@@ -334,6 +334,23 @@ fn adding_an_existing_key_is_refused_and_a_same_name_elsewhere_only_warns() {
     );
 }
 
+#[test]
+fn only_a_supported_signing_version_in_the_epoch_config_passes() {
+    use hashi_types::move_types::ConfigValue;
+    let key = hashi_types::move_types::KEY_MPC_SIGNING_VERSION;
+    refuse_unsupported_signing_version(key, &ConfigValue::U64(1), ConfigStore::Epoch).unwrap();
+    refuse_unsupported_signing_version("other", &ConfigValue::U64(2), ConfigStore::Instant)
+        .unwrap();
+    let err = refuse_unsupported_signing_version(key, &ConfigValue::U64(2), ConfigStore::Epoch)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not support signing version 2"), "{err}");
+    let err = refuse_unsupported_signing_version(key, &ConfigValue::U64(1), ConfigStore::Instant)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("read only from the epoch config"), "{err}");
+}
+
 // ===== decoding Move aborts =====
 
 fn move_abort(module: &str, code: u64, clever: Option<(&str, &str)>) -> ExecutionError {

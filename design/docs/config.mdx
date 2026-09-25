@@ -221,6 +221,19 @@ effective fault-tolerance assumption to shift by at most this many basis
 points relative to the unreduced committee. `0` disables weight reduction,
 so parties keep their full committee weights.
 
+### `mpc_signing_version`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `1` |
+| **Valid range** | `1` and up |
+
+This key sets which version of the MPC signing logic a committee uses,
+including the weight reduction. Nodes won't take part in a committee pinned to
+a version their release doesn't support, so only raise it after the fleet has
+upgraded.
+
 ## Read-only or genesis-only parameters
 
 ### `bitcoin_chain_id`

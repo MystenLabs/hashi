@@ -45,6 +45,11 @@ pub const PRESIG_REFILL_DIVISOR: usize = 2;
 /// (stamped nonce certs, deferred archival, TOB pruning) ships as v1.
 pub const SUPPORTED_PACKAGE_VERSIONS: &[u64] = &[1];
 
+/// Signing versions this binary computes (`mpc_signing_version`, pinned per
+/// committee). A committee pinned to any other version is refused, never
+/// computed the old way.
+pub const SUPPORTED_SIGNING_VERSIONS: &[u64] = &[1];
+
 pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }

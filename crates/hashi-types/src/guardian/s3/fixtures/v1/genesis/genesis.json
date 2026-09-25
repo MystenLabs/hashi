@@ -164,6 +164,12 @@
             {
               "U64": 0
             }
+          ],
+          [
+            "mpc_signing_version",
+            {
+              "U64": 1
+            }
           ]
         ]
       },
@@ -171,5 +177,5 @@
       "mpc_master_g": "mBf4FluB8lnZKM4t2/ybAgcLh86VYqBVrLvc+X5mvnkA"
     }
   },
-  "signature": "7a6788b107d66584a47cdfd413edeb928c156643d76b105f4d605ca2a698d2fcf9508d96ecec81d4fb4a27073fa845b034120532da10aeb5d430517e7da84401"
+  "signature": "cd98e7efb450b4875e4c0956230fff74ceedb79498170f3c77e3beed3fd98b9f06c5e676fa12e84962f6d676bd736296f625a70343d65052107f3413931f180d"
 }

@@ -365,6 +365,38 @@ pub fn refuse_bad_config_add(
     }))
 }
 
+pub fn refuse_unsupported_signing_version(
+    key: &str,
+    value: &hashi_types::move_types::ConfigValue,
+    target: ConfigStore,
+) -> Result<()> {
+    use hashi_types::move_types::ConfigValue;
+    use hashi_types::move_types::KEY_MPC_SIGNING_VERSION;
+
+    if key != KEY_MPC_SIGNING_VERSION {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        target == ConfigStore::Epoch,
+        "{key} is read only from the epoch config; a copy in the instant config does nothing. \
+         Use `{}` instead.",
+        ConfigStore::Epoch.update_command()
+    );
+    match value {
+        ConfigValue::U64(version)
+            if crate::constants::SUPPORTED_SIGNING_VERSIONS.contains(version) =>
+        {
+            Ok(())
+        }
+        ConfigValue::U64(version) => anyhow::bail!(
+            "this binary does not support signing version {version} (it supports {:?}); use \
+             a release that supports it to propose or vote for that version",
+            crate::constants::SUPPORTED_SIGNING_VERSIONS
+        ),
+        other => anyhow::bail!("{key} must be a u64, not {}", config_value_type(other)),
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -730,6 +762,16 @@ pub async fn vote(
         let seated = seated_members(committee.as_ref());
         refuse_if_not_seated(validator, seated.as_ref().map(|(e, m)| (*e, m.as_slice())))?;
         refuse_vote_state(validator, &details.votes, proposal_id, ProposalAction::Vote)?;
+    }
+    if let Some(change) = &details.config_change {
+        let target = if change.epoch {
+            ConfigStore::Epoch
+        } else {
+            ConfigStore::Instant
+        };
+        for entry in &change.entries.contents {
+            refuse_unsupported_signing_version(&entry.key, &entry.value, target)?;
+        }
     }
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
@@ -1222,6 +1264,7 @@ pub async fn create_update_config_proposal(
     print_detail(&format!("  Value: {}", value_str));
     print_metadata(&metadata);
 
+    refuse_unsupported_signing_version(key, &value, ConfigStore::Instant)?;
     let mut client = HashiClient::new(config).await?;
     refuse_bad_config_update(
         key,
@@ -1269,6 +1312,7 @@ pub async fn create_update_epoch_config_proposal(
     print_detail("  Takes effect: next committee formed after execution");
     print_metadata(&metadata);
 
+    refuse_unsupported_signing_version(key, &value, ConfigStore::Epoch)?;
     let mut client = HashiClient::new(config).await?;
     refuse_bad_config_update(
         key,
@@ -1321,12 +1365,13 @@ pub async fn create_add_config_proposal(
     ));
     print_metadata(&metadata);
 
-    let mut client = HashiClient::new(config).await?;
     let target = if epoch {
         ConfigStore::Epoch
     } else {
         ConfigStore::Instant
     };
+    refuse_unsupported_signing_version(key, &value, target)?;
+    let mut client = HashiClient::new(config).await?;
     let (in_target, in_other) = match target {
         ConfigStore::Epoch => (
             client.epoch_config_value(key).is_some(),

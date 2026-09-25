@@ -275,6 +275,15 @@ impl TestSetup {
         validator_index: usize,
         store: Arc<dyn PublicMessagesStore>,
     ) -> MpcManager {
+        self.try_create_manager_with_store(validator_index, store)
+            .unwrap()
+    }
+
+    fn try_create_manager_with_store(
+        &self,
+        validator_index: usize,
+        store: Arc<dyn PublicMessagesStore>,
+    ) -> MpcResult<MpcManager> {
         let address = Address::new([validator_index as u8; 32]);
         MpcManager::new(
             address,
@@ -293,7 +302,6 @@ impl TestSetup {
             ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
-        .unwrap()
     }
 
     fn address(&self, validator_index: usize) -> Address {
@@ -1642,7 +1650,7 @@ fn test_mpc_manager_new_with_weighted_committee() {
     // With total_weight=15:
     // max_faulty = floor(15*3333/10000) = floor(4.9995) = 4
     // threshold  = 15 - 2*4 = 7
-    // (after prop_reduce with allowed_delta=0, no reduction)
+    // (allowed_delta=0: no reduction)
     assert_eq!(manager.mpc_config.threshold, 7);
     assert_eq!(manager.mpc_config.max_faulty, 4);
 }
@@ -3444,7 +3452,7 @@ async fn test_run_as_party_with_reduced_weights() {
 
     assert_ne!(
         original_weight, reduced_weight,
-        "Test requires weights to be reduced by Nodes::prop_reduce. \
+        "Test requires the weight reduction to change weights. \
              Original: {}, Reduced: {}. If equal, this test won't catch the bug.",
         original_weight, reduced_weight
     );
@@ -6512,7 +6520,7 @@ impl RotationTestSetup {
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
         let committee = self.setup.committee();
         let (nodes, threshold, _max_faulty) =
-            build_reduced_nodes(committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+            build_reduced_nodes(committee, 1, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
         let mut result = Vec::new();
         let mut weight_sum = 0u16;
         for addr in self.certificates.keys() {
@@ -6540,7 +6548,7 @@ impl RotationTestSetup {
             .map(|(_, c)| c.clone());
         if let Some(ref prev) = previous_committee {
             let (nodes, threshold, _max_faulty) =
-                build_reduced_nodes(prev, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+                build_reduced_nodes(prev, 1, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
             manager.previous_nodes = Some(nodes);
             manager.previous_reconfig_output_threshold = Some(threshold);
             manager.previous_reconfig_input_threshold = Some(threshold);
@@ -17175,7 +17183,7 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     );
 
     let (nodes, threshold, max_faulty) =
-        build_reduced_nodes(&weighted, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+        build_reduced_nodes(&weighted, 1, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
 
     let weights: Vec<u16> = nodes.iter().map(|n| n.weight).collect();
     assert_eq!(
@@ -17195,6 +17203,625 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
         "knapsack restores t + 2f <= W here, which prop_reduce violated on this fixture \
          (82 + 2*82 > 242). Recorded, not guaranteed: it still fails on real Sui weights."
     );
+}
+
+const GOLDEN_SUI_EPOCHS: [(&str, &str); 8] = [
+    (
+        "100",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_100_details.txt"),
+    ),
+    (
+        "200",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_200_details.txt"),
+    ),
+    (
+        "400",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_400_details.txt"),
+    ),
+    (
+        "800",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_800_details.txt"),
+    ),
+    (
+        "974",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_974_details.txt"),
+    ),
+    (
+        "1000",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1000_details.txt"),
+    ),
+    (
+        "1100",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1100_details.txt"),
+    ),
+    (
+        "1200",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1200_details.txt"),
+    ),
+];
+
+const GOLDEN_CONFIG_GRID: [(u16, u16); 16] = [
+    (3333, 0),
+    (3333, 400),
+    (3333, 800),
+    (3333, 1200),
+    (3000, 0),
+    (3000, 400),
+    (3000, 800),
+    (3000, 1200),
+    (2500, 0),
+    (2500, 400),
+    (2500, 800),
+    (2500, 1200),
+    (2000, 0),
+    (2000, 400),
+    (2000, 800),
+    (2000, 1200),
+];
+
+const GOLDEN_SUBSET_CONFIGS: [(u16, u16); 4] = [(3333, 800), (3333, 0), (2500, 800), (2000, 1200)];
+
+const GOLDEN_E2E_CONFIGS: [(u16, u16); 5] = [
+    (3333, 800),
+    (3333, 0),
+    (2500, 800),
+    (2000, 1200),
+    (3000, 800),
+];
+
+const GOLDEN_E2E_DIVISOR: u16 = 100;
+
+#[derive(serde::Serialize)]
+struct ReductionGolden {
+    case: String,
+    total_weight: u64,
+    max_faulty_bps: u16,
+    allowed_delta_bps: u16,
+    outcome: ReductionGoldenOutcome,
+}
+
+#[derive(serde::Serialize)]
+enum ReductionGoldenOutcome {
+    Reduced {
+        weights: String,
+        total_weight: u16,
+        threshold: u16,
+        max_faulty: u16,
+        share_ids_digest: String,
+    },
+    Error(&'static str),
+}
+
+fn golden_sui_weights(contents: &str) -> Vec<u64> {
+    contents
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.rsplit(',').next().unwrap().trim().parse().unwrap())
+        .collect()
+}
+
+fn golden_error_kind(error: &MpcError) -> &'static str {
+    match error {
+        MpcError::InvalidConfig(_) => "InvalidConfig",
+        MpcError::InvalidThreshold(_) => "InvalidThreshold",
+        MpcError::CryptoError(_) => "CryptoError",
+        other => panic!("unexpected reduction error: {other:?}"),
+    }
+}
+
+fn golden_committee(weights: &[u64], (max_faulty_bps, allowed_delta_bps): (u16, u16)) -> Committee {
+    let mut rng = rand::thread_rng();
+    let signing_key = Bls12381PrivateKey::generate(&mut rng);
+    let encryption_key = EncryptionPrivateKey::new(&mut rng);
+    let members = weights
+        .iter()
+        .enumerate()
+        .map(|(index, &weight)| {
+            let mut address = [0u8; 32];
+            address[30..].copy_from_slice(&(index as u16).to_be_bytes());
+            CommitteeMember::new(
+                Address::new(address),
+                signing_key.public_key(),
+                encryption_key.public_key(),
+                weight,
+            )
+        })
+        .collect();
+    Committee::new(members, 1, allowed_delta_bps, max_faulty_bps)
+}
+
+fn golden_reduction(
+    case: String,
+    weights: &[u64],
+    (max_faulty_bps, allowed_delta_bps): (u16, u16),
+    divisor: u16,
+    chain_id: &str,
+) -> ReductionGolden {
+    let committee = golden_committee(weights, (max_faulty_bps, allowed_delta_bps));
+    let outcome = match build_reduced_nodes(&committee, 1, divisor, chain_id) {
+        Ok((nodes, threshold, max_faulty)) => {
+            let share_ids: Vec<Vec<u16>> = (0..nodes.num_nodes())
+                .map(|party| {
+                    nodes
+                        .share_ids_of(party as u16)
+                        .unwrap()
+                        .into_iter()
+                        .map(|share| share.get())
+                        .collect()
+                })
+                .collect();
+            let digest = fastcrypto::hash::Sha256::digest(bcs::to_bytes(&share_ids).unwrap());
+            ReductionGoldenOutcome::Reduced {
+                weights: nodes
+                    .iter()
+                    .map(|node| node.weight.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                total_weight: nodes.total_weight(),
+                threshold,
+                max_faulty,
+                share_ids_digest: hex::encode(&digest.digest[..8]),
+            }
+        }
+        Err(error) => ReductionGoldenOutcome::Error(golden_error_kind(&error)),
+    };
+    ReductionGolden {
+        case,
+        total_weight: weights.iter().sum(),
+        max_faulty_bps,
+        allowed_delta_bps,
+        outcome,
+    }
+}
+
+struct GoldenInput {
+    family: &'static str,
+    case: String,
+    weights: Vec<u64>,
+    config: (u16, u16),
+    divisor: u16,
+    chain_id: &'static str,
+}
+
+fn golden_corpus() -> Vec<GoldenInput> {
+    let mainnet = crate::constants::SUI_MAINNET_CHAIN_ID;
+    let mut corpus = Vec::new();
+    let mut push = |family, case, weights: &[u64], config, divisor, chain_id| {
+        corpus.push(GoldenInput {
+            family,
+            case,
+            weights: weights.to_vec(),
+            config,
+            divisor,
+            chain_id,
+        })
+    };
+    for (epoch, contents) in GOLDEN_SUI_EPOCHS {
+        let weights = golden_sui_weights(contents);
+        for config in GOLDEN_CONFIG_GRID {
+            push(
+                "sui_mainnet",
+                format!("sui_epoch_{epoch}"),
+                &weights,
+                config,
+                1,
+                mainnet,
+            );
+        }
+        for (subset, dropped) in [("keep_90", 9..10), ("keep_70", 7..10)] {
+            let kept: Vec<u64> = weights
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !dropped.contains(&(index % 10)))
+                .map(|(_, &weight)| weight)
+                .collect();
+            for config in GOLDEN_SUBSET_CONFIGS {
+                push(
+                    "sui_mainnet_subsets",
+                    format!("sui_epoch_{epoch}_{subset}"),
+                    &kept,
+                    config,
+                    1,
+                    mainnet,
+                );
+            }
+        }
+    }
+    for members in 1..=100u64 {
+        for config in [(3333, 800), (3333, 0)] {
+            push(
+                "equal_weights",
+                format!("equal_{members}"),
+                &vec![10_000 / members; members as usize],
+                config,
+                1,
+                mainnet,
+            );
+        }
+    }
+    let e2e_shapes: [(&str, Vec<u64>); 6] = [
+        ("e2e_1_node", vec![10_000]),
+        ("e2e_3_nodes", vec![3334, 3333, 3333]),
+        ("e2e_4_nodes", vec![2500; 4]),
+        (
+            "e2e_7_nodes",
+            vec![1429, 1429, 1429, 1429, 1428, 1428, 1428],
+        ),
+        ("e2e_19_of_20_registered", vec![500; 19]),
+        ("e2e_20_nodes", vec![500; 20]),
+    ];
+    for (shape, weights) in &e2e_shapes {
+        for config in GOLDEN_E2E_CONFIGS {
+            push(
+                "dev",
+                shape.to_string(),
+                weights,
+                config,
+                GOLDEN_E2E_DIVISOR,
+                TEST_CHAIN_ID,
+            );
+        }
+    }
+    for (shape, weights) in &e2e_shapes {
+        for config in GOLDEN_E2E_CONFIGS {
+            push(
+                "edge_cases",
+                format!("{shape}_production"),
+                weights,
+                config,
+                1,
+                mainnet,
+            );
+        }
+    }
+    for (case, weights, config, divisor, chain_id) in [
+        (
+            "threshold_not_above_max_faulty",
+            vec![1, 1, 1],
+            (3333, 0),
+            1,
+            mainnet,
+        ),
+        (
+            "below_production_floor",
+            vec![10; 5],
+            (3333, 800),
+            1,
+            mainnet,
+        ),
+        (
+            "member_below_divisor",
+            vec![40, 3000, 3000, 3960],
+            (3333, 800),
+            GOLDEN_E2E_DIVISOR,
+            TEST_CHAIN_ID,
+        ),
+        (
+            "member_above_max_weight",
+            vec![10_001, 1],
+            (3333, 800),
+            1,
+            mainnet,
+        ),
+    ] {
+        push(
+            "edge_cases",
+            case.to_string(),
+            &weights,
+            config,
+            divisor,
+            chain_id,
+        );
+    }
+    corpus
+}
+
+#[test]
+fn weight_reduction_v1_goldens() {
+    let mut families: BTreeMap<&str, Vec<ReductionGolden>> = BTreeMap::new();
+    for input in golden_corpus() {
+        families
+            .entry(input.family)
+            .or_default()
+            .push(golden_reduction(
+                input.case,
+                &input.weights,
+                input.config,
+                input.divisor,
+                input.chain_id,
+            ));
+    }
+    let reduction_digests: Vec<(String, String)> = GOLDEN_SUI_EPOCHS
+        .iter()
+        .map(|(epoch, contents)| {
+            let committee = golden_committee(&golden_sui_weights(contents), (3333, 800));
+            let (nodes, threshold, max_faulty) =
+                build_reduced_nodes(&committee, 1, 1, crate::constants::SUI_MAINNET_CHAIN_ID)
+                    .unwrap();
+            (
+                format!("sui_epoch_{epoch}"),
+                reduction_digest(1, &nodes, threshold, max_faulty),
+            )
+        })
+        .collect();
+
+    insta::with_settings!({
+        snapshot_path => "golden_snapshots",
+        prepend_module_to_snapshot => false,
+        omit_expression => true,
+    }, {
+        for (family, goldens) in &families {
+            insta::assert_yaml_snapshot!(format!("weight_reduction_v1_{family}"), goldens);
+        }
+        insta::assert_yaml_snapshot!("weight_reduction_v1_reduction_digest", reduction_digests);
+    });
+}
+
+fn pre_swap_reduced_nodes(
+    committee: &Committee,
+    test_weight_divisor: u16,
+    chain_id: &str,
+) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
+    let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
+        .members()
+        .iter()
+        .enumerate()
+        .map(|(index, member)| Node {
+            id: index as u16,
+            pk: member.encryption_public_key().to_owned(),
+            weight: (member.weight() as u16 / test_weight_divisor).max(1),
+        })
+        .collect();
+    let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
+    let max_faulty =
+        (total_weight as u32 * committee.mpc_max_faulty_in_basis_points() as u32 / 10000).max(1);
+    let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
+    if threshold <= max_faulty {
+        return Err(MpcError::InvalidThreshold(String::new()));
+    }
+    let delta = (total_weight as u32 * committee.mpc_weight_reduction_allowed_delta() as u32
+        / 10000)
+        .min(total_weight as u32) as u16;
+    let lower_bound = if crate::constants::is_production_sui_chain(chain_id) {
+        100
+    } else {
+        100.min(total_weight)
+    };
+    if total_weight < lower_bound {
+        return Err(MpcError::InvalidConfig(String::new()));
+    }
+    Nodes::knapsack_reduce(
+        nodes_vec,
+        threshold as u16,
+        max_faulty as u16,
+        delta,
+        lower_bound,
+    )
+    .map_err(|e| MpcError::CryptoError(e.to_string()))
+}
+
+fn golden_nodes(nodes: &Nodes<EncryptionGroupElement>) -> Vec<(u16, Vec<u16>)> {
+    nodes
+        .iter()
+        .map(|node| {
+            let share_ids = nodes
+                .share_ids_of(node.id)
+                .unwrap()
+                .into_iter()
+                .map(|share| share.get())
+                .collect();
+            (node.weight, share_ids)
+        })
+        .collect()
+}
+
+#[test]
+fn weight_reduction_v1_matches_the_pre_swap_reducer() {
+    let advice = "if only fastcrypto moved and the v1 goldens and source digest still pass, \
+                  delete this test with pre_swap_reduced_nodes and golden_nodes; otherwise v1, \
+                  build_reduced_nodes or fastcrypto's Nodes changed";
+    for input in golden_corpus() {
+        let committee = golden_committee(&input.weights, input.config);
+        let pre_swap = pre_swap_reduced_nodes(&committee, input.divisor, input.chain_id);
+        let frozen = build_reduced_nodes(&committee, 1, input.divisor, input.chain_id);
+        match (pre_swap, frozen) {
+            (Ok((old, old_t, old_f)), Ok((new, new_t, new_f))) => assert_eq!(
+                (golden_nodes(&old), old_t, old_f),
+                (golden_nodes(&new), new_t, new_f),
+                "{} {:?}: {advice}",
+                input.case,
+                input.config
+            ),
+            (Err(old), Err(new)) => assert_eq!(
+                golden_error_kind(&old),
+                golden_error_kind(&new),
+                "{} {:?}: {advice}",
+                input.case,
+                input.config
+            ),
+            (old, new) => panic!(
+                "{} {:?}: pre-swap {:?}, frozen {:?}: {advice}",
+                input.case,
+                input.config,
+                old.map(|(_, t, f)| (t, f)),
+                new.map(|(_, t, f)| (t, f))
+            ),
+        }
+    }
+}
+
+#[test]
+fn weight_reduction_v1_source_is_frozen() {
+    let crate_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../hashi-weight-reduction-v1");
+    let mut files = Vec::new();
+    let mut pending = vec![crate_dir.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(
+                    path.strip_prefix(&crate_dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    files.sort();
+    let mut expected: Vec<String> = WEIGHT_REDUCTION_V1_SOURCES
+        .iter()
+        .map(|(path, _)| path.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(files, expected);
+    insta::with_settings!({
+        snapshot_path => "golden_snapshots",
+        prepend_module_to_snapshot => false,
+        omit_expression => true,
+    }, {
+        insta::assert_yaml_snapshot!(
+            "weight_reduction_v1_source_digest",
+            weight_reduction_source_digest(&WEIGHT_REDUCTION_V1_SOURCES)
+        );
+    });
+}
+
+fn config_with_signing_version(
+    version: Option<hashi_types::move_types::ConfigValue>,
+    retired_key: Option<&str>,
+) -> hashi_types::move_types::Config {
+    let mut entries: Vec<_> = hashi_types::move_types::Config::from_mpc_params(
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
+    )
+    .into_entries()
+    .into_iter()
+    .filter(|(key, _)| key != hashi_types::move_types::KEY_MPC_SIGNING_VERSION)
+    .collect();
+    if let Some(version) = version {
+        entries.push((
+            hashi_types::move_types::KEY_MPC_SIGNING_VERSION.to_string(),
+            version,
+        ));
+    }
+    if let Some(key) = retired_key {
+        entries.push((
+            key.to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ));
+    }
+    hashi_types::move_types::Config::from_entries(entries)
+}
+
+fn replace_committee_config(
+    setup: &mut TestSetup,
+    epoch: u64,
+    config: hashi_types::move_types::Config,
+) {
+    let members = setup.committee().members().to_vec();
+    let mut committees = setup.committee_set.committees().clone();
+    committees.insert(epoch, Committee::with_config(members, epoch, config));
+    setup.committee_set.set_committees(committees);
+}
+
+#[test]
+fn a_committee_without_a_supported_signing_version_is_refused() {
+    use hashi_types::move_types::ConfigValue;
+    for (config, refusal) in [
+        (
+            config_with_signing_version(Some(ConfigValue::U64(2)), None),
+            SigningVersionRefusal::Unsupported(2),
+        ),
+        (
+            config_with_signing_version(None, None),
+            SigningVersionRefusal::Missing,
+        ),
+        (
+            config_with_signing_version(Some(ConfigValue::U128(2)), None),
+            SigningVersionRefusal::Malformed,
+        ),
+        (
+            config_with_signing_version(
+                Some(ConfigValue::U64(1)),
+                Some("mpc_threshold_in_basis_points"),
+            ),
+            SigningVersionRefusal::Legacy,
+        ),
+        (
+            config_with_signing_version(
+                Some(ConfigValue::U64(1)),
+                Some("mpc_nonce_generation_protocol"),
+            ),
+            SigningVersionRefusal::Legacy,
+        ),
+    ] {
+        let mut setup = TestSetup::new(4);
+        let epoch = setup.epoch();
+        replace_committee_config(&mut setup, epoch, config);
+        let result =
+            setup.try_create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
+        assert!(
+            matches!(result, Err(MpcError::SigningVersionRefused(r)) if r == refusal),
+            "expected {refusal:?}"
+        );
+    }
+}
+
+#[test]
+fn a_previous_committee_on_an_unsupported_signing_version_sits_out_rotation() {
+    let mut setup = TestSetup::new(4);
+    let epoch = setup.epoch();
+    replace_committee_config(
+        &mut setup,
+        epoch - 1,
+        config_with_signing_version(Some(hashi_types::move_types::ConfigValue::U64(2)), None),
+    );
+    let manager = setup.create_manager(0);
+    assert!(manager.previous_nodes.is_none());
+    assert!(manager.previous_reconfig_output_threshold.is_none());
+    assert_eq!(manager.mpc_config.signing_version, 1);
+}
+
+#[test]
+fn every_supported_signing_version_has_a_reduction_and_a_source_digest() {
+    let setup = TestSetup::new(4);
+    for &version in crate::constants::SUPPORTED_SIGNING_VERSIONS {
+        build_reduced_nodes(
+            setup.committee(),
+            version,
+            TEST_WEIGHT_DIVISOR,
+            TEST_CHAIN_ID,
+        )
+        .unwrap();
+        assert!(reduction_source_digest(version).is_some(), "{version}");
+    }
+}
+
+#[test]
+fn the_initial_signing_version_is_supported() {
+    let move_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/hashi/sources/core/mpc_config.move"),
+    )
+    .unwrap();
+    let seeded: u64 = move_source
+        .lines()
+        .find_map(|line| line.strip_prefix("const INITIAL_SIGNING_VERSION: u64 = "))
+        .and_then(|value| value.strip_suffix(';'))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(seeded, hashi_types::move_types::INITIAL_MPC_SIGNING_VERSION);
+    assert!(crate::constants::SUPPORTED_SIGNING_VERSIONS.contains(&seeded));
 }
 
 #[test]
@@ -17226,58 +17853,9 @@ fn derived_thresholds_are_accepted_by_the_reducer() {
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 f_bps,
             );
-            build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+            build_reduced_nodes(&committee, 1, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
         }
     }
-}
-
-#[test]
-fn a_legacy_pinned_committee_keeps_its_original_parameters() {
-    let setup = TestSetup::new(4);
-    let stakes: [u64; 4] = [25, 25, 25, 26];
-    let members: Vec<_> = setup
-        .committee()
-        .members()
-        .iter()
-        .zip(stakes)
-        .map(|(m, stake)| {
-            CommitteeMember::new(
-                m.validator_address(),
-                m.public_key().clone(),
-                m.encryption_public_key().clone(),
-                stake,
-            )
-        })
-        .collect();
-
-    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
-        (
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3334),
-        ),
-        (
-            "mpc_weight_reduction_allowed_delta".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-        (
-            "mpc_max_faulty_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3333),
-        ),
-        (
-            "mpc_nonce_accumulation_window_ms".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-    ]);
-    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!(nodes.total_weight(), 101);
-    assert_eq!((t, f), (34, 34));
-
-    let fresh = Committee::new(members.clone(), setup.epoch(), 0, 3333);
-    assert!(fresh.config().legacy_pinned_mpc_threshold().is_none());
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!(nodes.total_weight(), 100);
-    assert_eq!((t, f), (26, 25));
 }
 
 #[test]
@@ -17288,10 +17866,11 @@ fn an_underivable_previous_committee_does_not_block_startup() {
     let broken = Committee::with_config(
         members,
         epoch - 1,
-        hashi_types::move_types::Config::from_entries(vec![(
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::Bool(true),
-        )]),
+        hashi_types::move_types::Config::from_mpc_params(
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            5000,
+            0,
+        ),
     );
     let mut committees = setup.committee_set.committees().clone();
     committees.insert(epoch - 1, broken);
@@ -17303,51 +17882,6 @@ fn an_underivable_previous_committee_does_not_block_startup() {
     assert!(manager.previous_reconfig_output_threshold.is_none());
     assert!(manager.previous_reconfig_output_max_faulty.is_none());
     assert!(manager.mpc_config.threshold > 0);
-}
-
-#[test]
-fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
-    let setup = TestSetup::new(4);
-    let stakes: [u64; 4] = [51, 52, 52, 52];
-    let members: Vec<_> = setup
-        .committee()
-        .members()
-        .iter()
-        .zip(stakes)
-        .map(|(m, stake)| {
-            CommitteeMember::new(
-                m.validator_address(),
-                m.public_key().clone(),
-                m.encryption_public_key().clone(),
-                stake,
-            )
-        })
-        .collect();
-    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
-        (
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3334),
-        ),
-        (
-            "mpc_weight_reduction_allowed_delta".to_string(),
-            hashi_types::move_types::ConfigValue::U64(100),
-        ),
-        (
-            "mpc_max_faulty_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3333),
-        ),
-        (
-            "mpc_nonce_accumulation_window_ms".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-    ]);
-    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!((nodes.total_weight(), t, f), (100, 35, 34));
-
-    let fresh = Committee::new(members, setup.epoch(), 100, 3333);
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!((nodes.total_weight(), t, f), (100, 26, 25));
 }
 
 #[test]
@@ -17369,6 +17903,7 @@ fn a_committee_below_the_reduction_floor_is_rejected_not_panicked_on() {
     let committee = Committee::new(members, setup.epoch(), 0, 3333);
     let err = build_reduced_nodes(
         &committee,
+        1,
         TEST_WEIGHT_DIVISOR,
         crate::constants::SUI_TESTNET_CHAIN_ID,
     )
@@ -17402,7 +17937,8 @@ fn derived_threshold_rejects_max_faulty_at_or_above_a_third() {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             f_bps,
         );
-        let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
+        let err =
+            build_reduced_nodes(&committee, 1, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
         assert!(
             matches!(err, MpcError::InvalidThreshold(ref m) if m.contains("must exceed max_faulty")),
             "unexpected error for f_bps={f_bps}: {err:?}"

@@ -1,0 +1,19 @@
+---
+source: crates/hashi/src/mpc/mpc_except_signing_tests.rs
+---
+- - sui_epoch_100
+  - 97bc4ab662528c95
+- - sui_epoch_200
+  - df28b99ecb43e64e
+- - sui_epoch_400
+  - 54b018df038a43e0
+- - sui_epoch_800
+  - d68718357e3116f6
+- - sui_epoch_974
+  - b036d660dae8c1b8
+- - sui_epoch_1000
+  - 1b3715b95b95472d
+- - sui_epoch_1100
+  - fdb2c476eff64f2f
+- - sui_epoch_1200
+  - e7e8bb81a6bfc1d0

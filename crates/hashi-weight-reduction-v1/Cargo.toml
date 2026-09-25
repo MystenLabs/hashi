@@ -1,0 +1,7 @@
+[package]
+name = "hashi-weight-reduction-v1"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]

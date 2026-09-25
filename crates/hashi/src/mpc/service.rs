@@ -126,7 +126,8 @@ pub struct MpcService {
     reconciling: Arc<tokio::sync::Mutex<()>>,
     next_batch_repair: Mutex<Option<(u64, u32, tokio::time::Instant)>>,
     /// Earliest next attempt to restore the current epoch's `MpcManager`
-    /// after a failed one, keyed by epoch; see `restore_current_manager`.
+    /// after a failed one, keyed by epoch; see `restore_current_manager` and
+    /// `sync_if_stale`.
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
@@ -1208,10 +1209,15 @@ impl MpcService {
             self.restore_current_manager(epoch).await;
             return;
         }
+        let now = tokio::time::Instant::now;
+        if restore_rate_limited(*self.next_manager_restore.lock().unwrap(), epoch, now()) {
+            return;
+        }
         info!("sync_if_stale: rebuilding SigningManager for epoch {epoch}");
         let output = match self.recover_mpc_state().await {
             Ok(output) => output,
             Err(e) => {
+                *self.next_manager_restore.lock().unwrap() = Some((epoch, now() + RETRY_INTERVAL));
                 if let Some(p) = self.get_pending_epoch_change() {
                     info!(
                         "sync_if_stale: recover_mpc_state for epoch {epoch} superseded by \
@@ -1219,7 +1225,10 @@ impl MpcService {
                     );
                     return;
                 }
-                error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                error!(
+                    "sync_if_stale: recover_mpc_state failed for epoch {epoch}, next attempt in \
+                     {RETRY_INTERVAL:?}: {e}"
+                );
                 self.re_register_keys_if_lost().await;
                 return;
             }

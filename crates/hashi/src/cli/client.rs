@@ -92,6 +92,14 @@ pub struct ProposalDetails {
     pub votes: Vec<Address>,
     pub quorum_threshold_bps: u64,
     pub metadata: hashi_types::move_types::VecMap<String, String>,
+    pub config_change: Option<ConfigChange>,
+}
+
+#[derive(Debug)]
+pub struct ConfigChange {
+    /// `true` targets the epoch config, `false` the instant config.
+    pub epoch: bool,
+    pub entries: hashi_types::move_types::VecMap<String, ConfigValue>,
 }
 
 /// Result of a transaction simulation (dry-run)
@@ -462,52 +470,82 @@ impl HashiClient {
                 let proposal_type = parse_proposal_type(&type_tag);
 
                 let value_bytes = field.child_object().contents().value();
-                let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
+                let (creator, votes, quorum_threshold_bps, metadata, change) = match proposal_type {
                     ProposalType::UpdateConfig => {
                         let p: move_types::Proposal<move_types::UpdateConfig> =
                             bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        let change = ConfigChange {
+                            epoch: false,
+                            entries: p.data.entries,
+                        };
+                        (
+                            p.creator,
+                            p.votes,
+                            p.quorum_threshold_bps,
+                            p.metadata,
+                            Some(change),
+                        )
                     }
                     ProposalType::UpdateEpochConfig => {
                         let p: move_types::Proposal<move_types::UpdateEpochConfig> =
                             bcs::from_bytes(value_bytes)
                                 .context("deserialize UpdateEpochConfig")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        let change = ConfigChange {
+                            epoch: true,
+                            entries: p.data.entries,
+                        };
+                        (
+                            p.creator,
+                            p.votes,
+                            p.quorum_threshold_bps,
+                            p.metadata,
+                            Some(change),
+                        )
                     }
                     ProposalType::AddConfig => {
                         let p: move_types::Proposal<move_types::AddConfig> =
                             bcs::from_bytes(value_bytes).context("deserialize AddConfig")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        let change = ConfigChange {
+                            epoch: p.data.epoch,
+                            entries: p.data.entries,
+                        };
+                        (
+                            p.creator,
+                            p.votes,
+                            p.quorum_threshold_bps,
+                            p.metadata,
+                            Some(change),
+                        )
                     }
                     ProposalType::EnableVersion => {
                         let p: move_types::Proposal<move_types::EnableVersion> =
                             bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::DisableVersion => {
                         let p: move_types::Proposal<move_types::DisableVersion> =
                             bcs::from_bytes(value_bytes).context("deserialize DisableVersion")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::Upgrade => {
                         let p: move_types::Proposal<move_types::Upgrade> =
                             bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::EmergencyPause => {
                         let p: move_types::Proposal<move_types::EmergencyPause> =
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::UpdateGuardian => {
                         let p: move_types::Proposal<move_types::UpdateGuardian> =
                             bcs::from_bytes(value_bytes).context("deserialize UpdateGuardian")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::IgnoreMember => {
                         let p: move_types::Proposal<move_types::IgnoreMember> =
                             bcs::from_bytes(value_bytes).context("deserialize IgnoreMember")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata, None)
                     }
                     ProposalType::Unknown(s) => {
                         anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
@@ -518,6 +556,7 @@ impl HashiClient {
                     votes,
                     quorum_threshold_bps,
                     metadata,
+                    config_change: change,
                 });
             }
         }

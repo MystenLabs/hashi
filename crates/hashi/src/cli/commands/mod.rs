@@ -8,6 +8,7 @@ pub mod balance;
 pub mod committee;
 pub mod config;
 pub mod deposit;
+pub mod mpc;
 pub mod proposal;
 pub mod validator;
 pub mod withdraw;

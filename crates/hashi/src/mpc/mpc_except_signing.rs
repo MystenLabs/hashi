@@ -10,6 +10,7 @@ use crate::communication::sui_tob::tob_wait_superseded;
 use crate::communication::with_timeout_and_retry;
 use crate::communication::with_timeout_and_retry_budget;
 use crate::config::ComplaintResponsePolicy;
+use crate::constants::SUPPORTED_SIGNING_VERSIONS;
 use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
@@ -69,6 +70,7 @@ use crate::mpc::types::RotationRole;
 pub use crate::mpc::types::SendMessagesRequest;
 pub use crate::mpc::types::SendMessagesResponse;
 pub use crate::mpc::types::SessionId;
+use crate::mpc::types::SigningVersionRefusal;
 use crate::mpc::types::UnclassifiedNonceCert;
 use crate::mpc::types::VerifiedAvidVoteCert;
 use crate::mpc::types::VerifiedCertificateV1;
@@ -118,8 +120,6 @@ use sui_sdk_types::Address;
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 
-const MAX_BASIS_POINTS: u32 = 10000;
-const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 /// Per-call budget for pulling AVID dispersal artifacts from a cert's signers.
 const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -358,13 +358,28 @@ impl MpcManager {
             );
         }
         let weight_divisor = weight_divisor.unwrap_or(1);
-        let committee = committee_set
-            .committees()
-            .get(&epoch)
-            .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
-            .clone();
-        let (nodes, threshold, max_faulty) =
-            build_reduced_nodes(&committee, weight_divisor, chain_id)?;
+        let committees = manager_committees(committee_set, epoch)?;
+        let committee = committees.current.clone();
+        let mut reductions = Vec::new();
+        let mut reduce = |committee: &Committee| {
+            let result = signing_version(committee.config())
+                .map_err(MpcError::SigningVersionRefused)
+                .and_then(|version| {
+                    let (nodes, threshold, max_faulty) =
+                        build_reduced_nodes(committee, version, weight_divisor, chain_id)?;
+                    reductions.push((
+                        committee.epoch(),
+                        version,
+                        reduction_digest(version, &nodes, threshold, max_faulty),
+                    ));
+                    Ok((version, nodes, threshold, max_faulty))
+                });
+            if let Err(MpcError::SigningVersionRefused(refusal)) = &result {
+                metrics.record_signing_version_refusal(refusal);
+            }
+            result
+        };
+        let (signing_version, nodes, threshold, max_faulty) = reduce(&committee)?;
         let total_weight = nodes.total_weight();
         let mpc_config = MpcConfig::new(
             epoch,
@@ -372,6 +387,7 @@ impl MpcManager {
             threshold,
             max_faulty,
             committee.mpc_nonce_accumulation_window_ms(),
+            signing_version,
         );
         let party_id_opt = committee.index_of(&address).map(|i| i as u16);
         let my_pk = encryption_key
@@ -430,54 +446,44 @@ impl MpcManager {
                     .unwrap_or_default(),
             )));
         }
-        let (previous_epoch, previous_committee) =
-            match committee_set.previous_committee_for_target(epoch) {
-                Some((prev, committee)) => (prev, Some(committee.clone())),
-                None => (committee_set.epoch(), None),
-            };
+        let previous_epoch = committees.previous_epoch;
         let (
             previous_committee,
             previous_nodes,
             previous_reconfig_output_threshold,
             previous_reconfig_output_max_faulty,
-        ) = match previous_committee {
-            Some(prev_committee) => {
-                match build_reduced_nodes(&prev_committee, weight_divisor, chain_id) {
-                    Ok((nodes, threshold, prev_max_faulty)) => (
-                        Some(prev_committee),
-                        Some(nodes),
-                        Some(threshold),
-                        Some(prev_max_faulty),
-                    ),
-                    Err(e) => {
-                        tracing::warn!(
-                            epoch = prev_committee.epoch(),
-                            error = %e,
-                            "cannot derive parameters for the previous committee; this node starts but \
-                             cannot participate in key rotation for this epoch"
-                        );
-                        (None, None, None, None)
-                    }
+        ) = match committees.previous {
+            Some(prev_committee) => match reduce(prev_committee) {
+                Ok((_, nodes, threshold, prev_max_faulty)) => (
+                    Some(prev_committee.clone()),
+                    Some(nodes),
+                    Some(threshold),
+                    Some(prev_max_faulty),
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        epoch = prev_committee.epoch(),
+                        error = %e,
+                        "cannot derive parameters for the previous committee; this node starts but \
+                         cannot participate in key rotation for this epoch"
+                    );
+                    (None, None, None, None)
                 }
-            }
+            },
             None => (None, None, None, None),
         };
-        let previous_reconfig_input_threshold = committee_set
-            .committees()
-            .range(..previous_epoch)
-            .next_back()
-            .and_then(|(_, input_committee)| {
-                build_reduced_nodes(input_committee, weight_divisor, chain_id)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            epoch = input_committee.epoch(),
-                            error = %e,
-                            "cannot derive parameters for the reconfig input committee"
-                        );
-                    })
-                    .ok()
-                    .map(|(_, threshold, _)| threshold)
-            });
+        let previous_reconfig_input_threshold = committees.input.and_then(|input_committee| {
+            reduce(input_committee)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        epoch = input_committee.epoch(),
+                        error = %e,
+                        "cannot derive parameters for the reconfig input committee"
+                    );
+                })
+                .ok()
+                .map(|(_, _, threshold, _)| threshold)
+        });
         let identity = match (party_id_opt, encryption_key, signing_key) {
             (Some(party_id), Some(encryption_key), Some(signing_key)) => Some(TargetIdentity {
                 party_id,
@@ -526,6 +532,7 @@ impl MpcManager {
             complaint_response_policy,
         };
         manager.load_stored_messages()?;
+        metrics.set_reduction_info(&reductions);
         Ok(manager)
     }
 
@@ -6553,124 +6560,207 @@ fn process_avss_message(
     }
 }
 
-fn build_reduced_nodes(
+pub(crate) struct ManagerCommittees<'a> {
+    pub current: &'a Committee,
+    pub previous_epoch: u64,
+    pub previous: Option<&'a Committee>,
+    pub input: Option<&'a Committee>,
+}
+
+pub(crate) fn manager_committees(
+    committee_set: &CommitteeSet,
+    epoch: u64,
+) -> MpcResult<ManagerCommittees<'_>> {
+    let current = committee_set
+        .committees()
+        .get(&epoch)
+        .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?;
+    let (previous_epoch, previous) = committee_set.previous_committee_for_target(epoch).map_or(
+        (committee_set.epoch(), None),
+        |(previous_epoch, previous)| (previous_epoch, Some(previous)),
+    );
+    let input = committee_set
+        .committees()
+        .range(..previous_epoch)
+        .next_back()
+        .map(|(_, input)| input);
+    Ok(ManagerCommittees {
+        current,
+        previous_epoch,
+        previous,
+        input,
+    })
+}
+
+pub(crate) fn build_reduced_nodes(
     committee: &Committee,
+    version: u64,
     test_weight_divisor: u16,
     chain_id: &str,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
     let max_faulty_in_basis_points = committee.mpc_max_faulty_in_basis_points();
     let weight_reduction_allowed_delta_in_basis_points =
         committee.mpc_weight_reduction_allowed_delta();
-    let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
+    let weights: Vec<u16> = committee
         .members()
         .iter()
-        .enumerate()
-        .map(|(index, member)| Node {
-            id: index as u16,
-            pk: member.encryption_public_key().to_owned(),
-            weight: (member.weight() as u16 / test_weight_divisor).max(1),
-        })
+        .map(|member| (member.weight() as u16 / test_weight_divisor).max(1))
         .collect();
-    let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-    let legacy_threshold_in_basis_points = committee
-        .config()
-        .legacy_pinned_mpc_threshold()
-        .map(|value| -> MpcResult<u16> {
-            match value {
-                hashi_types::move_types::ConfigValue::U64(bps) => {
-                    u16::try_from(*bps).map_err(|_| {
-                        MpcError::InvalidConfig(format!(
-                            "pinned mpc_threshold_in_basis_points {bps} exceeds u16::MAX"
-                        ))
-                    })
-                }
-                other => Err(MpcError::InvalidConfig(format!(
-                    "pinned mpc_threshold_in_basis_points is not a u64: {other:?}"
-                ))),
-            }
-        })
-        .transpose()?;
-    let (threshold, max_faulty, weight_reduction_allowed_delta) =
-        match legacy_threshold_in_basis_points {
-            Some(threshold_in_basis_points) => (
-                (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
-                    as u16,
-                (total_weight as u32 * max_faulty_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
-                    as u16,
-                weight_reduction_allowed_delta_in_basis_points,
-            ),
-            None => {
-                let max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
-                    / MAX_BASIS_POINTS)
-                    .max(1);
-                let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
-                if threshold <= max_faulty {
-                    return Err(MpcError::InvalidThreshold(format!(
-                        "threshold {threshold} must exceed max_faulty {max_faulty}: \
-                         max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
-                    )));
-                }
-                let delta = (total_weight as u32
-                    * weight_reduction_allowed_delta_in_basis_points as u32
-                    / MAX_BASIS_POINTS)
-                    .min(total_weight as u32) as u16;
-                (threshold as u16, max_faulty as u16, delta)
-            }
-        };
-    let lower_bound = if is_production_sui_chain(chain_id) {
-        MIN_TOTAL_WEIGHT_AFTER_REDUCTION
-    } else {
-        MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight)
-    };
+    let total_weight: u32 = weights.iter().map(|&weight| u32::from(weight)).sum();
+    let reduction = match version {
+        1 => hashi_weight_reduction_v1::reduce(
+            &weights,
+            max_faulty_in_basis_points,
+            weight_reduction_allowed_delta_in_basis_points,
+            is_production_sui_chain(chain_id),
+        ),
+        version => {
+            return Err(MpcError::SigningVersionRefused(
+                SigningVersionRefusal::Unsupported(version),
+            ));
+        }
+    }
+    .map_err(|error| {
+        reduction_error(
+            error,
+            weights.len(),
+            total_weight,
+            max_faulty_in_basis_points,
+            weight_reduction_allowed_delta_in_basis_points,
+        )
+    })?;
     tracing::info!(
         committee_epoch = committee.epoch(),
         pre_reduction_total_weight = total_weight,
-        threshold,
-        max_faulty,
-        weight_reduction_allowed_delta,
-        lower_bound,
-        legacy_pinned = legacy_threshold_in_basis_points.is_some(),
+        threshold = reduction.pre_reduction_threshold,
+        max_faulty = reduction.pre_reduction_max_faulty,
+        weight_reduction_allowed_delta = reduction.allowed_delta,
+        lower_bound = reduction.lower_bound,
         "build_reduced_nodes: pre-reduction parameters"
     );
-    if total_weight < lower_bound {
-        return Err(MpcError::InvalidConfig(format!(
-            "total weight {total_weight} is below the reduction floor {lower_bound}"
-        )));
-    }
-    let (reducer, reduced) = if legacy_threshold_in_basis_points.is_some() {
-        (
-            "prop_reduce",
-            Nodes::prop_reduce(
-                nodes_vec,
-                threshold,
-                max_faulty,
-                weight_reduction_allowed_delta,
-                lower_bound,
-            ),
-        )
-    } else {
-        (
-            "knapsack_reduce",
-            Nodes::knapsack_reduce(
-                nodes_vec,
-                threshold,
-                max_faulty,
-                weight_reduction_allowed_delta,
-                lower_bound,
-            ),
-        )
-    };
-    let (nodes, reduced_threshold, reduced_max_faulty) =
-        reduced.map_err(|e| MpcError::CryptoError(e.to_string()))?;
+    let nodes = Nodes::new(
+        committee
+            .members()
+            .iter()
+            .zip(&reduction.weights)
+            .enumerate()
+            .map(|(index, (member, &weight))| Node {
+                id: index as u16,
+                pk: member.encryption_public_key().to_owned(),
+                weight,
+            })
+            .collect(),
+    )
+    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
     tracing::info!(
         committee_epoch = committee.epoch(),
-        reducer,
+        signing_version = version,
         reduced_total_weight = nodes.total_weight(),
-        reduced_threshold,
-        reduced_max_faulty,
+        reduced_threshold = reduction.threshold,
+        reduced_max_faulty = reduction.max_faulty,
         "build_reduced_nodes: post-reduction parameters"
     );
-    Ok((nodes, reduced_threshold, reduced_max_faulty))
+    Ok((nodes, reduction.threshold, reduction.max_faulty))
+}
+
+const WEIGHT_REDUCTION_V1_SOURCES: [(&str, &[u8]); 3] = [
+    (
+        "Cargo.toml",
+        include_bytes!("../../../hashi-weight-reduction-v1/Cargo.toml"),
+    ),
+    (
+        "src/lib.rs",
+        include_bytes!("../../../hashi-weight-reduction-v1/src/lib.rs"),
+    ),
+    (
+        "src/v1.rs",
+        include_bytes!("../../../hashi-weight-reduction-v1/src/v1.rs"),
+    ),
+];
+
+fn weight_reduction_source_digest(sources: &[(&str, &[u8])]) -> String {
+    let mut hasher = fastcrypto::hash::Sha256::default();
+    for (path, contents) in sources {
+        hasher.update(bcs::to_bytes(&(path, contents)).expect(EXPECT_SERIALIZATION_SUCCESS));
+    }
+    hex::encode(&hasher.finalize().digest[..8])
+}
+
+pub(crate) fn signing_version(
+    config: &hashi_types::move_types::Config,
+) -> Result<u64, SigningVersionRefusal> {
+    if config.retired_mpc_key().is_some() {
+        return Err(SigningVersionRefusal::Legacy);
+    }
+    match config.mpc_signing_version() {
+        None => Err(SigningVersionRefusal::Missing),
+        Some(hashi_types::move_types::ConfigValue::U64(version))
+            if SUPPORTED_SIGNING_VERSIONS.contains(version) =>
+        {
+            Ok(*version)
+        }
+        Some(hashi_types::move_types::ConfigValue::U64(version)) => {
+            Err(SigningVersionRefusal::Unsupported(*version))
+        }
+        Some(_) => Err(SigningVersionRefusal::Malformed),
+    }
+}
+
+pub(crate) fn reduction_source_digest(version: u64) -> Option<String> {
+    (version == 1).then(|| weight_reduction_source_digest(&WEIGHT_REDUCTION_V1_SOURCES))
+}
+
+pub(crate) fn reduction_digest(
+    version: u64,
+    nodes: &Nodes<EncryptionGroupElement>,
+    threshold: u16,
+    max_faulty: u16,
+) -> String {
+    let weights: Vec<u16> = nodes.iter().map(|node| node.weight).collect();
+    let share_ids: Vec<Vec<u16>> = (0..nodes.num_nodes())
+        .map(|party| {
+            nodes
+                .share_ids_of(party as PartyId)
+                .map(|ids| ids.into_iter().map(|id| id.get()).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    let bytes = bcs::to_bytes(&(version, weights, threshold, max_faulty, share_ids))
+        .expect(EXPECT_SERIALIZATION_SUCCESS);
+    hex::encode(&fastcrypto::hash::Sha256::digest(bytes).digest[..8])
+}
+
+fn reduction_error(
+    error: hashi_weight_reduction_v1::ReductionError,
+    members: usize,
+    total_weight: u32,
+    max_faulty_in_basis_points: u16,
+    allowed_delta_in_basis_points: u16,
+) -> MpcError {
+    use hashi_weight_reduction_v1::ReductionError;
+    let inputs = format!(
+        "{members} members, W={total_weight}, max_faulty_in_basis_points \
+         {max_faulty_in_basis_points}, allowed_delta_in_basis_points \
+         {allowed_delta_in_basis_points}"
+    );
+    match error {
+        ReductionError::InvalidThreshold {
+            threshold,
+            max_faulty,
+        } => MpcError::InvalidThreshold(format!(
+            "threshold {threshold} must exceed max_faulty {max_faulty}: \
+             max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
+        )),
+        ReductionError::BelowLowerBound { lower_bound, .. } => MpcError::InvalidConfig(format!(
+            "total weight {total_weight} is below the reduction floor {lower_bound}"
+        )),
+        ReductionError::InvalidInput => {
+            MpcError::CryptoError(format!("invalid weight reduction input: {inputs}"))
+        }
+        ReductionError::Violated(property) => MpcError::CryptoError(format!(
+            "weight reduction check failed ({property}): {inputs}"
+        )),
+    }
 }
 
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {

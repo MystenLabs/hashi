@@ -1,0 +1,2203 @@
+---
+source: crates/hashi/src/mpc/mpc_except_signing_tests.rs
+---
+- case: equal_1
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: bc4cca1b59ab3582
+- case: equal_1
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: bc4cca1b59ab3582
+- case: equal_2
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5000,5000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: 5d906582cdc3c3bd
+- case: equal_2
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5000,5000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: 5d906582cdc3c3bd
+- case: equal_3
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3333,3333,3333"
+      total_weight: 9999
+      threshold: 3335
+      max_faulty: 3332
+      share_ids_digest: 8a3028e96429614c
+- case: equal_3
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3333,3333,3333"
+      total_weight: 9999
+      threshold: 3335
+      max_faulty: 3332
+      share_ids_digest: 8a3028e96429614c
+- case: equal_4
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: equal_4
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: equal_5
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "20,20,20,20,20"
+      total_weight: 100
+      threshold: 21
+      max_faulty: 20
+      share_ids_digest: 6de674d8ab18745c
+- case: equal_5
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "20,20,20,20,20"
+      total_weight: 100
+      threshold: 21
+      max_faulty: 20
+      share_ids_digest: 6de674d8ab18745c
+- case: equal_6
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "17,17,17,17,17,17"
+      total_weight: 102
+      threshold: 35
+      max_faulty: 17
+      share_ids_digest: 208d9428dd619f69
+- case: equal_6
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "17,17,17,17,17,17"
+      total_weight: 102
+      threshold: 35
+      max_faulty: 17
+      share_ids_digest: 208d9428dd619f69
+- case: equal_7
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,15,15,15"
+      total_weight: 105
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: e7f37923cc8f17d9
+- case: equal_7
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,15,15,15"
+      total_weight: 105
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: e7f37923cc8f17d9
+- case: equal_8
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,13,13,13,13,13,13,13"
+      total_weight: 104
+      threshold: 27
+      max_faulty: 26
+      share_ids_digest: 8cf9d37055aa2691
+- case: equal_8
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "13,13,13,13,13,13,13,13"
+      total_weight: 104
+      threshold: 27
+      max_faulty: 26
+      share_ids_digest: 8cf9d37055aa2691
+- case: equal_9
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "12,12,12,12,12,12,12,12,12"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 24
+      share_ids_digest: c97b33dea5a4d6df
+- case: equal_9
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "12,12,12,12,12,12,12,12,12"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 24
+      share_ids_digest: c97b33dea5a4d6df
+- case: equal_10
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10,10,10,10,10,10,10,10,10,10"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: 44f08ea84e7b980e
+- case: equal_10
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "10,10,10,10,10,10,10,10,10,10"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: 44f08ea84e7b980e
+- case: equal_11
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10,10,10,10,10,10,10,10,10,10,10"
+      total_weight: 110
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: fcebc3f9dd52c74f
+- case: equal_11
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "10,10,10,10,10,10,10,10,10,10,10"
+      total_weight: 110
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: fcebc3f9dd52c74f
+- case: equal_12
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "9,9,9,9,9,9,9,9,9,9,9,9"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 27
+      share_ids_digest: 17f4a087091554a1
+- case: equal_12
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "9,9,9,9,9,9,9,9,9,9,9,9"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 27
+      share_ids_digest: 17f4a087091554a1
+- case: equal_13
+  total_weight: 9997
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,8,8,8,8,8,8,8,8,8"
+      total_weight: 104
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 5c5604bca81d7216
+- case: equal_13
+  total_weight: 9997
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,8,8,8,8,8,8,8,8,8"
+      total_weight: 104
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 5c5604bca81d7216
+- case: equal_14
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,8,8,8,8,8,8,8,8,8,8"
+      total_weight: 112
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 7e1d0160c0a6d63e
+- case: equal_14
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,8,8,8,8,8,8,8,8,8,8"
+      total_weight: 112
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 7e1d0160c0a6d63e
+- case: equal_15
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7"
+      total_weight: 105
+      threshold: 36
+      max_faulty: 28
+      share_ids_digest: 182213e0d0df079c
+- case: equal_15
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7"
+      total_weight: 105
+      threshold: 36
+      max_faulty: 28
+      share_ids_digest: 182213e0d0df079c
+- case: equal_16
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7"
+      total_weight: 112
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: e18cf356493c68db
+- case: equal_16
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7"
+      total_weight: 112
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: e18cf356493c68db
+- case: equal_17
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 102
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b060d32e8da9ba1a
+- case: equal_17
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 102
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b060d32e8da9ba1a
+- case: equal_18
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 30
+      share_ids_digest: 1952a62badbcc404
+- case: equal_18
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 30
+      share_ids_digest: 1952a62badbcc404
+- case: equal_19
+  total_weight: 9994
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: equal_19
+  total_weight: 9994
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: equal_20
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: equal_20
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: equal_21
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 105
+      threshold: 36
+      max_faulty: 30
+      share_ids_digest: 7d81a174d65f6ba1
+- case: equal_21
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 105
+      threshold: 36
+      max_faulty: 30
+      share_ids_digest: 7d81a174d65f6ba1
+- case: equal_22
+  total_weight: 9988
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 110
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: 64fc950e04f9c2c8
+- case: equal_22
+  total_weight: 9988
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 110
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: 64fc950e04f9c2c8
+- case: equal_23
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 115
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: 667c90c64ea55d17
+- case: equal_23
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 115
+      threshold: 36
+      max_faulty: 35
+      share_ids_digest: 667c90c64ea55d17
+- case: equal_24
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 35
+      share_ids_digest: b6607651a1038d44
+- case: equal_24
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 35
+      share_ids_digest: b6607651a1038d44
+- case: equal_25
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 100
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 3259a8c797d2b47d
+- case: equal_25
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 100
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 3259a8c797d2b47d
+- case: equal_26
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 104
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 1edfcf479ae24f53
+- case: equal_26
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 104
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: 1edfcf479ae24f53
+- case: equal_27
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 32
+      share_ids_digest: 7087a72c40f52002
+- case: equal_27
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 32
+      share_ids_digest: 7087a72c40f52002
+- case: equal_28
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 112
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 0aa022cf1180fc65
+- case: equal_28
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 112
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 0aa022cf1180fc65
+- case: equal_29
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 116
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 56e7ea3222dd1b18
+- case: equal_29
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 116
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 56e7ea3222dd1b18
+- case: equal_30
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 36
+      share_ids_digest: 4b302421131ed347
+- case: equal_30
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 36
+      share_ids_digest: 4b302421131ed347
+- case: equal_31
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 124
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 978c0e7d81ea426d
+- case: equal_31
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 124
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 978c0e7d81ea426d
+- case: equal_32
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 128
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 834423a87ed78321
+- case: equal_32
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 128
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 834423a87ed78321
+- case: equal_33
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 132
+      threshold: 45
+      max_faulty: 40
+      share_ids_digest: 309317d92779cc2b
+- case: equal_33
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4"
+      total_weight: 132
+      threshold: 45
+      max_faulty: 40
+      share_ids_digest: 309317d92779cc2b
+- case: equal_34
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 102
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: bdf225f292e269be
+- case: equal_34
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 102
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: bdf225f292e269be
+- case: equal_35
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 105
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 4a94c95f07f84763
+- case: equal_35
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 105
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 4a94c95f07f84763
+- case: equal_36
+  total_weight: 9972
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 33
+      share_ids_digest: edaac57f90bba65a
+- case: equal_36
+  total_weight: 9972
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 33
+      share_ids_digest: edaac57f90bba65a
+- case: equal_37
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 111
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 24bf1a88106caa0d
+- case: equal_37
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 111
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 24bf1a88106caa0d
+- case: equal_38
+  total_weight: 9994
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 44f32a8c0c87598c
+- case: equal_38
+  total_weight: 9994
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 44f32a8c0c87598c
+- case: equal_39
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 117
+      threshold: 40
+      max_faulty: 36
+      share_ids_digest: 587eaf7e62c828fd
+- case: equal_39
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 117
+      threshold: 40
+      max_faulty: 36
+      share_ids_digest: 587eaf7e62c828fd
+- case: equal_40
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 120
+      threshold: 40
+      max_faulty: 39
+      share_ids_digest: 6e8ccb464b0a6cd3
+- case: equal_40
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 120
+      threshold: 40
+      max_faulty: 39
+      share_ids_digest: 6e8ccb464b0a6cd3
+- case: equal_41
+  total_weight: 9963
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 123
+      threshold: 40
+      max_faulty: 39
+      share_ids_digest: 791710aeb15878cf
+- case: equal_41
+  total_weight: 9963
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 123
+      threshold: 40
+      max_faulty: 39
+      share_ids_digest: 791710aeb15878cf
+- case: equal_42
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 126
+      threshold: 43
+      max_faulty: 39
+      share_ids_digest: 1563d07cc54ef400
+- case: equal_42
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 126
+      threshold: 43
+      max_faulty: 39
+      share_ids_digest: 1563d07cc54ef400
+- case: equal_43
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 129
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: 85264d738fdc9eb3
+- case: equal_43
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 129
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: 85264d738fdc9eb3
+- case: equal_44
+  total_weight: 9988
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 132
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: 302dda55ce908c3f
+- case: equal_44
+  total_weight: 9988
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 132
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: 302dda55ce908c3f
+- case: equal_45
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 135
+      threshold: 46
+      max_faulty: 42
+      share_ids_digest: e1afaffa5adbea91
+- case: equal_45
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 135
+      threshold: 46
+      max_faulty: 42
+      share_ids_digest: e1afaffa5adbea91
+- case: equal_46
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 138
+      threshold: 46
+      max_faulty: 45
+      share_ids_digest: bc1f96d2de2aca3e
+- case: equal_46
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 138
+      threshold: 46
+      max_faulty: 45
+      share_ids_digest: bc1f96d2de2aca3e
+- case: equal_47
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 141
+      threshold: 46
+      max_faulty: 45
+      share_ids_digest: 035cec42baf27578
+- case: equal_47
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 141
+      threshold: 46
+      max_faulty: 45
+      share_ids_digest: 035cec42baf27578
+- case: equal_48
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 144
+      threshold: 49
+      max_faulty: 45
+      share_ids_digest: 13a216fe324f319c
+- case: equal_48
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 144
+      threshold: 49
+      max_faulty: 45
+      share_ids_digest: 13a216fe324f319c
+- case: equal_49
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 147
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 8359fea7740bfa71
+- case: equal_49
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 147
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 8359fea7740bfa71
+- case: equal_50
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 100
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: cb0dc67cc1e272b3
+- case: equal_50
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 100
+      threshold: 33
+      max_faulty: 32
+      share_ids_digest: cb0dc67cc1e272b3
+- case: equal_51
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 102
+      threshold: 35
+      max_faulty: 32
+      share_ids_digest: 5209350a83acf1c4
+- case: equal_51
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 102
+      threshold: 35
+      max_faulty: 32
+      share_ids_digest: 5209350a83acf1c4
+- case: equal_52
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 104
+      threshold: 35
+      max_faulty: 34
+      share_ids_digest: 41b16febb5bbf3f8
+- case: equal_52
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 104
+      threshold: 35
+      max_faulty: 34
+      share_ids_digest: 41b16febb5bbf3f8
+- case: equal_53
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 106
+      threshold: 35
+      max_faulty: 34
+      share_ids_digest: 01043848eefb08b5
+- case: equal_53
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 106
+      threshold: 35
+      max_faulty: 34
+      share_ids_digest: 01043848eefb08b5
+- case: equal_54
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 34
+      share_ids_digest: a2d4e3f9925d00e0
+- case: equal_54
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 108
+      threshold: 37
+      max_faulty: 34
+      share_ids_digest: a2d4e3f9925d00e0
+- case: equal_55
+  total_weight: 9955
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 110
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: c70c0f1823edc5b0
+- case: equal_55
+  total_weight: 9955
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 110
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: c70c0f1823edc5b0
+- case: equal_56
+  total_weight: 9968
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 112
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 4eb151c26292b5e8
+- case: equal_56
+  total_weight: 9968
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 112
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: 4eb151c26292b5e8
+- case: equal_57
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 114
+      threshold: 39
+      max_faulty: 36
+      share_ids_digest: bea0ef679bb23c8c
+- case: equal_57
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 114
+      threshold: 39
+      max_faulty: 36
+      share_ids_digest: bea0ef679bb23c8c
+- case: equal_58
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 116
+      threshold: 39
+      max_faulty: 38
+      share_ids_digest: fb922d2edc78f59a
+- case: equal_58
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 116
+      threshold: 39
+      max_faulty: 38
+      share_ids_digest: fb922d2edc78f59a
+- case: equal_59
+  total_weight: 9971
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 118
+      threshold: 39
+      max_faulty: 38
+      share_ids_digest: 639da30ebec8300b
+- case: equal_59
+  total_weight: 9971
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 118
+      threshold: 39
+      max_faulty: 38
+      share_ids_digest: 639da30ebec8300b
+- case: equal_60
+  total_weight: 9960
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 38
+      share_ids_digest: 11bb316d7e3bdff2
+- case: equal_60
+  total_weight: 9960
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 120
+      threshold: 41
+      max_faulty: 38
+      share_ids_digest: 11bb316d7e3bdff2
+- case: equal_61
+  total_weight: 9943
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 122
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 03a36a2c17e2a8a9
+- case: equal_61
+  total_weight: 9943
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 122
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: 03a36a2c17e2a8a9
+- case: equal_62
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 124
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: fb07b6393a0a064f
+- case: equal_62
+  total_weight: 9982
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 124
+      threshold: 41
+      max_faulty: 40
+      share_ids_digest: fb07b6393a0a064f
+- case: equal_63
+  total_weight: 9954
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 126
+      threshold: 43
+      max_faulty: 40
+      share_ids_digest: 6fce0f0b3e3569a8
+- case: equal_63
+  total_weight: 9954
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 126
+      threshold: 43
+      max_faulty: 40
+      share_ids_digest: 6fce0f0b3e3569a8
+- case: equal_64
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 128
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: f55cf87dbf5b4edc
+- case: equal_64
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 128
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: f55cf87dbf5b4edc
+- case: equal_65
+  total_weight: 9945
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 130
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: e78366719ea6b8ef
+- case: equal_65
+  total_weight: 9945
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 130
+      threshold: 43
+      max_faulty: 42
+      share_ids_digest: e78366719ea6b8ef
+- case: equal_66
+  total_weight: 9966
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 132
+      threshold: 45
+      max_faulty: 42
+      share_ids_digest: a16ae2056276e7ec
+- case: equal_66
+  total_weight: 9966
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 132
+      threshold: 45
+      max_faulty: 42
+      share_ids_digest: a16ae2056276e7ec
+- case: equal_67
+  total_weight: 9983
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 134
+      threshold: 45
+      max_faulty: 44
+      share_ids_digest: ae47d5f67ae47ee7
+- case: equal_67
+  total_weight: 9983
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 134
+      threshold: 45
+      max_faulty: 44
+      share_ids_digest: ae47d5f67ae47ee7
+- case: equal_68
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 136
+      threshold: 45
+      max_faulty: 44
+      share_ids_digest: 4dde8290727a0330
+- case: equal_68
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 136
+      threshold: 45
+      max_faulty: 44
+      share_ids_digest: 4dde8290727a0330
+- case: equal_69
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 138
+      threshold: 47
+      max_faulty: 44
+      share_ids_digest: 70c2f4f9279516ec
+- case: equal_69
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 138
+      threshold: 47
+      max_faulty: 44
+      share_ids_digest: 70c2f4f9279516ec
+- case: equal_70
+  total_weight: 9940
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 140
+      threshold: 47
+      max_faulty: 46
+      share_ids_digest: a7fc22ff3240af63
+- case: equal_70
+  total_weight: 9940
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 140
+      threshold: 47
+      max_faulty: 46
+      share_ids_digest: a7fc22ff3240af63
+- case: equal_71
+  total_weight: 9940
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 142
+      threshold: 47
+      max_faulty: 46
+      share_ids_digest: ca3aa02c2d706af2
+- case: equal_71
+  total_weight: 9940
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 142
+      threshold: 47
+      max_faulty: 46
+      share_ids_digest: ca3aa02c2d706af2
+- case: equal_72
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 144
+      threshold: 49
+      max_faulty: 46
+      share_ids_digest: 282fc9d04c0a7c6c
+- case: equal_72
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 144
+      threshold: 49
+      max_faulty: 46
+      share_ids_digest: 282fc9d04c0a7c6c
+- case: equal_73
+  total_weight: 9928
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 146
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 7eccec6bdb8f9ed1
+- case: equal_73
+  total_weight: 9928
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 146
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 7eccec6bdb8f9ed1
+- case: equal_74
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 148
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 254a942b9b8166e1
+- case: equal_74
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 148
+      threshold: 49
+      max_faulty: 48
+      share_ids_digest: 254a942b9b8166e1
+- case: equal_75
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 150
+      threshold: 51
+      max_faulty: 48
+      share_ids_digest: 8e64986743e5c3dc
+- case: equal_75
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 150
+      threshold: 51
+      max_faulty: 48
+      share_ids_digest: 8e64986743e5c3dc
+- case: equal_76
+  total_weight: 9956
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 152
+      threshold: 51
+      max_faulty: 50
+      share_ids_digest: 4d693062af5b0a51
+- case: equal_76
+  total_weight: 9956
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 152
+      threshold: 51
+      max_faulty: 50
+      share_ids_digest: 4d693062af5b0a51
+- case: equal_77
+  total_weight: 9933
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 154
+      threshold: 51
+      max_faulty: 50
+      share_ids_digest: 2966ef710b3b4ff5
+- case: equal_77
+  total_weight: 9933
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 154
+      threshold: 51
+      max_faulty: 50
+      share_ids_digest: 2966ef710b3b4ff5
+- case: equal_78
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 156
+      threshold: 53
+      max_faulty: 50
+      share_ids_digest: a2db1a2479e289e8
+- case: equal_78
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 156
+      threshold: 53
+      max_faulty: 50
+      share_ids_digest: a2db1a2479e289e8
+- case: equal_79
+  total_weight: 9954
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 158
+      threshold: 53
+      max_faulty: 52
+      share_ids_digest: e271c8261d18a967
+- case: equal_79
+  total_weight: 9954
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 158
+      threshold: 53
+      max_faulty: 52
+      share_ids_digest: e271c8261d18a967
+- case: equal_80
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 160
+      threshold: 53
+      max_faulty: 52
+      share_ids_digest: 4b44638a9fa165f6
+- case: equal_80
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 160
+      threshold: 53
+      max_faulty: 52
+      share_ids_digest: 4b44638a9fa165f6
+- case: equal_81
+  total_weight: 9963
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 162
+      threshold: 55
+      max_faulty: 52
+      share_ids_digest: 688fe22ce48e1967
+- case: equal_81
+  total_weight: 9963
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 162
+      threshold: 55
+      max_faulty: 52
+      share_ids_digest: 688fe22ce48e1967
+- case: equal_82
+  total_weight: 9922
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 164
+      threshold: 55
+      max_faulty: 54
+      share_ids_digest: 669eaa464d9cf5da
+- case: equal_82
+  total_weight: 9922
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 164
+      threshold: 55
+      max_faulty: 54
+      share_ids_digest: 669eaa464d9cf5da
+- case: equal_83
+  total_weight: 9960
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 166
+      threshold: 55
+      max_faulty: 54
+      share_ids_digest: 1698d8799a89a5e9
+- case: equal_83
+  total_weight: 9960
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 166
+      threshold: 55
+      max_faulty: 54
+      share_ids_digest: 1698d8799a89a5e9
+- case: equal_84
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 168
+      threshold: 57
+      max_faulty: 54
+      share_ids_digest: 6861c87464f18600
+- case: equal_84
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 168
+      threshold: 57
+      max_faulty: 54
+      share_ids_digest: 6861c87464f18600
+- case: equal_85
+  total_weight: 9945
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 170
+      threshold: 57
+      max_faulty: 56
+      share_ids_digest: e4563d709b132a66
+- case: equal_85
+  total_weight: 9945
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 170
+      threshold: 57
+      max_faulty: 56
+      share_ids_digest: e4563d709b132a66
+- case: equal_86
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 172
+      threshold: 57
+      max_faulty: 56
+      share_ids_digest: f8b2da354bf71212
+- case: equal_86
+  total_weight: 9976
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 172
+      threshold: 57
+      max_faulty: 56
+      share_ids_digest: f8b2da354bf71212
+- case: equal_87
+  total_weight: 9918
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 174
+      threshold: 59
+      max_faulty: 56
+      share_ids_digest: 3b7b94c72f6e4f32
+- case: equal_87
+  total_weight: 9918
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 174
+      threshold: 59
+      max_faulty: 56
+      share_ids_digest: 3b7b94c72f6e4f32
+- case: equal_88
+  total_weight: 9944
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 176
+      threshold: 59
+      max_faulty: 58
+      share_ids_digest: c2a950dbae3a30b0
+- case: equal_88
+  total_weight: 9944
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 176
+      threshold: 59
+      max_faulty: 58
+      share_ids_digest: c2a950dbae3a30b0
+- case: equal_89
+  total_weight: 9968
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 178
+      threshold: 59
+      max_faulty: 58
+      share_ids_digest: c7f8fef2cdcb6158
+- case: equal_89
+  total_weight: 9968
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 178
+      threshold: 59
+      max_faulty: 58
+      share_ids_digest: c7f8fef2cdcb6158
+- case: equal_90
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 180
+      threshold: 61
+      max_faulty: 58
+      share_ids_digest: 3976da486ec555d6
+- case: equal_90
+  total_weight: 9990
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 180
+      threshold: 61
+      max_faulty: 58
+      share_ids_digest: 3976da486ec555d6
+- case: equal_91
+  total_weight: 9919
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 182
+      threshold: 61
+      max_faulty: 60
+      share_ids_digest: 835d9ab5f5597f12
+- case: equal_91
+  total_weight: 9919
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 182
+      threshold: 61
+      max_faulty: 60
+      share_ids_digest: 835d9ab5f5597f12
+- case: equal_92
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 184
+      threshold: 61
+      max_faulty: 60
+      share_ids_digest: 026ed716e0e842f7
+- case: equal_92
+  total_weight: 9936
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 184
+      threshold: 61
+      max_faulty: 60
+      share_ids_digest: 026ed716e0e842f7
+- case: equal_93
+  total_weight: 9951
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 186
+      threshold: 63
+      max_faulty: 60
+      share_ids_digest: 1a89eb9190b24806
+- case: equal_93
+  total_weight: 9951
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 186
+      threshold: 63
+      max_faulty: 60
+      share_ids_digest: 1a89eb9190b24806
+- case: equal_94
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 188
+      threshold: 63
+      max_faulty: 62
+      share_ids_digest: d4fc0bcc1b255608
+- case: equal_94
+  total_weight: 9964
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 188
+      threshold: 63
+      max_faulty: 62
+      share_ids_digest: d4fc0bcc1b255608
+- case: equal_95
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 190
+      threshold: 63
+      max_faulty: 62
+      share_ids_digest: 1a6b4bfdbd2aa23a
+- case: equal_95
+  total_weight: 9975
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 190
+      threshold: 63
+      max_faulty: 62
+      share_ids_digest: 1a6b4bfdbd2aa23a
+- case: equal_96
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 192
+      threshold: 65
+      max_faulty: 62
+      share_ids_digest: 5695d9310cebf025
+- case: equal_96
+  total_weight: 9984
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 192
+      threshold: 65
+      max_faulty: 62
+      share_ids_digest: 5695d9310cebf025
+- case: equal_97
+  total_weight: 9991
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 194
+      threshold: 65
+      max_faulty: 64
+      share_ids_digest: cdc0a9a24c34f23f
+- case: equal_97
+  total_weight: 9991
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 194
+      threshold: 65
+      max_faulty: 64
+      share_ids_digest: cdc0a9a24c34f23f
+- case: equal_98
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 196
+      threshold: 65
+      max_faulty: 64
+      share_ids_digest: 620170f13b5e7af0
+- case: equal_98
+  total_weight: 9996
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 196
+      threshold: 65
+      max_faulty: 64
+      share_ids_digest: 620170f13b5e7af0
+- case: equal_99
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 198
+      threshold: 67
+      max_faulty: 64
+      share_ids_digest: 90a1f8971dee0fed
+- case: equal_99
+  total_weight: 9999
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 198
+      threshold: 67
+      max_faulty: 64
+      share_ids_digest: 90a1f8971dee0fed
+- case: equal_100
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 1fd1c07de8510fbe
+- case: equal_100
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 1fd1c07de8510fbe

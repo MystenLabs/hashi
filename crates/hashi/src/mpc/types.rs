@@ -89,6 +89,10 @@ pub struct MpcConfig {
     pub threshold: u16,
     pub max_faulty: u16,
     pub nonce_accumulation_window_ms: u64,
+    /// This epoch's committee's validated `mpc_signing_version`; consumers
+    /// read it here, never from the epoch store, which holds the next
+    /// committee's.
+    pub signing_version: u64,
 }
 
 impl MpcConfig {
@@ -98,6 +102,7 @@ impl MpcConfig {
         threshold: u16,
         max_faulty: u16,
         nonce_accumulation_window_ms: u64,
+        signing_version: u64,
     ) -> Self {
         Self {
             epoch,
@@ -105,6 +110,7 @@ impl MpcConfig {
             threshold,
             max_faulty,
             nonce_accumulation_window_ms,
+            signing_version,
         }
     }
 }
@@ -940,6 +946,48 @@ pub(crate) fn resolve_signers<T: hashi_types::intent::IntentMessage>(
 
 pub type MpcResult<T> = Result<T, MpcError>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SigningVersionRefusal {
+    Unsupported(u64),
+    Missing,
+    Malformed,
+    Legacy,
+}
+
+impl SigningVersionRefusal {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Unsupported(_) => "unsupported",
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::Legacy => "legacy",
+        }
+    }
+
+    pub fn version_label(&self) -> String {
+        match self {
+            Self::Unsupported(version) => version.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for SigningVersionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(version) => write!(
+                f,
+                "unsupported signing version {version} (this release supports {:?}); run a \
+                 release that supports it",
+                crate::constants::SUPPORTED_SIGNING_VERSIONS
+            ),
+            Self::Missing => write!(f, "the committee's config has no signing version"),
+            Self::Malformed => write!(f, "the committee's signing version is not a u64"),
+            Self::Legacy => write!(f, "the committee's config pins a retired MPC parameter"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum MpcError {
     #[error("Invalid configuration: {0}")]
@@ -947,6 +995,9 @@ pub enum MpcError {
 
     #[error("Invalid threshold configuration: {0}")]
     InvalidThreshold(String),
+
+    #[error("Signing version refused: {0}")]
+    SigningVersionRefused(SigningVersionRefusal),
 
     #[error("Not enough participants: expected {expected}, got {got}")]
     NotEnoughParticipants { expected: usize, got: usize },

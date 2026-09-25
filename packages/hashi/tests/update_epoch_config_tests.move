@@ -77,6 +77,47 @@ fun reject_single(key: std::string::String, value: config_value::Value) {
     std::unit_test::destroy(hashi);
 }
 
+fun mpc_signing_version_key(): std::string::String {
+    b"mpc_signing_version".to_string()
+}
+
+#[test]
+fun test_signing_version_is_seeded_at_one() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+
+    assert!(hashi.epoch_config().get(b"mpc_signing_version").as_u64() == 1);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_signing_version_update_applies() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let mut entries = vec_map::empty();
+    entries.insert(mpc_signing_version_key(), config_value::new_u64(2));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
+
+    assert!(hashi.epoch_config().get(b"mpc_signing_version").as_u64() == 2);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
+fun test_reject_signing_version_zero() {
+    reject_single(mpc_signing_version_key(), config_value::new_u64(0));
+}
+
+#[test]
+fun test_signing_version_of_another_type_is_invalid() {
+    assert!(!mpc_config::is_valid_value(&mpc_signing_version_key(), &config_value::new_bool(true)));
+}
+
 #[test]
 fun test_single_key_update() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

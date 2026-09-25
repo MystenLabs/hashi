@@ -1,0 +1,333 @@
+---
+source: crates/hashi/src/mpc/mpc_except_signing_tests.rs
+---
+- case: e2e_1_node
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "100"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: b2397a476dd9d0e2
+- case: e2e_1_node
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "100"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: b2397a476dd9d0e2
+- case: e2e_1_node
+  total_weight: 10000
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "100"
+      total_weight: 100
+      threshold: 50
+      max_faulty: 25
+      share_ids_digest: b2397a476dd9d0e2
+- case: e2e_1_node
+  total_weight: 10000
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "100"
+      total_weight: 100
+      threshold: 60
+      max_faulty: 20
+      share_ids_digest: b2397a476dd9d0e2
+- case: e2e_1_node
+  total_weight: 10000
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "100"
+      total_weight: 100
+      threshold: 40
+      max_faulty: 30
+      share_ids_digest: b2397a476dd9d0e2
+- case: e2e_3_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "33,33,33"
+      total_weight: 99
+      threshold: 35
+      max_faulty: 32
+      share_ids_digest: 073c8d8bd2a67a93
+- case: e2e_3_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "33,33,33"
+      total_weight: 99
+      threshold: 35
+      max_faulty: 32
+      share_ids_digest: 073c8d8bd2a67a93
+- case: e2e_3_nodes
+  total_weight: 10000
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "33,33,33"
+      total_weight: 99
+      threshold: 51
+      max_faulty: 24
+      share_ids_digest: 073c8d8bd2a67a93
+- case: e2e_3_nodes
+  total_weight: 10000
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "33,33,33"
+      total_weight: 99
+      threshold: 61
+      max_faulty: 19
+      share_ids_digest: 073c8d8bd2a67a93
+- case: e2e_3_nodes
+  total_weight: 10000
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "33,33,33"
+      total_weight: 99
+      threshold: 41
+      max_faulty: 29
+      share_ids_digest: 073c8d8bd2a67a93
+- case: e2e_4_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes
+  total_weight: 10000
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes
+  total_weight: 10000
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 60
+      max_faulty: 20
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes
+  total_weight: 10000
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_7_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "14,14,14,14,14,14,14"
+      total_weight: 98
+      threshold: 29
+      max_faulty: 28
+      share_ids_digest: 3f60f89ac0842dcb
+- case: e2e_7_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "14,14,14,14,14,14,14"
+      total_weight: 98
+      threshold: 29
+      max_faulty: 28
+      share_ids_digest: 3f60f89ac0842dcb
+- case: e2e_7_nodes
+  total_weight: 10000
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "14,14,14,14,14,14,14"
+      total_weight: 98
+      threshold: 43
+      max_faulty: 14
+      share_ids_digest: 3f60f89ac0842dcb
+- case: e2e_7_nodes
+  total_weight: 10000
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "14,14,14,14,14,14,14"
+      total_weight: 98
+      threshold: 57
+      max_faulty: 14
+      share_ids_digest: 3f60f89ac0842dcb
+- case: e2e_7_nodes
+  total_weight: 10000
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "14,14,14,14,14,14,14"
+      total_weight: 98
+      threshold: 29
+      max_faulty: 28
+      share_ids_digest: 3f60f89ac0842dcb
+- case: e2e_19_of_20_registered
+  total_weight: 9500
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 95
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: 37099eb522f4278c
+- case: e2e_19_of_20_registered
+  total_weight: 9500
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 95
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: 37099eb522f4278c
+- case: e2e_19_of_20_registered
+  total_weight: 9500
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 95
+      threshold: 46
+      max_faulty: 20
+      share_ids_digest: 37099eb522f4278c
+- case: e2e_19_of_20_registered
+  total_weight: 9500
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 95
+      threshold: 56
+      max_faulty: 15
+      share_ids_digest: 37099eb522f4278c
+- case: e2e_19_of_20_registered
+  total_weight: 9500
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 95
+      threshold: 36
+      max_faulty: 25
+      share_ids_digest: 37099eb522f4278c
+- case: e2e_20_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes
+  total_weight: 10000
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes
+  total_weight: 10000
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 46
+      max_faulty: 25
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes
+  total_weight: 10000
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 56
+      max_faulty: 20
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes
+  total_weight: 10000
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 36
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38

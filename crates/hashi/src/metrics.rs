@@ -254,6 +254,10 @@ pub struct Metrics {
     pub mpc_sign_aggregation_duration_seconds: HistogramVec,
     pub mpc_rpc_handler_process_duration_seconds: HistogramVec,
     pub mpc_party_reduced_weight: IntGauge,
+    pub mpc_signing_version_supported: IntGaugeVec,
+    pub mpc_reduction_version_info: IntGaugeVec,
+    pub mpc_signing_version_refused_total: IntCounterVec,
+    pub mpc_reduction_info: IntGaugeVec,
     pub withdrawal_duration_seconds: HistogramVec,
 }
 
@@ -343,7 +347,7 @@ impl Metrics {
     }
 
     pub fn new(registry: &Registry) -> Self {
-        Self {
+        let metrics = Self {
             inflight_requests: register_int_gauge_vec_with_registry!(
                 "hashi_inflight_requests",
                 "Total in-flight RPC requests per route",
@@ -1504,6 +1508,34 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_signing_version_supported: register_int_gauge_vec_with_registry!(
+                "hashi_mpc_signing_version_supported",
+                "Signing versions this binary supports.",
+                &["version"],
+                registry,
+            )
+            .unwrap(),
+            mpc_reduction_version_info: register_int_gauge_vec_with_registry!(
+                "hashi_mpc_reduction_version_info",
+                "Source digest of the weight reduction each supported signing version uses.",
+                &["version", "source_digest"],
+                registry,
+            )
+            .unwrap(),
+            mpc_signing_version_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_signing_version_refused_total",
+                "Committee signing versions refused, counted per MPC parameter build attempt.",
+                &["reason", "version"],
+                registry,
+            )
+            .unwrap(),
+            mpc_reduction_info: register_int_gauge_vec_with_registry!(
+                "hashi_mpc_reduction_info",
+                "Weight reduction digest of each epoch this node's MPC manager uses.",
+                &["epoch", "version", "digest"],
+                registry,
+            )
+            .unwrap(),
             withdrawal_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_withdrawal_duration_seconds",
                 "Duration of withdrawal lifecycle phases.",
@@ -1512,6 +1544,48 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+        };
+        metrics.init_signing_version_metrics();
+        metrics
+    }
+
+    /// Sets the supported-version gauges and registers the refusal series at 0.
+    fn init_signing_version_metrics(&self) {
+        for &version in crate::constants::SUPPORTED_SIGNING_VERSIONS {
+            let version_label = version.to_string();
+            self.mpc_signing_version_supported
+                .with_label_values(&[version_label.as_str()])
+                .set(1);
+            if let Some(digest) = crate::mpc::reduction_source_digest(version) {
+                self.mpc_reduction_version_info
+                    .with_label_values(&[version_label.as_str(), digest.as_str()])
+                    .set(1);
+            }
+        }
+        for reason in ["missing", "malformed", "legacy"] {
+            self.mpc_signing_version_refused_total
+                .with_label_values(&[reason, ""])
+                .inc_by(0);
+        }
+    }
+
+    pub fn record_signing_version_refusal(
+        &self,
+        refusal: &crate::mpc::types::SigningVersionRefusal,
+    ) {
+        let version_label = refusal.version_label();
+        self.mpc_signing_version_refused_total
+            .with_label_values(&[refusal.reason(), version_label.as_str()])
+            .inc();
+    }
+
+    pub fn set_reduction_info(&self, reductions: &[(u64, u64, String)]) {
+        self.mpc_reduction_info.reset();
+        for (epoch, version, digest) in reductions {
+            let (epoch, version) = (epoch.to_string(), version.to_string());
+            self.mpc_reduction_info
+                .with_label_values(&[epoch.as_str(), version.as_str(), digest.as_str()])
+                .set(1);
         }
     }
 

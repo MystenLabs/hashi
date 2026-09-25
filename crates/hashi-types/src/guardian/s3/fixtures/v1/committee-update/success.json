@@ -166,6 +166,12 @@
               {
                 "U64": 0
               }
+            ],
+            [
+              "mpc_signing_version",
+              {
+                "U64": 1
+              }
             ]
           ]
         },
@@ -182,5 +188,5 @@
       }
     }
   },
-  "signature": "d0f7571cdb2af66c38b987004b82e91393535645014614346225ef44167e8ec7f037100d6d1a26458ddf116361c3e769b383fe2237604cd92c3e9e66542d8e02"
+  "signature": "354d52e67a254d33f20cc4eb24a7fdc239ae6d3433d044984002915a9cf15079abd8ef11d9109e6f2807f08a36683f3477e4679ff3fb8b31b1b30f8ad0fa9307"
 }

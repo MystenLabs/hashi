@@ -56,6 +56,15 @@ enum Commands {
         action: hashi::cli::CommitteeCommands,
     },
 
+    /// MPC diagnostics
+    Mpc {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::MpcCommands,
+    },
+
     /// CLI configuration management
     Config {
         #[clap(flatten)]
@@ -144,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Committee { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Committee { action }).await
+        }
+        Commands::Mpc { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Mpc { action }).await
         }
         Commands::Config { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Config { action }).await

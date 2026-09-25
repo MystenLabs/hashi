@@ -383,8 +383,16 @@ pub enum ConfigValue {
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS: &str = "mpc_nonce_accumulation_window_ms";
+pub const KEY_MPC_SIGNING_VERSION: &str = "mpc_signing_version";
 
-const LEGACY_KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
+/// Keys main never writes; each selects a signing behaviour main no longer has.
+const RETIRED_MPC_KEYS: [&str; 2] = [
+    "mpc_threshold_in_basis_points",
+    "mpc_nonce_generation_protocol",
+];
+
+/// Mirrors `INITIAL_SIGNING_VERSION` in `mpc_config.move`.
+pub const INITIAL_MPC_SIGNING_VERSION: u64 = 1;
 
 /// Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in `mpc_config.move`.
 pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
@@ -476,6 +484,10 @@ impl Config {
                 KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS.to_string(),
                 ConfigValue::U64(nonce_accumulation_window_ms),
             ),
+            (
+                KEY_MPC_SIGNING_VERSION.to_string(),
+                ConfigValue::U64(INITIAL_MPC_SIGNING_VERSION),
+            ),
         ])
     }
 
@@ -500,11 +512,20 @@ impl Config {
         )
     }
 
-    pub fn legacy_pinned_mpc_threshold(&self) -> Option<&ConfigValue> {
+    /// The raw entry: absent and mistyped values are the reader's to refuse,
+    /// never defaulted.
+    pub fn mpc_signing_version(&self) -> Option<&ConfigValue> {
         self.0
             .iter()
-            .find(|(key, _)| key == LEGACY_KEY_MPC_THRESHOLD_IN_BASIS_POINTS)
+            .find(|(key, _)| key == KEY_MPC_SIGNING_VERSION)
             .map(|(_, value)| value)
+    }
+
+    pub fn retired_mpc_key(&self) -> Option<&str> {
+        self.0
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .find(|key| RETIRED_MPC_KEYS.contains(key))
     }
 
     fn mpc_param(&self, key: &str, default: u16) -> u16 {
@@ -2142,14 +2163,15 @@ mod tests {
         let mpc = Config::from_mpc_params(800, 3333, 700);
         let bytes = bcs::to_bytes(&mpc).expect("serialize");
 
-        // VecMap<String,Value> = ULEB128 len (3) then, per entry, ULEB128 key
+        // VecMap<String,Value> = ULEB128 len (4) then, per entry, ULEB128 key
         // length, key bytes, 1-byte Value variant tag (U64 = 0), 8-byte LE u64.
         let expected: Vec<u8> = {
-            let mut v = vec![3u8];
+            let mut v = vec![4u8];
             for (key, val) in [
                 ("mpc_weight_reduction_allowed_delta", 800u64),
                 ("mpc_max_faulty_in_basis_points", 3333),
                 ("mpc_nonce_accumulation_window_ms", 700),
+                ("mpc_signing_version", 1),
             ] {
                 v.push(key.len() as u8);
                 v.extend_from_slice(key.as_bytes());

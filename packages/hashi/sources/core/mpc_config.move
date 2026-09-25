@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// The MPC protocol parameters (`f`, weight-reduction delta, nonce
-/// accumulation window) and their validation. They live in the
+/// accumulation window, signing version) and their validation. They live in the
 /// package's EPOCH config: governance edits them through
 /// `update_epoch_config`, and `pin` snapshots the whole epoch config onto the
 /// committee formed at `start_reconfig`, so a committee's parameters never
@@ -22,6 +22,10 @@ const DEFAULT_NONCE_ACCUMULATION_WINDOW_MS: u64 = 2000;
 
 const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
 
+/// Seed and floor of `mpc_signing_version`, which each committee pins at
+/// formation.
+const INITIAL_SIGNING_VERSION: u64 = 1;
+
 const MAX_BPS: u64 = 10000;
 
 const MAX_FAULTY_BPS: u64 = 3333;
@@ -31,6 +35,7 @@ const KEY_MAX_FAULTY_IN_BASIS_POINTS: vector<u8> = b"mpc_max_faulty_in_basis_poi
 const KEY_WEIGHT_REDUCTION_ALLOWED_DELTA: vector<u8> = b"mpc_weight_reduction_allowed_delta";
 const KEY_REMOVED_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protocol";
 const KEY_NONCE_ACCUMULATION_WINDOW_MS: vector<u8> = b"mpc_nonce_accumulation_window_ms";
+const KEY_SIGNING_VERSION: vector<u8> = b"mpc_signing_version";
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
@@ -50,6 +55,8 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
         false
     } else if (k == &KEY_NONCE_ACCUMULATION_WINDOW_MS) {
         value.is_u64() && (*value).as_u64() <= MAX_NONCE_ACCUMULATION_WINDOW_MS
+    } else if (k == &KEY_SIGNING_VERSION) {
+        value.is_u64() && (*value).as_u64() >= INITIAL_SIGNING_VERSION
     } else {
         true
     }
@@ -89,6 +96,7 @@ public(package) fun init_defaults(config: &mut Config) {
         KEY_NONCE_ACCUMULATION_WINDOW_MS,
         config_value::new_u64(DEFAULT_NONCE_ACCUMULATION_WINDOW_MS),
     );
+    config.upsert(KEY_SIGNING_VERSION, config_value::new_u64(INITIAL_SIGNING_VERSION));
 }
 
 /// The one rule the per-entry range checks cannot see: the weight-reduction
@@ -118,5 +126,6 @@ public(package) fun new_for_testing(
         KEY_NONCE_ACCUMULATION_WINDOW_MS,
         config_value::new_u64(nonce_accumulation_window_ms),
     );
+    mpc.upsert(KEY_SIGNING_VERSION, config_value::new_u64(INITIAL_SIGNING_VERSION));
     mpc
 }

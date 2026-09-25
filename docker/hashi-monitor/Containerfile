@@ -22,21 +22,23 @@ COPY crates/hashi-monitor/Cargo.toml /src/crates/hashi-monitor/Cargo.toml
 COPY crates/hashi-guardian/Cargo.toml /src/crates/hashi-guardian/Cargo.toml
 COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
 # Only for resolution: hashi-monitor's e2e-tests dev-dependency (and its hashi
-# dependency) must load, though the binary builds neither.
+# dependency, with hashi's own) must load, though the binary builds none of them.
 COPY crates/e2e-tests/Cargo.toml /src/crates/e2e-tests/Cargo.toml
 COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
+COPY crates/hashi-weight-reduction-v1/Cargo.toml /src/crates/hashi-weight-reduction-v1/Cargo.toml
 
 WORKDIR /src
 
 # Create stub source files so cargo can resolve and compile all external deps
-RUN mkdir -p crates/hashi-monitor/src crates/hashi-guardian/src crates/hashi-types/src crates/e2e-tests/src crates/hashi/src \
+RUN mkdir -p crates/hashi-monitor/src crates/hashi-guardian/src crates/hashi-types/src crates/e2e-tests/src crates/hashi/src crates/hashi-weight-reduction-v1/src \
  && echo 'fn main(){}' > crates/hashi-monitor/src/main.rs \
  && touch crates/hashi-monitor/src/lib.rs \
  && touch crates/hashi-guardian/src/lib.rs \
  && touch crates/hashi-types/src/lib.rs \
  && echo 'fn main(){}' > crates/e2e-tests/src/main.rs \
  && touch crates/e2e-tests/src/lib.rs \
- && touch crates/hashi/src/lib.rs
+ && touch crates/hashi/src/lib.rs \
+ && touch crates/hashi-weight-reduction-v1/src/lib.rs
 
 ENV TARGET=x86_64-unknown-linux-musl
 ENV OPENSSL_STATIC=true

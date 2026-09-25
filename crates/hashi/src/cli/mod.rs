@@ -466,6 +466,17 @@ pub enum CommitteeCommands {
 }
 
 #[derive(Subcommand)]
+pub enum MpcCommands {
+    /// Print the weight reduction this binary computes for each committee a
+    /// node reads now. Compare the output across releases before upgrading.
+    ShowReduction {
+        /// Use this signing version instead of each committee's own.
+        #[clap(long)]
+        version: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Generate a configuration file template
     Template {
@@ -987,6 +998,9 @@ pub enum CliCommand {
     Committee {
         action: CommitteeCommands,
     },
+    Mpc {
+        action: MpcCommands,
+    },
     Config {
         action: ConfigCommands,
     },
@@ -1261,6 +1275,11 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             CommitteeCommands::StartReconfig => {
                 commands::committee::start_reconfig(&config, &tx_opts).await?;
+            }
+        },
+        CliCommand::Mpc { action } => match action {
+            MpcCommands::ShowReduction { version } => {
+                commands::mpc::show_reduction(&config, version).await?;
             }
         },
         CliCommand::Config { action } => match action {
