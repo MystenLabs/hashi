@@ -6,7 +6,7 @@ they are not records from a running guardian.
 
 The corpus covers all 17 cases, including both ceremony-proposal variants and
 both ceremony/withdraw initialization variants in OI records, with withdraw
-records covering both absent and populated bootstrap genesis hashes. The bootstrap
+records covering both absent and populated bootstrap genesis hashes. The `oi-guardian-info-with-genesis`
 case also includes a historical build in the full deployment policy. Records use
 the public test signing key seed `[21u8; 32]`, timestamp
 `1700000000000`, and an all-zero suffix wherever a writer would normally choose

@@ -614,10 +614,10 @@ mod tests {
             LogMessage::Init(message) => match message.as_ref() {
                 InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
                 InitLogMessage::OIGuardianInfo(info) => match &info.mode {
-                    OperatorInitMode::Ceremony => "init/oi-ceremony-guardian-info",
+                    OperatorInitMode::Ceremony => "init/oi-guardian-info-ceremony",
                     OperatorInitMode::Withdraw(withdraw) => match withdraw.genesis_state_hash {
-                        None => "init/oi-guardian-info",
-                        Some(_) => "init/oi-bootstrap-guardian-info",
+                        None => "init/oi-guardian-info-without-genesis",
+                        Some(_) => "init/oi-guardian-info-with-genesis",
                     },
                 },
                 InitLogMessage::PIEnclaveFullyInitialized { .. } => {
