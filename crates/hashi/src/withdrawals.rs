@@ -422,8 +422,8 @@ impl RefusedItem {
 pub struct RefusedItems(pub Vec<RefusedItem>);
 
 #[derive(Debug, Error)]
-#[error("fee estimate unavailable: {0}")]
-pub struct FeeEstimateUnavailable(#[source] anyhow::Error);
+#[error(transparent)]
+pub struct FeeEstimateUnavailable(anyhow::Error);
 
 impl std::fmt::Display for RefusedItems {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2049,8 +2049,8 @@ pub const MAX_ANCESTOR_DEPTH: usize = 25;
 /// longest `produced_by` chain. Every ancestor that still appears in
 /// `withdrawal_txns` is conservatively treated as unconfirmed (we skip
 /// querying Bitcoin for actual confirmation counts). Commitment validation
-/// rejects UTXOs whose ancestor chain would exceed Bitcoin Core's relay
-/// limit, and the builder skips the same UTXOs.
+/// rejects UTXOs whose chain reaches `MAX_ANCESTOR_DEPTH`, and the builder
+/// skips the same UTXOs.
 fn unconfirmed_ancestor_depth(
     record: &UtxoRecord,
     withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
@@ -2447,7 +2447,7 @@ mod tests {
     }
 
     #[test]
-    fn withdrawal_outputs_below_moves_dust_floor_are_refused() {
+    fn withdrawal_outputs_below_move_dust_floor_are_refused() {
         assert!(below_withdrawal_dust(545));
         assert!(!below_withdrawal_dust(546));
     }

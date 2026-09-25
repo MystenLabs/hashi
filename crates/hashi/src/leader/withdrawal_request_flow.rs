@@ -606,10 +606,12 @@ impl LeaderService {
             }
             Err(e) => {
                 let kind = e.kind();
-                if kind == WithdrawalCommitmentErrorKind::CommitmentCheckFailed {
-                    error!("Withdrawal batch not proposed: {e}");
-                } else {
-                    warn!("Withdrawal commitment attempt failed: {e}");
+                match kind {
+                    WithdrawalCommitmentErrorKind::CommitmentCheckFailed => {
+                        error!("Withdrawal batch not proposed: {e}")
+                    }
+                    WithdrawalCommitmentErrorKind::UtxoSelectionFailed => {}
+                    _ => warn!("Withdrawal commitment attempt failed: {e}"),
                 }
                 inner
                     .metrics
@@ -844,12 +846,20 @@ async fn build_checked_commitment(
     for _ in 0..COMMITMENT_CHECK_ROUNDS {
         let approval = match build(&requests, &excluded_inputs).await {
             Ok(approval) => approval,
-            Err(_) if !commit_gate_open() => return Ok(None),
+            Err(e) if !commit_gate_open() => {
+                debug!("Batch build failed, and an unsigned withdrawal has appeared: {e}");
+                return Ok(None);
+            }
             Err(e) => return Err(e),
         };
         let refusal = match check(&approval).await {
             Ok(()) => return Ok(commit_gate_open().then_some(approval)),
-            Err(_) if !commit_gate_open() => return Ok(None),
+            Err(e) if !commit_gate_open() => {
+                debug!(
+                    "Commit check refused the batch, and an unsigned withdrawal has appeared: {e:#}"
+                );
+                return Ok(None);
+            }
             Err(refusal) => refusal,
         };
         if refusal.downcast_ref::<FeeEstimateUnavailable>().is_some() {
