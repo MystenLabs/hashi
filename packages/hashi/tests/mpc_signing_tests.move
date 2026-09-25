@@ -218,3 +218,18 @@ fun test_record_length_mismatch_aborts() {
     b.record(vector[0, 1], vector[sig(0xAA)]);
     b.destroy_for_testing();
 }
+
+/// Pins the BCS bytes of a batch holding one pending pair and one signed
+/// slot. The Rust mirror's `signing_batch_bcs_matches_move` asserts the same
+/// bytes, so a layout change on either side fails a test.
+#[test]
+fun test_signing_batch_bcs_is_pinned() {
+    let mut b = mpc_signing::new(2, 4, 7, 4); // pairs (4, 5) and (6, 7)
+    b.record(vector[1], vector[x"AABB"]);
+    // 2 slots | Pending, first = 4, second = 5 | Signed, 2 bytes aabb |
+    // epoch = 7.
+    assert!(
+        std::bcs::to_bytes(&b) == x"0200040000000000000005000000000000000102aabb0700000000000000",
+    );
+    b.destroy_for_testing();
+}

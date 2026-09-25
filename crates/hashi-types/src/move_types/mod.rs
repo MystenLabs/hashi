@@ -2213,4 +2213,41 @@ mod tests {
             u256_value
         );
     }
+
+    /// Pins the BCS bytes of a signing batch holding one pending pair and
+    /// one signed slot. `mpc_signing_tests::test_signing_batch_bcs_is_pinned`
+    /// asserts the same bytes from Move, so a layout change on either side
+    /// fails here or there instead of silently misdecoding on-chain state.
+    #[test]
+    fn signing_batch_bcs_matches_move() {
+        let batch = SigningBatch {
+            signatures: vec![
+                MpcSig::Pending(PresigPair {
+                    first: 4,
+                    second: 5,
+                }),
+                MpcSig::Signed(vec![0xAA, 0xBB]),
+            ],
+            epoch: 7,
+        };
+        // 2 slots | Pending, first = 4, second = 5 | Signed, 2 bytes aabb |
+        // epoch = 7.
+        let expected = concat!(
+            "02",
+            "00",
+            "0400000000000000",
+            "0500000000000000",
+            "01",
+            "02aabb",
+            "0700000000000000",
+        );
+
+        let bytes = bcs::to_bytes(&batch).expect("serialize");
+
+        assert_eq!(hex::encode(&bytes), expected);
+        assert_eq!(
+            bcs::from_bytes::<SigningBatch>(&bytes).expect("deserialize"),
+            batch
+        );
+    }
 }
