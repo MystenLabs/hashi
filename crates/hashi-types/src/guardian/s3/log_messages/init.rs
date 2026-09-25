@@ -28,7 +28,7 @@ pub struct OperatorInitInfo {
     /// KPs use this key to encrypt shares for the initialized session.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
-    pub initialization: OperatorInitMode,
+    pub mode: OperatorInitMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,7 +56,7 @@ pub struct WithdrawOperatorInitInfo {
 
 impl OperatorInitInfo {
     pub fn mode(&self) -> EnclaveMode {
-        match &self.initialization {
+        match &self.mode {
             OperatorInitMode::Ceremony => EnclaveMode::Ceremony,
             OperatorInitMode::Withdraw(_) => EnclaveMode::Withdraw,
         }
@@ -145,7 +145,7 @@ impl InitLogMessage {
                 "expected PIEnclaveFullyInitialized init log".into(),
             ));
         };
-        let OperatorInitMode::Withdraw(withdraw) = &oi_info.initialization else {
+        let OperatorInitMode::Withdraw(withdraw) = &oi_info.mode else {
             return Err(InvalidS3Log(
                 "PI requires withdraw-mode operator initialization".into(),
             ));
@@ -201,7 +201,7 @@ impl InitLogMessage {
         else {
             return Err(InvalidS3Log("expected OAActivated init log".into()));
         };
-        let OperatorInitMode::Withdraw(withdraw) = &oi_info.initialization else {
+        let OperatorInitMode::Withdraw(withdraw) = &oi_info.mode else {
             return Err(InvalidS3Log(
                 "OA requires withdraw-mode operator initialization".into(),
             ));
@@ -343,7 +343,7 @@ mod tests {
     fn ceremony_initialization_cannot_authorize_pi_or_oa() {
         let mut oi_info = OperatorInitInfo::mock_for_testing();
         assert_eq!(oi_info.mode(), EnclaveMode::Withdraw);
-        oi_info.initialization = OperatorInitMode::Ceremony;
+        oi_info.mode = OperatorInitMode::Ceremony;
         assert_eq!(oi_info.mode(), EnclaveMode::Ceremony);
         assert!(InitLogMessage::verify_oi_pi_consistency(&oi_info, &pi_message(0)).is_err());
         assert!(
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn operator_init_schema_requires_common_and_withdraw_fields() {
         let json = serde_json::to_value(OperatorInitInfo::mock_for_testing()).unwrap();
-        for field in ["deployment", "encryption_pubkey", "initialization"] {
+        for field in ["deployment", "encryption_pubkey", "mode"] {
             let mut incomplete = json.clone();
             incomplete.as_object_mut().unwrap().remove(field);
             assert!(
@@ -370,7 +370,7 @@ mod tests {
             "mpc_master_g",
         ] {
             let mut incomplete = json.clone();
-            incomplete["initialization"]["Withdraw"]
+            incomplete["mode"]["Withdraw"]
                 .as_object_mut()
                 .unwrap()
                 .remove(field);
