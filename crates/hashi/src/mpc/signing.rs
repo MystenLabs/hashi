@@ -1905,13 +1905,18 @@ mod tests {
         n: u16,
         f: u16,
         t: u16,
+        dealt: Vec<(Vec<G>, Vec<Vec<S>>)>,
     }
 
     impl SigningTestSetup {
         fn new(n: u16) -> Self {
+            Self::with_seed(n, 42)
+        }
+
+        fn with_seed(n: u16, seed: u64) -> Self {
             let f = (n - 1) / 3;
             let t = f + 1;
-            let mut rng = StdRng::seed_from_u64(42);
+            let mut rng = StdRng::seed_from_u64(seed);
 
             // Committee
             let encryption_keys: Vec<_> = (0..n)
@@ -2011,6 +2016,7 @@ mod tests {
                 n,
                 f,
                 t,
+                dealt: nonces_for_dealer,
             }
         }
 
@@ -2086,11 +2092,10 @@ mod tests {
             }
         }
 
-        /// Build one fresh batch of presignatures per manager.
-        fn build_presignatures(&self) -> Vec<Presignatures> {
+        fn next_batch_dealt(&self) -> Vec<(Vec<G>, Vec<Vec<S>>)> {
             let batch_size_per_weight: u16 = 10;
             let mut rng = StdRng::seed_from_u64(99);
-            let nonces_for_dealer: Vec<_> = (0..self.n)
+            (0..self.n)
                 .map(|_| {
                     let nonces: Vec<S> = (0..batch_size_per_weight)
                         .map(|_| S::rand(&mut rng))
@@ -2107,7 +2112,13 @@ mod tests {
                         .collect();
                     (public_keys, nonce_shares)
                 })
-                .collect();
+                .collect()
+        }
+
+        /// Build one fresh batch of presignatures per manager.
+        fn build_presignatures(&self) -> Vec<Presignatures> {
+            let batch_size_per_weight: u16 = 10;
+            let nonces_for_dealer = self.next_batch_dealt();
             (0..self.managers.len())
                 .map(|i| {
                     let index = ShareIndex::new(i as u16 + 1).unwrap();
@@ -4677,6 +4688,414 @@ mod tests {
             pool_after,
             pool_before - 2,
             "two different requests should consume two presigs"
+        );
+    }
+
+    const GOLDEN_SEED: u64 = 2;
+    const GOLDEN_SIGNING_FIXTURE: &str =
+        "2d346c97c202394098e235e9332dd2795000940f0b1d2d6b60f16b73a9825e0f";
+
+    #[test]
+    fn golden_signing_fixture() {
+        use fastcrypto::hash::HashFunction;
+        let setup = SigningTestSetup::with_seed(4, GOLDEN_SEED);
+        assert!(
+            !setup.verifying_key.has_even_y().unwrap(),
+            "GOLDEN_SEED must give an odd-y master key, or forcing even y cannot move the goldens"
+        );
+        let mut bytes = setup.verifying_key.to_byte_array().to_vec();
+        for mgr in &setup.managers {
+            for share in &mgr.config.key_shares.shares {
+                bytes.extend_from_slice(&share.value.to_byte_array());
+            }
+        }
+        for (public_keys, shares) in setup.dealt.iter().chain(&setup.next_batch_dealt()) {
+            for key in public_keys {
+                bytes.extend_from_slice(&key.to_byte_array());
+            }
+            for share in shares.iter().flatten() {
+                bytes.extend_from_slice(&share.to_byte_array());
+            }
+        }
+        assert_eq!(
+            hex::encode(fastcrypto::hash::Sha256::digest(&bytes).digest),
+            GOLDEN_SIGNING_FIXTURE
+        );
+    }
+
+    const GOLDEN_PARTIALS: [&str; 4] = [
+        "0cd9074b061b2b4fb516fa8176da36c7cfac91c23e6b1e95001d84969e75ce31",
+        "a74a047885306c57474a5cd6e4a3a1e4dbce23bc8506b0ab0e15ba81ee86f595",
+        "1b7e4809a77c3e456d208f317073bdc76131a083a6d546d778655382949f9b34",
+        "f3ae5b533193f007b52f8f9dce5ec5e0ca440c498cdaa4f9a1bf7fb3a2e9b197",
+    ];
+
+    fn derived_key(vk: &G, address: &DerivationAddress) -> G {
+        use fastcrypto::traits::ToFromBytes;
+        let mut ikm = vk.x_as_be_bytes().unwrap().to_vec();
+        ikm.extend_from_slice(address);
+        let tweak = fastcrypto::hmac::hkdf_sha3_256(
+            &fastcrypto::hmac::HkdfIkm::from_bytes(&ikm).unwrap(),
+            &[],
+            &[],
+            64,
+        )
+        .unwrap();
+        let derived = *vk + G::generator() * S::from_bytes_mod_order(&tweak);
+        assert_eq!(
+            derived.x_as_be_bytes().unwrap(),
+            fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(vk, address)
+                .unwrap()
+                .to_byte_array()
+        );
+        derived
+    }
+
+    fn pooled_nonce(mgr: &SigningManager, index: u64) -> G {
+        let state = mgr.state.read().unwrap();
+        let batch = state.batches.iter().find(|b| b.contains(index)).unwrap();
+        batch.pool[(index - batch.start_index) as usize]
+            .as_ref()
+            .unwrap()
+            .1
+    }
+
+    fn prepare_peers(setup: &SigningTestSetup, input: &SignInput, beacon: &S) {
+        for mgr in &setup.managers[1..] {
+            let presig = {
+                let state = mgr.state.read().unwrap();
+                let batch = state
+                    .batches
+                    .iter()
+                    .find(|b| b.contains(input.global_presig_index))
+                    .unwrap();
+                batch.pool[(input.global_presig_index - batch.start_index) as usize]
+                    .clone()
+                    .unwrap()
+            };
+            let (nonce, sigs) = generate_partial_signatures(
+                &input.message,
+                presig,
+                beacon,
+                &mgr.config.key_shares,
+                &mgr.config.verifying_key,
+                input.derivation_address.as_ref(),
+            )
+            .unwrap();
+            mgr.state.write().unwrap().partial_signing_outputs.insert(
+                input.signing_id,
+                PartialSigningOutput::new(
+                    nonce,
+                    beacon,
+                    &input.message,
+                    input.derivation_address.as_ref(),
+                    sigs,
+                ),
+            );
+        }
+    }
+
+    async fn sign_all(
+        setup: &SigningTestSetup,
+        inputs: Vec<SignInput>,
+        beacon: &S,
+    ) -> Vec<(Address, SigningResult<SchnorrSignature>)> {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        setup.managers[0]
+            .sign(
+                &setup.mock_p2p_for(0),
+                inputs,
+                beacon,
+                Duration::from_secs(30),
+                &test_metrics(),
+                result_tx,
+            )
+            .await;
+        let mut results = Vec::new();
+        while let Some(result) = result_rx.recv().await {
+            results.push(result);
+        }
+        results
+    }
+
+    fn golden_input(i: u8, index: u64) -> SignInput {
+        SignInput {
+            signing_id: Address::new([0xb0 + i; 32]),
+            message: format!("golden {i}").into_bytes(),
+            global_presig_index: index,
+            derivation_address: Some([0x40 + i; 32]),
+        }
+    }
+
+    #[tokio::test]
+    async fn golden_partial_signatures() {
+        let setup = SigningTestSetup::with_seed(4, GOLDEN_SEED);
+        let batch_end = setup.managers[0].initial_presig_count() as u64;
+        setup.set_next_batch_on_all();
+        setup.advance_peers_to_next_batch(0);
+        let beacon = S::from(5u128);
+        let inputs: Vec<SignInput> = (0..4u8)
+            .map(|i| golden_input(i, batch_end - 2 + u64::from(i)))
+            .collect();
+        let derived_parities: HashSet<bool> = inputs
+            .iter()
+            .map(|input| {
+                derived_key(
+                    &setup.verifying_key,
+                    input.derivation_address.as_ref().unwrap(),
+                )
+                .has_even_y()
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(derived_parities.len(), 2);
+        let nonce_parities: HashSet<bool> = inputs
+            .iter()
+            .map(|input| {
+                (pooled_nonce(&setup.managers[1], input.global_presig_index)
+                    + G::generator() * beacon)
+                    .has_even_y()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(nonce_parities.len(), 2);
+        for input in &inputs {
+            prepare_peers(&setup, input, &beacon);
+        }
+
+        let first = sign_all(
+            &setup,
+            vec![golden_input(0, batch_end - 2), golden_input(2, batch_end)],
+            &beacon,
+        )
+        .await;
+        assert_eq!(first.len(), 2);
+        let second = sign_all(
+            &setup,
+            (0..4u8)
+                .map(|i| golden_input(i, batch_end - 2 + u64::from(i)))
+                .collect(),
+            &beacon,
+        )
+        .await;
+        assert_eq!(second.len(), 4);
+
+        for (signing_id, result) in first.into_iter().chain(second) {
+            let input = inputs.iter().find(|i| i.signing_id == signing_id).unwrap();
+            let key = derived_key(
+                &setup.verifying_key,
+                input.derivation_address.as_ref().unwrap(),
+            );
+            verify_schnorr(&key, &input.message, &result.unwrap());
+        }
+        let state = setup.managers[0].state.read().unwrap();
+        let partials: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                let output = &state.partial_signing_outputs[&input.signing_id];
+                hex::encode(output.partial_sigs[0].value.to_byte_array())
+            })
+            .collect();
+        assert_eq!(partials, GOLDEN_PARTIALS);
+    }
+
+    const GOLDEN_PRESIG_NONCES: [&str; 5] = [
+        "177baab7675f2cf312edcd57e4469c7324995f96ef505d42f497d0a0e0ec424880",
+        "45e4159d51f588539dc7e0df0ac86790909f0387714b551f114f953b17b2455080",
+        "a4c51c75e6abdb496b581b0e84aa19f8954da72e6dfc55e2c06cc4b60f59290580",
+        "01fa1d399f7d72f95bb6bd85e90ef1be07468cc55a47edc3fae3aecd969e95d200",
+        "9a483f662371568c8fe5036a32a03631c826a23961adcd397caba208cddb5cbf00",
+    ];
+    const GOLDEN_BEACONS: [&str; 2] = [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "000000000000000000000000000000014551231950b75fc4402da1732fc9bebe",
+    ];
+    const GOLDEN_NONCE: &str = "46e3f2e799529a4a7a292a143380f688e06a4a28c03d76587f0e73610ec50e4180";
+
+    #[test]
+    fn golden_presig_nonces_and_beacon() {
+        let setup = SigningTestSetup::with_seed(4, GOLDEN_SEED);
+        let mgr = &setup.managers[0];
+        let batch_end = mgr.initial_presig_count() as u64;
+        setup.set_next_batch_on_all();
+        let mut nonces: Vec<String> = [0, 1, batch_end - 1]
+            .iter()
+            .map(|&index| hex::encode(pooled_nonce(mgr, index).to_byte_array()))
+            .collect();
+        {
+            let state = mgr.state.read().unwrap();
+            let next = &state.next_batch.as_ref().unwrap().pool;
+            nonces.extend(
+                next[..2]
+                    .iter()
+                    .map(|presig| hex::encode(presig.as_ref().unwrap().1.to_byte_array())),
+            );
+        }
+        assert_eq!(nonces, GOLDEN_PRESIG_NONCES);
+
+        let randomness: [Vec<u8>; 2] = [(0u8..32).collect(), vec![0xff; 32]];
+        let beacons: Vec<String> = randomness
+            .iter()
+            .map(|r| hex::encode(crate::withdrawals::withdrawal_beacon(r).to_byte_array()))
+            .collect();
+        assert_eq!(beacons, GOLDEN_BEACONS);
+        let beacon = crate::withdrawals::withdrawal_beacon(&randomness[0]);
+        assert_eq!(
+            hex::encode(signing_nonce_bytes(&pooled_nonce(mgr, 0), &beacon)),
+            GOLDEN_NONCE
+        );
+    }
+
+    const GOLDEN_WITHDRAWAL_TXID: &str =
+        "aadb1be8cc4bb676d6a7b1e8eb833655874053ab0263cb2166fb130df4b2b212";
+    const GOLDEN_SIGHASHES: [&str; 4] = [
+        "c7eeefa0da8d9889e6b7b99ff3c658795172a8bc20e8f974e2df44b03081dc12",
+        "60f6002fcaa46640f239f27299901c14d9f856c5d0ee9138780c562d1dbc7840",
+        "efd11b65c32eeca4365a0011307d2dc3d30643398959ebda23ce69edbb8a492f",
+        "bfa75cd7882027268fb6cdc87cb7c1d2e99d8e93d3444ceb999165943369013f",
+    ];
+    const GOLDEN_INPUT_KEYS: [&str; 4] = [
+        "ed54a01bae825b938ea324119712108b9c7fea158bca00c1ec764e40081670c5",
+        "74ee074dd433d09ed8cecd91cd2c8bc21bf2fea12283dcf6b7130f69acea400b",
+        "ce887befdd17e2e04d863cfcd5ae1ad73f80cacca4fc025e9b42c41985163e4b",
+        "9f0649d910eadb8b313f204ed384312e3d2d46980e384fcec2fec871e35f0d62",
+    ];
+
+    #[test]
+    fn golden_withdrawal_sighashes() {
+        use crate::onchain::types::OutputUtxo;
+        use crate::onchain::types::Utxo;
+        use crate::onchain::types::UtxoId;
+        use hashi_types::bitcoin_txid::BitcoinTxid;
+
+        let setup = SigningTestSetup::with_seed(4, GOLDEN_SEED);
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let mut config = crate::config::Config::new_for_testing();
+        config.db = Some(tmpdir.path().into());
+        let hashi = crate::Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            None,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        *hashi.signing_manager.write().unwrap() = Some(setup.managers[0].clone());
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let guardian = bitcoin::secp256k1::Keypair::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+        )
+        .x_only_public_key()
+        .0;
+        hashi.guardian_btc_pubkey.set(Some(guardian)).unwrap();
+        assert!(
+            !setup.verifying_key.has_even_y().unwrap(),
+            "GOLDEN_SEED must give an odd-y master key, or forcing even y cannot move the goldens"
+        );
+
+        let utxo = |byte: u8, amount: u64, path: Option<Address>| Utxo {
+            id: UtxoId {
+                txid: BitcoinTxid::new([byte; 32]),
+                vout: byte.into(),
+            },
+            amount,
+            derivation_path: path,
+        };
+        let inputs = vec![
+            utxo(0xa1, 100_000, Some(Address::new([0x0a; 32]))),
+            utxo(0xa2, 200_000, Some(Address::new([0x0b; 32]))),
+            utxo(0xa3, 50_000, None),
+            utxo(0xa4, 75_000, Some(Address::new([0x0d; 32]))),
+        ];
+        let change = hashi_types::bitcoin::witness_program_from_address(
+            &hashi.get_deposit_address(None).unwrap(),
+        )
+        .unwrap();
+        let outputs = vec![
+            OutputUtxo {
+                amount: 120_000,
+                bitcoin_address: vec![0x11; 20],
+            },
+            OutputUtxo {
+                amount: 150_000,
+                bitcoin_address: vec![0x22; 32],
+            },
+            OutputUtxo {
+                amount: 150_000,
+                bitcoin_address: change,
+            },
+        ];
+        let tx = hashi
+            .build_unsigned_withdrawal_tx(&inputs, &outputs)
+            .unwrap();
+        let messages = hashi.withdrawal_signing_messages(&tx, &inputs).unwrap();
+        let keys: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                hex::encode(
+                    hashi
+                        .deposit_pubkey(input.derivation_path.as_ref())
+                        .unwrap()
+                        .serialize(),
+                )
+            })
+            .collect();
+        assert_eq!(tx.compute_txid().to_string(), GOLDEN_WITHDRAWAL_TXID);
+        assert_eq!(
+            messages.iter().map(hex::encode).collect::<Vec<_>>(),
+            GOLDEN_SIGHASHES
+        );
+        assert_eq!(keys, GOLDEN_INPUT_KEYS);
+        let signing_keys: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                hex::encode(
+                    fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+                        &setup.verifying_key,
+                        &crate::withdrawals::withdrawal_input_derivation_address(input),
+                    )
+                    .unwrap()
+                    .to_byte_array(),
+                )
+            })
+            .collect();
+        assert_eq!(signing_keys, GOLDEN_INPUT_KEYS);
+
+        let txn = crate::onchain::types::WithdrawalTransaction {
+            id: Address::new([0x77; 32]),
+            txid: tx.compute_txid().into(),
+            request_ids: vec![Address::new([0x01; 32]), Address::new([0x02; 32])],
+            inputs: inputs.clone(),
+            withdrawal_outputs: outputs[..2].to_vec(),
+            change_outputs: outputs[2..].to_vec(),
+            created_timestamp_ms: 0,
+            signed_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
+            randomness: vec![],
+            signing: hashi_types::move_types::SigningBatch {
+                signatures: vec![],
+                epoch: 0,
+            },
+            guardian_signatures: None,
+        };
+        assert_eq!(
+            hashi
+                .build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())
+                .unwrap(),
+            tx
+        );
+        let request =
+            crate::withdrawals::build_guardian_withdrawal_request(&hashi, &txn, 0, 0).unwrap();
+        let (enclave_messages, enclave_txid) = request
+            .utxos()
+            .signing_messages_and_txid(&guardian, &setup.verifying_key);
+        assert_eq!(enclave_txid, tx.compute_txid());
+        assert_eq!(
+            enclave_messages
+                .iter()
+                .map(|m| *m.as_ref())
+                .collect::<Vec<[u8; 32]>>(),
+            messages
         );
     }
 }
