@@ -2333,7 +2333,6 @@ impl MpcManager {
         builder: &batch_avss_avid::AvssMessageBuilder,
         confirm_cert: AvidConfirmCertificate,
         batch_index: u32,
-        replay: bool,
     ) -> MpcResult<Vec<(Address, Messages)>> {
         let dealer_sid = SessionId::nonce_dealer_session_id(
             &self.chain_id,
@@ -2377,7 +2376,7 @@ impl MpcManager {
                         kind: AvidNonceMessageKind::Dispersal {
                             dispersal: message.dispersal,
                             confirm_cert: confirm_cert.clone(),
-                            optimistic_message: (replay || !signers.contains(&(j as u16)))
+                            optimistic_message: (!signers.contains(&(j as u16)))
                                 .then(|| builder.message_for(j as u16))
                                 .flatten(),
                         },
@@ -2694,6 +2693,14 @@ impl MpcManager {
                         reason: "confirm cert was signed for a different dealer or batch".into(),
                     });
                 }
+                if let Some(msg) = optimistic_message
+                    && MessagesHash::from(msg.common.hash().digest) != signed.messages_hash
+                {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "bundled round-1 message does not match the confirm cert".into(),
+                    });
+                }
                 match (
                     self.get_avid_round_state(batch_index, &sender)?,
                     optimistic_message,
@@ -2845,15 +2852,8 @@ impl MpcManager {
                 mgr.address,
             )
         };
-        let replay = dealer_data.stored_confirm_cert.is_some();
         let confirm_cert = match dealer_data.stored_confirm_cert.take() {
-            Some(cert) => {
-                tracing::info!(
-                    "AVID nonce round replayed from the stored confirm cert: dealer {address:?}, \
-                     batch_index={batch_index}"
-                );
-                cert
-            }
+            Some(cert) => cert,
             None => {
                 let mut aggregator = BlsSignatureAggregator::new_reduced(
                     dealer_data.hashi_id,
@@ -2936,12 +2936,8 @@ impl MpcManager {
             let mgr = Arc::clone(mpc_manager);
             spawn_blocking(move || -> MpcResult<_> {
                 let mut mgr = mgr.write().unwrap();
-                let mut dispersals = mgr.create_avid_nonce_dispersal_messages(
-                    &builder,
-                    confirm_cert,
-                    batch_index,
-                    replay,
-                )?;
+                let mut dispersals =
+                    mgr.create_avid_nonce_dispersal_messages(&builder, confirm_cert, batch_index)?;
                 let own_index = dispersals
                     .iter()
                     .position(|(addr, _)| *addr == mgr.address)

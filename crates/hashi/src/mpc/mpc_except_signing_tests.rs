@@ -12280,7 +12280,7 @@ fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
 
     let messages = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert, batch_index, false)
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert, batch_index)
         .unwrap();
 
     assert_eq!(messages.len(), setup.num_validators());
@@ -12303,12 +12303,7 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     // A confirmer (holds its output) processes its dispersal.
@@ -12357,12 +12352,7 @@ fn test_avid_nonce_echo_and_vote_requires_verified_round() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let mut never_verified = setup.create_manager(5);
@@ -12427,12 +12417,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let decoder_addr = setup.address(5);
 
@@ -12619,12 +12604,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let mut receiver = setup.create_manager(1);
     receiver
@@ -12685,12 +12665,7 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let mut laggard = setup.create_manager(5);
@@ -12714,12 +12689,7 @@ fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let mut non_signer = setup.create_manager(5);
@@ -12785,12 +12755,7 @@ fn test_handle_avid_dispersal_refuses_a_confirm_cert_for_another_batch() {
     }
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            agg.finish().unwrap(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, agg.finish().unwrap(), batch_index)
         .unwrap();
 
     let result = fx.confirmers[1].handle_send_messages_request(
@@ -12807,18 +12772,41 @@ fn test_handle_avid_dispersal_refuses_a_confirm_cert_for_another_batch() {
 }
 
 #[test]
+fn test_handle_avid_dispersal_refuses_a_bundle_the_confirm_cert_does_not_cover() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let other_builder = fx
+        .dealer
+        .create_avid_nonce_dealer_builder(batch_index, &mut rand::thread_rng())
+        .unwrap();
+    let tampered = with_optimistic_message(&dispersals[5].1, other_builder.message_for(5));
+
+    let mut non_signer = setup.create_manager(5);
+    let result = non_signer
+        .handle_send_messages_request(fx.dealer_addr, &SendMessagesRequest { messages: tampered });
+    assert!(
+        matches!(result, Err(MpcError::InvalidMessage { .. })),
+        "a bundled round-1 message the confirm cert does not cover must be refused: {result:?}"
+    );
+    assert!(
+        non_signer.current_avid_round_state.is_empty(),
+        "the refused bundle must not be processed into round state"
+    );
+}
+
+#[test]
 fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let store = SharedMemoryStore::new();
     let mut confirmer = setup.create_manager_with_store(1, Arc::new(store.clone()));
@@ -12862,12 +12850,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals_a = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     // A second valid Confirm cert with signers {0, 1, 2, 4, 5} (weight 5 = W-f) yields pending
@@ -12913,7 +12896,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
     let cert_b = agg.finish().unwrap();
     let dispersals_b = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(&fx.builder, cert_b, batch_index, false)
+        .create_avid_nonce_dispersal_messages(&fx.builder, cert_b, batch_index)
         .unwrap();
 
     let mut receiver = setup.create_manager(1);
@@ -13001,12 +12984,7 @@ fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let mut store = InMemoryPublicMessagesStore::new();
@@ -13046,12 +13024,7 @@ fn test_handle_avid_echo_push_is_rejected() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
     let (_vote, _avid_vote, echoes) = fx.confirmers[1]
@@ -13381,73 +13354,6 @@ async fn test_repeat_dealer_round_reuses_the_stored_cert_without_reconfirming() 
     );
 }
 
-#[tokio::test(start_paused = true)]
-#[tracing_test::traced_test]
-async fn test_repeat_dealer_round_resends_round_one_to_a_signer_that_lost_its_state() {
-    let setup = TestSetup::new(6);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let managers = std::sync::Arc::new(std::sync::Mutex::new(
-        (1..6)
-            .map(|i| (setup.address(i), setup.create_manager(i)))
-            .collect::<HashMap<_, _>>(),
-    ));
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
-
-    let run1 = BundleScenarioP2PChannel {
-        managers: managers.clone(),
-        current_sender: dealer_addr,
-        fail_optimistic_to: [setup.address(5)].into_iter().collect(),
-        fail_dispersal_to: [setup.address(4), setup.address(5)].into_iter().collect(),
-    };
-    let mut tob1 = MockOrderedBroadcastChannel::new(vec![]);
-    let first = MpcManager::run_as_avid_nonce_dealer(
-        &dealer,
-        batch_index,
-        &run1,
-        &mut tob1,
-        &test_metrics(),
-    )
-    .await;
-    assert!(
-        matches!(first, Err(MpcError::NotEnoughApprovals { .. })),
-        "run 1 reaches the pessimistic path but the vote falls short: {first:?}"
-    );
-
-    managers
-        .lock()
-        .unwrap()
-        .insert(setup.address(4), setup.create_manager(4));
-
-    let run2 = BundleScenarioP2PChannel {
-        managers: managers.clone(),
-        current_sender: dealer_addr,
-        fail_optimistic_to: (1..6).map(|i| setup.address(i)).collect(),
-        fail_dispersal_to: [setup.address(5)].into_iter().collect(),
-    };
-    let mut tob2 = MockOrderedBroadcastChannel::new(vec![]);
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &run2, &mut tob2, &test_metrics())
-        .await
-        .expect("the replay resends round 1 to the signer that lost its state, so it votes");
-    assert_eq!(tob2.published.lock().unwrap().len(), 1);
-    assert!(
-        managers
-            .lock()
-            .unwrap()
-            .get(&setup.address(4))
-            .unwrap()
-            .avid_held_echoes
-            .contains_key(&(batch_index, dealer_addr)),
-        "the signer that lost its state rebuilt it from the resent round 1 and voted"
-    );
-    assert!(logs_contain(
-        "AVID nonce round replayed from the stored confirm cert"
-    ));
-    assert!(logs_contain(
-        "processed round-1 message bundled with an AVID dispersal"
-    ));
-}
-
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
@@ -13589,12 +13495,7 @@ fn test_avid_nonce_retrieval() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     // A voter that processed both phases serves the full bundle to a pending recipient.
@@ -14111,12 +14012,7 @@ fn cut_off_confirmer_fixture(setup: &TestSetup, batch_index: u32) -> CutOffConfi
     let mut fx = avid_pessimistic_fixture(setup, dealer_idx, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let mut vote_sigs = Vec::new();
     for j in [0usize, 1, 2, 3] {
@@ -15669,12 +15565,7 @@ fn test_decoded_shares_match_optimistic_shares() {
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let decoder_addr = setup.address(5);
 
@@ -15997,10 +15888,10 @@ fn test_avid_voter_state_survives_restart() {
         .collect();
     let cert_b = cert(&sigs_b);
     let dispersals_a = dealer
-        .create_avid_nonce_dispersal_messages(&flow.builder, cert_a, batch_index, false)
+        .create_avid_nonce_dispersal_messages(&flow.builder, cert_a, batch_index)
         .unwrap();
     let dispersals_b = dealer
-        .create_avid_nonce_dispersal_messages(&flow.builder, cert_b, batch_index, false)
+        .create_avid_nonce_dispersal_messages(&flow.builder, cert_b, batch_index)
         .unwrap();
 
     let mut vote_sigs = Vec::new();
@@ -16193,7 +16084,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
     }
     let confirm_cert = agg.finish().unwrap();
     let dispersals = dealer_mgr
-        .create_avid_nonce_dispersal_messages(&flow.builder, confirm_cert, batch_index, false)
+        .create_avid_nonce_dispersal_messages(&flow.builder, confirm_cert, batch_index)
         .unwrap();
 
     let mut vote_sigs = Vec::new();
@@ -17954,12 +17845,7 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let source = Arc::new(InMemoryPublicMessagesStore::new());
@@ -18038,12 +17924,7 @@ fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
-        .create_avid_nonce_dispersal_messages(
-            &fx.builder,
-            fx.confirm_cert.clone(),
-            batch_index,
-            false,
-        )
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     let mut store = InMemoryPublicMessagesStore::new();
