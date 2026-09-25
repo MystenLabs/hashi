@@ -554,7 +554,7 @@ mod tests {
         use std::time::Duration;
         use tokio::sync::oneshot;
 
-        let enclave = Arc::new(Enclave::create_with_random_keys());
+        let enclave = Enclave::create_with_random_keys();
         let before = enclave.info().await;
         assert_eq!(before.lifecycle, None);
         assert!(before.deployment_info.is_none());
