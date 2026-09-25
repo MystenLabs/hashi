@@ -4,10 +4,11 @@
 at the testnet wipe. These replace the old deployed V1/V2 compatibility fixtures;
 they are not records from a running guardian.
 
-The corpus covers all 14 cases, including both ceremony-proposal variants and
-both ceremony/withdraw deployment summaries in OI records. Records use the
-public test signing key seed `[21u8; 32]`, timestamp `1700000000000`, and
-deterministic object keys. Every signed record has a
+The corpus covers all 15 cases, including both ceremony-proposal variants and
+both ceremony/withdraw initialization variants in OI records, with withdraw
+records covering both absent and populated bootstrap genesis hashes. Records use
+the public test signing key seed `[21u8; 32]`, timestamp
+`1700000000000`, and deterministic object keys. Every signed record has a
 valid Guardian signature. Attestation bytes, encrypted shares, and other nested
 mock payloads are dummy data; these fixtures do not establish Nitro attestation
 or end-to-end protocol validity.

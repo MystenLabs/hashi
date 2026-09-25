@@ -6,13 +6,9 @@
   "message": {
     "Init": {
       "OIGuardianInfo": {
-        "lifecycle": {
-          "ceremony": "uninitialized"
-        },
-        "secret_sharing_instance": null,
         "deployment_info": {
           "bucket_info": {
-            "name": "bucket",
+            "name": "test-bucket",
             "region": "us-east-1"
           },
           "retention_environment": "testnet",
@@ -20,16 +16,9 @@
           "git_revision": "unknown"
         },
         "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
-        "config_hash": null,
-        "enclave_btc_pubkey": null,
-        "limiter_state": null,
-        "limiter_config": null,
-        "current_committee_epoch": null,
-        "hashi_object_id": null,
-        "mpc_master_g": null,
-        "genesis_state_hash": null
+        "initialization": "Ceremony"
       }
     }
   },
-  "signature": "98dd00b03eb050ce1a05d1bec25a77f9bc10c9a7a2404376ce8fb612f056ae45c5f580640c10292781b8e58c2afe0403377fd5938be1eca848098600646f9608"
+  "signature": "e43492b5d44768c74f511af54680acbf0e652d7028815f2b370185717d1f282e21524ac9020a8f8e0652d0f7a64341b99ca35e987b97ab964ec84f30b86cac03"
 }

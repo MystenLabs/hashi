@@ -184,10 +184,10 @@ mod tests {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::GuardianInfo;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::NitroAttestation;
+    use hashi_types::guardian::OperatorInitInfo;
     use hashi_types::guardian::S3BucketInfo;
     use hashi_types::guardian::S3RetentionEnvironment;
     use std::future::pending;
@@ -223,7 +223,7 @@ mod tests {
 
     fn signed_init() -> LogMessage {
         LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
-            GuardianInfo::mock_for_testing(),
+            OperatorInitInfo::mock_for_testing(),
         ))))
     }
 
