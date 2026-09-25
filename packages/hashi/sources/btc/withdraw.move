@@ -19,7 +19,7 @@ use hashi::{
     utxo::UtxoId,
     withdrawal_queue::OutputUtxo
 };
-use sui::{balance::Balance, clock::Clock, random::Random};
+use sui::{balance::Balance, clock::Clock};
 
 use fun btc_config::bitcoin_withdrawal_minimum as Config.bitcoin_withdrawal_minimum;
 use fun btc_config::withdrawal_cancellation_cooldown_ms as
@@ -117,7 +117,6 @@ entry fun commit_withdrawal_tx(
     txid: address,
     cert: CommitteeSignature,
     clock: &Clock,
-    r: &Random,
     ctx: &mut TxContext,
 ) {
     hashi.versioning().assert_version_enabled();
@@ -149,9 +148,6 @@ entry fun commit_withdrawal_tx(
     let presig_count = hashi::mpc_signing::presigs_for_inputs(inputs.length());
     let presig_start_index = hashi.allocate_presigs(presig_count);
 
-    let mut rng = sui::random::new_generator(r, ctx);
-    let randomness = rng.generate_bytes(32);
-
     // Create the WithdrawalTransaction object
     let withdrawal_txn = hashi::withdrawal_queue::new_withdrawal_txn(
         ctx,
@@ -165,7 +161,6 @@ entry fun commit_withdrawal_tx(
         epoch,
         hashi.config(),
         clock,
-        randomness,
     );
 
     // Now that the object exists, use its ID for UTXO locks and request commits.

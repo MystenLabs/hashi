@@ -145,7 +145,6 @@ public struct WithdrawalTransaction has key, store {
     /// Clock timestamp at which the Bitcoin transaction was confirmed.
     /// `None` until `confirm_withdrawal`.
     confirmed_timestamp_ms: Option<u64>,
-    randomness: vector<u8>,
     /// Per-input MPC committee signatures, accumulated incrementally and
     /// out-of-order across checkpoints/leaders/epochs. Owns the presignature
     /// bookkeeping (see `hashi::mpc_signing`).
@@ -191,7 +190,6 @@ public struct WithdrawalPickedForProcessing has copy, drop {
     withdrawal_outputs: vector<OutputUtxo>,
     change_outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
-    randomness: vector<u8>,
 }
 
 /// Emitted on each incremental chunk write so the watcher can track signing
@@ -449,7 +447,6 @@ public(package) fun new_withdrawal_txn(
     epoch: u64,
     config: &Config,
     clock: &Clock,
-    randomness: vector<u8>,
 ): WithdrawalTransaction {
     let max_network_fee = config.worst_case_network_fee();
 
@@ -519,7 +516,6 @@ public(package) fun new_withdrawal_txn(
         created_timestamp_ms: clock.timestamp_ms(),
         signed_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
-        randomness,
         signing,
         guardian_signatures: option::none(),
     }
@@ -882,7 +878,6 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTrans
         withdrawal_outputs: self.withdrawal_outputs,
         change_outputs: self.change_outputs,
         timestamp_ms: self.created_timestamp_ms,
-        randomness: self.randomness,
     });
 }
 
@@ -989,7 +984,6 @@ public(package) fun new_withdrawal_txn_for_testing(
         created_timestamp_ms: clock.timestamp_ms(),
         signed_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
-        randomness: vector[0, 0, 0, 0],
         signing: mpc_signing::new(num_inputs, 0, 0, mpc_signing::presigs_for_inputs(num_inputs)),
         guardian_signatures: option::none(),
     }

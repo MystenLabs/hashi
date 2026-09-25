@@ -757,7 +757,6 @@ pub struct WithdrawalTransaction {
     /// Clock timestamp at which the Bitcoin transaction was confirmed.
     /// `None` until `confirm_withdrawal`.
     pub confirmed_timestamp_ms: Option<u64>,
-    pub randomness: Vec<u8>,
     /// Per-input MPC signatures, accumulated incrementally and out-of-order.
     pub signing: SigningBatch,
     /// Per-input guardian enclave signatures, written once at finalize.
@@ -1699,7 +1698,6 @@ pub struct WithdrawalPickedForProcessing {
     /// outputs). Empty when there is no change.
     pub change_outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
-    pub randomness: Vec<u8>,
 }
 
 impl MoveType for WithdrawalPickedForProcessing {

@@ -548,7 +548,6 @@ fun test_miner_fee_single_request() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -589,7 +588,6 @@ fun test_miner_fee_single_request_large_fee() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -637,7 +635,6 @@ fun test_miner_fee_batched_even_split() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -694,7 +691,6 @@ fun test_miner_fee_batched_with_remainder_aborts() {
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -742,7 +738,6 @@ fun test_miner_fee_batched_unequal_amounts() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -782,7 +777,6 @@ fun test_miner_fee_zero() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -824,7 +818,6 @@ fun test_miner_fee_output_at_dust_floor() {
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -867,7 +860,6 @@ fun test_miner_fee_output_below_dust_aborts() {
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -910,7 +902,6 @@ fun test_miner_fee_wrong_output_amount_aborts() {
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -952,7 +943,6 @@ fun test_miner_fee_wrong_address_aborts() {
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -995,7 +985,6 @@ fun test_miner_fee_exceeds_max_aborts() {
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);

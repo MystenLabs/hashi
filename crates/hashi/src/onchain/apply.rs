@@ -1527,7 +1527,6 @@ mod tests {
             created_timestamp_ms: 5,
             signed_timestamp_ms: fully_signed.then_some(6),
             confirmed_timestamp_ms: None,
-            randomness: vec![],
             signing: move_types::SigningBatch {
                 signatures: vec![if fully_signed {
                     move_types::MpcSig::Signed(vec![1, 2, 3])

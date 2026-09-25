@@ -2829,7 +2829,6 @@ mod pending_presig_indices_tests {
             created_timestamp_ms: 0,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: None,
-            randomness: vec![],
             signing: SigningBatch { signatures, epoch },
             guardian_signatures: None,
         }

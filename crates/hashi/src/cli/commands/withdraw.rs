@@ -627,7 +627,6 @@ mod tests {
             created_timestamp_ms: 0,
             signed_timestamp_ms: fully_signed.then_some(1),
             confirmed_timestamp_ms: None,
-            randomness: vec![],
             signing: SigningBatch {
                 signatures: vec![if fully_signed {
                     MpcSig::Signed(vec![0u8; 64])
