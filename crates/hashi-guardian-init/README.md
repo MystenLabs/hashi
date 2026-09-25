@@ -170,9 +170,9 @@ command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
 Lowering `max_bucket_capacity` can strand a committed batch and stop all
-withdrawals. Pause the bridge first, then keep the new cap at or above every
-committed batch's outflow in `hashi withdraw list`. Unpause once every node's
-`hashi_guardian_limiter_max_capacity` shows the new cap.
+withdrawals. Pause the bridge first, then keep the new cap at or above the
+outflow of every batch `hashi withdraw list` shows as Committed. Unpause once
+every node's `hashi_guardian_limiter_max_capacity` shows the new cap.
 
 ## key-provisioner provision
 
