@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ApprovedDepositError","UnapprovedDepositError"],"fn":["derive_deposit_address"]};

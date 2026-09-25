@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEVNET_S3_OBJECT_LOCK_POLICY","MAINNET_S3_OBJECT_LOCK_POLICY","MAX_DIR_COMPLETION_LAG","TESTNET_S3_OBJECT_LOCK_POLICY"],"enum":["S3RetentionEnvironment"],"mod":["log"],"struct":["S3BucketInfo","S3Credentials","S3HourScopedDirectory","S3ObjectLockPolicy"]};
