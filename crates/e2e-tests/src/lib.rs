@@ -855,7 +855,7 @@ mod tests {
     use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::S;
     use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
     use fastcrypto_tbls::types::ShareIndex;
 
@@ -989,15 +989,14 @@ mod tests {
         batch_size_per_weight: u16,
         params: Parameters,
     ) -> Presignatures {
-        let receiver_outputs: Vec<batch_avss::ReceiverOutput> = nonces_for_dealer
+        let receiver_outputs: Vec<batch_avss_avid::ReceiverOutput> = nonces_for_dealer
             .iter()
             .map(|dealer| {
-                let shares: Vec<batch_avss::ShareBatch> = share_ids
+                let shares: Vec<batch_avss_avid::ShareBatch> = share_ids
                     .iter()
                     .map(|&sid| {
                         let share_idx = u16::from(sid) as usize - 1;
-                        batch_avss::ShareBatch {
-                            index: sid,
+                        batch_avss_avid::ShareBatch {
                             batch: (0..batch_size_per_weight as usize)
                                 .map(|l| dealer.nonce_shares[l][share_idx])
                                 .collect(),
@@ -1005,13 +1004,13 @@ mod tests {
                         }
                     })
                     .collect();
-                batch_avss::ReceiverOutput {
-                    my_shares: batch_avss::SharesForNode { shares },
+                batch_avss_avid::ReceiverOutput {
+                    my_shares: batch_avss_avid::SharesForNode { shares },
                     public_keys: dealer.public_keys.clone(),
                 }
             })
             .collect();
-        Presignatures::new(receiver_outputs, batch_size_per_weight, params, true).unwrap()
+        Presignatures::new(receiver_outputs, batch_size_per_weight, params).unwrap()
     }
 
     fn mock_shares(

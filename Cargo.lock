@@ -2390,7 +2390,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2402,7 +2402,7 @@ checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 [[package]]
 name = "fastcrypto"
 version = "0.1.11"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=e59b4a412c3f1cb2d477061e146de55276b6950d#e59b4a412c3f1cb2d477061e146de55276b6950d"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=3c3ad9744946ff8e1d93289e5f8fbd451730d6a2#3c3ad9744946ff8e1d93289e5f8fbd451730d6a2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2467,7 +2467,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-derive"
 version = "0.1.4"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=e59b4a412c3f1cb2d477061e146de55276b6950d#e59b4a412c3f1cb2d477061e146de55276b6950d"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=3c3ad9744946ff8e1d93289e5f8fbd451730d6a2#3c3ad9744946ff8e1d93289e5f8fbd451730d6a2"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -2476,7 +2476,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-tbls"
 version = "0.1.0"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=e59b4a412c3f1cb2d477061e146de55276b6950d#e59b4a412c3f1cb2d477061e146de55276b6950d"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=3c3ad9744946ff8e1d93289e5f8fbd451730d6a2#3c3ad9744946ff8e1d93289e5f8fbd451730d6a2"
 dependencies = [
  "bcs",
  "digest 0.10.7",
@@ -3448,7 +3448,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3743,7 +3743,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4254,7 +4254,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5042,7 +5042,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.37",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5079,7 +5079,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -5495,7 +5495,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5785,7 +5785,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
- "base64 0.22.1",
+ "base64 0.21.7",
  "block-padding",
  "blowfish",
  "buffered-reader",
@@ -6486,7 +6486,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6495,7 +6495,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7337,7 +7337,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
