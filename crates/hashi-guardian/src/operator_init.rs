@@ -265,7 +265,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     } = install;
 
     let oi_info = OperatorInitInfo {
-        deployment_info: deployment.summary(),
+        deployment: deployment.clone(),
         encryption_pubkey: enclave.encryption_public_key().to_bytes().to_vec(),
         initialization: match &withdraw_mode {
             None => OperatorInitMode::Ceremony,
@@ -533,10 +533,7 @@ mod tests {
             panic!("expected operator-init completion record");
         };
         assert_eq!(info.mode(), expected_mode);
-        assert_eq!(
-            info.deployment_info,
-            enclave.config.deployment().unwrap().summary()
-        );
+        assert_eq!(&info.deployment, enclave.config.deployment().unwrap());
         assert_eq!(
             info.encryption_pubkey,
             enclave.encryption_public_key().to_bytes().to_vec()

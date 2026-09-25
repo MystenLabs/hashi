@@ -129,7 +129,7 @@ pub fn ensure_oi_info_matches_post_init(
         live_info.lifecycle
     );
     ensure!(
-        live_info.deployment_info.as_ref() == Some(&oi_info.deployment_info),
+        live_info.deployment_info.as_ref() == Some(&oi_info.deployment.summary()),
         "S3 OI deployment differs from live post-OperatorInit GuardianInfo"
     );
     ensure!(
@@ -207,7 +207,7 @@ mod tests {
             withdraw.genesis_state_hash = genesis_state_hash;
             let live = GuardianInfo {
                 lifecycle: WithdrawStage::OperatorInitialized.into(),
-                deployment_info: Some(oi.deployment_info.clone()),
+                deployment_info: Some(oi.deployment.summary()),
                 encryption_pubkey: oi.encryption_pubkey.clone(),
                 secret_sharing_instance: Some(withdraw.secret_sharing_instance.clone()),
                 config_hash: Some(withdraw.config_hash),
@@ -270,7 +270,7 @@ mod tests {
         oi.initialization = OperatorInitMode::Ceremony;
         let mut live = GuardianInfo::mock_for_testing();
         live.lifecycle = CeremonyStage::OperatorInitialized.into();
-        live.deployment_info = Some(oi.deployment_info.clone());
+        live.deployment_info = Some(oi.deployment.summary());
         live.encryption_pubkey = oi.encryption_pubkey.clone();
         ensure_oi_info_matches_post_init(&oi, &live).unwrap();
         live.lifecycle = CeremonyStage::Uninitialized.into();

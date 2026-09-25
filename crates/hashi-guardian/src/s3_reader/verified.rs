@@ -4,7 +4,6 @@
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::DeploymentConfig;
-use hashi_types::guardian::DeploymentConfigSummary;
 use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianPubKey;
@@ -116,8 +115,7 @@ impl VerifiedSessionInfo {
         //    reported build. This replays a logged attestation whose short-lived
         //    leaf cert has typically expired, so the chain is checked at the
         //    document's own signed timestamp, not now.
-        let build_pcrs =
-            verify_deployment_info(session_id, &info.deployment_info, expected_deployment)?;
+        let build_pcrs = verify_deployment_info(session_id, &info.deployment, expected_deployment)?;
         attestation
             .verify_replay(&signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
@@ -207,9 +205,11 @@ impl VerifiedSessionInfo {
 
 /// Authenticate deployment identity separately from build selection: historical
 /// sessions may use older allowlisted builds, but must serve the same deployment.
+/// The logged policy records what the writer trusted. Only the reader's own
+/// allowlist authorizes the writing build and supplies its attestation PCR pin.
 fn verify_deployment_info(
     session_id: &str,
-    reported: &DeploymentConfigSummary,
+    reported: &DeploymentConfig,
     expected: &DeploymentConfig,
 ) -> GuardianResult<BuildPcrs> {
     if reported.bucket_info != expected.bucket_info {
@@ -232,7 +232,7 @@ fn verify_deployment_info(
     }
     expected
         .pcr_allowlist
-        .resolve(&reported.git_revision)
+        .resolve(reported.pcr_allowlist.current_build().git_revision())
         .cloned()
 }
 
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn session_deployment_must_match_all_stable_fields() {
         let expected = DeploymentConfig::mock_for_testing();
-        let reported = expected.summary();
+        let reported = expected.clone();
         assert_eq!(
             verify_deployment_info("session", &reported, &expected).unwrap(),
             *expected.pcr_allowlist.current_build()
@@ -315,16 +315,39 @@ mod tests {
             [previous.clone()],
         )
         .unwrap();
-        let mut reported = expected.summary();
-        reported.git_revision = "previous".into();
+        let mut reported = expected.clone();
+        reported.pcr_allowlist =
+            hashi_types::guardian::PcrAllowlist::new(previous.clone(), []).unwrap();
         let build = verify_deployment_info("session", &reported, &expected).unwrap();
         assert_eq!(build, previous);
         assert!(expected
             .pcr_allowlist
             .require_current_build(&build)
             .is_err());
-        reported.git_revision = "not-allowlisted".into();
+        reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+            BuildPcrs::new("not-allowlisted", vec![9]),
+            [],
+        )
+        .unwrap();
         assert!(verify_deployment_info("session", &reported, &expected).is_err());
+    }
+
+    #[test]
+    fn logged_pcr_pins_do_not_replace_the_readers_trust_policy() {
+        let expected = DeploymentConfig::mock_for_testing();
+        let mut reported = expected.clone();
+        reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+            BuildPcrs::new(
+                expected.pcr_allowlist.current_build().git_revision(),
+                vec![9],
+            ),
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            verify_deployment_info("session", &reported, &expected).unwrap(),
+            *expected.pcr_allowlist.current_build(),
+        );
     }
 
     fn build_pcrs() -> BuildPcrs {

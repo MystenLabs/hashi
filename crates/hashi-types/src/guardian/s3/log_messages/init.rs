@@ -5,7 +5,7 @@ use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_INIT;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::HashiMasterG;
-use crate::guardian::DeploymentConfigSummary;
+use crate::guardian::DeploymentConfig;
 use crate::guardian::EncPubKeyBytes;
 use crate::guardian::EnclaveMode;
 use crate::guardian::GuardianError::InvalidS3Log;
@@ -24,7 +24,8 @@ use std::collections::BTreeSet;
 /// is independent of the live GuardianInfo response and its lifecycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorInitInfo {
-    pub deployment_info: DeploymentConfigSummary,
+    /// Full installed policy, including current and historical PCR pins.
+    pub deployment: DeploymentConfig,
     /// KPs use this key to encrypt shares for the initialized session.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
@@ -358,7 +359,7 @@ mod tests {
     #[test]
     fn operator_init_schema_requires_common_and_withdraw_fields() {
         let json = serde_json::to_value(OperatorInitInfo::mock_for_testing()).unwrap();
-        for field in ["deployment_info", "encryption_pubkey", "initialization"] {
+        for field in ["deployment", "encryption_pubkey", "initialization"] {
             let mut incomplete = json.clone();
             incomplete.as_object_mut().unwrap().remove(field);
             assert!(

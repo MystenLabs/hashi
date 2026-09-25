@@ -354,7 +354,7 @@ fn verify_oi_info_matches_provisioned_standby(
         "OI record secret-sharing instance differs from live standby GuardianInfo"
     );
     ensure!(
-        Some(&oi_info.deployment_info) == live_info.deployment_info.as_ref(),
+        Some(&oi_info.deployment.summary()) == live_info.deployment_info.as_ref(),
         "OI record deployment differs from live standby GuardianInfo"
     );
     ensure!(

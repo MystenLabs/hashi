@@ -95,7 +95,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     anyhow::ensure!(
-        &verified_session.info().deployment_info == endpoint_deployment,
+        &verified_session.info().deployment.summary() == endpoint_deployment,
         "guardian S3 session deployment differs from live GuardianInfo"
     );
     let endpoint_btc_pubkey = endpoint_verified

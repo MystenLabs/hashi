@@ -131,7 +131,7 @@ impl super::OperatorInitInfo {
         let config = InitConfig::mock_for_testing();
         let (_, hashi_object_id, mpc_master_g) = GenesisState::mock_for_testing().into_parts();
         Self {
-            deployment_info: config.deployment().summary(),
+            deployment: config.deployment().clone(),
             encryption_pubkey: vec![0u8; 32],
             initialization: super::OperatorInitMode::Withdraw(Box::new(
                 super::WithdrawOperatorInitInfo {

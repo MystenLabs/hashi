@@ -497,6 +497,15 @@ mod tests {
         };
         withdraw.genesis_state_hash =
             Some(crate::guardian::GenesisState::mock_for_testing().digest());
+        bootstrap_info.deployment.pcr_allowlist = crate::guardian::PcrAllowlist::new(
+            bootstrap_info
+                .deployment
+                .pcr_allowlist
+                .current_build()
+                .clone(),
+            [crate::guardian::BuildPcrs::new("previous", vec![1])],
+        )
+        .unwrap();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
