@@ -6,19 +6,25 @@
   "message": {
     "Init": {
       "OIGuardianInfo": {
-        "deployment_info": {
+        "deployment": {
           "bucket_info": {
             "name": "test-bucket",
             "region": "us-east-1"
           },
           "retention_environment": "testnet",
           "bitcoin_network": "regtest",
-          "git_revision": "unknown"
+          "pcr_allowlist": {
+            "current_build": {
+              "git_revision": "unknown",
+              "pcr0": "00"
+            },
+            "prev_builds": []
+          }
         },
         "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
         "initialization": "Ceremony"
       }
     }
   },
-  "signature": "e43492b5d44768c74f511af54680acbf0e652d7028815f2b370185717d1f282e21524ac9020a8f8e0652d0f7a64341b99ca35e987b97ab964ec84f30b86cac03"
+  "signature": "eebddef4f1da5a01c7cde02461c5c446a29a439cf91b433f039c00d713e2b442cbf3aa5b8aeef85ddfbfecc0a82d18fff6b2e721a55fd7c407311dcd722e080c"
 }
