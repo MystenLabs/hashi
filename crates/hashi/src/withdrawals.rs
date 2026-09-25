@@ -13,7 +13,6 @@ use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
@@ -85,7 +84,7 @@ fn select_withdrawal_signing_indices(
                 signing.num_inputs()
             );
         }
-        if signing.pending_index(i).is_none() {
+        if signing.pending_pair(i).is_none() {
             anyhow::bail!("input index {input_index} is already signed");
         }
         selected.push(i);
@@ -1195,15 +1194,13 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
-        let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
-        let beacon_ref = &beacon;
         let metrics_ref = &*self.metrics;
         let txn_id = txn.id;
-        // Per-input presig index is read off the on-chain signing batch slot, so
-        // out-of-order / resume works and the index is always the current-epoch
+        // Per-input presig pair is read off the on-chain signing batch slot, so
+        // out-of-order / resume works and the pair is always the current-epoch
         // one assigned by `commit`/`reallocate`. Already-signed inputs are skipped.
         let signing = &txn.signing;
         let inputs = &txn.inputs;
@@ -1217,8 +1214,8 @@ impl Hashi {
             let message = signing_messages
                 .get(input_index)
                 .expect("validated input_index is in range for signing_messages");
-            let global_presig_index = signing
-                .pending_index(input_index)
+            let presig_pair = signing
+                .pending_pair(input_index)
                 .expect("validated input_index is pending");
             let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
             // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
@@ -1236,7 +1233,7 @@ impl Hashi {
             requests.push(crate::mpc::SignInput {
                 signing_id,
                 message: message.to_vec(),
-                global_presig_index,
+                presig_pair,
                 derivation_address: Some(derivation_address),
             });
         }
@@ -1245,7 +1242,6 @@ impl Hashi {
         let collect = signing_manager_ref.sign(
             p2p_channel_ref,
             requests,
-            beacon_ref,
             WITHDRAWAL_SIGNING_TIMEOUT,
             metrics_ref,
             result_tx,
@@ -2058,6 +2054,7 @@ async fn forward_signing_results(
                 let reason = match e {
                     crate::mpc::types::SigningError::Timeout { .. } => "timeout",
                     crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                    crate::mpc::types::SigningError::InvalidPresigPair(_) => "invalid_presig_pair",
                     crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
                         "not_enough_usable"
                     }
@@ -2327,11 +2324,8 @@ mod tests {
             created_timestamp_ms: 0,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: None,
-            randomness: vec![],
             signing: hashi_types::move_types::SigningBatch {
-                signatures: (0..num_inputs)
-                    .map(hashi_types::move_types::MpcSig::Pending)
-                    .collect(),
+                signatures: (0..num_inputs).map(|i| pending(2 * i)).collect(),
                 epoch: 0,
             },
             guardian_signatures: None,
@@ -2476,6 +2470,14 @@ mod tests {
         );
     }
 
+    /// A pending slot holding the adjacent pair starting at `first`.
+    fn pending(first: u64) -> hashi_types::move_types::MpcSig {
+        hashi_types::move_types::MpcSig::Pending(hashi_types::move_types::PresigPair {
+            first,
+            second: first + 1,
+        })
+    }
+
     fn signing(
         signatures: Vec<hashi_types::move_types::MpcSig>,
     ) -> hashi_types::move_types::SigningBatch {
@@ -2512,9 +2514,9 @@ mod tests {
     #[test]
     fn requested_signing_indices_empty_request_defaults_to_unsigned_inputs() {
         let signing = signing(vec![
-            hashi_types::move_types::MpcSig::Pending(10),
+            pending(10),
             hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
-            hashi_types::move_types::MpcSig::Pending(12),
+            pending(12),
         ]);
 
         let selected = select_withdrawal_signing_indices(&signing, &[]).unwrap();
@@ -2525,9 +2527,9 @@ mod tests {
     #[test]
     fn requested_signing_indices_accepts_pending_subset() {
         let signing = signing(vec![
-            hashi_types::move_types::MpcSig::Pending(10),
+            pending(10),
             hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
-            hashi_types::move_types::MpcSig::Pending(12),
+            pending(12),
         ]);
 
         let selected = select_withdrawal_signing_indices(&signing, &[2]).unwrap();
@@ -2537,10 +2539,7 @@ mod tests {
 
     #[test]
     fn requested_signing_indices_rejects_duplicate_indices() {
-        let signing = signing(vec![
-            hashi_types::move_types::MpcSig::Pending(10),
-            hashi_types::move_types::MpcSig::Pending(11),
-        ]);
+        let signing = signing(vec![pending(10), pending(12)]);
 
         let err = select_withdrawal_signing_indices(&signing, &[1, 1]).unwrap_err();
 
@@ -2550,7 +2549,7 @@ mod tests {
     #[test]
     fn requested_signing_indices_rejects_already_signed_indices() {
         let signing = signing(vec![
-            hashi_types::move_types::MpcSig::Pending(10),
+            pending(10),
             hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
         ]);
 
@@ -2561,7 +2560,7 @@ mod tests {
 
     #[test]
     fn requested_signing_indices_rejects_out_of_range_indices() {
-        let signing = signing(vec![hashi_types::move_types::MpcSig::Pending(10)]);
+        let signing = signing(vec![pending(10)]);
 
         let err = select_withdrawal_signing_indices(&signing, &[1]).unwrap_err();
 

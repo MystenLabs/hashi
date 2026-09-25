@@ -544,10 +544,10 @@ fun test_miner_fee_single_request() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA01,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -584,10 +584,10 @@ fun test_miner_fee_single_request_large_fee() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA02,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -631,10 +631,10 @@ fun test_miner_fee_batched_even_split() {
         ],
         @0xBB01,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -687,10 +687,10 @@ fun test_miner_fee_batched_with_remainder_aborts() {
         ],
         @0xBB02,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -734,10 +734,10 @@ fun test_miner_fee_batched_unequal_amounts() {
         ],
         @0xBB03,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -773,10 +773,10 @@ fun test_miner_fee_zero() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC01,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -814,10 +814,10 @@ fun test_miner_fee_output_at_dust_floor() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC02,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
     let btc_balance = queue.commit_requests(&pending);
     btc_balance.destroy_for_testing();
@@ -856,10 +856,10 @@ fun test_miner_fee_output_below_dust_aborts() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xDD01,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -898,10 +898,10 @@ fun test_miner_fee_wrong_output_amount_aborts() {
         vector[make_test_output(wrong_output), make_test_output(change)],
         @0xDD02,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -939,10 +939,10 @@ fun test_miner_fee_wrong_address_aborts() {
         vector[make_test_output_with_address(user_output, wrong_addr), make_test_output(change)],
         @0xDD03,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);
@@ -981,10 +981,10 @@ fun test_miner_fee_exceeds_max_aborts() {
         vector[make_test_output(user_output), make_test_output(change)],
         @0xEE01,
         0,
+        2,
         0,
         &config,
         &clock,
-        vector[],
     );
 
     queue.insert_withdrawal_txn(pending);

@@ -8,9 +8,13 @@
 /// `WithdrawalTransaction` rather than stored as a separate object.
 ///
 /// Each input occupies one slot that is either:
-///   - `Pending(presig_index)` — awaiting its signature; carries the
-///     presignature index it will consume (valid within `epoch`), or
-///   - `Signed(bytes)`         — the completed per-input MPC signature.
+///   - `Pending(pair)` — awaiting its signature; carries the pair of
+///     presignature indices it will consume (valid within `epoch`), or
+///   - `Signed(bytes)` — the completed per-input MPC signature.
+///
+/// Every signature consumes a pair of presignatures, which the signer binds
+/// to the message (FROST-style), so the nonce stays safe whether the
+/// presignatures were generated before or after the message was fixed.
 ///
 /// Signatures are filled in any order (`record`), survive leader timeouts /
 /// rotation / restart because they live on chain, and survive committee
@@ -19,8 +23,9 @@
 /// and epoch-independent (the committee group key is stable across rotation).
 ///
 /// NONCE SAFETY (a violation leaks the group secret share):
-///   - every `Pending` index is unique within (batch, epoch) — `new` /
-///     `reallocate` assign distinct offsets from a freshly allocated block;
+///   - every index in every `Pending` pair is unique within (batch, epoch) —
+///     `new` / `reallocate` assign distinct offsets from a freshly allocated
+///     block whose size they check against `presigs_for_inputs`;
 ///   - indices are globally disjoint within an epoch — the allocator is
 ///     monotonic (see `hashi::allocate_presigs`);
 ///   - a stale-epoch index is never used after a reconfig — `reallocate`
@@ -44,13 +49,25 @@ const EAllocationMismatch: vector<u8> = b"allocated presig count does not match 
 #[error]
 const ENotComplete: vector<u8> = b"signing batch is not fully signed";
 
+// ~~~~~~~ Constants ~~~~~~~
+
+/// Presignatures consumed by one input's signature.
+const PRESIGS_PER_INPUT: u64 = 2;
+
 // ~~~~~~~ Structs ~~~~~~~
+
+/// The two presignature indices one input's signature consumes, in the order
+/// the signer binds them.
+public struct PresigPair has copy, drop, store {
+    first: u64,
+    second: u64,
+}
 
 /// Per-input signing slot.
 public enum MpcSig has drop, store {
-    /// Awaiting signature; holds the presignature index this input will
+    /// Awaiting signature; holds the presignature pair this input will
     /// consume, valid within the owning batch's `epoch`.
-    Pending(u64),
+    Pending(PresigPair),
     /// Completed per-input MPC Schnorr signature bytes.
     Signed(vector<u8>),
 }
@@ -61,7 +78,7 @@ public enum MpcSig has drop, store {
 public struct SigningBatch has store {
     /// One slot per input; same length/order as the withdrawal's inputs.
     signatures: vector<MpcSig>,
-    /// Epoch the `Pending` presignature indices belong to.
+    /// Epoch the `Pending` presignature pairs belong to.
     epoch: u64,
 }
 
@@ -74,17 +91,31 @@ public struct SigningBatch has store {
 // so allocation and reassignment live across call sites. A follow-up could thread
 // an &mut to the consumed-presig counter through here to centralize it in one
 // place. Left as-is for now (see PR #667 review).
-/// Create a batch for `num_inputs`, contiguously assigning presignature
-/// indices so that input `i` uses `presig_base + i`.
-public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningBatch {
+/// Create a batch for `num_inputs`, contiguously assigning presignature pairs
+/// so that input `i` uses `presig_base + 2i` and `presig_base + 2i + 1`.
+/// `allocated_count` is the size of the block the caller reserved; it MUST
+/// equal `presigs_for_inputs(num_inputs)` for the same reason as in
+/// `reallocate`.
+public(package) fun new(
+    num_inputs: u64,
+    presig_base: u64,
+    epoch: u64,
+    allocated_count: u64,
+): SigningBatch {
     assert!(num_inputs > 0, EZeroInputs);
+    assert!(allocated_count == presigs_for_inputs(num_inputs), EAllocationMismatch);
     let mut signatures = vector[];
     let mut i = 0;
     while (i < num_inputs) {
-        signatures.push_back(MpcSig::Pending(presig_base + i));
+        signatures.push_back(MpcSig::Pending(pair_at(presig_base, i)));
         i = i + 1;
     };
     SigningBatch { signatures, epoch }
+}
+
+/// Number of presignatures to allocate for `num_inputs` signatures.
+public(package) fun presigs_for_inputs(num_inputs: u64): u64 {
+    num_inputs * PRESIGS_PER_INPUT
 }
 
 // === Mutation ===
@@ -120,14 +151,15 @@ public(package) fun record(
     };
 }
 
-/// Reassign fresh presignature indices to every still-`Pending` slot for a new
+/// Reassign fresh presignature pairs to every still-`Pending` slot for a new
 /// epoch. `Signed` slots are untouched (their signatures are final and
 /// epoch-independent). The j-th still-`Pending` slot (ascending input order)
-/// gets `new_base + j`, so the caller must allocate exactly `pending_count`
-/// presignatures starting at `new_base` for `current_epoch`. `allocated_count`
-/// is the size of the block the caller reserved; it MUST equal `pending_count`
-/// — under-allocating would assign indices past the reserved block, letting the
-/// monotonic allocator hand the same index to another batch (nonce reuse).
+/// gets `new_base + 2j` and `new_base + 2j + 1`, so the caller must allocate
+/// exactly `presigs_for_inputs(pending_count)` presignatures starting at
+/// `new_base` for `current_epoch`. `allocated_count` is the size of the block
+/// the caller reserved; it MUST equal that — under-allocating would assign
+/// indices past the reserved block, letting the monotonic allocator hand the
+/// same index to another batch (nonce reuse).
 /// Aborts if the batch is not actually stale (guards against double reallocation).
 public(package) fun reallocate(
     self: &mut SigningBatch,
@@ -136,13 +168,13 @@ public(package) fun reallocate(
     allocated_count: u64,
 ) {
     assert!(self.epoch != current_epoch, ENotStale);
-    assert!(allocated_count == pending_count(self), EAllocationMismatch);
+    assert!(allocated_count == presigs_for_inputs(pending_count(self)), EAllocationMismatch);
     let len = self.signatures.length();
     let mut i = 0;
     let mut j = 0;
     while (i < len) {
         if (self.signatures.borrow(i).is_pending()) {
-            *self.signatures.borrow_mut(i) = MpcSig::Pending(new_base + j);
+            *self.signatures.borrow_mut(i) = MpcSig::Pending(pair_at(new_base, j));
             j = j + 1;
         };
         i = i + 1;
@@ -152,7 +184,7 @@ public(package) fun reallocate(
 
 // === Views ===
 
-/// Number of still-`Pending` slots (the count that must be re-presigned on a
+/// Number of still-`Pending` slots (the inputs that must be re-presigned on a
 /// stale-epoch `reallocate`).
 public(package) fun pending_count(self: &SigningBatch): u64 {
     self.signatures.length() - self.signed_count()
@@ -194,11 +226,11 @@ public(package) fun is_signed(self: &SigningBatch, i: u64): bool {
     !self.signatures.borrow(i).is_pending()
 }
 
-/// The presignature index input `i` will use, or `none` if already signed.
-public(package) fun pending_index(self: &SigningBatch, i: u64): Option<u64> {
+/// The presignature pair input `i` will use, or `none` if already signed.
+public(package) fun pending_pair(self: &SigningBatch, i: u64): Option<PresigPair> {
     assert!(i < self.signatures.length(), EIndexOutOfRange);
     match (self.signatures.borrow(i)) {
-        MpcSig::Pending(idx) => option::some(*idx),
+        MpcSig::Pending(pair) => option::some(*pair),
         MpcSig::Signed(_) => option::none(),
     }
 }
@@ -222,6 +254,15 @@ public(package) fun to_signatures(self: &SigningBatch): vector<vector<u8>> {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
+/// The pair for the `j`-th slot of a block starting at `base`. Every block
+/// is a whole number of pairs, so `base` stays even and a pair never straddles
+/// an even-sized presignature batch; the signer still takes a pair atomically
+/// in case a batch is odd-sized.
+fun pair_at(base: u64, j: u64): PresigPair {
+    let first = base + j * PRESIGS_PER_INPUT;
+    PresigPair { first, second: first + 1 }
+}
+
 fun is_pending(self: &MpcSig): bool {
     match (self) {
         MpcSig::Pending(_) => true,
@@ -230,6 +271,11 @@ fun is_pending(self: &MpcSig): bool {
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public(package) fun new_pair_for_testing(first: u64, second: u64): PresigPair {
+    PresigPair { first, second }
+}
 
 #[test_only]
 public(package) fun destroy_for_testing(self: SigningBatch) {

@@ -1034,7 +1034,6 @@ mod tests {
             created_timestamp_ms: 0,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: confirmed.then_some(1),
-            randomness: vec![],
             signing: SigningBatch {
                 signatures: vec![],
                 epoch: 0,

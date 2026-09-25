@@ -603,6 +603,7 @@ fn withdrawal_txn_row(pw: &WithdrawalTransaction) -> serde_json::Value {
 mod tests {
     use hashi_types::move_types::CommitteeSignature;
     use hashi_types::move_types::MpcSig;
+    use hashi_types::move_types::PresigPair;
     use hashi_types::move_types::SigningBatch;
 
     use super::*;
@@ -626,12 +627,14 @@ mod tests {
             created_timestamp_ms: 0,
             signed_timestamp_ms: fully_signed.then_some(1),
             confirmed_timestamp_ms: None,
-            randomness: vec![],
             signing: SigningBatch {
                 signatures: vec![if fully_signed {
                     MpcSig::Signed(vec![0u8; 64])
                 } else {
-                    MpcSig::Pending(0)
+                    MpcSig::Pending(PresigPair {
+                        first: 0,
+                        second: 1,
+                    })
                 }],
                 epoch: 0,
             },

@@ -267,7 +267,6 @@ const MOVE_STDLIB_ADDRESS: Address = Address::from_static("0x1");
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 pub const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
-const SUI_RANDOM_OBJECT_ID: Address = Address::from_static("0x8");
 
 /// How a built transaction should be finalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1565,7 +1564,6 @@ impl SuiTxExecutor {
     }
 
     /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.
-    /// - `r: &Random`
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -1648,11 +1646,6 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(false),
         );
-        let random_arg = builder.object(
-            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
 
         builder.move_call(
             Function::new(
@@ -1668,7 +1661,6 @@ impl SuiTxExecutor {
                 txid_arg,
                 cert_arg,
                 clock_arg,
-                random_arg,
             ],
         );
 

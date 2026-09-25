@@ -638,12 +638,34 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
+/// Rust version of the Move hashi::mpc_signing::PresigPair type: the two
+/// presignature indices one input's signature consumes, in binding order.
+/// Field order MUST match Move exactly (BCS-decoded, positional).
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, serde_derive::Deserialize, serde_derive::Serialize,
+)]
+pub struct PresigPair {
+    pub first: u64,
+    pub second: u64,
+}
+
+impl PresigPair {
+    /// Presignatures consumed by one input's signature. Mirrors
+    /// `hashi::mpc_signing::PRESIGS_PER_INPUT`.
+    pub const PRESIGS_PER_INPUT: u64 = 2;
+
+    /// Both indices, in binding order.
+    pub fn indices(&self) -> [u64; 2] {
+        [self.first, self.second]
+    }
+}
+
 /// Rust version of the Move hashi::mpc_signing::MpcSig enum. Variant order
 /// MUST match Move (Pending = 0, Signed = 1) for BCS.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum MpcSig {
-    /// Awaiting signature; holds the presignature index (valid in the batch's epoch).
-    Pending(u64),
+    /// Awaiting signature; holds the presignature pair (valid in the batch's epoch).
+    Pending(PresigPair),
     /// Completed per-input MPC Schnorr signature bytes.
     Signed(Vec<u8>),
 }
@@ -653,7 +675,7 @@ pub enum MpcSig {
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct SigningBatch {
     pub signatures: Vec<MpcSig>,
-    /// Epoch the `Pending` presig indices belong to.
+    /// Epoch the `Pending` presig pairs belong to.
     pub epoch: u64,
 }
 
@@ -692,11 +714,11 @@ impl SigningBatch {
             .collect()
     }
 
-    /// Presig index assigned to input `i`, or `None` if it is already signed
+    /// Presig pair assigned to input `i`, or `None` if it is already signed
     /// or out of range.
-    pub fn pending_index(&self, i: usize) -> Option<u64> {
+    pub fn pending_pair(&self, i: usize) -> Option<PresigPair> {
         match self.signatures.get(i) {
-            Some(MpcSig::Pending(idx)) => Some(*idx),
+            Some(MpcSig::Pending(pair)) => Some(*pair),
             _ => None,
         }
     }
@@ -735,7 +757,6 @@ pub struct WithdrawalTransaction {
     /// Clock timestamp at which the Bitcoin transaction was confirmed.
     /// `None` until `confirm_withdrawal`.
     pub confirmed_timestamp_ms: Option<u64>,
-    pub randomness: Vec<u8>,
     /// Per-input MPC signatures, accumulated incrementally and out-of-order.
     pub signing: SigningBatch,
     /// Per-input guardian enclave signatures, written once at finalize.
@@ -1677,7 +1698,6 @@ pub struct WithdrawalPickedForProcessing {
     /// outputs). Empty when there is no change.
     pub change_outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
-    pub randomness: Vec<u8>,
 }
 
 impl MoveType for WithdrawalPickedForProcessing {
@@ -2191,6 +2211,43 @@ mod tests {
         assert_eq!(
             bcs::from_bytes::<ConfigValue>(&bytes).expect("deserialize"),
             u256_value
+        );
+    }
+
+    /// Pins the BCS bytes of a signing batch holding one pending pair and
+    /// one signed slot. `mpc_signing_tests::test_signing_batch_bcs_is_pinned`
+    /// asserts the same bytes from Move, so a layout change on either side
+    /// fails here or there instead of silently misdecoding on-chain state.
+    #[test]
+    fn signing_batch_bcs_matches_move() {
+        let batch = SigningBatch {
+            signatures: vec![
+                MpcSig::Pending(PresigPair {
+                    first: 4,
+                    second: 5,
+                }),
+                MpcSig::Signed(vec![0xAA, 0xBB]),
+            ],
+            epoch: 7,
+        };
+        // 2 slots | Pending, first = 4, second = 5 | Signed, 2 bytes aabb |
+        // epoch = 7.
+        let expected = concat!(
+            "02",
+            "00",
+            "0400000000000000",
+            "0500000000000000",
+            "01",
+            "02aabb",
+            "0700000000000000",
+        );
+
+        let bytes = bcs::to_bytes(&batch).expect("serialize");
+
+        assert_eq!(hex::encode(&bytes), expected);
+        assert_eq!(
+            bcs::from_bytes::<SigningBatch>(&bytes).expect("deserialize"),
+            batch
         );
     }
 }

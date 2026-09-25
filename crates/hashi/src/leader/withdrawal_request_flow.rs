@@ -641,9 +641,10 @@ impl LeaderService {
         // Proactively trigger a presig refill if this commit will allocate
         // indices beyond the current pool.
         {
-            let num_inputs = approval.selected_utxos.len() as u64;
+            let num_presigs = approval.selected_utxos.len() as u64
+                * hashi_types::move_types::PresigPair::PRESIGS_PER_INPUT;
             let num_consumed = inner.onchain_state().state().hashi().num_consumed_presigs;
-            let needed_end = num_consumed + num_inputs;
+            let needed_end = num_consumed + num_presigs;
             if let Some(signing_manager) = inner.current_signing_manager() {
                 let available_end = signing_manager.available_presig_end_index();
                 if needed_end > available_end {
