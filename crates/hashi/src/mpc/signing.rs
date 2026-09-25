@@ -328,6 +328,19 @@ impl SigningManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // TODO(defence in depth): recovery re-enables every presig slot that is still `Pending`
+    // on chain, including slots this node already consumed and served partials
+    // for before it restarted, and the only reuse guard (the `RequestChanged`
+    // digest check in `prepare_local_partial_signatures`) lives in the in-memory
+    // partial cache. That is safe only because the sighash is a pure function of
+    // chain state plus compiled constants (leaf template, recovery delay, sighash
+    // construction); a binary upgrade that changes any of those while a
+    // withdrawal is pending would make every restarted node sign a different
+    // message with the same nonce share, and the pair of partials leaks its key
+    // shares. Persist (epoch, presig index) -> (request digest, signing nonce
+    // bytes) before partials are served and refuse a re-enabled slot under a
+    // different digest; persist the batch fingerprint as well so a recovered
+    // batch that differs from the one originally served is refused.
     pub fn new_recovered(
         address: Address,
         committee: Committee,
@@ -740,6 +753,17 @@ impl SigningManager {
         }
     }
 
+    // TODO(Must fix): the RS "mismatched" attribution is only sound when the decoded
+    // polynomial is pinned down by honest points, and it is not always. Partials
+    // are public, so at the first recovery attempt (N = t+2, radius 1) an
+    // adversary can submit three partials on a polynomial with the same constant
+    // term that agrees with the true one on t-2 honest points; that polynomial is
+    // what gets decoded, the signature still verifies, and the one honest point
+    // off it is reported as the error. This flags the honest owner's whole share
+    // set for the rest of the call and blames it in `mpc_partial_sig_mismatch_total`.
+    // Treat flagging as advisory unless the decode had margin: with m mismatches
+    // reported out of N partials, flag only when N - m >= t + f, so that t honest
+    // points fix the polynomial even after discounting f adversarial ones.
     fn flag_mismatched(
         &self,
         mismatched: &[ShareIndex],

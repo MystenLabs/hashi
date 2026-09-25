@@ -132,6 +132,7 @@ const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the first phase of batch AVSS keeps waiting for unanimity once the
 /// pessimistic fallback is already assured.
+// TODO: I think that 10 or 15 should be enough
 const BATCH_AVSS_VOTES_GRACE: Duration = Duration::from_secs(90);
 
 /// Backstop on a dealer's whole collection, for the case where the stopping
@@ -524,6 +525,24 @@ impl MpcManager {
         Ok(manager)
     }
 
+    // TODO(Must fix): the message kind is never checked against `self.protocol_type`,
+    // which lets one member of the incoming committee stall every key rotation
+    // (liveness, High). In a rotation epoch this handler accepts a
+    // `Messages::Dkg` from any new-committee member, persists it under the DKG
+    // store and signs it; the ack is a `DealerMessagesHash` under the same intent
+    // and epoch as a rotation ack, so the sender collects t'+f' honest signatures
+    // and submits the cert via `submit_rotation_cert` (the chain only checks that
+    // the dealer is a registered member). Needing no prepare phase, it lands first
+    // in the rotation bucket, and every honest party then dies on it in
+    // `run_key_rotation_as_party`: `previous_share_ids_of(&dealer)?` is a hard
+    // error if the sender is not in the previous committee, and otherwise the
+    // retrieval asks signers for rotation messages they stored as DKG messages,
+    // gets NotFound from all of them and errors. `handle_reconfig` retries into
+    // the same first cert until the epoch window closes; local reconstruction
+    // fails the same way. Fix: reject a message kind that does not match the
+    // manager's protocol type here and in `try_sign_*`, and make the party loop
+    // skip a certified dealer outside the previous committee deterministically
+    // instead of erroring.
     pub fn handle_send_messages_request(
         &mut self,
         sender: Address,
@@ -661,6 +680,37 @@ impl MpcManager {
         Ok(RetrieveOutcome::NeedsStore)
     }
 
+    // TODO[defence in depth]: only non-signers may complain. Cheap.
+    // TODO[defence in depth]: bound what forged complaints can reveal. Two options:
+    //  1. Send complaints via the TOB and cap the registered dealer weight per
+    //     (epoch, protocol, batch) by f (exactly min(f, t-f-1), which is f for f up to 25%);
+    //     responders reveal only for dealers registered on chain. Exact bound and an audit
+    //     trail, at one extra transaction per complaint.
+    //  2. Keep p2p complaints as today and cap each responder locally at B of dealer weight
+    //     per epoch (per batch for nonces). Forged complaints can then expose up to
+    //     B*(W'-f')/(t'-f'), which must stay <= t'-f'-1, so B <= (t'-f'-1)(t'-f')/(W'-f'):
+    //     B = f is safe for f <= 20%, B = 5% is enough for f < 27%, and nothing positive is
+    //     safe near f = 33%.
+    // In both: count distinct dealers in reduced weight (the response cache re-serves a
+    // dealer's shares, so a dealer counts once), count rotation in previous share indices
+    // against the previous committee's t-f-1, persist the counter, refuse beyond the cap,
+    // alarm on the first reveal, log the evidence, and resume only through a manual config
+    // override after review.
+
+    // TODO(defence in depth): invalid complaints are a cheap way for a member to hog the
+    // manager write lock. The RPC layer takes `mgr.write()` for the whole call,
+    // and a well-formed but invalid complaint (a recovery package over the
+    // accuser's own valid shares) runs `handle_complaint`, i.e. decryption plus
+    // a share check over the accuser's w indices against the degree-(t-1)
+    // commitment, O(w*t) group operations, before it is rejected; nothing is
+    // cached on failure (only successful responses enter `complaint_responses`),
+    // and previous-epoch complaints additionally re-run a full dealing
+    // verification each time because previous-epoch outputs are never cached.
+    // Honest protocol steps that need the write lock queue behind it, and 200
+    // in-flight calls exhaust the blocking thread pool. Verify complaints
+    // outside the manager lock (clone the dealer message and output under a
+    // read lock), resolve `accuser_party_id` before any crypto, and memoize or
+    // rate-limit rejected complaints per (accuser, dealer, share_index).
     pub fn handle_complain_request(
         &mut self,
         caller: Address,
@@ -2792,6 +2842,20 @@ impl MpcManager {
         })
     }
 
+    // TODO(Must fix): liveness hole vs the spec's second-round send rule (see pdf). The
+    // dispersal is sent to every member regardless of whether it confirmed
+    // round 1, and round-1 sends still in flight are dropped when the confirm
+    // collection closes, so a party that missed round 1 rejects round 2 with
+    // NotReady and cannot vote in this attempt. With f' silent Byzantine
+    // signers in S and f' honest parties in that state, honest votes are
+    // W'-2f' < W'-f' and the attempt fails.
+    // Follow the spec: keep round-1 delivery alive through the vote phase and send round 2 to a party only
+    // after its confirmation, late confirmers included, so every party that
+    // receives round 2 can vote. Alternatively, the dealer can resend the
+    // round-1 message together with the round-2 message to the parties that
+    // did not sign the confirm cert: make the round-1 message an optional
+    // field of the dispersal RPC, and have the receiver process it first
+    // (verify and persist the round state) before the dispersal.
     async fn run_as_avid_nonce_dealer(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
