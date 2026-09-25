@@ -19,6 +19,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # The golden snapshot gate diffs against the merge commit's first parent.
+          fetch-depth: 2
+
+      - name: Check existing golden snapshots are unchanged (warn only)
+        if: github.event_name == 'pull_request'
+        env:
+          GOLDEN_GATE_ENFORCE: "false"
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/check-golden-snapshots.sh
 
       - name: rust version
         run: |
@@ -26,6 +36,10 @@ jobs:
           cargo --version
 
       - uses: taiki-e/install-action@cargo-nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          # Keep in step with the insta crate in Cargo.lock.
+          tool: cargo-insta@1.48.0
 
       - name: Install Bitcoin Core
         env:
@@ -78,8 +92,11 @@ jobs:
         run: .github/scripts/install-sui.sh
 
       - name: Run tests
+        env:
+          # Keeps a repo insta config from force-passing the goldens under --check.
+          INSTA_FORCE_PASS: "0"
         run: |
-          cargo nextest run --workspace --all-features --profile ci
+          cargo insta test --workspace --all-features --test-runner nextest --nextest-profile ci --check --unreferenced reject --disable-nextest-doctest
           cargo test --workspace --all-features --doc
 
       - name: Detect TRM client changes

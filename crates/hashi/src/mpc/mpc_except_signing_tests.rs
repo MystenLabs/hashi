@@ -17197,6 +17197,352 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     );
 }
 
+const GOLDEN_SUI_EPOCHS: [(&str, &str); 8] = [
+    (
+        "100",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_100_details.txt"),
+    ),
+    (
+        "200",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_200_details.txt"),
+    ),
+    (
+        "400",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_400_details.txt"),
+    ),
+    (
+        "800",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_800_details.txt"),
+    ),
+    (
+        "974",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_974_details.txt"),
+    ),
+    (
+        "1000",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1000_details.txt"),
+    ),
+    (
+        "1100",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1100_details.txt"),
+    ),
+    (
+        "1200",
+        include_str!("golden_fixtures/sui_real_all_voting_power_epoch_1200_details.txt"),
+    ),
+];
+
+const GOLDEN_CONFIG_GRID: [(u16, u16); 16] = [
+    (3333, 0),
+    (3333, 400),
+    (3333, 800),
+    (3333, 1200),
+    (3000, 0),
+    (3000, 400),
+    (3000, 800),
+    (3000, 1200),
+    (2500, 0),
+    (2500, 400),
+    (2500, 800),
+    (2500, 1200),
+    (2000, 0),
+    (2000, 400),
+    (2000, 800),
+    (2000, 1200),
+];
+
+const GOLDEN_SUBSET_CONFIGS: [(u16, u16); 4] = [(3333, 800), (3333, 0), (2500, 800), (2000, 1200)];
+
+const GOLDEN_E2E_CONFIGS: [(u16, u16); 5] = [
+    (3333, 800),
+    (3333, 0),
+    (2500, 800),
+    (2000, 1200),
+    (3000, 800),
+];
+
+const GOLDEN_E2E_DIVISOR: u16 = 100;
+
+const GOLDEN_DEV_CHAIN_ID: &str = "testchain";
+
+#[derive(serde::Serialize)]
+struct ReductionGolden {
+    case: String,
+    committee_weight: u64,
+    divisor: u16,
+    chain_id: &'static str,
+    max_faulty_bps: u16,
+    allowed_delta_bps: u16,
+    outcome: ReductionGoldenOutcome,
+}
+
+#[derive(serde::Serialize)]
+enum ReductionGoldenOutcome {
+    Reduced {
+        weights: String,
+        total_weight: u16,
+        threshold: u16,
+        max_faulty: u16,
+        share_ids_digest: String,
+    },
+    Error(&'static str),
+}
+
+fn golden_sui_weights(contents: &str) -> Vec<u64> {
+    contents
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.rsplit(',').next().unwrap().trim().parse().unwrap())
+        .collect()
+}
+
+fn golden_error_kind(error: &MpcError) -> &'static str {
+    match error {
+        MpcError::InvalidConfig(_) => "InvalidConfig",
+        MpcError::InvalidThreshold(_) => "InvalidThreshold",
+        MpcError::CryptoError(_) => "CryptoError",
+        other => panic!("unexpected reduction error: {other:?}"),
+    }
+}
+
+fn golden_committee(weights: &[u64], (max_faulty_bps, allowed_delta_bps): (u16, u16)) -> Committee {
+    let mut rng = rand::thread_rng();
+    let signing_public_key = Bls12381PrivateKey::generate(&mut rng).public_key();
+    let encryption_public_key = EncryptionPrivateKey::new(&mut rng).public_key();
+    let members = weights
+        .iter()
+        .enumerate()
+        .map(|(index, &weight)| {
+            let mut address = [0u8; 32];
+            address[30..].copy_from_slice(&(index as u16).to_be_bytes());
+            CommitteeMember::new(
+                Address::new(address),
+                signing_public_key.clone(),
+                encryption_public_key.clone(),
+                weight,
+            )
+        })
+        .collect();
+    Committee::new(members, 1, allowed_delta_bps, max_faulty_bps)
+}
+
+fn golden_reduction(
+    case: String,
+    weights: &[u64],
+    (max_faulty_bps, allowed_delta_bps): (u16, u16),
+    divisor: u16,
+    chain_id: &'static str,
+) -> ReductionGolden {
+    let committee = golden_committee(weights, (max_faulty_bps, allowed_delta_bps));
+    let outcome = match build_reduced_nodes(&committee, divisor, chain_id) {
+        Ok((nodes, threshold, max_faulty)) => {
+            let share_ids: Vec<Vec<u16>> = (0..nodes.num_nodes())
+                .map(|party| {
+                    nodes
+                        .share_ids_of(party as u16)
+                        .unwrap()
+                        .into_iter()
+                        .map(|share| share.get())
+                        .collect()
+                })
+                .collect();
+            let digest = fastcrypto::hash::Sha256::digest(bcs::to_bytes(&share_ids).unwrap());
+            ReductionGoldenOutcome::Reduced {
+                weights: nodes
+                    .iter()
+                    .map(|node| node.weight.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                total_weight: nodes.total_weight(),
+                threshold,
+                max_faulty,
+                share_ids_digest: hex::encode(&digest.digest[..8]),
+            }
+        }
+        Err(error) => ReductionGoldenOutcome::Error(golden_error_kind(&error)),
+    };
+    ReductionGolden {
+        case,
+        committee_weight: weights.iter().sum(),
+        divisor,
+        chain_id,
+        max_faulty_bps,
+        allowed_delta_bps,
+        outcome,
+    }
+}
+
+struct GoldenInput {
+    family: &'static str,
+    case: String,
+    weights: Vec<u64>,
+    config: (u16, u16),
+    divisor: u16,
+    chain_id: &'static str,
+}
+
+fn golden_corpus() -> Vec<GoldenInput> {
+    let mainnet = crate::constants::SUI_MAINNET_CHAIN_ID;
+    let mut corpus = Vec::new();
+    let mut push = |family, case, weights: &[u64], config, divisor, chain_id| {
+        corpus.push(GoldenInput {
+            family,
+            case,
+            weights: weights.to_vec(),
+            config,
+            divisor,
+            chain_id,
+        })
+    };
+    for (epoch, contents) in GOLDEN_SUI_EPOCHS {
+        let weights = golden_sui_weights(contents);
+        for config in GOLDEN_CONFIG_GRID {
+            push(
+                "sui_mainnet",
+                format!("sui_epoch_{epoch}"),
+                &weights,
+                config,
+                1,
+                mainnet,
+            );
+        }
+        for (subset, dropped) in [("keep_90", 9..10), ("keep_70", 7..10)] {
+            let kept: Vec<u64> = weights
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !dropped.contains(&(index % 10)))
+                .map(|(_, &weight)| weight)
+                .collect();
+            for config in GOLDEN_SUBSET_CONFIGS {
+                push(
+                    "sui_mainnet_subsets",
+                    format!("sui_epoch_{epoch}_{subset}"),
+                    &kept,
+                    config,
+                    1,
+                    mainnet,
+                );
+            }
+        }
+    }
+    for members in 1..=100u64 {
+        for config in [(3333, 800), (3333, 0)] {
+            push(
+                "equal_weights",
+                format!("equal_{members}"),
+                &vec![10_000 / members; members as usize],
+                config,
+                1,
+                mainnet,
+            );
+        }
+    }
+    let e2e_shapes: [(&str, Vec<u64>); 6] = [
+        ("e2e_1_node", vec![10_000]),
+        ("e2e_3_nodes", vec![3334, 3333, 3333]),
+        ("e2e_4_nodes", vec![2500; 4]),
+        (
+            "e2e_7_nodes",
+            vec![1429, 1429, 1429, 1429, 1428, 1428, 1428],
+        ),
+        ("e2e_19_of_20_registered", vec![500; 19]),
+        ("e2e_20_nodes", vec![500; 20]),
+    ];
+    for (shape, weights) in &e2e_shapes {
+        for config in GOLDEN_E2E_CONFIGS {
+            push(
+                "dev",
+                shape.to_string(),
+                weights,
+                config,
+                GOLDEN_E2E_DIVISOR,
+                GOLDEN_DEV_CHAIN_ID,
+            );
+        }
+    }
+    for (shape, weights) in &e2e_shapes {
+        for config in GOLDEN_E2E_CONFIGS {
+            push(
+                "edge_cases",
+                format!("{shape}_production"),
+                weights,
+                config,
+                1,
+                mainnet,
+            );
+        }
+    }
+    for (case, weights, config, divisor, chain_id) in [
+        (
+            "threshold_not_above_max_faulty",
+            vec![1, 1, 1],
+            (3333, 0),
+            1,
+            mainnet,
+        ),
+        (
+            "below_production_floor",
+            vec![10; 5],
+            (3333, 800),
+            1,
+            mainnet,
+        ),
+        (
+            "member_below_divisor",
+            vec![40, 3000, 3000, 3960],
+            (3333, 800),
+            GOLDEN_E2E_DIVISOR,
+            GOLDEN_DEV_CHAIN_ID,
+        ),
+        (
+            "member_above_max_weight",
+            vec![10_001, 1],
+            (3333, 800),
+            1,
+            mainnet,
+        ),
+    ] {
+        push(
+            "edge_cases",
+            case.to_string(),
+            &weights,
+            config,
+            divisor,
+            chain_id,
+        );
+    }
+    corpus
+}
+
+#[test]
+fn weight_reduction_v1_goldens() {
+    let mut families: BTreeMap<&str, Vec<ReductionGolden>> = BTreeMap::new();
+    for input in golden_corpus() {
+        families
+            .entry(input.family)
+            .or_default()
+            .push(golden_reduction(
+                input.case,
+                &input.weights,
+                input.config,
+                input.divisor,
+                input.chain_id,
+            ));
+    }
+
+    insta::with_settings!({
+        snapshot_path => "golden_snapshots",
+        prepend_module_to_snapshot => false,
+        omit_expression => true,
+        description => "Append-only goldens of build_reduced_nodes: do not re-accept a mismatch.",
+    }, {
+        for (family, goldens) in &families {
+            insta::assert_yaml_snapshot!(format!("weight_reduction_v1_{family}"), goldens);
+        }
+    });
+}
+
 #[test]
 fn derived_thresholds_are_accepted_by_the_reducer() {
     for f_bps in [1000u16, 2000, 2500, 3000, 3333] {

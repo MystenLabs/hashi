@@ -88,6 +88,7 @@ tempfile.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 ed25519-dalek.workspace = true
 test-strategy.workspace = true
 proptest.workspace = true

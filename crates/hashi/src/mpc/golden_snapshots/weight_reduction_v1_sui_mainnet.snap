@@ -1,0 +1,1668 @@
+---
+source: crates/hashi/src/mpc/mpc_except_signing_tests.rs
+description: "Append-only goldens of build_reduced_nodes: do not re-accept a mismatch."
+---
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "391,325,286,275,255,238,235,206,206,198,193,192,192,190,188,186,186,185,185,185,175,169,158,158,158,158,158,151,151,146,145,144,118,110,98,94,89,84,76,71,71,64,63,62,62,60,59,57,57,57,54,50,50,50,49,48,48,48,48,47,47,47,47,47,47,47,47,47,47,47,47,47,45,41,40,38,38,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,36,36,36,36,36,36,36,36,36,36,35,35"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: fcf57d700481512f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "31,26,23,22,20,19,18,16,16,16,15,15,15,15,15,15,15,14,14,14,14,13,12,12,12,12,12,12,12,11,11,11,9,9,8,7,7,6,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3"
+      total_weight: 788
+      threshold: 274
+      max_faulty: 273
+      share_ids_digest: 926d7db5009891f8
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "17,14,12,12,11,10,10,9,9,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,5,5,4,4,4,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 402
+      threshold: 146
+      max_faulty: 145
+      share_ids_digest: 51a2a47c3681580f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 209
+      threshold: 79
+      max_faulty: 78
+      share_ids_digest: dfc29467fde601a0
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "391,325,286,275,255,238,235,206,206,198,193,192,192,190,188,186,186,185,185,185,175,169,158,158,158,158,158,151,151,146,145,144,118,110,98,94,89,84,76,71,71,64,63,62,62,60,59,57,57,57,54,50,50,50,49,48,48,48,48,47,47,47,47,47,47,47,47,47,47,47,47,47,45,41,40,38,38,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,36,36,36,36,36,36,36,36,36,36,35,35"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: fcf57d700481512f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "32,26,23,22,21,19,19,17,17,16,15,15,15,15,15,15,15,15,15,15,14,14,13,13,13,13,13,12,12,12,12,11,9,9,8,7,7,7,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2"
+      total_weight: 790
+      threshold: 329
+      max_faulty: 247
+      share_ids_digest: 067e56df784b8506
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "17,14,12,12,11,10,10,9,9,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,5,5,4,4,4,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 402
+      threshold: 175
+      max_faulty: 131
+      share_ids_digest: 51a2a47c3681580f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 209
+      threshold: 93
+      max_faulty: 71
+      share_ids_digest: dfc29467fde601a0
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "391,325,286,275,255,238,235,206,206,198,193,192,192,190,188,186,186,185,185,185,175,169,158,158,158,158,158,151,151,146,145,144,118,110,98,94,89,84,76,71,71,64,63,62,62,60,59,57,57,57,54,50,50,50,49,48,48,48,48,47,47,47,47,47,47,47,47,47,47,47,47,47,45,41,40,38,38,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,36,36,36,36,36,36,36,36,36,36,35,35"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: fcf57d700481512f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "25,20,18,17,16,15,15,13,13,12,12,12,12,12,12,12,12,12,12,12,11,10,10,10,10,10,10,9,9,9,9,9,7,7,6,6,5,5,5,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 614
+      threshold: 319
+      max_faulty: 160
+      share_ids_digest: 90b50245d77b571d
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10,8,7,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 248
+      threshold: 134
+      max_faulty: 68
+      share_ids_digest: 8ad3fdabec910405
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0"
+      total_weight: 208
+      threshold: 114
+      max_faulty: 60
+      share_ids_digest: 05182a5ad138d28e
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "391,325,286,275,255,238,235,206,206,198,193,192,192,190,188,186,186,185,185,185,175,169,158,158,158,158,158,151,151,146,145,144,118,110,98,94,89,84,76,71,71,64,63,62,62,60,59,57,57,57,54,50,50,50,49,48,48,48,48,47,47,47,47,47,47,47,47,47,47,47,47,47,45,41,40,38,38,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,37,36,36,36,36,36,36,36,36,36,36,35,35"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: fcf57d700481512f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "24,20,17,17,15,14,14,13,13,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,7,7,6,6,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 604
+      threshold: 375
+      max_faulty: 127
+      share_ids_digest: 5e3bfb54fb70552f
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10,8,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,3,3,3,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 245
+      threshold: 158
+      max_faulty: 54
+      share_ids_digest: 36a8fb97843c7832
+- case: sui_epoch_100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 206
+      threshold: 134
+      max_faulty: 49
+      share_ids_digest: 74a5c1628a0f9572
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "335,288,285,279,261,243,231,227,216,200,196,189,188,187,179,176,175,175,174,171,169,169,169,169,168,168,160,144,144,144,144,144,137,137,131,131,131,131,109,83,80,72,68,68,66,64,61,59,56,55,52,51,51,49,45,45,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,41,39,37,37,34,34,34,34,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,32,32"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: c5248c2c41957d62
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,20,20,19,18,17,16,15,15,14,13,13,13,13,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,9,9,9,9,9,9,7,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 669
+      threshold: 233
+      max_faulty: 232
+      share_ids_digest: 2a881042d25c1c57
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "9,8,8,8,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 275
+      threshold: 100
+      max_faulty: 99
+      share_ids_digest: dd203f4ddff0ec2f
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,7,7,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0"
+      total_weight: 230
+      threshold: 87
+      max_faulty: 86
+      share_ids_digest: 4cca073087070b7a
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "335,288,285,279,261,243,231,227,216,200,196,189,188,187,179,176,175,175,174,171,169,169,169,169,168,168,160,144,144,144,144,144,137,137,131,131,131,131,109,83,80,72,68,68,66,64,61,59,56,55,52,51,51,49,45,45,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,41,39,37,37,34,34,34,34,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,32,32"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: c5248c2c41957d62
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,20,20,19,18,17,16,15,15,14,13,13,13,13,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,9,9,9,9,9,9,7,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 669
+      threshold: 279
+      max_faulty: 209
+      share_ids_digest: 2a881042d25c1c57
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "9,8,8,8,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 275
+      threshold: 119
+      max_faulty: 90
+      share_ids_digest: fc6ac0088e338066
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,6,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 229
+      threshold: 102
+      max_faulty: 78
+      share_ids_digest: 03bdfdab86581754
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "335,288,285,279,261,243,231,227,216,200,196,189,188,187,179,176,175,175,174,171,169,169,169,169,168,168,160,144,144,144,144,144,137,137,131,131,131,131,109,83,80,72,68,68,66,64,61,59,56,55,52,51,51,49,45,45,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,41,39,37,37,34,34,34,34,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,32,32"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: c5248c2c41957d62
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,20,19,19,18,16,16,15,15,14,13,13,13,13,12,12,12,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,9,9,9,9,9,9,7,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 667
+      threshold: 347
+      max_faulty: 174
+      share_ids_digest: 84402e39e39f7861
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "9,8,8,8,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,3,3,3,3,3,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 271
+      threshold: 146
+      max_faulty: 74
+      share_ids_digest: 80a99573a35adae7
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 228
+      threshold: 125
+      max_faulty: 66
+      share_ids_digest: 25778c05e1273035
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "335,288,285,279,261,243,231,227,216,200,196,189,188,187,179,176,175,175,174,171,169,169,169,169,168,168,160,144,144,144,144,144,137,137,131,131,131,131,109,83,80,72,68,68,66,64,61,59,56,55,52,51,51,49,45,45,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,43,41,39,37,37,34,34,34,34,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,33,32,32"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: c5248c2c41957d62
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "21,18,18,18,16,15,14,14,14,13,12,12,12,12,11,11,11,11,11,11,11,11,11,11,10,10,10,9,9,9,9,9,9,9,8,8,8,8,7,5,5,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 627
+      threshold: 387
+      max_faulty: 133
+      share_ids_digest: 0de2924855449ffc
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "9,8,8,8,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 267
+      threshold: 172
+      max_faulty: 59
+      share_ids_digest: b43c74179751e59e
+- case: sui_epoch_200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 222
+      threshold: 144
+      max_faulty: 54
+      share_ids_digest: b276ba8bda605651
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "298,295,293,277,258,258,229,209,206,179,178,176,169,169,160,152,151,151,150,150,150,147,147,140,137,137,137,131,125,116,116,113,109,108,108,108,106,105,103,103,102,102,101,100,99,95,93,91,88,88,82,77,77,76,76,75,62,56,55,53,50,49,48,46,46,46,45,44,44,44,44,44,44,44,44,44,44,44,41,41,40,38,37,37,37,36,35,35,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,32,31"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: d55da790c8a773a9
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "20,20,19,18,17,17,15,14,14,12,12,12,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,8,8,8,7,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,5,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 655
+      threshold: 228
+      max_faulty: 227
+      share_ids_digest: 7cf0e2c4fce5bcbd
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,7,7,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 269
+      threshold: 98
+      max_faulty: 97
+      share_ids_digest: d1c379ab1122c056
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,7,7,6,6,6,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 242
+      threshold: 92
+      max_faulty: 91
+      share_ids_digest: b45095c6e41a7ef1
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "298,295,293,277,258,258,229,209,206,179,178,176,169,169,160,152,151,151,150,150,150,147,147,140,137,137,137,131,125,116,116,113,109,108,108,108,106,105,103,103,102,102,101,100,99,95,93,91,88,88,82,77,77,76,76,75,62,56,55,53,50,49,48,46,46,46,45,44,44,44,44,44,44,44,44,44,44,44,41,41,40,38,37,37,37,36,35,35,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,32,31"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: d55da790c8a773a9
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "20,20,20,18,17,17,15,14,14,12,12,12,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,8,8,8,7,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,5,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 656
+      threshold: 273
+      max_faulty: 205
+      share_ids_digest: cf3ba7e84bf74448
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,7,7,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 267
+      threshold: 116
+      max_faulty: 87
+      share_ids_digest: eadbda4e4f7d74d8
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,7,7,7,6,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 234
+      threshold: 105
+      max_faulty: 80
+      share_ids_digest: 610bb834245bc9a3
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "298,295,293,277,258,258,229,209,206,179,178,176,169,169,160,152,151,151,150,150,150,147,147,140,137,137,137,131,125,116,116,113,109,108,108,108,106,105,103,103,102,102,101,100,99,95,93,91,88,88,82,77,77,76,76,75,62,56,55,53,50,49,48,46,46,46,45,44,44,44,44,44,44,44,44,44,44,44,41,41,40,38,37,37,37,36,35,35,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,32,31"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: d55da790c8a773a9
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "20,20,20,18,17,17,15,14,14,12,12,12,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,5,5,5,5,5,5,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 651
+      threshold: 338
+      max_faulty: 170
+      share_ids_digest: aa3b73b5d932fb5a
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,8,7,7,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 266
+      threshold: 143
+      max_faulty: 73
+      share_ids_digest: f34a4e91aefb4fc1
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,7,7,6,6,6,5,5,5,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0"
+      total_weight: 222
+      threshold: 123
+      max_faulty: 64
+      share_ids_digest: e34390d4ed866dd7
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "298,295,293,277,258,258,229,209,206,179,178,176,169,169,160,152,151,151,150,150,150,147,147,140,137,137,137,131,125,116,116,113,109,108,108,108,106,105,103,103,102,102,101,100,99,95,93,91,88,88,82,77,77,76,76,75,62,56,55,53,50,49,48,46,46,46,45,44,44,44,44,44,44,44,44,44,44,44,41,41,40,38,37,37,37,36,35,35,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,32,31"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: d55da790c8a773a9
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "19,19,19,18,17,17,15,14,13,12,12,11,11,11,10,10,10,10,10,10,10,9,9,9,9,9,9,8,8,7,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,5,5,5,5,5,5,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2"
+      total_weight: 642
+      threshold: 398
+      max_faulty: 135
+      share_ids_digest: e3b83c8e83d565f1
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "8,8,8,7,7,7,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 260
+      threshold: 167
+      max_faulty: 58
+      share_ids_digest: 69ba46689bd173c5
+- case: sui_epoch_400
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,5,5,5,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 211
+      threshold: 137
+      max_faulty: 51
+      share_ids_digest: 9cd8961d0766aa62
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "285,278,199,192,189,181,178,177,173,167,163,159,158,155,154,154,153,153,149,146,145,140,139,138,135,130,123,120,115,115,114,114,114,111,110,107,106,106,105,104,103,102,100,98,98,89,88,87,87,85,85,84,83,78,77,72,69,68,61,61,59,59,58,53,52,51,51,50,50,50,50,50,49,49,49,49,48,48,47,46,45,45,45,44,44,42,42,42,42,42,41,40,40,40,39,39,39,38,38,38,38,38,38,38,37,36,36,36,35,32,31,31,29,28,26,19"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: e1a37d1c07e9bedf
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,22,16,15,15,14,14,14,14,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1"
+      total_weight: 779
+      threshold: 271
+      max_faulty: 270
+      share_ids_digest: 5eba28d0663590fe
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,12,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 436
+      threshold: 158
+      max_faulty: 157
+      share_ids_digest: e40a9babf6c7afb9
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,7,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0"
+      total_weight: 234
+      threshold: 89
+      max_faulty: 88
+      share_ids_digest: 9fd9fbd4829c6b42
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "285,278,199,192,189,181,178,177,173,167,163,159,158,155,154,154,153,153,149,146,145,140,139,138,135,130,123,120,115,115,114,114,114,111,110,107,106,106,105,104,103,102,100,98,98,89,88,87,87,85,85,84,83,78,77,72,69,68,61,61,59,59,58,53,52,51,51,50,50,50,50,50,49,49,49,49,48,48,47,46,45,45,45,44,44,42,42,42,42,42,41,40,40,40,39,39,39,38,38,38,38,38,38,38,37,36,36,36,35,32,31,31,29,28,26,19"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: e1a37d1c07e9bedf
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "22,22,16,15,15,14,14,14,14,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,11,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1"
+      total_weight: 777
+      threshold: 323
+      max_faulty: 243
+      share_ids_digest: e13d5e467a55abae
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,13,9,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 436
+      threshold: 189
+      max_faulty: 142
+      share_ids_digest: 96ee77d2f9685f3e
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,7,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 232
+      threshold: 105
+      max_faulty: 79
+      share_ids_digest: 3fcb06e6369bfbc7
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "285,278,199,192,189,181,178,177,173,167,163,159,158,155,154,154,153,153,149,146,145,140,139,138,135,130,123,120,115,115,114,114,114,111,110,107,106,106,105,104,103,102,100,98,98,89,88,87,87,85,85,84,83,78,77,72,69,68,61,61,59,59,58,53,52,51,51,50,50,50,50,50,49,49,49,49,48,48,47,46,45,45,45,44,44,42,42,42,42,42,41,40,40,40,39,39,39,38,38,38,38,38,38,38,37,36,36,36,35,32,31,31,29,28,26,19"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: e1a37d1c07e9bedf
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "22,22,15,15,15,14,14,14,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1"
+      total_weight: 768
+      threshold: 398
+      max_faulty: 201
+      share_ids_digest: 4075c8e7c0c8c5fd
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,13,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 432
+      threshold: 232
+      max_faulty: 118
+      share_ids_digest: 02f8d966e5d36a2d
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,7,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 229
+      threshold: 128
+      max_faulty: 66
+      share_ids_digest: c36a07474082b77b
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "285,278,199,192,189,181,178,177,173,167,163,159,158,155,154,154,153,153,149,146,145,140,139,138,135,130,123,120,115,115,114,114,114,111,110,107,106,106,105,104,103,102,100,98,98,89,88,87,87,85,85,84,83,78,77,72,69,68,61,61,59,59,58,53,52,51,51,50,50,50,50,50,49,49,49,49,48,48,47,46,45,45,45,44,44,42,42,42,42,42,41,40,40,40,39,39,39,38,38,38,38,38,38,38,37,36,36,36,35,32,31,31,29,28,26,19"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: e1a37d1c07e9bedf
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "22,21,15,15,14,14,14,13,13,13,12,12,12,12,12,12,12,12,11,11,11,11,11,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,1"
+      total_weight: 758
+      threshold: 470
+      max_faulty: 160
+      share_ids_digest: 9c74554abb1c5e97
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "12,12,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"
+      total_weight: 409
+      threshold: 263
+      max_faulty: 91
+      share_ids_digest: bf082f0363cfae22
+- case: sui_epoch_800
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "6,6,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0"
+      total_weight: 201
+      threshold: 133
+      max_faulty: 48
+      share_ids_digest: ab1150685e0d98fd
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "282,253,217,203,201,183,181,176,176,169,165,160,157,156,156,151,149,149,148,148,147,140,139,124,122,117,115,115,112,112,108,108,107,106,105,105,103,102,100,99,98,94,92,90,88,88,88,87,86,85,84,83,82,77,75,75,75,72,69,60,60,60,59,55,53,52,52,51,51,51,51,51,48,48,47,47,47,47,45,44,44,43,43,42,41,41,41,40,40,39,39,39,39,38,38,38,38,38,38,37,37,36,36,35,35,34,34,34,33,32,31,31,30,29,26,25,22,21,21,20,20,18,13,7,4,4,3"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: d21a59f39423a8a3
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,21,20,20,18,18,17,17,17,16,16,15,15,15,15,15,15,15,15,14,14,14,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,0,0,0"
+      total_weight: 981
+      threshold: 341
+      max_faulty: 340
+      share_ids_digest: d23954bdf2165a56
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "14,12,11,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 468
+      threshold: 170
+      max_faulty: 169
+      share_ids_digest: 6f38ddf4a64b9dc9
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 250
+      threshold: 95
+      max_faulty: 94
+      share_ids_digest: a65c15eca3ca71fd
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "282,253,217,203,201,183,181,176,176,169,165,160,157,156,156,151,149,149,148,148,147,140,139,124,122,117,115,115,112,112,108,108,107,106,105,105,103,102,100,99,98,94,92,90,88,88,88,87,86,85,84,83,82,77,75,75,75,72,69,60,60,60,59,55,53,52,52,51,51,51,51,51,48,48,47,47,47,47,45,44,44,43,43,42,41,41,41,40,40,39,39,39,39,38,38,38,38,38,38,37,37,36,36,35,35,34,34,34,33,32,31,31,30,29,26,25,22,21,21,20,20,18,13,7,4,4,3"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: d21a59f39423a8a3
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,21,20,20,18,18,17,17,17,16,16,15,15,15,15,15,15,15,15,14,14,14,12,12,12,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,0,0,0"
+      total_weight: 982
+      threshold: 408
+      max_faulty: 307
+      share_ids_digest: a10faec9b8d7a36e
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "14,12,11,10,10,9,9,9,9,8,8,8,8,8,8,7,7,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 470
+      threshold: 204
+      max_faulty: 153
+      share_ids_digest: 9996532c48b21f14
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 250
+      threshold: 113
+      max_faulty: 85
+      share_ids_digest: a65c15eca3ca71fd
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "282,253,217,203,201,183,181,176,176,169,165,160,157,156,156,151,149,149,148,148,147,140,139,124,122,117,115,115,112,112,108,108,107,106,105,105,103,102,100,99,98,94,92,90,88,88,88,87,86,85,84,83,82,77,75,75,75,72,69,60,60,60,59,55,53,52,52,51,51,51,51,51,48,48,47,47,47,47,45,44,44,43,43,42,41,41,41,40,40,39,39,39,39,38,38,38,38,38,38,37,37,36,36,35,35,34,34,34,33,32,31,31,30,29,26,25,22,21,21,20,20,18,13,7,4,4,3"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: d21a59f39423a8a3
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "27,24,21,19,19,17,17,17,17,16,16,15,15,15,15,14,14,14,14,14,14,13,13,12,12,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,1,1,0,0,0,0"
+      total_weight: 932
+      threshold: 483
+      max_faulty: 244
+      share_ids_digest: 147e7dafa087e690
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,10,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 444
+      threshold: 238
+      max_faulty: 122
+      share_ids_digest: ed19bbefc70d517c
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 243
+      threshold: 136
+      max_faulty: 70
+      share_ids_digest: 232011def971a8a9
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "282,253,217,203,201,183,181,176,176,169,165,160,157,156,156,151,149,149,148,148,147,140,139,124,122,117,115,115,112,112,108,108,107,106,105,105,103,102,100,99,98,94,92,90,88,88,88,87,86,85,84,83,82,77,75,75,75,72,69,60,60,60,59,55,53,52,52,51,51,51,51,51,48,48,47,47,47,47,45,44,44,43,43,42,41,41,41,40,40,39,39,39,39,38,38,38,38,38,38,37,37,36,36,35,35,34,34,34,33,32,31,31,30,29,26,25,22,21,21,20,20,18,13,7,4,4,3"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: d21a59f39423a8a3
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,21,18,16,16,15,15,14,14,14,13,13,13,13,13,12,12,12,12,12,12,11,11,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,1,1,1,1,0,0,0,0"
+      total_weight: 797
+      threshold: 494
+      max_faulty: 168
+      share_ids_digest: c2267bc453ef1765
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,12,10,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 434
+      threshold: 280
+      max_faulty: 96
+      share_ids_digest: 878d858b877e4c85
+- case: sui_epoch_974
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 229
+      threshold: 153
+      max_faulty: 54
+      share_ids_digest: 7c216d2b068b8c4b
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,251,217,203,200,196,181,173,171,169,165,161,160,157,156,156,150,149,148,148,147,140,139,124,124,117,115,112,112,108,108,107,107,106,105,105,103,102,100,99,98,94,90,90,88,88,88,87,86,84,84,84,83,83,75,75,75,72,69,69,60,60,60,55,55,52,51,51,50,50,50,50,48,47,47,47,46,45,44,44,43,43,43,42,41,41,41,40,40,39,39,38,38,38,38,38,37,36,36,36,36,36,35,35,34,34,34,33,32,31,31,30,29,29,26,25,23,22,21,21,20,18,18,7,4,3"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: 83f79e9f3a1c67bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,22,20,20,19,18,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,12,12,11,11,11,11,11,11,10,10,10,10,10,10,10,10,10,10,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,0,0,0"
+      total_weight: 972
+      threshold: 338
+      max_faulty: 337
+      share_ids_digest: 6bfc80f71d21625b
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,12,10,9,9,9,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 446
+      threshold: 162
+      max_faulty: 161
+      share_ids_digest: 38efddc5b0377bc3
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 261
+      threshold: 99
+      max_faulty: 98
+      share_ids_digest: 28fc126c2711b147
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,251,217,203,200,196,181,173,171,169,165,161,160,157,156,156,150,149,148,148,147,140,139,124,124,117,115,112,112,108,108,107,107,106,105,105,103,102,100,99,98,94,90,90,88,88,88,87,86,84,84,84,83,83,75,75,75,72,69,69,60,60,60,55,55,52,51,51,50,50,50,50,48,47,47,47,46,45,44,44,43,43,43,42,41,41,41,40,40,39,39,38,38,38,38,38,37,36,36,36,36,36,35,35,34,34,34,33,32,31,31,30,29,29,26,25,23,22,21,21,20,18,18,7,4,3"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: 83f79e9f3a1c67bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,21,20,20,19,18,17,17,17,16,16,16,15,15,15,15,15,15,15,14,14,14,12,12,11,11,11,11,11,11,10,10,10,10,10,10,10,10,10,10,9,9,9,9,9,9,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,1,0,0"
+      total_weight: 976
+      threshold: 406
+      max_faulty: 305
+      share_ids_digest: 6b93b1145adb64bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,10,9,9,9,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 444
+      threshold: 192
+      max_faulty: 145
+      share_ids_digest: f67ebca0029b0ffd
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "8,7,6,6,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 260
+      threshold: 117
+      max_faulty: 89
+      share_ids_digest: 6925dd725a859575
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,251,217,203,200,196,181,173,171,169,165,161,160,157,156,156,150,149,148,148,147,140,139,124,124,117,115,112,112,108,108,107,107,106,105,105,103,102,100,99,98,94,90,90,88,88,88,87,86,84,84,84,83,83,75,75,75,72,69,69,60,60,60,55,55,52,51,51,50,50,50,50,48,47,47,47,46,45,44,44,43,43,43,42,41,41,41,40,40,39,39,38,38,38,38,38,37,36,36,36,36,36,35,35,34,34,34,33,32,31,31,30,29,29,26,25,23,22,21,21,20,18,18,7,4,3"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: 83f79e9f3a1c67bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "26,24,20,19,19,18,17,16,16,16,15,15,15,15,15,15,14,14,14,14,14,13,13,12,12,11,11,10,10,10,10,10,10,10,10,10,10,9,9,9,9,9,8,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,0,0,0"
+      total_weight: 925
+      threshold: 479
+      max_faulty: 242
+      share_ids_digest: a1d29679cd043a37
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,12,10,9,9,9,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 439
+      threshold: 237
+      max_faulty: 120
+      share_ids_digest: 475ef5b3634218bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 242
+      threshold: 135
+      max_faulty: 70
+      share_ids_digest: dc0c4ac90db2d6df
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,251,217,203,200,196,181,173,171,169,165,161,160,157,156,156,150,149,148,148,147,140,139,124,124,117,115,112,112,108,108,107,107,106,105,105,103,102,100,99,98,94,90,90,88,88,88,87,86,84,84,84,83,83,75,75,75,72,69,69,60,60,60,55,55,52,51,51,50,50,50,50,48,47,47,47,46,45,44,44,43,43,43,42,41,41,41,40,40,39,39,38,38,38,38,38,37,36,36,36,36,36,35,35,34,34,34,33,32,31,31,30,29,29,26,25,23,22,21,21,20,18,18,7,4,3"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: 83f79e9f3a1c67bc
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "23,20,18,16,16,16,15,14,14,14,13,13,13,13,13,13,12,12,12,12,12,11,11,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,0,0,0"
+      total_weight: 799
+      threshold: 495
+      max_faulty: 169
+      share_ids_digest: 1a1ac6a5d912ef71
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,10,9,9,9,8,8,8,8,7,7,7,7,7,7,7,7,7,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0"
+      total_weight: 431
+      threshold: 278
+      max_faulty: 95
+      share_ids_digest: 05cb45ac4d7861d2
+- case: sui_epoch_1000
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 234
+      threshold: 156
+      max_faulty: 55
+      share_ids_digest: 684efd82ba79a80e
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,249,241,212,200,191,191,182,177,170,161,158,157,157,156,155,150,150,150,147,145,140,140,132,119,119,118,117,116,112,111,110,109,108,108,107,106,103,100,100,98,95,94,94,93,89,89,88,88,86,84,83,73,71,69,69,68,65,65,63,60,59,57,56,54,52,51,51,50,50,50,50,47,47,47,46,45,45,45,45,44,43,43,42,41,41,41,41,40,40,39,39,39,38,38,38,37,37,36,36,36,35,34,34,33,32,32,30,29,28,28,27,25,21,21,21,21,20,20,17,17,17,16,13,7,4,3"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: 8d63d099e305777f
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,24,21,20,19,19,18,18,17,16,16,15,15,15,15,15,15,15,14,14,14,14,13,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0"
+      total_weight: 972
+      threshold: 338
+      max_faulty: 337
+      share_ids_digest: a1731e9d7e770d6d
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,11,10,9,9,9,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0"
+      total_weight: 441
+      threshold: 160
+      max_faulty: 159
+      share_ids_digest: fa436afdcf60f8e5
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "9,8,8,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0"
+      total_weight: 317
+      threshold: 120
+      max_faulty: 119
+      share_ids_digest: ebcb66c943fa10dc
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,249,241,212,200,191,191,182,177,170,161,158,157,157,156,155,150,150,150,147,145,140,140,132,119,119,118,117,116,112,111,110,109,108,108,107,106,103,100,100,98,95,94,94,93,89,89,88,88,86,84,83,73,71,69,69,68,65,65,63,60,59,57,56,54,52,51,51,50,50,50,50,47,47,47,46,45,45,45,45,44,43,43,42,41,41,41,41,40,40,39,39,39,38,38,38,37,37,36,36,36,35,34,34,33,32,32,30,29,28,28,27,25,21,21,21,21,20,20,17,17,17,16,13,7,4,3"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: 8d63d099e305777f
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,24,21,20,19,19,18,17,17,16,15,15,15,15,15,15,15,15,14,14,14,14,13,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0"
+      total_weight: 970
+      threshold: 404
+      max_faulty: 303
+      share_ids_digest: 8c33f9fffff4a3ef
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,11,9,9,9,9,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0"
+      total_weight: 439
+      threshold: 190
+      max_faulty: 143
+      share_ids_digest: 7334dd1143b54de3
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "9,8,8,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 311
+      threshold: 140
+      max_faulty: 106
+      share_ids_digest: 8d46f98d46829489
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,249,241,212,200,191,191,182,177,170,161,158,157,157,156,155,150,150,150,147,145,140,140,132,119,119,118,117,116,112,111,110,109,108,108,107,106,103,100,100,98,95,94,94,93,89,89,88,88,86,84,83,73,71,69,69,68,65,65,63,60,59,57,56,54,52,51,51,50,50,50,50,47,47,47,46,45,45,45,45,44,43,43,42,41,41,41,41,40,40,39,39,39,38,38,38,37,37,36,36,36,35,34,34,33,32,32,30,29,28,28,27,25,21,21,21,21,20,20,17,17,17,16,13,7,4,3"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: 8d63d099e305777f
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,25,24,21,20,19,19,18,17,17,16,15,15,15,15,15,15,15,15,14,14,14,14,13,12,12,12,11,11,11,11,11,11,11,11,10,10,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0"
+      total_weight: 970
+      threshold: 503
+      max_faulty: 253
+      share_ids_digest: 8c33f9fffff4a3ef
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "12,11,11,9,9,8,8,8,8,7,7,7,7,7,7,7,7,7,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0"
+      total_weight: 433
+      threshold: 232
+      max_faulty: 119
+      share_ids_digest: d7a924d5169423f4
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "9,8,8,7,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 293
+      threshold: 165
+      max_faulty: 84
+      share_ids_digest: fbd918218f82099b
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "281,249,241,212,200,191,191,182,177,170,161,158,157,157,156,155,150,150,150,147,145,140,140,132,119,119,118,117,116,112,111,110,109,108,108,107,106,103,100,100,98,95,94,94,93,89,89,88,88,86,84,83,73,71,69,69,68,65,65,63,60,59,57,56,54,52,51,51,50,50,50,50,47,47,47,46,45,45,45,45,44,43,43,42,41,41,41,41,40,40,39,39,39,38,38,38,37,37,36,36,36,35,34,34,33,32,32,30,29,28,28,27,25,21,21,21,21,20,20,17,17,17,16,13,7,4,3"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: 8d63d099e305777f
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "26,23,22,20,19,18,18,17,16,16,15,15,15,15,14,14,14,14,14,14,13,13,13,12,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,8,8,7,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0"
+      total_weight: 912
+      threshold: 566
+      max_faulty: 192
+      share_ids_digest: c35a83ee859cefa8
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "12,11,10,9,9,8,8,8,8,7,7,7,7,7,7,7,6,6,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 420
+      threshold: 269
+      max_faulty: 94
+      share_ids_digest: cd85180d52fd8b7c
+- case: sui_epoch_1100
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,6,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 238
+      threshold: 159
+      max_faulty: 56
+      share_ids_digest: 73784e02cefb20bc
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "300,247,226,207,196,180,171,166,165,164,162,162,159,158,158,157,156,156,156,153,148,147,135,123,121,119,118,117,116,114,114,113,113,112,112,108,106,105,103,102,101,100,98,94,93,93,89,88,85,81,80,76,75,73,72,69,63,62,61,60,60,58,55,55,54,54,53,53,53,53,52,50,49,48,48,47,46,45,45,45,44,43,43,43,43,43,43,42,42,41,41,40,40,40,39,39,38,38,38,38,37,36,36,34,34,34,33,31,31,30,30,29,26,24,22,22,21,21,18,18,13,8,6,4,3"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: 667394e411d3cef5
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "29,24,22,20,19,17,16,16,16,16,15,15,15,15,15,15,15,15,15,14,14,14,13,12,11,11,11,11,11,11,11,11,11,11,11,10,10,10,10,10,9,9,9,9,9,9,8,8,8,8,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,0,0,0,0"
+      total_weight: 935
+      threshold: 325
+      max_faulty: 324
+      share_ids_digest: 09a5ffbd33868fba
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,12,11,10,10,9,8,8,8,8,8,8,8,8,8,8,8,8,8,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 468
+      threshold: 170
+      max_faulty: 169
+      share_ids_digest: 041738631b0ed263
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "10,8,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0"
+      total_weight: 309
+      threshold: 117
+      max_faulty: 116
+      share_ids_digest: 0f496e6f2c87726c
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "300,247,226,207,196,180,171,166,165,164,162,162,159,158,158,157,156,156,156,153,148,147,135,123,121,119,118,117,116,114,114,113,113,112,112,108,106,105,103,102,101,100,98,94,93,93,89,88,85,81,80,76,75,73,72,69,63,62,61,60,60,58,55,55,54,54,53,53,53,53,52,50,49,48,48,47,46,45,45,45,44,43,43,43,43,43,43,42,42,41,41,40,40,40,39,39,38,38,38,38,37,36,36,34,34,34,33,31,31,30,30,29,26,24,22,22,21,21,18,18,13,8,6,4,3"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: 667394e411d3cef5
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "29,24,22,20,19,17,16,16,16,16,15,15,15,15,15,15,15,15,15,15,14,14,13,12,11,11,11,11,11,11,11,11,11,11,11,10,10,10,10,10,9,9,9,9,9,9,8,8,8,8,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,1,1,1,0,0,0,0"
+      total_weight: 934
+      threshold: 389
+      max_faulty: 292
+      share_ids_digest: 786a646e9559d792
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,12,11,10,9,9,8,8,8,8,8,8,8,8,8,8,7,7,7,7,7,7,6,6,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 466
+      threshold: 202
+      max_faulty: 152
+      share_ids_digest: a2e66b1c0e1586fb
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "10,8,7,7,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0"
+      total_weight: 307
+      threshold: 138
+      max_faulty: 105
+      share_ids_digest: 896a5d81e19e765d
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "300,247,226,207,196,180,171,166,165,164,162,162,159,158,158,157,156,156,156,153,148,147,135,123,121,119,118,117,116,114,114,113,113,112,112,108,106,105,103,102,101,100,98,94,93,93,89,88,85,81,80,76,75,73,72,69,63,62,61,60,60,58,55,55,54,54,53,53,53,53,52,50,49,48,48,47,46,45,45,45,44,43,43,43,43,43,43,42,42,41,41,40,40,40,39,39,38,38,38,38,37,36,36,34,34,34,33,31,31,30,30,29,26,24,22,22,21,21,18,18,13,8,6,4,3"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: 667394e411d3cef5
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "28,23,21,19,18,17,16,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,13,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,8,8,8,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,1,1,1,1,0,0,0"
+      total_weight: 921
+      threshold: 477
+      max_faulty: 241
+      share_ids_digest: 51e8c2c4ec2af9de
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,11,10,9,9,8,7,7,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 427
+      threshold: 229
+      max_faulty: 117
+      share_ids_digest: fa6717e6608db3aa
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,6,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 236
+      threshold: 132
+      max_faulty: 68
+      share_ids_digest: 86f00a1dde1ae821
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "300,247,226,207,196,180,171,166,165,164,162,162,159,158,158,157,156,156,156,153,148,147,135,123,121,119,118,117,116,114,114,113,113,112,112,108,106,105,103,102,101,100,98,94,93,93,89,88,85,81,80,76,75,73,72,69,63,62,61,60,60,58,55,55,54,54,53,53,53,53,52,50,49,48,48,47,46,45,45,45,44,43,43,43,43,43,43,42,42,41,41,40,40,40,39,39,38,38,38,38,37,36,36,34,34,34,33,31,31,30,30,29,26,24,22,22,21,21,18,18,13,8,6,4,3"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: 667394e411d3cef5
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 400
+  outcome:
+    Reduced:
+      weights: "27,22,20,18,17,16,15,15,15,15,14,14,14,14,14,14,14,14,14,14,13,13,12,11,11,10,10,10,10,10,10,10,10,10,10,9,9,9,9,9,9,9,9,8,8,8,8,8,7,7,7,7,7,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,1,1,1,1,0,0,0"
+      total_weight: 873
+      threshold: 541
+      max_faulty: 184
+      share_ids_digest: cbf85e7cc8cf2e6a
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "13,10,10,9,8,8,7,7,7,7,7,7,7,7,7,7,7,7,7,6,6,6,6,5,5,5,5,5,5,5,5,5,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0"
+      total_weight: 412
+      threshold: 265
+      max_faulty: 91
+      share_ids_digest: c1751b242def8386
+- case: sui_epoch_1200
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "7,6,5,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0"
+      total_weight: 229
+      threshold: 153
+      max_faulty: 54
+      share_ids_digest: 9e99d6a27a9cd84c

@@ -1,0 +1,431 @@
+---
+source: crates/hashi/src/mpc/mpc_except_signing_tests.rs
+description: "Append-only goldens of build_reduced_nodes: do not re-accept a mismatch."
+---
+- case: e2e_1_node_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: bc4cca1b59ab3582
+- case: e2e_1_node_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 3334
+      max_faulty: 3333
+      share_ids_digest: bc4cca1b59ab3582
+- case: e2e_1_node_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: bc4cca1b59ab3582
+- case: e2e_1_node_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: bc4cca1b59ab3582
+- case: e2e_1_node_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "10000"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: bc4cca1b59ab3582
+- case: e2e_3_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "34,33,33"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 6ea2528af8192841
+- case: e2e_3_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "34,33,33"
+      total_weight: 100
+      threshold: 34
+      max_faulty: 33
+      share_ids_digest: 6ea2528af8192841
+- case: e2e_3_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3334,3333,3333"
+      total_weight: 10000
+      threshold: 5000
+      max_faulty: 2500
+      share_ids_digest: 40a5ca9c2c2b6411
+- case: e2e_3_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "3334,3333,3333"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: 40a5ca9c2c2b6411
+- case: e2e_3_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "3334,3333,3333"
+      total_weight: 10000
+      threshold: 4000
+      max_faulty: 3000
+      share_ids_digest: 40a5ca9c2c2b6411
+- case: e2e_4_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_4_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "2500,2500,2500,2500"
+      total_weight: 10000
+      threshold: 6000
+      max_faulty: 2000
+      share_ids_digest: 48ea31ab4653202c
+- case: e2e_4_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "25,25,25,25"
+      total_weight: 100
+      threshold: 26
+      max_faulty: 25
+      share_ids_digest: a7747fe47b797ea9
+- case: e2e_7_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,14,14,14"
+      total_weight: 102
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: e9362e8a5fff7aee
+- case: e2e_7_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,14,14,14"
+      total_weight: 102
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: e9362e8a5fff7aee
+- case: e2e_7_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,14,14,14"
+      total_weight: 102
+      threshold: 46
+      max_faulty: 15
+      share_ids_digest: e9362e8a5fff7aee
+- case: e2e_7_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,14,14,14"
+      total_weight: 102
+      threshold: 61
+      max_faulty: 15
+      share_ids_digest: e9362e8a5fff7aee
+- case: e2e_7_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "15,15,15,15,14,14,14"
+      total_weight: 102
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: e9362e8a5fff7aee
+- case: e2e_19_of_20_registered_production
+  committee_weight: 9500
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: e2e_19_of_20_registered_production
+  committee_weight: 9500
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 37
+      max_faulty: 36
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: e2e_19_of_20_registered_production
+  committee_weight: 9500
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 55
+      max_faulty: 24
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: e2e_19_of_20_registered_production
+  committee_weight: 9500
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 67
+      max_faulty: 18
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: e2e_19_of_20_registered_production
+  committee_weight: 9500
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6"
+      total_weight: 114
+      threshold: 43
+      max_faulty: 30
+      share_ids_digest: ac5f72ca0d8aee5a
+- case: e2e_20_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 31
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2500
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 46
+      max_faulty: 25
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 2000
+  allowed_delta_bps: 1200
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 56
+      max_faulty: 20
+      share_ids_digest: b4fea116cd4bca38
+- case: e2e_20_nodes_production
+  committee_weight: 10000
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3000
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5"
+      total_weight: 100
+      threshold: 36
+      max_faulty: 30
+      share_ids_digest: b4fea116cd4bca38
+- case: threshold_not_above_max_faulty
+  committee_weight: 3
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 0
+  outcome:
+    Error: InvalidThreshold
+- case: below_production_floor
+  committee_weight: 50
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Error: InvalidConfig
+- case: member_below_divisor
+  committee_weight: 10000
+  divisor: 100
+  chain_id: testchain
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Reduced:
+      weights: "1,30,30,39"
+      total_weight: 100
+      threshold: 32
+      max_faulty: 31
+      share_ids_digest: 7eed692edf7e868a
+- case: member_above_max_weight
+  committee_weight: 10002
+  divisor: 1
+  chain_id: 4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S
+  max_faulty_bps: 3333
+  allowed_delta_bps: 800
+  outcome:
+    Error: CryptoError
