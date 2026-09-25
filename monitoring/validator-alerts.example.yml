@@ -116,3 +116,17 @@ groups:
             This node owned share indices in the previous committee but entered
             the rotation with none to reshare, so its weight did not reach the
             new key.
+
+      - alert: HashiComplaintWithheld
+        expr: increase(hashi_mpc_complaints_withheld_total[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "withheld the response to a verified MPC complaint"
+          description: >-
+            A peer sent a complaint that verified, so some dealer sent it a
+            corrupt share, and the dealer is outside this node's
+            complaint-response-policy, so the peer cannot recover its share
+            until operators coordinate a fix. Honest nodes never trigger this.
+            Never add a complaint-response-policy entry on your own: one wrong
+            entry can leak your shares.

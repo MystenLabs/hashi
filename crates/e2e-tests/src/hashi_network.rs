@@ -4,6 +4,7 @@
 use anyhow::Result;
 use hashi::Hashi;
 use hashi::ServerVersion;
+use hashi::config::ComplaintResponsePolicy;
 use hashi::config::Config as HashiConfig;
 use hashi::config::HashiIds;
 use std::net::SocketAddr;
@@ -159,6 +160,12 @@ impl HashiNodeHandle {
     /// round-trip tests) without forcing every caller to build their own.
     pub fn config(&self) -> &HashiConfig {
         &self.config
+    }
+
+    /// Mutable access to the node's config, which takes effect on its next
+    /// (re)start.
+    pub fn config_mut(&mut self) -> &mut HashiConfig {
+        &mut self.config
     }
 
     pub fn validator_address(&self) -> sui_sdk_types::Address {
@@ -435,6 +442,10 @@ pub struct HashiNetworkBuilder {
     /// Node index whose shares should be corrupted by all other nodes,
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
+    /// Overrides `complaint_response_policy` in each node's config. `None`
+    /// answers every complaint when `test_corrupt_shares_target` is set, and
+    /// otherwise keeps the production default (answer none).
+    pub complaint_response_policy: Option<ComplaintResponsePolicy>,
     /// Node index whose Sui RPC connection is routed through a severable
     /// [`TcpProxy`](crate::tcp_proxy::TcpProxy), so tests can simulate a
     /// fullnode outage for that node alone.
@@ -452,6 +463,7 @@ impl HashiNetworkBuilder {
             withdrawal_max_batch_size: None,
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
+            complaint_response_policy: None,
             sui_rpc_proxy_node: None,
         }
     }
@@ -473,6 +485,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
         self.test_corrupt_shares_target = Some(target_node_index);
+        self
+    }
+
+    pub fn with_complaint_response_policy(mut self, policy: ComplaintResponsePolicy) -> Self {
+        self.complaint_response_policy = Some(policy);
         self
     }
 
@@ -557,6 +574,10 @@ impl HashiNetworkBuilder {
             {
                 config.test_corrupt_shares_for = Some(target_addr);
             }
+            config.complaint_response_policy = self
+                .complaint_response_policy
+                .clone()
+                .or(corrupt_target_address.map(|_| ComplaintResponsePolicy::AllowAll));
             // Deliberately NO local `guardian_endpoint`: nodes must resolve
             // the guardian client lazily from the on-chain guardian_url set
             // by the launch tx, so every e2e run exercises the

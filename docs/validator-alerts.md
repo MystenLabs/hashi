@@ -28,6 +28,7 @@ Two principles shape this list:
 | Database poisoned       | `hashi_db_poisoned == 1`                                              | fjall refuses every write after a failed flush or fsync (usually a full disk) until the process restarts, while reads and signing carry on looking healthy. Free the disk, then restart.                                  |
 | Crash looping           | `changes(process_start_time_seconds{job="<your-node>"}[1h]) > 3`      | Uses the standard process exporter if you run one; any restart-count source works.                                                                                                                                        |
 | Previous shares missing | `increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0`  | The node owed shares to a rotation and had none, so its weight did not reach the new key.                                                                                                                                 |
+| Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
 
 Dashboard-worthy but **not** alerts:
 

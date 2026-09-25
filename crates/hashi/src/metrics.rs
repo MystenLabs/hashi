@@ -202,6 +202,10 @@ pub struct Metrics {
     pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
+    /// Complaints whose response was withheld because the dealer is outside
+    /// the complaint response policy. Should never increase: any increase
+    /// means a verified complaint about such a dealer reached this node.
+    pub mpc_complaints_withheld_total: IntCounter,
     /// Nonce batches abandoned because the checkpoint clock never passed the
     /// accumulation window's cutoff
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
@@ -1119,6 +1123,13 @@ impl Metrics {
             mpc_avid_complaints_recovered_total: register_int_counter_with_registry!(
                 "hashi_mpc_avid_complaints_recovered_total",
                 "AVID nonce shares recovered via the complaint protocol",
+                registry,
+            )
+            .unwrap(),
+            mpc_complaints_withheld_total: register_int_counter_with_registry!(
+                "hashi_mpc_complaints_withheld_total",
+                "Verified complaints withheld because the dealer is outside the complaint \
+                 response policy",
                 registry,
             )
             .unwrap(),
