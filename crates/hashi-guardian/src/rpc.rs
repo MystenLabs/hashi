@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::info;
 use crate::task_spawner;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
@@ -85,7 +84,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = info::get_guardian_info(self.enclave.clone())
+        let resp = task_spawner::get_guardian_info(self.enclave.clone())
             .await
             .map_err(to_status)?;
 
