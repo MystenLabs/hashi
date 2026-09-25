@@ -128,4 +128,5 @@ groups:
             corrupt share, and the dealer is outside this node's
             complaint-response-policy, so the peer cannot recover its share
             until operators coordinate a fix. Honest nodes never trigger this.
-            The warning log names the epoch and dealer.
+            Never add a complaint-response-policy entry on your own: one wrong
+            entry can leak your shares.
