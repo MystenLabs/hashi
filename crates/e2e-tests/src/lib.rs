@@ -1162,7 +1162,7 @@ mod tests {
         message: &[u8],
         epoch: u64,
         sui_request_id: sui_sdk_types::Address,
-        global_presig_index: u64,
+        pair_slot: u64,
         derivation_address: Option<[u8; 32]>,
     ) -> Vec<
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
@@ -1172,7 +1172,7 @@ mod tests {
             epoch,
             &[(
                 sui_request_id,
-                global_presig_index,
+                pair_slot,
                 message.to_vec(),
                 derivation_address,
             )],
@@ -1181,8 +1181,23 @@ mod tests {
         per_input.pop().expect("one input requested")
     }
 
-    /// One batch input: (signing_id, global_presig_index, message, derivation_address).
+    /// One batch input: (signing_id, pair_slot, message, derivation_address).
+    /// Slot `j` signs with the presig pair `(2j, 2j + 1)`, the layout the
+    /// on-chain allocator hands out.
     type SignInputSpec = (sui_sdk_types::Address, u64, Vec<u8>, Option<[u8; 32]>);
+
+    fn presig_pair_for_slot(slot: u64) -> hashi_types::move_types::PresigPair {
+        let first = slot * hashi_types::move_types::PresigPair::PRESIGS_PER_INPUT;
+        hashi_types::move_types::PresigPair {
+            first,
+            second: first + 1,
+        }
+    }
+
+    /// Whole presig pairs in a pool of `pool_size` presigs.
+    fn pool_pairs(pool_size: usize) -> usize {
+        pool_size / hashi_types::move_types::PresigPair::PRESIGS_PER_INPUT as usize
+    }
 
     async fn sign_batch_on_all_nodes(
         nodes: &[HashiNodeHandle],
@@ -1220,10 +1235,10 @@ mod tests {
                 let metrics = node.hashi().metrics.clone();
                 let requests: Vec<hashi::mpc::SignInput> = inputs
                     .iter()
-                    .map(|(sid, pidx, msg, deriv)| hashi::mpc::SignInput {
+                    .map(|(sid, slot, msg, deriv)| hashi::mpc::SignInput {
                         signing_id: *sid,
                         message: msg.clone(),
-                        global_presig_index: *pidx,
+                        presig_pair: presig_pair_for_slot(*slot),
                         derivation_address: *deriv,
                     })
                     .collect();
@@ -2650,11 +2665,13 @@ mod tests {
             .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
         assert_pool_derivation(pool_size, &nodes[0]);
-        let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
-        // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
-        let num_signings = pool_size + 1;
+        // Each signing consumes a presig pair, so count in pairs.
+        let pairs = pool_pairs(pool_size);
+        let refill_trigger_at = pairs - pairs / hashi::constants::PRESIG_REFILL_DIVISOR;
+        // Sign pairs + 1 times: exhaust batch 0 and prove batch 1 swap works.
+        let num_signings = pairs + 1;
         // Wait for refill a few signs after the threshold, before exhaustion.
-        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+        let wait_at = refill_trigger_at + (pairs - refill_trigger_at) / 2;
 
         for i in 0..num_signings {
             let mut bytes = [0u8; 32];
@@ -2999,9 +3016,10 @@ mod tests {
             .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
         assert_pool_derivation(pool_size, &nodes[0]);
-        let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
-        let num_signings = pool_size + 1;
-        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+        let pairs = pool_pairs(pool_size);
+        let refill_trigger_at = pairs - pairs / hashi::constants::PRESIG_REFILL_DIVISOR;
+        let num_signings = pairs + 1;
+        let wait_at = refill_trigger_at + (pairs - refill_trigger_at) / 2;
 
         for i in 0..num_signings {
             let mut bytes = [0u8; 32];
@@ -3122,27 +3140,28 @@ mod tests {
             .hashi()
             .onchain_state()
             .epoch();
-        let (pool_size, refill_trigger_at) = {
+        let (pairs, refill_trigger_at) = {
             let nodes = test_networks.hashi_network().nodes();
             wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
             let signing_manager = nodes[0]
                 .hashi()
                 .signing_manager_for(epoch)
                 .expect("just waited for it");
-            let pool_size = signing_manager.initial_presig_count();
+            // Each signing consumes a presig pair, so count in pairs.
+            let pairs = pool_pairs(signing_manager.initial_presig_count());
             (
-                pool_size,
-                pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR,
+                pairs,
+                pairs - pairs / hashi::constants::PRESIG_REFILL_DIVISOR,
             )
         };
 
         test_networks.hashi_network_mut().nodes_mut()[3]
             .shutdown()
             .await;
-        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+        let wait_at = refill_trigger_at + (pairs - refill_trigger_at) / 2;
         assert!(
-            wait_at + 1 < pool_size,
-            "batch too small: no batch-0 headroom after the drain (pool={pool_size}, wait_at={wait_at})"
+            wait_at + 1 < pairs,
+            "batch too small: no batch-0 headroom after the drain (pairs={pairs}, wait_at={wait_at})"
         );
 
         {
@@ -3186,7 +3205,7 @@ mod tests {
         nodes[3].wait_for_mpc_key(DKG_TIMEOUT).await?;
         wait_for_signing_manager(&nodes[3..], epoch, std::time::Duration::from_secs(120)).await?;
 
-        let inputs: Vec<_> = ((wait_at + 1)..pool_size)
+        let inputs: Vec<_> = ((wait_at + 1)..pairs)
             .map(|i| {
                 let mut bytes = [0u8; 32];
                 bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
@@ -3207,7 +3226,7 @@ mod tests {
             }
         }
 
-        for i in pool_size..(pool_size + 2) {
+        for i in pairs..(pairs + 2) {
             let mut bytes = [0u8; 32];
             bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
             let request_id = sui_sdk_types::Address::new(bytes);

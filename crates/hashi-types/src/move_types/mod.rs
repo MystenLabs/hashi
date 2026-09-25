@@ -638,12 +638,34 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
+/// Rust version of the Move hashi::mpc_signing::PresigPair type: the two
+/// presignature indices one input's signature consumes, in binding order.
+/// Field order MUST match Move exactly (BCS-decoded, positional).
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, serde_derive::Deserialize, serde_derive::Serialize,
+)]
+pub struct PresigPair {
+    pub first: u64,
+    pub second: u64,
+}
+
+impl PresigPair {
+    /// Presignatures consumed by one input's signature. Mirrors
+    /// `hashi::mpc_signing::PRESIGS_PER_INPUT`.
+    pub const PRESIGS_PER_INPUT: u64 = 2;
+
+    /// Both indices, in binding order.
+    pub fn indices(&self) -> [u64; 2] {
+        [self.first, self.second]
+    }
+}
+
 /// Rust version of the Move hashi::mpc_signing::MpcSig enum. Variant order
 /// MUST match Move (Pending = 0, Signed = 1) for BCS.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum MpcSig {
-    /// Awaiting signature; holds the presignature index (valid in the batch's epoch).
-    Pending(u64),
+    /// Awaiting signature; holds the presignature pair (valid in the batch's epoch).
+    Pending(PresigPair),
     /// Completed per-input MPC Schnorr signature bytes.
     Signed(Vec<u8>),
 }
@@ -653,7 +675,7 @@ pub enum MpcSig {
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct SigningBatch {
     pub signatures: Vec<MpcSig>,
-    /// Epoch the `Pending` presig indices belong to.
+    /// Epoch the `Pending` presig pairs belong to.
     pub epoch: u64,
 }
 
@@ -692,11 +714,11 @@ impl SigningBatch {
             .collect()
     }
 
-    /// Presig index assigned to input `i`, or `None` if it is already signed
+    /// Presig pair assigned to input `i`, or `None` if it is already signed
     /// or out of range.
-    pub fn pending_index(&self, i: usize) -> Option<u64> {
+    pub fn pending_pair(&self, i: usize) -> Option<PresigPair> {
         match self.signatures.get(i) {
-            Some(MpcSig::Pending(idx)) => Some(*idx),
+            Some(MpcSig::Pending(pair)) => Some(*pair),
             _ => None,
         }
     }

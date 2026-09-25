@@ -1144,8 +1144,9 @@ mod tests {
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
 
-        // Perform 4 deposit+withdrawal cycles to exhaust batch 0 (~3 presigs)
-        // and consume 1 presig from batch 1.
+        // Perform 4 deposit+withdrawal cycles. Every input consumes a presig
+        // pair, so this exhausts batch 0 (~3 presigs) and draws from later
+        // batches, including pairs that straddle a batch boundary.
         let num_withdrawals = 4;
         for _ in 0..num_withdrawals {
             create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -3442,7 +3443,7 @@ mod tests {
         // on a timer. This ensures all 40 requests end up in one Bitcoin tx.
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
         // is batch_size_per_weight * total_weight. We need enough
-        // presignatures for 400 inputs.
+        // presignatures for 400 inputs, a pair each.
         let mut networks = TestNetworksBuilder::new()
             .with_nodes(4)
             .with_withdrawal_max_batch_size(num_withdrawals)

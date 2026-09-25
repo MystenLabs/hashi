@@ -1213,6 +1213,9 @@ pub enum SigningError {
     #[error("Presignature pool exhausted, new batch not yet available")]
     PoolExhausted,
 
+    #[error("Presignature pair {0:?} names the same index twice")]
+    InvalidPresigPair(hashi_types::move_types::PresigPair),
+
     #[error(
         "Cached partial signatures for {signing_id} were computed under a different message, \
          derivation address or beacon"

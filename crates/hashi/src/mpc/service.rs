@@ -157,6 +157,40 @@ fn restore_rate_limited(
     matches!(gate, Some((e, not_before)) if e == epoch && now < not_before)
 }
 
+/// Every presig index still owed to a pending input of a current-epoch
+/// withdrawal: both halves of each pending pair. Recovery must keep all of
+/// them available, so an index at or past the allocation cursor, or one
+/// assigned twice, means the on-chain state is inconsistent and recovery
+/// refuses to guess.
+fn pending_presig_indices<'a>(
+    txns: impl IntoIterator<Item = &'a move_types::WithdrawalTransaction>,
+    epoch: u64,
+    num_consumed: u64,
+) -> anyhow::Result<HashSet<u64>> {
+    let mut pending: HashSet<u64> = HashSet::new();
+    for txn in txns {
+        if txn.signing_epoch() != epoch {
+            continue;
+        }
+        for signature in &txn.signing.signatures {
+            let move_types::MpcSig::Pending(pair) = signature else {
+                continue;
+            };
+            for index in pair.indices() {
+                anyhow::ensure!(
+                    index < num_consumed,
+                    "pending presig index {index} is not below allocation cursor {num_consumed}",
+                );
+                anyhow::ensure!(
+                    pending.insert(index),
+                    "pending presig index {index} is assigned more than once",
+                );
+            }
+        }
+    }
+    Ok(pending)
+}
+
 fn walk_step(size: Option<usize>, batch_start: u64, num_consumed: u64) -> WalkStep {
     match size {
         Some(size) if num_consumed < batch_start + size as u64 => WalkStep::Last(size),
@@ -941,24 +975,11 @@ impl MpcService {
                 .get(&epoch)
                 .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
                 .clone();
-            let mut pending: HashSet<u64> = HashSet::new();
-            for txn in hashi.bitcoin().withdrawal_queue.withdrawal_txns().values() {
-                if txn.signing_epoch() != epoch {
-                    continue;
-                }
-                for signature in &txn.signing.signatures {
-                    if let move_types::MpcSig::Pending(index) = signature {
-                        anyhow::ensure!(
-                            *index < num_consumed,
-                            "pending presig index {index} is not below allocation cursor {num_consumed}",
-                        );
-                        anyhow::ensure!(
-                            pending.insert(*index),
-                            "pending presig index {index} is assigned more than once",
-                        );
-                    }
-                }
-            }
+            let pending = pending_presig_indices(
+                hashi.bitcoin().withdrawal_queue.withdrawal_txns().values(),
+                epoch,
+                num_consumed,
+            )?;
             (num_consumed, epoch, committee, pending)
         };
         let mpc_manager = self
@@ -2781,6 +2802,75 @@ mod restore_gate_tests {
         // A gate left by another epoch never holds this one back.
         assert!(!restore_rate_limited(Some((5, deadline)), 6, now));
         assert!(!restore_rate_limited(None, 6, now));
+    }
+}
+
+#[cfg(test)]
+mod pending_presig_indices_tests {
+    use super::pending_presig_indices;
+    use hashi_types::move_types::MpcSig;
+    use hashi_types::move_types::PresigPair;
+    use hashi_types::move_types::SigningBatch;
+    use hashi_types::move_types::WithdrawalTransaction;
+    use std::collections::HashSet;
+
+    fn pending(first: u64, second: u64) -> MpcSig {
+        MpcSig::Pending(PresigPair { first, second })
+    }
+
+    fn txn(epoch: u64, signatures: Vec<MpcSig>) -> WithdrawalTransaction {
+        WithdrawalTransaction {
+            id: sui_sdk_types::Address::ZERO,
+            txid: hashi_types::bitcoin_txid::BitcoinTxid::ZERO,
+            request_ids: vec![],
+            inputs: vec![],
+            withdrawal_outputs: vec![],
+            change_outputs: vec![],
+            created_timestamp_ms: 0,
+            signed_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
+            randomness: vec![],
+            signing: SigningBatch { signatures, epoch },
+            guardian_signatures: None,
+        }
+    }
+
+    #[test]
+    fn collects_both_halves_of_current_epoch_pairs_only() {
+        let txns = [
+            txn(
+                5,
+                vec![pending(0, 1), MpcSig::Signed(vec![0; 64]), pending(4, 5)],
+            ),
+            // A stale-epoch batch awaits reallocation; its indices belong to
+            // an old epoch's pool and must not pin anything in this one.
+            txn(4, vec![pending(2, 3)]),
+        ];
+
+        let pending = pending_presig_indices(&txns, 5, 6).unwrap();
+
+        assert_eq!(pending, HashSet::from([0, 1, 4, 5]));
+    }
+
+    #[test]
+    fn rejects_second_half_at_the_cursor() {
+        let txns = [txn(5, vec![pending(4, 5)])];
+
+        let err = pending_presig_indices(&txns, 5, 5).unwrap_err();
+
+        assert!(err.to_string().contains("presig index 5 is not below"));
+    }
+
+    #[test]
+    fn rejects_an_index_shared_by_two_pairs() {
+        let txns = [txn(5, vec![pending(0, 1)]), txn(5, vec![pending(1, 2)])];
+
+        let err = pending_presig_indices(&txns, 5, 4).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("presig index 1 is assigned more than once")
+        );
     }
 }
 

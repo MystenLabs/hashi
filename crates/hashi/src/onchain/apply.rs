@@ -1532,7 +1532,10 @@ mod tests {
                 signatures: vec![if fully_signed {
                     move_types::MpcSig::Signed(vec![1, 2, 3])
                 } else {
-                    move_types::MpcSig::Pending(0)
+                    move_types::MpcSig::Pending(move_types::PresigPair {
+                        first: 0,
+                        second: 1,
+                    })
                 }],
                 epoch: 7,
             },
