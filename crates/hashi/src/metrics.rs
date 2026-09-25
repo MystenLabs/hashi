@@ -1029,8 +1029,8 @@ impl Metrics {
             .unwrap(),
             withdrawal_commitment_left_out_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_commitment_left_out_total",
-                "Requests and inputs the leader left out of a batch because members would reject \
-                 them.",
+                "Times the leader left a request or input out of a batch because the commit check \
+                 refused it.",
                 &["item", "reason"],
                 registry,
             )

@@ -28,6 +28,7 @@ use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
+use crate::onchain::types::DUST_RELAY_MIN_VALUE;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
@@ -99,8 +100,11 @@ fn select_withdrawal_signing_indices(
 /// avoid relying on a separate fee field.
 pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction) -> u64 {
     let inputs: u64 = txn.inputs.iter().map(|u| u.amount).sum();
-    let change: u64 = txn.change_outputs.iter().map(|c| c.amount).sum();
-    inputs.saturating_sub(change)
+    limiter_outflow(inputs, &txn.change_outputs)
+}
+
+fn limiter_outflow(input_total: u64, change_outputs: &[OutputUtxo]) -> u64 {
+    input_total.saturating_sub(change_outputs.iter().map(|o| o.amount).sum())
 }
 
 /// Conservative runtime-object budget shared by the withdrawal flow's Sui
@@ -362,6 +366,10 @@ fn validate_commitment_shape(
     Ok(())
 }
 
+fn below_withdrawal_dust(amount: u64) -> bool {
+    amount < DUST_RELAY_MIN_VALUE
+}
+
 pub(crate) fn check_commitment_outflow(
     input_total: u64,
     change_outputs: &[OutputUtxo],
@@ -369,8 +377,7 @@ pub(crate) fn check_commitment_outflow(
 ) -> anyhow::Result<()> {
     let max_bucket_capacity = max_bucket_capacity
         .ok_or_else(|| anyhow!("No local guardian limiter to check the commitment against"))?;
-    let change_total: u64 = change_outputs.iter().map(|o| o.amount).sum();
-    let outflow = input_total.saturating_sub(change_total);
+    let outflow = limiter_outflow(input_total, change_outputs);
     anyhow::ensure!(
         outflow <= max_bucket_capacity,
         "Commitment spends {outflow} sats from the pool, above the limiter's max bucket \
@@ -411,14 +418,12 @@ impl RefusedItem {
     }
 }
 
-impl std::fmt::Display for RefusedItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
 #[derive(Debug)]
 pub struct RefusedItems(pub Vec<RefusedItem>);
+
+#[derive(Debug, Error)]
+#[error("fee estimate unavailable: {0}")]
+pub struct FeeEstimateUnavailable(#[source] anyhow::Error);
 
 impl std::fmt::Display for RefusedItems {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -692,13 +697,14 @@ impl Hashi {
         for (i, request) in requests.iter().enumerate() {
             let output = &approval.outputs[i];
             let expected_amount = request.btc_amount.saturating_sub(per_user_miner_fee);
-            if expected_amount < utxo_pool::TR_DUST_RELAY_MIN_VALUE {
+            if below_withdrawal_dust(expected_amount) {
                 refused.push(RefusedItem::new(
                     CommitmentItem::Request(request.id),
                     "output_below_dust",
                     format!(
-                        "Withdrawal output {expected_amount} sats is below dust threshold {} sats",
-                        utxo_pool::TR_DUST_RELAY_MIN_VALUE
+                        "Withdrawal output {expected_amount} sats for request {} is below dust \
+                         threshold {DUST_RELAY_MIN_VALUE} sats",
+                        request.id
                     ),
                 ));
                 continue;
@@ -739,7 +745,7 @@ impl Hashi {
             }
         }
 
-        // 5b. Verify the batch fits the guardian limiter's bucket.
+        // 5b. Verify the batch fits the guardian limiter's max bucket capacity.
         check_commitment_outflow(
             input_total,
             &approval.outputs[request_count..],
@@ -770,7 +776,8 @@ impl Hashi {
             let kyoto_fee_rate = self
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
-                .await?;
+                .await
+                .map_err(FeeEstimateUnavailable)?;
             let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, self.effective_min_fee_rate());
 
             let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
@@ -1519,7 +1526,12 @@ impl Hashi {
         // Map available (unlocked) UTXOs to UtxoCandidates.
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
-            .filter(|r| r.spent_by.is_none() && !excluded_inputs.contains(&r.utxo.id))
+            .filter(|r| {
+                r.spent_by.is_none()
+                    && !excluded_inputs.contains(&r.utxo.id)
+                    && unconfirmed_ancestor_depth(r, &withdrawal_txns, &utxo_records)
+                        < MAX_ANCESTOR_DEPTH
+            })
             .map(|r| {
                 let status =
                     build_utxo_status(self, r, &withdrawal_txns, &tx_confirmations, &utxo_records);
@@ -1534,8 +1546,8 @@ impl Hashi {
             .collect();
 
         // Drain versus consolidate: size the batch cap by comparing the
-        // queue depth to the available pool. `candidates` counts every
-        // unlocked UTXO — the same set coin selection draws from.
+        // queue depth to the available pool. `candidates` is the set coin
+        // selection draws from.
         let batch_request_cap = withdrawal_batch_request_cap(requests.len(), candidates.len());
         let configured_max_requests = self
             .config
@@ -2033,54 +2045,50 @@ fn build_utxo_status(
 /// the deepest we can safely spend.
 pub const MAX_ANCESTOR_DEPTH: usize = 25;
 
-/// Count the number of unconfirmed ancestors for a UTXO record by walking
-/// the `produced_by` chain. Every ancestor that still appears in
+/// Count the number of unconfirmed ancestors for a UTXO record along its
+/// longest `produced_by` chain. Every ancestor that still appears in
 /// `withdrawal_txns` is conservatively treated as unconfirmed (we skip
-/// querying Bitcoin for actual confirmation counts). This is used during
-/// commitment validation to reject UTXOs whose ancestor chain would exceed
-/// Bitcoin Core's relay limit.
-///
-/// The walk is a BFS over the ancestor DAG. Each item on the queue is a
-/// `(producing_withdrawal_id, depth)` pair. We track the maximum depth
-/// seen across all branches.
+/// querying Bitcoin for actual confirmation counts). Commitment validation
+/// rejects UTXOs whose ancestor chain would exceed Bitcoin Core's relay
+/// limit, and the builder skips the same UTXOs.
 fn unconfirmed_ancestor_depth(
     record: &UtxoRecord,
     withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> usize {
-    let Some(producing_id) = record.produced_by else {
+    record.produced_by.map_or(0, |producing_id| {
+        withdrawal_chain_depth(
+            producing_id,
+            withdrawal_txns,
+            utxo_records,
+            &mut HashMap::new(),
+        )
+    })
+}
+
+fn withdrawal_chain_depth(
+    wid: Address,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+    memo: &mut HashMap<Address, usize>,
+) -> usize {
+    if let Some(&depth) = memo.get(&wid) {
+        return depth;
+    }
+    let Some(txn) = withdrawal_txns.get(&wid) else {
         return 0;
     };
-
-    let mut max_depth: usize = 0;
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((producing_id, 1usize));
-
-    while let Some((wid, depth)) = queue.pop_front() {
-        if depth > MAX_ANCESTOR_DEPTH {
-            return depth;
-        }
-
-        let Some(txn) = withdrawal_txns.get(&wid) else {
-            // The producing withdrawal has been confirmed and removed;
-            // it does not contribute to the unconfirmed chain.
-            continue;
-        };
-
-        max_depth = std::cmp::max(max_depth, depth);
-
-        // Enqueue any inputs that are themselves unconfirmed change
-        // outputs of an earlier withdrawal.
-        for input_utxo in &txn.inputs {
-            if let Some(input_record) = utxo_records.get(&input_utxo.id)
-                && let Some(parent_id) = input_record.produced_by
-            {
-                queue.push_back((parent_id, depth + 1));
-            }
-        }
-    }
-
-    max_depth
+    memo.insert(wid, MAX_ANCESTOR_DEPTH);
+    let deepest_parent = txn
+        .inputs
+        .iter()
+        .filter_map(|input| utxo_records.get(&input.id)?.produced_by)
+        .map(|parent| withdrawal_chain_depth(parent, withdrawal_txns, utxo_records, memo))
+        .max()
+        .unwrap_or(0);
+    let depth = 1 + deepest_parent;
+    memo.insert(wid, depth);
+    depth
 }
 
 /// Build the ancestor chain for a UTXO produced by `producing_id`. Each
@@ -2436,6 +2444,50 @@ mod tests {
             amount,
             bitcoin_address: vec![0; 32],
         }
+    }
+
+    #[test]
+    fn withdrawal_outputs_below_moves_dust_floor_are_refused() {
+        assert!(below_withdrawal_dust(545));
+        assert!(!below_withdrawal_dust(546));
+    }
+
+    #[test]
+    fn ancestor_depth_does_not_walk_every_path() {
+        let depth = 24u8;
+        let mut withdrawal_txns = BTreeMap::new();
+        let mut utxo_records = BTreeMap::new();
+        for level in 1..=depth {
+            let wid = Address::new([level; 32]);
+            let mut txn = make_txn(vec![1; 3], vec![1], vec![1; 3]);
+            txn.id = wid;
+            txn.inputs = (0..3)
+                .map(|vout| Utxo {
+                    id: test_utxo_id(level - 1, vout),
+                    amount: 1,
+                    derivation_path: None,
+                })
+                .collect();
+            withdrawal_txns.insert(wid, txn);
+            for vout in 0..3 {
+                let id = test_utxo_id(level, vout);
+                utxo_records.insert(id, test_utxo_record(id, Some(wid), None));
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tip = &utxo_records[&test_utxo_id(depth, 0)];
+            let _ = sender.send(unconfirmed_ancestor_depth(
+                tip,
+                &withdrawal_txns,
+                &utxo_records,
+            ));
+        });
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(10)),
+            Ok(usize::from(depth))
+        );
     }
 
     #[test]

@@ -70,9 +70,8 @@ pub struct Hashi {
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
-    /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
-    guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
-    guardian_next_seq_read: RwLock<Option<u64>>,
+    /// The last guardian-finalized withdrawal and the guardian seq read since, for pacing.
+    guardian_pacing: RwLock<guardian_limiter::FinalizePacing>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
     reported_registration_aborts: RwLock<HashSet<String>>,
@@ -108,8 +107,7 @@ impl Hashi {
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
-            guardian_last_finalized: RwLock::new(None),
-            guardian_next_seq_read: RwLock::new(None),
+            guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -145,8 +143,7 @@ impl Hashi {
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
-            guardian_last_finalized: RwLock::new(None),
-            guardian_next_seq_read: RwLock::new(None),
+            guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -157,22 +154,29 @@ impl Hashi {
         next_seq: u64,
         wid: sui_sdk_types::Address,
     ) -> bool {
-        let last = *self.guardian_last_finalized.read().unwrap();
-        let guardian_next_seq = *self.guardian_next_seq_read.read().unwrap();
-        guardian_limiter::should_defer_guardian_finalize(next_seq, last, wid, guardian_next_seq)
+        self.guardian_pacing
+            .read()
+            .unwrap()
+            .should_defer(next_seq, wid)
     }
 
-    fn record_guardian_next_seq(&self, next_seq: u64) {
-        *self.guardian_next_seq_read.write().unwrap() = Some(next_seq);
+    fn guardian_read_generation(&self) -> u64 {
+        self.guardian_pacing.read().unwrap().generation()
+    }
+
+    fn record_guardian_next_seq(&self, next_seq: u64, read_generation: u64) {
+        self.guardian_pacing
+            .write()
+            .unwrap()
+            .record_guardian_next_seq(next_seq, read_generation);
     }
 
     /// Record a successful guardian finalize; monotonic in `seq`.
     pub(crate) fn record_guardian_finalized(&self, seq: u64, wid: sui_sdk_types::Address) {
-        let mut last = self.guardian_last_finalized.write().unwrap();
-        match *last {
-            Some((prev_seq, _)) if seq < prev_seq => {}
-            _ => *last = Some((seq, wid)),
-        }
+        self.guardian_pacing
+            .write()
+            .unwrap()
+            .record_finalized(seq, wid);
     }
 
     pub fn onchain_state(&self) -> &onchain::OnchainState {
@@ -967,6 +971,7 @@ impl Hashi {
 
     async fn try_seed_guardian_state(&self) -> bool {
         self.metrics.guardian_bootstrap_attempts_total.inc();
+        let read_generation = self.guardian_read_generation();
         let Ok(info) = self.fetch_guardian_info_data().await else {
             return false;
         };
@@ -980,7 +985,7 @@ impl Hashi {
             tracing::debug!("guardian bootstrap: guardian has no limiter yet");
             return false;
         };
-        self.record_guardian_next_seq(state.next_seq);
+        self.record_guardian_next_seq(state.next_seq, read_generation);
         let limiter = Arc::new(guardian_limiter::LocalLimiter::new(config, state));
         if self.local_limiter.set(limiter.clone()).is_ok() {
             tracing::info!(
@@ -1061,13 +1066,14 @@ impl Hashi {
         hashi_types::guardian::LimiterState,
     )> {
         let limiter = self.local_limiter()?;
+        let read_generation = self.guardian_read_generation();
         let info = self.fetch_guardian_info_data().await.ok()?;
         if !self.verify_and_pin_guardian_btc_pubkey(info.enclave_btc_pubkey) {
             return None;
         }
         match (info.limiter_config, info.limiter_state) {
             (Some(config), Some(state)) => {
-                self.record_guardian_next_seq(state.next_seq);
+                self.record_guardian_next_seq(state.next_seq, read_generation);
                 Some((limiter, config, state))
             }
             // The enclave installs the config at operator_init and builds the
