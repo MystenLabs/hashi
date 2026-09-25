@@ -106,6 +106,9 @@ async fn main() -> Result<()> {
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
 
+    // TODO(Must fix): anyone who can reach this port can call the guardian, not just nodes.
+    // Fix: authenticate callers here (mTLS against the node TLS keys registered on chain).
+    
     // Serve gRPC (forwarder + relay + health) and the HTTP `/info` + `/health` on
     // ONE port: each tonic service is mounted as an axum route-service, the plain
     // routes merged in, one `axum::serve`. Mirrors crates/hashi/src/grpc/mod.rs.

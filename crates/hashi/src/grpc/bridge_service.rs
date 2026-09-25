@@ -204,6 +204,17 @@ impl BridgeService for HttpService {
         }))
     }
 
+    // TODO(defence in depth): any registered member (not only the leader, not only the
+    // current committee) can start as many signing sessions here as it likes. Each call
+    // spawns a detached task that keeps running after the caller drops the stream (send
+    // errors are ignored), so the per-peer in-flight limit, which is held by the response
+    // stream, does not bound the tasks; `withdrawal_signing_concurrency` only sizes the
+    // channel. Calls for the same withdrawal are not deduplicated, and only the per-input
+    // partials are cached, not the aggregated signatures, so every call repeats the tx
+    // rebuild and the per-input key derivation and sighash (synchronously, before the
+    // requested indices are looked at), a collection session against every peer (up to
+    // WITHDRAWAL_SIGNING_TIMEOUT when peers have not signed yet), and the aggregation and
+    // verification of every input.
     #[tracing::instrument(
         level = "info",
         skip_all,
