@@ -15,6 +15,7 @@ use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;
+use hpke::Serializable;
 use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
@@ -263,6 +264,22 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         withdraw_mode,
     } = install;
 
+    let oi_info = OperatorInitInfo {
+        deployment: deployment.clone(),
+        encryption_pubkey: enclave.encryption_public_key().to_bytes().to_vec(),
+        mode: match &withdraw_mode {
+            None => OperatorInitMode::Ceremony,
+            Some(withdraw) => OperatorInitMode::Withdraw(Box::new(WithdrawOperatorInitInfo {
+                secret_sharing_instance: withdraw.ceremony_state.secret_sharing_instance.clone(),
+                config_hash: withdraw.init_config.digest(),
+                limiter_config: *withdraw.init_config.limiter_config(),
+                hashi_object_id: withdraw.hashi_object_id,
+                mpc_master_g: withdraw.mpc_master_g,
+                genesis_state_hash: withdraw.genesis_state.as_ref().map(GenesisState::digest),
+            })),
+        },
+    };
+
     enclave
         .config
         .set_s3_logger(logger)
@@ -290,15 +307,12 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         .expect("S3 logger must be initialized to log the OI attestation");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
-    // This pre-transition snapshot reports `Uninitialized`; successfully
-    // writing it completes operator initialization.
-    // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
-    // purpose-built OI payload containing only the data readers and KPs need;
-    // the evolving status response should not define the durable log schema.
+    // Successfully writing this record completes operator initialization before
+    // the live lifecycle advances. Its schema contains only durable OI facts.
     enclave
-        .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
+        .log_init(OIGuardianInfo(Box::new(oi_info)))
         .await
-        .expect("S3 logger must be initialized to log GuardianInfo");
+        .expect("S3 logger must be initialized to log operator initialization");
 
     let initialized = match enclave.mode() {
         EnclaveMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
@@ -486,11 +500,12 @@ mod tests {
         (enclave, captures)
     }
 
-    fn assert_operator_init_logs(
+    async fn assert_operator_init_logs(
         enclave: &Enclave,
         captures: &CapturedPuts,
-        expected_lifecycle: EnclaveLifecycle,
+        expected_mode: EnclaveMode,
     ) {
+        let live_info = enclave.info().await;
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 2, "operator init should write two records");
         let session_id = enclave.s3_session_id();
@@ -515,9 +530,32 @@ mod tests {
             panic!("expected V1 init record");
         };
         let OIGuardianInfo(info) = message.as_ref() else {
-            panic!("expected operator-init GuardianInfo record");
+            panic!("expected operator-init completion record");
         };
-        assert_eq!(info.lifecycle, expected_lifecycle);
+        assert_eq!(info.mode(), expected_mode);
+        assert_eq!(&info.deployment, enclave.config.deployment().unwrap());
+        assert_eq!(
+            info.encryption_pubkey,
+            enclave.encryption_public_key().to_bytes().to_vec()
+        );
+        if let OperatorInitMode::Withdraw(withdraw) = &info.mode {
+            let state = enclave.temporary_init_state().unwrap();
+            assert_eq!(
+                withdraw.secret_sharing_instance,
+                state.ceremony_state.secret_sharing_instance
+            );
+            assert_eq!(withdraw.config_hash, state.config_hash);
+            assert_eq!(
+                withdraw.genesis_state_hash,
+                state.genesis_state.as_ref().map(GenesisState::digest)
+            );
+            assert_eq!(withdraw.limiter_config, enclave.limiter_config().unwrap());
+            assert_eq!(Some(withdraw.hashi_object_id), live_info.hashi_object_id);
+            assert_eq!(Some(withdraw.mpc_master_g), live_info.mpc_master_g);
+        }
+        guardian_info
+            .validate(Some(&enclave.signing_pubkey()))
+            .unwrap();
     }
 
     #[tokio::test]
@@ -527,7 +565,7 @@ mod tests {
             enclave.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
-        assert_operator_init_logs(&enclave, &captures, WithdrawStage::Uninitialized.into());
+        assert_operator_init_logs(&enclave, &captures, EnclaveMode::Withdraw).await;
     }
 
     #[tokio::test]
@@ -537,6 +575,6 @@ mod tests {
             enclave.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
-        assert_operator_init_logs(&enclave, &captures, CeremonyStage::Uninitialized.into());
+        assert_operator_init_logs(&enclave, &captures, EnclaveMode::Ceremony).await;
     }
 }

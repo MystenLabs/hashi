@@ -75,7 +75,7 @@ impl GuardianReader {
         }
     }
 
-    /// Load and verify a session's attestation and guardian info on first use.
+    /// Load and verify a session's attestation and completed operator initialization on first use.
     async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
         if !self.sessions.contains_key(session_id) {
             let session_info =

@@ -126,6 +126,26 @@ impl GuardianInfo {
     }
 }
 
+impl super::OperatorInitInfo {
+    pub fn mock_for_testing() -> Self {
+        let config = InitConfig::mock_for_testing();
+        let (_, hashi_object_id, mpc_master_g) = GenesisState::mock_for_testing().into_parts();
+        Self {
+            deployment: config.deployment().clone(),
+            encryption_pubkey: vec![0u8; 32],
+            mode: super::OperatorInitMode::Withdraw(Box::new(super::WithdrawOperatorInitInfo {
+                secret_sharing_instance: SetupNewKeyResponse::mock_for_testing()
+                    .secret_sharing_instance,
+                config_hash: [2; 32],
+                limiter_config: *config.limiter_config(),
+                hashi_object_id,
+                mpc_master_g,
+                genesis_state_hash: None,
+            })),
+        }
+    }
+}
+
 impl GetGuardianInfoResponse {
     pub fn mock_for_testing() -> Self {
         let signing_key = ed25519_consensus::SigningKey::from([1u8; 32]);

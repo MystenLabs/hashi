@@ -144,7 +144,18 @@ enum VerifyTime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildPcrs {
     git_revision: GitRevision,
+    #[serde(serialize_with = "serialize_pcr0")]
     pcr0: Vec<u8>,
+}
+
+// Config files accept hex PCRs. Emit the same readable form in logged policies,
+// while preserving the binary representation used by existing config digests.
+fn serialize_pcr0<S: serde::Serializer>(pcr0: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&hex::encode(pcr0))
+    } else {
+        pcr0.serialize(serializer)
+    }
 }
 
 impl BuildPcrs {
@@ -277,6 +288,19 @@ impl<'de> Deserialize<'de> for PcrAllowlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pcr_serialization_round_trips_json_and_preserves_binary_commitments() {
+        let build = BuildPcrs::new("current", vec![0, 255]);
+        let json = serde_json::to_value(&build).unwrap();
+        assert_eq!(json["pcr0"], "00ff");
+        assert_eq!(serde_json::from_value::<BuildPcrs>(json).unwrap(), build);
+        // This is the original derived struct's BCS field order and encoding.
+        assert_eq!(
+            bcs::to_bytes(&build).unwrap(),
+            bcs::to_bytes(&(build.git_revision(), build.pcr0())).unwrap(),
+        );
+    }
 
     #[test]
     fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {

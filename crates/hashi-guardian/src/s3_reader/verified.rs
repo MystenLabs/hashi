@@ -4,16 +4,15 @@
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::DeploymentConfig;
-use hashi_types::guardian::DeploymentConfigSummary;
 use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::LogType;
+use hashi_types::guardian::OperatorInitInfo;
 
 /// Initialization checkpoint required by or verified for a session.
 ///
@@ -26,12 +25,12 @@ enum InitCheckpoint {
     OperatorActivated,
 }
 
-/// A session's attestation-anchored signing key, signed [`GuardianInfo`], build
+/// A session's attestation-anchored signing key, signed [`OperatorInitInfo`], build
 /// PCRs, and highest verified initialization checkpoint.
 #[derive(Debug, Clone)]
 pub struct VerifiedSessionInfo {
     signing_pubkey: GuardianPubKey,
-    info: GuardianInfo,
+    info: OperatorInitInfo,
     build_pcrs: BuildPcrs,
     verified_init_checkpoint: InitCheckpoint,
 }
@@ -77,7 +76,7 @@ impl VerifiedSessionInfo {
     pub(super) fn new_for_test(signing_pubkey: GuardianPubKey, build_pcrs: BuildPcrs) -> Self {
         Self {
             signing_pubkey,
-            info: GuardianInfo::mock_for_testing(),
+            info: OperatorInitInfo::mock_for_testing(),
             build_pcrs,
             verified_init_checkpoint: InitCheckpoint::OperatorInitialized,
         }
@@ -102,7 +101,7 @@ impl VerifiedSessionInfo {
             )));
         };
 
-        // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
+        // 2. Completed operator initialization, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_message = Self::read_init_log(s3, &info_key, Some(&signing_pubkey)).await?;
         let InitLogMessage::OIGuardianInfo(info) = *info_message else {
@@ -116,11 +115,7 @@ impl VerifiedSessionInfo {
         //    reported build. This replays a logged attestation whose short-lived
         //    leaf cert has typically expired, so the chain is checked at the
         //    document's own signed timestamp, not now.
-        let build_pcrs = verify_deployment_info(
-            session_id,
-            info.deployment_info.as_ref(),
-            expected_deployment,
-        )?;
+        let build_pcrs = verify_deployment_info(session_id, &info.deployment, expected_deployment)?;
         attestation
             .verify_replay(&signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
@@ -140,7 +135,7 @@ impl VerifiedSessionInfo {
         record: LogRecord,
     ) -> GuardianResult<VerifiedLogRecord> {
         let entry = record.validate_into_entry(Some(&self.signing_pubkey))?;
-        let required = InitCheckpoint::required_for(entry.log_type(), self.info.lifecycle.mode())?;
+        let required = InitCheckpoint::required_for(entry.log_type(), self.info.mode())?;
         self.ensure_init_checkpoint(s3, entry.session_id(), required)
             .await?;
         Ok(VerifiedLogRecord {
@@ -199,7 +194,7 @@ impl VerifiedSessionInfo {
         &self.signing_pubkey
     }
 
-    pub fn info(&self) -> &GuardianInfo {
+    pub fn info(&self) -> &OperatorInitInfo {
         &self.info
     }
 
@@ -210,16 +205,13 @@ impl VerifiedSessionInfo {
 
 /// Authenticate deployment identity separately from build selection: historical
 /// sessions may use older allowlisted builds, but must serve the same deployment.
+/// The logged policy records what the writer trusted. Only the reader's own
+/// allowlist authorizes the writing build and supplies its attestation PCR pin.
 fn verify_deployment_info(
     session_id: &str,
-    reported: Option<&DeploymentConfigSummary>,
+    reported: &DeploymentConfig,
     expected: &DeploymentConfig,
 ) -> GuardianResult<BuildPcrs> {
-    let reported = reported.ok_or_else(|| {
-        InvalidS3Log(format!(
-            "session {session_id} GuardianInfo is missing deployment_info"
-        ))
-    })?;
     if reported.bucket_info != expected.bucket_info {
         return Err(InvalidS3Log(format!(
             "session {session_id} bucket/region {:?} does not match expected {:?}",
@@ -240,7 +232,7 @@ fn verify_deployment_info(
     }
     expected
         .pcr_allowlist
-        .resolve(&reported.git_revision)
+        .resolve(reported.pcr_allowlist.current_build().git_revision())
         .cloned()
 }
 
@@ -287,15 +279,14 @@ mod tests {
     use hashi_types::guardian::S3ObjectLockPolicy;
     use hashi_types::guardian::S3RetentionEnvironment;
     use hashi_types::guardian::SessionID;
-    use hashi_types::guardian::SetupNewKeyResponse;
     use hashi_types::guardian::ShareID;
 
     #[test]
     fn session_deployment_must_match_all_stable_fields() {
         let expected = DeploymentConfig::mock_for_testing();
-        let reported = expected.summary();
+        let reported = expected.clone();
         assert_eq!(
-            verify_deployment_info("session", Some(&reported), &expected).unwrap(),
+            verify_deployment_info("session", &reported, &expected).unwrap(),
             *expected.pcr_allowlist.current_build()
         );
         let mut wrong_bucket = reported.clone();
@@ -309,14 +300,10 @@ mod tests {
         wrong_network.bitcoin_network = bitcoin::Network::Bitcoin;
         for changed in [wrong_bucket, wrong_region, wrong_retention, wrong_network] {
             assert!(matches!(
-                verify_deployment_info("session", Some(&changed), &expected),
+                verify_deployment_info("session", &changed, &expected),
                 Err(InvalidS3Log(message)) if message.contains("does not match expected")
             ));
         }
-        assert!(matches!(
-            verify_deployment_info("session", None, &expected),
-            Err(InvalidS3Log(message)) if message.contains("missing deployment_info")
-        ));
     }
 
     #[test]
@@ -328,16 +315,39 @@ mod tests {
             [previous.clone()],
         )
         .unwrap();
-        let mut reported = expected.summary();
-        reported.git_revision = "previous".into();
-        let build = verify_deployment_info("session", Some(&reported), &expected).unwrap();
+        let mut reported = expected.clone();
+        reported.pcr_allowlist =
+            hashi_types::guardian::PcrAllowlist::new(previous.clone(), []).unwrap();
+        let build = verify_deployment_info("session", &reported, &expected).unwrap();
         assert_eq!(build, previous);
         assert!(expected
             .pcr_allowlist
             .require_current_build(&build)
             .is_err());
-        reported.git_revision = "not-allowlisted".into();
-        assert!(verify_deployment_info("session", Some(&reported), &expected).is_err());
+        reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+            BuildPcrs::new("not-allowlisted", vec![9]),
+            [],
+        )
+        .unwrap();
+        assert!(verify_deployment_info("session", &reported, &expected).is_err());
+    }
+
+    #[test]
+    fn logged_pcr_pins_do_not_replace_the_readers_trust_policy() {
+        let expected = DeploymentConfig::mock_for_testing();
+        let mut reported = expected.clone();
+        reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+            BuildPcrs::new(
+                expected.pcr_allowlist.current_build().git_revision(),
+                vec![9],
+            ),
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            verify_deployment_info("session", &reported, &expected).unwrap(),
+            *expected.pcr_allowlist.current_build(),
+        );
     }
 
     fn build_pcrs() -> BuildPcrs {
@@ -345,11 +355,7 @@ mod tests {
     }
 
     fn session_info_ready_for_activation(signing_pubkey: GuardianPubKey) -> VerifiedSessionInfo {
-        let mut session_info = VerifiedSessionInfo::new_for_test(signing_pubkey, build_pcrs());
-        session_info.info.secret_sharing_instance =
-            Some(SetupNewKeyResponse::mock_for_testing().secret_sharing_instance);
-        session_info.info.config_hash = Some([2; 32]);
-        session_info
+        VerifiedSessionInfo::new_for_test(signing_pubkey, build_pcrs())
     }
 
     fn listed_record(key: String) -> ListObjectVersionsOutput {

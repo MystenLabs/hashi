@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "object_key": "init/d54207da194977dc/02-oi-guardian-info.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
+  "message": {
+    "Init": {
+      "OIGuardianInfo": {
+        "deployment": {
+          "bucket_info": {
+            "name": "test-bucket",
+            "region": "us-east-1"
+          },
+          "retention_environment": "testnet",
+          "bitcoin_network": "regtest",
+          "pcr_allowlist": {
+            "current_build": {
+              "git_revision": "unknown",
+              "pcr0": "00"
+            },
+            "prev_builds": []
+          }
+        },
+        "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": {
+          "Withdraw": {
+            "secret_sharing_instance": {
+              "commitments": {
+                "1": "0000000000000000000000000000000000000000000000000000000000000000",
+                "2": "0000000000000000000000000000000000000000000000000000000000000000",
+                "3": "0000000000000000000000000000000000000000000000000000000000000000",
+                "4": "0000000000000000000000000000000000000000000000000000000000000000",
+                "5": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "params": {
+                "num_shares": 5,
+                "threshold": 3
+              },
+              "sharing_seq": 0
+            },
+            "config_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+            "limiter_config": {
+              "refill_rate": 10,
+              "max_bucket_capacity": 1000
+            },
+            "hashi_object_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mpc_master_g": "jwfd1en1F5z/GUhgNBge12UFuqrVPl2ZQGQSe1bFhBuA",
+            "genesis_state_hash": null
+          }
+        }
+      }
+    }
+  },
+  "signature": "64c7c809d457318960c3cfbac1e20670b3646e7adc512a529d9fbed2be5f2962c14df700f0ac6980debe67f0b6f959d61340b72c8423fc8a8c0f65f20f9c4d01"
+}
