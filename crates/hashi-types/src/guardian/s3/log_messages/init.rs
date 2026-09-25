@@ -5,10 +5,12 @@ use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_INIT;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::HashiMasterG;
+use crate::guardian::CeremonyStage;
 use crate::guardian::DeploymentConfig;
 use crate::guardian::EncPubKeyBytes;
 use crate::guardian::EnclaveMode;
 use crate::guardian::GuardianError::InvalidS3Log;
+use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::LimiterConfig;
@@ -16,6 +18,7 @@ use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::ShareID;
+use crate::guardian::WithdrawStage;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -61,6 +64,74 @@ impl OperatorInitInfo {
             OperatorInitMode::Ceremony => EnclaveMode::Ceremony,
             OperatorInitMode::Withdraw(_) => EnclaveMode::Withdraw,
         }
+    }
+
+    /// Compare completed OI facts with the live response immediately after OI.
+    /// Later-stage fields are checked on the live response, not stored in the log.
+    pub fn match_post_oi_guardian_info(&self, live_info: &GuardianInfo) -> anyhow::Result<()> {
+        let expected_lifecycle = match &self.mode {
+            OperatorInitMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
+            OperatorInitMode::Withdraw(_) => WithdrawStage::OperatorInitialized.into(),
+        };
+        anyhow::ensure!(
+            live_info.lifecycle == expected_lifecycle,
+            "S3 OI mode {:?} does not match live post-OperatorInit lifecycle {:?}",
+            self.mode(),
+            live_info.lifecycle
+        );
+        anyhow::ensure!(
+            live_info.deployment_info.as_ref() == Some(&self.deployment.summary()),
+            "S3 OI deployment differs from live post-OperatorInit GuardianInfo"
+        );
+        anyhow::ensure!(
+            live_info.encryption_pubkey == self.encryption_pubkey,
+            "S3 OI encryption pubkey differs from live post-OperatorInit GuardianInfo"
+        );
+        anyhow::ensure!(
+            live_info.enclave_btc_pubkey.is_none()
+                && live_info.limiter_state.is_none()
+                && live_info.current_committee_epoch.is_none(),
+            "live post-OperatorInit GuardianInfo contains later-stage state"
+        );
+        match &self.mode {
+            OperatorInitMode::Ceremony => anyhow::ensure!(
+                live_info.secret_sharing_instance.is_none()
+                    && live_info.config_hash.is_none()
+                    && live_info.limiter_config.is_none()
+                    && live_info.hashi_object_id.is_none()
+                    && live_info.mpc_master_g.is_none()
+                    && live_info.genesis_state_hash.is_none(),
+                "live ceremony GuardianInfo contains withdraw initialization state"
+            ),
+            OperatorInitMode::Withdraw(withdraw) => {
+                anyhow::ensure!(
+                    live_info.secret_sharing_instance.as_ref()
+                        == Some(&withdraw.secret_sharing_instance),
+                    "S3 OI secret-sharing instance differs from live post-OperatorInit GuardianInfo"
+                );
+                anyhow::ensure!(
+                    live_info.config_hash == Some(withdraw.config_hash),
+                    "S3 OI config_hash differs from live post-OperatorInit GuardianInfo"
+                );
+                anyhow::ensure!(
+                    live_info.limiter_config == Some(withdraw.limiter_config),
+                    "S3 OI limiter config differs from live post-OperatorInit GuardianInfo"
+                );
+                anyhow::ensure!(
+                    live_info.hashi_object_id == Some(withdraw.hashi_object_id),
+                    "S3 OI Hashi object ID differs from live post-OperatorInit GuardianInfo"
+                );
+                anyhow::ensure!(
+                    live_info.mpc_master_g == Some(withdraw.mpc_master_g),
+                    "S3 OI MPC master G differs from live post-OperatorInit GuardianInfo"
+                );
+                anyhow::ensure!(
+                    live_info.genesis_state_hash == withdraw.genesis_state_hash,
+                    "S3 OI genesis_state_hash differs from live post-OperatorInit GuardianInfo"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -384,5 +455,88 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn post_init_comparison_preserves_withdraw_bindings_and_stage_checks() {
+        let mut oi = OperatorInitInfo::mock_for_testing();
+        for genesis_state_hash in [None, Some([3; 32])] {
+            let OperatorInitMode::Withdraw(withdraw) = &mut oi.mode else {
+                unreachable!();
+            };
+            withdraw.genesis_state_hash = genesis_state_hash;
+            let live = GuardianInfo {
+                lifecycle: WithdrawStage::OperatorInitialized.into(),
+                deployment_info: Some(oi.deployment.summary()),
+                encryption_pubkey: oi.encryption_pubkey.clone(),
+                secret_sharing_instance: Some(withdraw.secret_sharing_instance.clone()),
+                config_hash: Some(withdraw.config_hash),
+                limiter_config: Some(withdraw.limiter_config),
+                hashi_object_id: Some(withdraw.hashi_object_id),
+                mpc_master_g: Some(withdraw.mpc_master_g),
+                genesis_state_hash,
+                enclave_btc_pubkey: None,
+                limiter_state: None,
+                current_committee_epoch: None,
+            };
+            oi.match_post_oi_guardian_info(&live).unwrap();
+            let mutations: &[fn(&mut GuardianInfo)] = &[
+                |info| info.lifecycle = WithdrawStage::ProvisionerInitialized.into(),
+                |info| info.lifecycle = CeremonyStage::OperatorInitialized.into(),
+                |info| {
+                    info.deployment_info
+                        .as_mut()
+                        .unwrap()
+                        .git_revision
+                        .push_str("-other")
+                },
+                |info| info.encryption_pubkey[0] ^= 1,
+                |info| info.secret_sharing_instance = None,
+                |info| info.config_hash = Some([9; 32]),
+                |info| info.limiter_config = None,
+                |info| info.hashi_object_id = None,
+                |info| info.mpc_master_g = None,
+                |info| info.genesis_state_hash = Some([9; 32]),
+                |info| {
+                    info.enclave_btc_pubkey = Some(
+                        crate::bitcoin::create_btc_keypair_for_test(&[1; 32])
+                            .x_only_public_key()
+                            .0,
+                    )
+                },
+                |info| {
+                    info.limiter_state = Some(crate::guardian::LimiterState {
+                        num_tokens_available: 0,
+                        last_updated_at: 0,
+                        next_seq: 0,
+                    })
+                },
+                |info| info.current_committee_epoch = Some(0),
+            ];
+            for (index, mutate) in mutations.iter().enumerate() {
+                let mut changed = live.clone();
+                mutate(&mut changed);
+                assert!(
+                    oi.match_post_oi_guardian_info(&changed).is_err(),
+                    "mutation {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn post_init_comparison_accepts_ceremony_without_withdraw_state() {
+        let mut oi = OperatorInitInfo::mock_for_testing();
+        oi.mode = OperatorInitMode::Ceremony;
+        let mut live = GuardianInfo::mock_for_testing();
+        live.lifecycle = CeremonyStage::OperatorInitialized.into();
+        live.deployment_info = Some(oi.deployment.summary());
+        live.encryption_pubkey = oi.encryption_pubkey.clone();
+        oi.match_post_oi_guardian_info(&live).unwrap();
+        live.lifecycle = CeremonyStage::Uninitialized.into();
+        assert!(oi.match_post_oi_guardian_info(&live).is_err());
+        live.lifecycle = CeremonyStage::OperatorInitialized.into();
+        live.config_hash = Some([2; 32]);
+        assert!(oi.match_post_oi_guardian_info(&live).is_err());
     }
 }

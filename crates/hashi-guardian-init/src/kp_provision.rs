@@ -56,7 +56,6 @@ use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
-use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_provisioning_target_info;
 use crate::kp_roster::decrypt_kp_share;
 
@@ -217,7 +216,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
-    ensure_oi_info_matches_post_init(verified_session.info(), &guardian_info)
+    verified_session
+        .info()
+        .match_post_oi_guardian_info(&guardian_info)
         .with_context(|| format!("S3 operator-init info mismatch for session {session_id}"))?;
     info!(
         phase = "guardian info",
