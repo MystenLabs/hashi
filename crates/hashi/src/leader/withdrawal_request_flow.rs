@@ -11,7 +11,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::CommitmentItem;
-use crate::withdrawals::RefusedItem;
+use crate::withdrawals::FeeEstimateUnavailable;
 use crate::withdrawals::RefusedItems;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
 use crate::withdrawals::WithdrawalCommitmentError;
@@ -493,7 +493,8 @@ impl LeaderService {
             }
             (batch, at_capacity)
         } else {
-            (approved, false)
+            debug!("No local guardian limiter yet; not committing withdrawals");
+            return;
         };
 
         let max_batch = withdrawal_fire_threshold(self.inner.config.withdrawal_max_batch_size());
@@ -577,29 +578,38 @@ impl LeaderService {
                 let inner = inner.clone();
                 async move { inner.validate_withdrawal_tx_commitment(approval).await }.boxed()
             },
+            || !inner.onchain_state().has_unsigned_withdrawal_txn(),
             |refused| {
                 warn!(
-                    item = ?refused.item,
-                    reason = refused.reason,
-                    "Commit check refused an item; leaving it out of the withdrawal batch: {refused}"
+                    count = refused.0.len(),
+                    "Commit check refused items; leaving them out of the withdrawal batch: {refused}"
                 );
-                inner
-                    .metrics
-                    .withdrawal_commitment_left_out_total
-                    .with_label_values(&[refused.item.label(), refused.reason])
-                    .inc();
+                for item in &refused.0 {
+                    inner
+                        .metrics
+                        .withdrawal_commitment_left_out_total
+                        .with_label_values(&[item.item.label(), item.reason])
+                        .inc();
+                }
             },
         )
         .await
         {
-            Ok(approval) => {
+            Ok(Some(approval)) => {
                 retry_tracker.clear();
                 approval
+            }
+            Ok(None) => {
+                info!("An unsigned withdrawal appeared; skipping this batch");
+                retry_tracker.clear();
+                return Ok(());
             }
             Err(e) => {
                 let kind = e.kind();
                 if kind == WithdrawalCommitmentErrorKind::CommitmentCheckFailed {
                     error!("Withdrawal batch not proposed: {e}");
+                } else {
+                    warn!("Withdrawal commitment attempt failed: {e}");
                 }
                 inner
                     .metrics
@@ -827,21 +837,30 @@ async fn build_checked_commitment(
     )
         -> BoxFuture<'a, Result<WithdrawalTxCommitment, WithdrawalCommitmentError>>,
     check: impl for<'a> Fn(&'a WithdrawalTxCommitment) -> BoxFuture<'a, anyhow::Result<()>>,
-    mut on_left_out: impl FnMut(&RefusedItem),
-) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
+    commit_gate_open: impl Fn() -> bool,
+    mut on_left_out: impl FnMut(&RefusedItems),
+) -> Result<Option<WithdrawalTxCommitment>, WithdrawalCommitmentError> {
     let mut excluded_inputs = BTreeSet::new();
     for _ in 0..COMMITMENT_CHECK_ROUNDS {
-        let approval = build(&requests, &excluded_inputs).await?;
+        let approval = match build(&requests, &excluded_inputs).await {
+            Ok(approval) => approval,
+            Err(_) if !commit_gate_open() => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let refusal = match check(&approval).await {
-            Ok(()) => return Ok(approval),
+            Ok(()) => return Ok(commit_gate_open().then_some(approval)),
+            Err(_) if !commit_gate_open() => return Ok(None),
             Err(refusal) => refusal,
         };
-        let Some(RefusedItems(items)) = refusal.downcast_ref::<RefusedItems>() else {
+        if refusal.downcast_ref::<FeeEstimateUnavailable>().is_some() {
+            return Err(WithdrawalCommitmentError::FeeEstimateFailed(refusal));
+        }
+        let Some(refused) = refusal.downcast_ref::<RefusedItems>() else {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(refusal));
         };
-        for refused in items {
-            on_left_out(refused);
-            match refused.item {
+        on_left_out(refused);
+        for item in &refused.0 {
+            match item.item {
                 CommitmentItem::Request(id) => requests.retain(|r| r.id != id),
                 CommitmentItem::Input(id) => {
                     excluded_inputs.insert(id);
@@ -864,6 +883,7 @@ async fn build_checked_commitment(
 #[cfg(test)]
 mod checked_commitment_tests {
     use super::*;
+    use crate::withdrawals::RefusedItem;
     use hashi_types::bitcoin_txid::BitcoinTxid;
 
     fn request(id: u8) -> WithdrawalRequest {
@@ -881,21 +901,26 @@ mod checked_commitment_tests {
         }
     }
 
+    fn commit_all<'a>(
+        requests: &'a [WithdrawalRequest],
+        _: &'a BTreeSet<UtxoId>,
+    ) -> BoxFuture<'a, Result<WithdrawalTxCommitment, WithdrawalCommitmentError>> {
+        futures::future::ready(Ok(WithdrawalTxCommitment {
+            request_ids: requests.iter().map(|r| r.id).collect(),
+            selected_utxos: Vec::new(),
+            outputs: Vec::new(),
+            txid: BitcoinTxid::ZERO,
+        }))
+        .boxed()
+    }
+
     #[tokio::test]
     async fn leaves_out_the_request_the_commit_check_refuses() {
         let refused_id = Address::new([2; 32]);
         let mut left_out = Vec::new();
         let approval = build_checked_commitment(
             vec![request(1), request(2), request(3)],
-            |requests, _| {
-                let commitment = WithdrawalTxCommitment {
-                    request_ids: requests.iter().map(|r| r.id).collect(),
-                    selected_utxos: Vec::new(),
-                    outputs: Vec::new(),
-                    txid: BitcoinTxid::ZERO,
-                };
-                futures::future::ready(Ok(commitment)).boxed()
-            },
+            commit_all,
             |approval| {
                 let result = if approval.request_ids.contains(&refused_id) {
                     Err(anyhow::Error::new(RefusedItems(vec![RefusedItem::new(
@@ -908,9 +933,11 @@ mod checked_commitment_tests {
                 };
                 futures::future::ready(result).boxed()
             },
-            |refused| left_out.push(refused.item),
+            || true,
+            |refused| left_out.extend(refused.0.iter().map(|r| r.item)),
         )
         .await
+        .unwrap()
         .unwrap();
 
         assert_eq!(
@@ -918,6 +945,54 @@ mod checked_commitment_tests {
             vec![Address::new([1; 32]), Address::new([3; 32])]
         );
         assert_eq!(left_out, vec![CommitmentItem::Request(refused_id)]);
+    }
+
+    #[tokio::test]
+    async fn stops_quietly_when_a_refusal_comes_from_a_closed_commit_gate() {
+        let committed_id = Address::new([1; 32]);
+        let refused_once = std::cell::Cell::new(false);
+        let mut left_out = Vec::new();
+        let approval = build_checked_commitment(
+            vec![request(1), request(2)],
+            commit_all,
+            |_| {
+                refused_once.set(true);
+                futures::future::ready(Err(anyhow::Error::new(RefusedItems(vec![
+                    RefusedItem::new(
+                        CommitmentItem::Request(committed_id),
+                        "request_committed",
+                        String::new(),
+                    ),
+                ]))))
+                .boxed()
+            },
+            || !refused_once.get(),
+            |refused| left_out.extend(refused.0.iter().map(|r| r.item)),
+        )
+        .await
+        .unwrap();
+
+        assert!(approval.is_none());
+        assert!(left_out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn does_not_propose_when_the_commit_gate_closes_after_a_passing_check() {
+        let checked = std::cell::Cell::new(false);
+        let approval = build_checked_commitment(
+            vec![request(1)],
+            commit_all,
+            |_| {
+                checked.set(true);
+                futures::future::ready(Ok(())).boxed()
+            },
+            || !checked.get(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(approval.is_none());
     }
 }
 
