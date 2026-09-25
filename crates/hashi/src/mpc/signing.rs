@@ -7,17 +7,18 @@ use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
+use fastcrypto_tbls::threshold_schnorr::signing::Blame;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
-use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Committee;
+use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -90,7 +91,7 @@ impl PresigBatch {
 struct SigningEpochConfig {
     address: Address,
     committee: Committee,
-    threshold: u16,
+    params: Parameters,
     key_shares: avss::SharesForNode,
     verifying_key: G,
     share_owners: HashMap<ShareIndex, Address>,
@@ -279,7 +280,7 @@ impl SigningManager {
     pub fn new(
         address: Address,
         committee: Committee,
-        threshold: u16,
+        params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
         share_owners: HashMap<ShareIndex, Address>,
@@ -309,7 +310,7 @@ impl SigningManager {
             config: Arc::new(SigningEpochConfig {
                 address,
                 committee,
-                threshold,
+                params,
                 key_shares,
                 verifying_key,
                 owned_counts: owned_counts_by_member(&share_owners),
@@ -331,7 +332,7 @@ impl SigningManager {
     pub fn new_recovered(
         address: Address,
         committee: Committee,
-        threshold: u16,
+        params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
         share_owners: HashMap<ShareIndex, Address>,
@@ -391,7 +392,7 @@ impl SigningManager {
                 config: Arc::new(SigningEpochConfig {
                     address,
                     committee,
-                    threshold,
+                    params,
                     key_shares,
                     verifying_key,
                     owned_counts: owned_counts_by_member(&share_owners),
@@ -521,7 +522,7 @@ impl SigningManager {
     }
 
     pub fn threshold(&self) -> u16 {
-        self.config.threshold
+        self.config.params.t
     }
 
     pub fn key_shares(&self) -> &avss::SharesForNode {
@@ -572,7 +573,8 @@ impl SigningManager {
         metrics: &Metrics,
         result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
     ) {
-        let threshold = self.config.threshold;
+        let params = self.config.params;
+        let threshold = params.t;
         let verifying_key = self.config.verifying_key;
         let self_address = self.config.address;
         let all_peers: HashSet<Address> = self
@@ -634,7 +636,7 @@ impl SigningManager {
             self.finalize_sweep(
                 &mut pending,
                 &mut flagged,
-                threshold,
+                params,
                 &verifying_key,
                 metrics,
                 &result_tx,
@@ -683,7 +685,7 @@ impl SigningManager {
         &self,
         pending: &mut Vec<InputSigningState>,
         flagged: &mut HashSet<ShareIndex>,
-        threshold: u16,
+        params: Parameters,
         verifying_key: &G,
         metrics: &Metrics,
         result_tx: &tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
@@ -696,7 +698,7 @@ impl SigningManager {
                 let peers_exhausted = pending[i].peers_remaining.is_empty();
                 let outcome = try_finalize_signature(
                     &mut pending[i],
-                    threshold,
+                    params,
                     verifying_key,
                     peers_exhausted,
                     flagged,
@@ -709,10 +711,10 @@ impl SigningManager {
                         exhausted.push(pending[i].signing_id);
                         i += 1;
                     }
-                    FinalizeOutcome::Done(sig, mismatched) => {
+                    FinalizeOutcome::Done(sig, blame) => {
                         let st = pending.swap_remove(i);
                         let _ = result_tx.send((st.signing_id, Ok(sig)));
-                        grew |= self.flag_mismatched(&mismatched, flagged, metrics);
+                        grew |= self.flag_mismatched(blame, flagged, metrics);
                     }
                     FinalizeOutcome::Failed(e) => {
                         let st = pending.swap_remove(i);
@@ -731,7 +733,7 @@ impl SigningManager {
                     st.signing_id,
                     Err(SigningError::TooManyInvalidSignatures {
                         collected: st.partials.len(),
-                        threshold,
+                        threshold: params.t,
                     }),
                 ));
                 false
@@ -740,53 +742,73 @@ impl SigningManager {
         }
     }
 
+    /// Flag every share index whose owner `blame` names, so the retries that follow can leave
+    /// their partial signatures out for the rest of this call, and count the certain ones
+    /// against their owners. Returns whether anything new was flagged.
+    ///
+    /// The blame comes from an input that already finished, so the flags only help the inputs
+    /// still pending in this call.
+    ///
+    /// The full Reed-Solomon attempt is still given every partial signature, flagged ones
+    /// included, since its decoding is what corrects them.
+    ///
+    /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
+    /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
     fn flag_mismatched(
         &self,
-        mismatched: &[ShareIndex],
+        blame: Blame,
         flagged: &mut HashSet<ShareIndex>,
         metrics: &Metrics,
     ) -> bool {
-        if mismatched.is_empty() {
-            return false;
-        }
         let share_owners = &self.config.share_owners;
-        let mut per_owner: HashMap<Address, u64> = HashMap::new();
-        for idx in mismatched {
-            if let Some(owner) = share_owners.get(idx) {
-                *per_owner.entry(*owner).or_default() += 1;
+
+        // Whose partial signatures to skip, and how many indices each of them was named for.
+        // Both verdicts name contributors to leave out.
+        let per_owner: HashMap<Address, usize> = match &blame {
+            Blame::Nobody => return false,
+            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
+                .iter()
+                .filter_map(|idx| share_owners.get(idx).copied())
+                .counts(),
+        };
+
+        // Report metrics.
+        match &blame {
+            Blame::Certain(indices) => {
+                for (owner, count) in &per_owner {
+                    metrics
+                        .mpc_partial_sig_mismatch_total
+                        .with_label_values(&[&owner.to_string()])
+                        .inc_by(*count as u64);
+                }
+                let local: Vec<ShareIndex> = indices
+                    .iter()
+                    .copied()
+                    .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
+                    .collect();
+                if !local.is_empty() {
+                    tracing::warn!(
+                        "Locally generated partial signatures at share indices {local:?} disagree \
+                         with the RS-recovered polynomial, so the local presig or key state may be \
+                         corrupt"
+                    );
+                }
             }
+            Blame::Inconclusive(_) | Blame::Nobody => {}
         }
-        for (owner, count) in &per_owner {
-            metrics
-                .mpc_partial_sig_mismatch_total
-                .with_label_values(&[&owner.to_string()])
-                .inc_by(*count);
-        }
-        let local: Vec<ShareIndex> = mismatched
-            .iter()
-            .copied()
-            .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
-            .collect();
-        if !local.is_empty() {
-            tracing::warn!(
-                "Locally generated partial signatures at share indices {local:?} disagree with \
-                 the RS-recovered polynomial: local presig/key state may be corrupt, or the \
-                 decode was steered by other contributions"
-            );
-        }
-        let owners: HashSet<Address> = per_owner.into_keys().collect();
         let before = flagged.len();
         flagged.extend(
             share_owners
                 .iter()
-                .filter(|(_, owner)| owners.contains(*owner))
+                .filter(|(_, owner)| per_owner.contains_key(*owner))
                 .map(|(idx, _)| *idx),
         );
         let grew = flagged.len() > before;
         if grew {
             tracing::debug!(
-                "Flagged {} share index(es) after RS recovery; the other pending inputs are \
-                 also tried without their owners' partials for the rest of this call",
+                "Flagged {} share index(es) after RS recovery; the retries on the other \
+                 pending inputs also leave out their owners' partials for the rest of this \
+                 call",
                 flagged.len() - before,
             );
         }
@@ -1082,9 +1104,9 @@ impl InputSigningState {
 }
 
 enum FinalizeOutcome {
-    /// Aggregation succeeded. The second field lists the share indices whose
-    /// contributed values disagree with the recovered polynomial.
-    Done(SchnorrSignature, Vec<ShareIndex>),
+    /// Aggregation succeeded. The second field says which share indices disagreed with the
+    /// recovered polynomial, and whether their owners can be blamed for it.
+    Done(SchnorrSignature, Blame),
     NeedMore,
     /// No peer can still contribute and no attemptable candidate succeeded.
     Exhausted,
@@ -1101,7 +1123,7 @@ struct AggregationContext {
     beacon: S,
     vk: G,
     deriv: Option<DerivationAddress>,
-    threshold: u16,
+    params: Parameters,
 }
 
 impl AggregationContext {
@@ -1109,74 +1131,44 @@ impl AggregationContext {
         &self,
         sigs: Vec<Eval<S>>,
         metrics: &Metrics,
-    ) -> Result<SchnorrSignature, FastCryptoError> {
+    ) -> Result<(SchnorrSignature, Blame), FastCryptoError> {
         let _timer = metrics
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
+        let (message, nonce, beacon, vk, deriv, params) = (
             self.message.clone(),
             self.nonce,
             self.beacon,
             self.vk,
             self.deriv,
-            self.threshold,
+            self.params,
         );
-        super::spawn_blocking(move || {
+        let (signature, blame) = super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
                 &nonce,
                 &beacon,
                 &sigs,
-                threshold,
+                params,
                 &vk,
                 deriv.as_ref(),
             )
         })
-        .await
-    }
-
-    async fn recover(
-        &self,
-        sigs: Vec<Eval<S>>,
-        metrics: &Metrics,
-    ) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
-        let _timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
-            self.message.clone(),
-            self.nonce,
-            self.beacon,
-            self.vk,
-            self.deriv,
-            self.threshold,
-        );
-        super::spawn_blocking(move || {
-            aggregate_signatures_with_recovery(
-                &message,
-                &nonce,
-                &beacon,
-                &sigs,
-                threshold,
-                &vk,
-                deriv.as_ref(),
-            )
-        })
-        .await
+        .await?;
+        Ok((signature, blame))
     }
 }
 
 async fn try_finalize_signature(
     st: &mut InputSigningState,
-    threshold: u16,
+    params: Parameters,
     verifying_key: &G,
     peers_exhausted: bool,
     flagged: &HashSet<ShareIndex>,
     metrics: &Metrics,
 ) -> FinalizeOutcome {
-    let t = threshold as usize;
+    let t = params.t as usize;
     let n = st.partials.len();
     let need_more_or_fail = || {
         if peers_exhausted {
@@ -1194,14 +1186,24 @@ async fn try_finalize_signature(
         beacon: st.beacon,
         vk: *verifying_key,
         deriv: st.derivation_address,
-        threshold,
+        params,
     };
-    let crypto_error =
-        |e: FastCryptoError| FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string()));
+    let crypto_error = |e: FastCryptoError| {
+        let reason = match e {
+            // The partials were ruled out as the cause, so collecting more cannot fix this.
+            FastCryptoError::InconsistentInputs => {
+                "the presigning tuple, beacon, message, verifying key or derivation address \
+                 does not match the ones the signers used, so retrying will not help"
+                    .to_string()
+            }
+            e => e.to_string(),
+        };
+        FinalizeOutcome::Failed(SigningError::CryptoError(reason))
+    };
     if !st.clean_attempted {
         st.clean_attempted = true;
         match ctx.aggregate(st.partials[..t].to_vec(), metrics).await {
-            Ok(sig) => return FinalizeOutcome::Done(sig, Vec::new()),
+            Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
@@ -1210,15 +1212,15 @@ async fn try_finalize_signature(
     if let Some(key) = st.unflagged_prefix_key(t, &unflagged, flagged) {
         st.unflagged_prefix_attempted = Some(key);
         match ctx.aggregate(unflagged[..t].to_vec(), metrics).await {
-            Ok(sig) => return FinalizeOutcome::Done(sig, Vec::new()),
+            Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
     }
     if st.recovery_attemptable(t) {
-        match ctx.recover(st.partials.clone(), metrics).await {
+        match ctx.aggregate(st.partials.clone(), metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
-            Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
+            Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
         st.required_full = next_rs_attempt_at(t, n);
@@ -1226,9 +1228,9 @@ async fn try_finalize_signature(
     if let Some(key) = st.erased_key(t, &unflagged) {
         let n_unflagged = unflagged.len();
         st.erased_attempted = Some(key);
-        match ctx.recover(unflagged, metrics).await {
+        match ctx.aggregate(unflagged, metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
-            Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
+            Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
         st.required_erased = next_rs_attempt_at(t, n_unflagged);
@@ -1256,7 +1258,7 @@ impl SigningManager {
         flagged: &HashSet<ShareIndex>,
         metrics: &Metrics,
     ) -> bool {
-        let t = self.config.threshold as usize;
+        let t = self.config.params.t as usize;
         let now = Instant::now();
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
         for st in pending.iter_mut() {
@@ -1448,34 +1450,6 @@ impl SigningManager {
         }
         progressed
     }
-}
-
-fn aggregate_signatures_with_recovery(
-    message: &[u8],
-    public_presig: &G,
-    beacon_value: &S,
-    partial_signatures: &[Eval<S>],
-    threshold: u16,
-    verifying_key: &G,
-    derivation_address: Option<&DerivationAddress>,
-) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
-    let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
-    let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
-    let poly = RSDecoder::new(indices, threshold as usize).compute_message_polynomial(&values)?;
-    let sig = finalize_schnorr_signature(
-        message,
-        public_presig,
-        beacon_value,
-        poly.c0(),
-        verifying_key,
-        derivation_address,
-    )?;
-    let mismatched = partial_signatures
-        .iter()
-        .filter(|e| poly.eval(e.index).value != e.value)
-        .map(|e| e.index)
-        .collect();
-    Ok((sig, mismatched))
 }
 
 #[cfg(test)]
@@ -1982,7 +1956,7 @@ mod tests {
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
-                        t,
+                        Parameters { t, f },
                         key_shares,
                         vk,
                         test_share_owners(n),
@@ -2161,13 +2135,14 @@ mod tests {
         }
     }
 
-    /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
+    /// Pre-built partial sigs for the error-correcting aggregation tests.
     struct AggregateTestData {
         partial_sigs: Vec<Eval<S>>,
         public_nonce: G,
         vk: G,
         beacon: S,
         t: u16,
+        f: u16,
         rng: StdRng,
     }
 
@@ -2248,6 +2223,7 @@ mod tests {
             vk,
             beacon,
             t,
+            f,
             rng,
         }
     }
@@ -2322,7 +2298,7 @@ mod tests {
         let mgr = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2342,7 +2318,7 @@ mod tests {
         let (_, unmasked) = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2407,7 +2383,7 @@ mod tests {
         let err = SigningManager::new_recovered(
             test_address(0),
             committee,
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2929,7 +2905,7 @@ mod tests {
 
         let outcome = try_finalize_signature(
             &mut pending[0],
-            setup.managers[0].config.threshold,
+            setup.managers[0].config.params,
             &setup.verifying_key,
             true,
             &HashSet::new(),
@@ -2938,7 +2914,7 @@ mod tests {
         .await;
         match outcome {
             FinalizeOutcome::Done(sig, mismatched) => {
-                assert!(mismatched.is_empty(), "no share should mismatch");
+                assert_eq!(mismatched, Blame::Nobody, "no share should mismatch");
                 verify_schnorr(&setup.verifying_key, message, &sig);
                 let reported = G::from_byte_array(&signing_nonce_bytes(&public_nonce, &beacon))
                     .unwrap()
@@ -3703,7 +3679,8 @@ mod tests {
         // n=4, t=2, f=1. All 3 peers return corrupt sigs.
         // aggregate_signatures uses first `threshold` sigs, so caller(valid) +
         // any_peer(corrupted) → InvalidSignature.
-        // RS: 4 sigs, 3 bad, capacity=(4-2)/2=1 → TooManyErrors.
+        // RS: 4 sigs, 3 bad, capacity=(4-2)/2=1 → decoding fails, reported as
+        // InvalidSignature.
         // No remaining peers → TooManyInvalidSignatures.
         let setup = SigningTestSetup::new(4);
         let message = b"too-many";
@@ -4026,7 +4003,18 @@ mod tests {
             data.t as usize,
             HashSet::new(),
         );
-        try_finalize_signature(&mut st, data.t, &data.vk, true, flagged, &test_metrics()).await
+        try_finalize_signature(
+            &mut st,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
+            &data.vk,
+            true,
+            flagged,
+            &test_metrics(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -4052,7 +4040,7 @@ mod tests {
         match finalize_with(&data, message, garbage_first.clone(), &flags(&[4, 5])).await {
             FinalizeOutcome::Done(sig, mismatched) => {
                 verify_schnorr(&data.vk, message, &sig);
-                assert!(mismatched.is_empty());
+                assert_eq!(mismatched, Blame::Nobody);
             }
             _ => panic!("flagging the garbage indices must complete the input"),
         }
@@ -4070,7 +4058,9 @@ mod tests {
         match finalize_with(&data, message, one_flagged, &flags(&[4])).await {
             FinalizeOutcome::Done(sig, mismatched) => {
                 verify_schnorr(&data.vk, message, &sig);
-                assert_eq!(mismatched, vec![share_index(5)]);
+                // The correction is right, but 5 partials with 1 excluded leaves 4 against the
+                // t + f = 5 needed to blame it, so it comes back for flagging only.
+                assert_eq!(mismatched, Blame::Inconclusive(vec![share_index(5)]));
             }
             _ => panic!("erasing the flagged index must let recovery correct the other"),
         }
@@ -4085,12 +4075,15 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         let corrupted_index = data.partial_sigs[0].index;
 
-        let (sig, mismatched) = aggregate_signatures_with_recovery(
+        let (sig, mismatched) = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
             &data.partial_sigs,
-            data.t,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
             &data.vk,
             None,
         )
@@ -4099,7 +4092,7 @@ mod tests {
         verify_schnorr(&data.vk, message, &sig);
         assert_eq!(
             mismatched,
-            vec![corrupted_index],
+            Blame::Certain(vec![corrupted_index]),
             "recovery must identify exactly the corrupted share index"
         );
     }
@@ -4113,20 +4106,23 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         data.partial_sigs[1].value = S::rand(&mut data.rng);
 
-        let result = aggregate_signatures_with_recovery(
+        let result = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
             &data.partial_sigs,
-            data.t,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
             &data.vk,
             None,
         );
 
         assert!(
-            matches!(result, Err(FastCryptoError::TooManyErrors(_))),
-            "expected TooManyErrors, got: {:?}",
-            result.err()
+            matches!(result, Err(FastCryptoError::InvalidSignature)),
+            "expected InvalidSignature, got: {:?}",
+            result.err().map(|e| e.to_string())
         );
     }
 

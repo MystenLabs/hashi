@@ -176,8 +176,8 @@ pub struct Metrics {
     /// per input before its eval set is inspected, so an empty eval set still
     /// counts; an input the peer omitted entirely is never reached.
     pub mpc_partial_sig_nonce_mismatch_total: IntCounterVec,
-    /// Partial signatures that disagreed with the RS-recovered polynomial,
-    /// by owner.
+    /// Partial signatures that disagreed with the RS-recovered polynomial, by
+    /// owner. Counted only when the decoding could blame that owner for them.
     pub mpc_partial_sig_mismatch_total: IntCounterVec,
     /// Partial-signature lists refused at merge, by peer.
     pub mpc_partial_sig_lists_rejected_total: IntCounterVec,
@@ -1103,8 +1103,9 @@ impl Metrics {
             .unwrap(),
             mpc_partial_sig_mismatch_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_partial_sig_mismatch_total",
-                "Partial signatures that disagreed with the RS-recovered polynomial, by owner \
-                 (does not establish which side is wrong; nobody is excluded)",
+                "Partial signatures the decoding could attribute to their owner, counted only \
+                 when enough honest shares were kept to rule out a steered decode; nobody is \
+                 excluded on this alone",
                 &["peer"],
                 registry,
             )
