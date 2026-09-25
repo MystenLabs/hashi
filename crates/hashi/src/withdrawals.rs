@@ -809,6 +809,11 @@ impl Hashi {
                 anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
 
+        anyhow::ensure!(
+            !txn.is_fully_signed(),
+            "WithdrawalTransaction {withdrawal_txn_id} is already finalized"
+        );
+
         let guardian_request = build_guardian_withdrawal_request(self, &txn, timestamp_secs, seq)?;
 
         self.sign_message_proto(&guardian_request)
