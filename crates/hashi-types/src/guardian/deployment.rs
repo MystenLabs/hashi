@@ -76,7 +76,7 @@ mod tests {
     fn every_deployment_setting_is_bound_into_both_approvals() {
         let original = DeploymentConfig::mock_for_testing();
         let state = CeremonyState::from(SetupNewKeyResponse::mock_for_testing());
-        let init = InitConfig::mock_for_testing(None);
+        let init = InitConfig::mock_for_testing();
         let mut changes = Vec::new();
         let mut changed = original.clone();
         changed.bucket_info.name.push_str("-other");
@@ -117,12 +117,7 @@ mod tests {
                 }
                 .digest()
             );
-            let changed_init = InitConfig::new(
-                *init.limiter_config(),
-                init.hashi_btc_master_pubkey(),
-                changed,
-                init.hashi_object_id(),
-            );
+            let changed_init = InitConfig::new(*init.limiter_config(), changed);
             assert_ne!(changed_init.digest(), init.digest());
         }
     }

@@ -11,6 +11,7 @@ use crate::enclave::TemporaryInitState;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
+use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;
@@ -31,6 +32,8 @@ pub struct OIWithdrawModeInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
     genesis_state: Option<GenesisState>,
+    hashi_object_id: hashi_types::sui_sdk_types::Address,
+    mpc_master_g: HashiMasterG,
 }
 
 impl OIInstall {
@@ -54,26 +57,48 @@ impl OIWithdrawModeInstall {
         init_config: InitConfig,
         ceremony_state: CeremonyState,
         genesis_state: Option<GenesisState>,
+        hashi_object_id: hashi_types::sui_sdk_types::Address,
+        mpc_master_g: HashiMasterG,
     ) -> Self {
         Self {
             init_config,
             ceremony_state,
             genesis_state,
+            hashi_object_id,
+            mpc_master_g,
         }
     }
 
-    /// Build the arming bundle from the stable config and S3-derived ceremony +
-    /// KP share state.
-    pub async fn from_config(
-        logger: &GuardianS3Client,
+    /// Build the arming bundle from the stable config, verified ceremony state,
+    /// and either supplied bootstrap state or verified persisted genesis.
+    async fn from_ceremony_state(
+        reader: &mut GuardianReader,
         config: InitConfig,
+        ceremony_state: CeremonyState,
         genesis_state: Option<GenesisState>,
     ) -> GuardianResult<Self> {
-        let mut reader =
-            GuardianReader::from_s3_client(logger.clone(), config.deployment().clone());
-        let ceremony_state = reader.read_latest_ceremony_state().await?;
+        // First deployment pins these values for KP authorization during PI.
+        // Subsequent enclaves recover them from the verified immutable record.
+        let (hashi_object_id, mpc_master_g) = match &genesis_state {
+            Some(state) => {
+                let (_, hashi_object_id, mpc_master_g) = state.clone().into_parts();
+                (hashi_object_id, mpc_master_g)
+            }
+            None => {
+                let genesis = reader.read_genesis().await?.ok_or_else(|| {
+                    InvalidInputs("no genesis record found; genesis bootstrap is required".into())
+                })?;
+                (genesis.hashi_object_id, genesis.mpc_master_g)
+            }
+        };
 
-        Ok(Self::from_parts(config, ceremony_state, genesis_state))
+        Ok(Self::from_parts(
+            config,
+            ceremony_state,
+            genesis_state,
+            hashi_object_id,
+            mpc_master_g,
+        ))
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
@@ -81,8 +106,6 @@ impl OIWithdrawModeInstall {
     pub fn install_into(self, enclave: &Enclave) {
         let config_hash = self.init_config.digest();
         let limiter_config = *self.init_config.limiter_config();
-        let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
-        let hashi_object_id = self.init_config.hashi_object_id();
 
         info!(
             "Setting secret-sharing instance: n={}, t={}, {} commitments.",
@@ -109,7 +132,7 @@ impl OIWithdrawModeInstall {
 
         info!("Setting withdraw configuration.");
         enclave
-            .install_config(hashi_btc_master_pubkey, limiter_config, hashi_object_id)
+            .install_config(self.mpc_master_g, limiter_config, self.hashi_object_id)
             .expect("Unable to set enclave configuration");
     }
 }
@@ -192,7 +215,18 @@ pub async fn operator_init(
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
     let withdraw_mode = match withdraw_inputs {
         Some((config, genesis_state)) => {
-            Some(OIWithdrawModeInstall::from_config(&logger, config, genesis_state).await?)
+            let mut reader =
+                GuardianReader::from_s3_client(logger.clone(), config.deployment().clone());
+            let ceremony_state = reader.read_latest_ceremony_state().await?;
+            Some(
+                OIWithdrawModeInstall::from_ceremony_state(
+                    &mut reader,
+                    config,
+                    ceremony_state,
+                    genesis_state,
+                )
+                .await?,
+            )
         }
         None => None,
     };
@@ -304,6 +338,120 @@ mod tests {
         assert!(validate_deployment(&enclave, &deployment).is_ok());
     }
 
+    fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> LogRecord {
+        let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
+        LogRecord::new(
+            SessionID::from_signing_pubkey(&key.verification_key()),
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
+                committee,
+                hashi_object_id,
+                mpc_master_g,
+            })),
+            key,
+        )
+    }
+
+    #[tokio::test]
+    async fn installs_immutable_bindings_from_genesis_after_committee_updates() {
+        let key = GuardianSignKeyPair::from([42; 32]);
+        let (committee, _, _) = GenesisState::mock_for_testing().into_parts();
+        let object_id = hashi_types::sui_sdk_types::Address::new([19; 32]);
+        let master_g = hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test(
+            &hashi_types::bitcoin::create_btc_keypair_for_test(&[23; 32])
+                .x_only_public_key()
+                .0,
+        );
+        let genesis = GenesisState::from_parts(committee, object_id, master_g);
+        let mut reader = crate::s3_reader::genesis_reader_for_test(
+            Some(genesis_record(genesis, &key)),
+            key.verification_key(),
+            vec!["committee-update/00000000000000000009-later-session.json".into()],
+        );
+        let args = crate::test_utils::OperatorInitTestArgs::default();
+        let install = OIWithdrawModeInstall::from_ceremony_state(
+            &mut reader,
+            args.config,
+            args.ceremony_state,
+            None,
+        )
+        .await
+        .unwrap();
+        let enclave = Enclave::create_with_random_keys();
+        enclave
+            .config
+            .set_deployment(install.init_config.deployment().clone())
+            .unwrap();
+        install.install_into(&enclave);
+        let info = enclave.info().await;
+        assert_eq!(info.hashi_object_id, Some(object_id));
+        assert_eq!(info.mpc_master_g, Some(master_g));
+        assert_eq!(info.genesis_state_hash, None);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_installs_supplied_genesis_bindings_and_authorization_hash() {
+        // This logger cannot service reads: bootstrap must use the supplied state.
+        let args = crate::test_utils::OperatorInitTestArgs::default();
+        let mut reader =
+            GuardianReader::from_s3_client(args.s3_logger, args.config.deployment().clone());
+        let genesis = GenesisState::mock_for_testing();
+        let expected_hash = genesis.digest();
+        let (_, object_id, master_g) = genesis.clone().into_parts();
+        let install = OIWithdrawModeInstall::from_ceremony_state(
+            &mut reader,
+            args.config,
+            args.ceremony_state,
+            Some(genesis),
+        )
+        .await
+        .unwrap();
+        let enclave = Enclave::create_with_random_keys();
+        enclave
+            .config
+            .set_deployment(install.init_config.deployment().clone())
+            .unwrap();
+        install.install_into(&enclave);
+        let info = enclave.info().await;
+        assert_eq!(info.hashi_object_id, Some(object_id));
+        assert_eq!(info.mpc_master_g, Some(master_g));
+        assert_eq!(info.genesis_state_hash, Some(expected_hash));
+    }
+
+    #[tokio::test]
+    async fn missing_or_invalid_genesis_rejects_install_preparation() {
+        let key = GuardianSignKeyPair::from([42; 32]);
+        let record = genesis_record(GenesisState::mock_for_testing(), &key);
+        // Keep the expected session identity while changing signed contents.
+        let mut json = serde_json::to_value(record).unwrap();
+        json["timestamp_ms"] = serde_json::json!(json["timestamp_ms"].as_u64().unwrap() + 1);
+        let invalid_record = serde_json::from_value(json).unwrap();
+        for record in [None, Some(invalid_record)] {
+            let missing = record.is_none();
+            let mut reader =
+                crate::s3_reader::genesis_reader_for_test(record, key.verification_key(), vec![]);
+            let args = crate::test_utils::OperatorInitTestArgs::default();
+            let result = OIWithdrawModeInstall::from_ceremony_state(
+                &mut reader,
+                args.config,
+                args.ceremony_state,
+                None,
+            )
+            .await;
+            let error = result
+                .err()
+                .expect("invalid genesis must not produce an install bundle");
+            if missing {
+                assert!(
+                    matches!(error, InvalidInputs(message) if message.contains("no genesis record"))
+                );
+            } else {
+                assert!(
+                    matches!(error, InvalidS3Log(message) if message.contains("invalid log signature"))
+                );
+            }
+        }
+    }
+
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
     /// carries the InitConfig install bundle; ceremony => none).
     async fn commit_for_mode(mode: EnclaveMode) -> (Arc<Enclave>, CapturedPuts) {
@@ -316,7 +464,7 @@ mod tests {
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let (deployment, withdraw_mode) = match mode {
             EnclaveMode::Withdraw => {
-                let config = InitConfig::mock_for_testing(None);
+                let config = InitConfig::mock_for_testing();
                 let args = crate::test_utils::OperatorInitTestArgs::default();
                 (
                     config.deployment().clone(),
@@ -324,6 +472,8 @@ mod tests {
                         config,
                         args.ceremony_state,
                         None,
+                        args.hashi_object_id,
+                        args.mpc_master_g,
                     )),
                 )
             }

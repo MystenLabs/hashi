@@ -76,19 +76,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
     info!(
-        phase = "sui connect",
-        sui_rpc = %cfg.hashi.sui_rpc,
-        package_id = %cfg.hashi.hashi_ids.package_id,
-        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
-        "connecting to Sui RPC for Hashi on-chain state",
-    );
-    let onchain_state = cfg.hashi.onchain_state().await?;
-    info!(phase = "sui connect", "connected to Sui RPC");
-
-    let master_g = onchain_state.onchain_verifying_key_g()?;
-    info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
-
-    info!(
         phase = "guardian connect",
         endpoint = %cfg.guardian_endpoint,
         "connecting to withdraw-mode guardian",
@@ -106,7 +93,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let session_id = preflight.session_id.clone();
     let signing_pub_key = preflight.signing_pub_key;
     let pre_info = preflight.info.clone();
-    let standby = verify_provisioned_standby_info(&pre_info, &cfg, &master_g)?;
+    let standby = verify_provisioned_standby_info(&pre_info, &cfg)?;
     info!(
         phase = "guardian preflight",
         session_id = %session_id,
@@ -293,7 +280,6 @@ struct StandbyChecks {
 fn verify_provisioned_standby_info(
     info: &GuardianInfo,
     cfg: &Config,
-    master_g: &hashi_types::bitcoin::HashiMasterG,
 ) -> anyhow::Result<StandbyChecks> {
     ensure!(
         info.lifecycle == WithdrawStage::ProvisionerInitialized.into(),
@@ -313,9 +299,6 @@ fn verify_provisioned_standby_info(
     let limiter_config = info
         .limiter_config
         .context("Guardian info missing limiter config")?;
-    let mpc_master_g = info
-        .mpc_master_g
-        .context("Guardian info missing MPC master G")?;
     ensure!(
         info.limiter_state.is_none(),
         "Guardian has limiter_state => operator activation already ran"
@@ -336,18 +319,7 @@ fn verify_provisioned_standby_info(
         cfg.limiter_config,
         limiter_config
     );
-    ensure!(
-        master_g == &mpc_master_g,
-        "Guardian MPC master G mismatch: expected {:?}, got {:?}",
-        master_g,
-        mpc_master_g
-    );
-    let init_config = InitConfig::new(
-        cfg.limiter_config,
-        *master_g,
-        cfg.deployment.clone(),
-        cfg.hashi.hashi_ids.hashi_object_id,
-    );
+    let init_config = InitConfig::new(cfg.limiter_config, cfg.deployment.clone());
     let expected_config_hash = init_config.digest();
     ensure!(
         expected_config_hash == config_hash,

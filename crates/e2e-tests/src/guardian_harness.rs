@@ -86,14 +86,12 @@ impl GuardianHarness {
         limiter_state: LimiterState,
         hashi_object_id: sui_sdk_types::Address,
     ) -> Result<()> {
-        let config = InitConfig::from_parts_for_testing(
-            limiter_config,
-            master_pubkey,
-            self.network,
-            hashi_object_id,
+        let config = InitConfig::from_parts_for_testing(limiter_config, self.network);
+        self.enclave.install_operator_init_for_testing(
+            OperatorInitTestArgs::default()
+                .with_config(config)
+                .with_genesis_bindings(hashi_object_id, master_pubkey),
         );
-        self.enclave
-            .install_operator_init_for_testing(OperatorInitTestArgs::default().with_config(config));
         hashi_guardian::test_utils::finalize_enclave(&self.enclave)
             .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
         activate_enclave_for_testing(&self.enclave, committee, limiter_config, limiter_state)

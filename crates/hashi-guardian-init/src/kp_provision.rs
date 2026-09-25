@@ -13,12 +13,12 @@
 //!    configured) — is fetched and verified against the enclave attestation,
 //!    pinning the standby session.
 //! 2. The same session's S3 `init/` log is fetched and required to match the
-//!    endpoint `GuardianInfo`. Bucket, limiter config, `mpc_master_g`, and
+//!    endpoint `GuardianInfo`. Deployment policy, limiter config, and
 //!    `enclave_btc_pubkey == None` are all confirmed.
 //! 3. The authoritative `ceremony/` log is scraped for the secret-sharing
 //!    instance the new guardian was booted with; it must match.
-//! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
-//!    allowlist, S3 policy, and network; its `config_hash` is confirmed.
+//! 4. The stable `InitConfig` is recomputed from limiter config and deployment
+//!    policy; its `config_hash` is confirmed.
 //! 5. The optional genesis state hash is independently derived from S3 and
 //!    current on-chain state and confirmed against the enclave's pin.
 //! 6. This KP's PGP-encrypted share is read from the latest
@@ -95,19 +95,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
     info!(
-        phase = "sui connect",
-        sui_rpc = %cfg.hashi.sui_rpc,
-        package_id = %cfg.hashi.hashi_ids.package_id,
-        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
-        "connecting to Sui RPC for Hashi on-chain state",
-    );
-    let onchain_state = cfg.hashi.onchain_state().await?;
-    info!(phase = "sui connect", "connected to Sui RPC");
-
-    let master_g = onchain_state.onchain_verifying_key_g()?;
-    info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
-
-    info!(
         phase = "roster load",
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP certificate roster",
@@ -171,15 +158,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         limiter_state: enclave_limiter_state,
         limiter_config,
         current_committee_epoch: enclave_current_committee_epoch,
-        mpc_master_g,
-        hashi_object_id: enclave_hashi_object_id,
+        mpc_master_g: _,
+        hashi_object_id: _,
     } = &guardian_info;
-    anyhow::ensure!(
-        *enclave_hashi_object_id == Some(cfg.hashi.hashi_ids.hashi_object_id),
-        "Guardian hashi_object_id mismatch: enclave reports {:?}, expected {}",
-        enclave_hashi_object_id,
-        cfg.hashi.hashi_ids.hashi_object_id,
-    );
     anyhow::ensure!(
         *lifecycle == WithdrawStage::OperatorInitialized.into(),
         "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
@@ -205,9 +186,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         .as_ref()
         .copied()
         .context("Guardian info missing limiter_config")?;
-    let enclave_mpc_master_g = mpc_master_g
-        .as_ref()
-        .context("Guardian info missing mpc_master_g")?;
     info!(
         phase = "guardian info",
         session_id = %session_id,
@@ -241,16 +219,10 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     ensure_oi_info_matches_post_init(verified_session.info(), &guardian_info)
         .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
-    anyhow::ensure!(
-        &master_g == enclave_mpc_master_g,
-        "MPC master g mismatch: expected {:?}, got {:?}",
-        master_g,
-        enclave_mpc_master_g
-    );
     info!(
         phase = "guardian info",
         session_id = %session_id,
-        "guardian info checks passed (bucket, limiter config, mpc_master_g, standby not activated)",
+        "guardian info checks passed (deployment policy, limiter config, standby not activated)",
     );
     info!(
         phase = "heartbeat",
@@ -297,14 +269,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     //    digest is the `config_hash` bound into the signed PI submission.
     info!(
         phase = "config hash",
-        "recomputing config_hash from limiter config + master G + PCR allowlist + S3 policy + network",
+        "recomputing config_hash from limiter config + deployment policy",
     );
-    let expected_config = InitConfig::new(
-        cfg.limiter_config,
-        master_g,
-        cfg.deployment.clone(),
-        cfg.hashi.hashi_ids.hashi_object_id,
-    );
+    let expected_config = InitConfig::new(cfg.limiter_config, cfg.deployment.clone());
     let config_hash = expected_config.digest();
     anyhow::ensure!(
         config_hash == enclave_config_hash,
@@ -324,6 +291,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let expected_genesis_state_hash = match (do_genesis, latest_committee) {
         (false, Some(_)) => None,
         (true, None) => {
+            let onchain_state = cfg.hashi.onchain_state().await?;
+            let master_g = onchain_state.onchain_verifying_key_g()?;
             let committee = onchain_state
                 .current_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
