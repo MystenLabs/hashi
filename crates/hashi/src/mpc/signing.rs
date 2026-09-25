@@ -2327,113 +2327,151 @@ mod tests {
         }
     }
 
+    /// One member's view of a four-member committee, enough to rebuild a
+    /// `SigningManager` from retained presig batches as restart recovery
+    /// does.
+    struct RecoveryFixture {
+        committee: Committee,
+        t: u16,
+        key_shares: avss::SharesForNode,
+        vk: G,
+        outputs: Vec<batch_avss::ReceiverOutput>,
+        params: Parameters,
+        batch_size_per_weight: u16,
+    }
+
+    impl RecoveryFixture {
+        fn new() -> Self {
+            let n: u16 = 4;
+            let f = (n - 1) / 3;
+            let t = f + 1;
+            let mut rng = StdRng::seed_from_u64(7);
+
+            let encryption_keys: Vec<_> = (0..n)
+                .map(|_| EncryptionPrivateKey::new(&mut rng))
+                .collect();
+            let members: Vec<_> = (0..n as usize)
+                .map(|i| {
+                    CommitteeMember::new(
+                        test_address(i),
+                        hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
+                        encryption_keys[i].public_key(),
+                        1,
+                    )
+                })
+                .collect();
+            let committee = Committee::new(members, 100, 0u16, 3333u16);
+
+            let sk = S::rand(&mut rng);
+            let vk = G::generator() * sk;
+            let sk_shares = mock_shares(&mut rng, sk, t, n);
+
+            let batch_size_per_weight: u16 = 10;
+            let nonces_for_dealer: Vec<(Vec<G>, Vec<Vec<S>>)> = (0..n)
+                .map(|_| {
+                    let nonces: Vec<S> = (0..batch_size_per_weight)
+                        .map(|_| S::rand(&mut rng))
+                        .collect();
+                    let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                    let nonce_shares: Vec<Vec<S>> = nonces
+                        .iter()
+                        .map(|&nonce| {
+                            mock_shares(&mut rng, nonce, t, n)
+                                .iter()
+                                .map(|e| e.value)
+                                .collect()
+                        })
+                        .collect();
+                    (public_keys, nonce_shares)
+                })
+                .collect();
+
+            let index = ShareIndex::new(1).unwrap();
+            let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
+                .map(|j| batch_avss::ReceiverOutput {
+                    my_shares: batch_avss::SharesForNode {
+                        shares: vec![batch_avss::ShareBatch {
+                            index,
+                            batch: (0..batch_size_per_weight as usize)
+                                .map(|l| nonces_for_dealer[j].1[l][0])
+                                .collect(),
+                            blinding_share: S::zero(),
+                        }],
+                    },
+                    public_keys: nonces_for_dealer[j].0.clone(),
+                })
+                .collect();
+            RecoveryFixture {
+                committee,
+                t,
+                key_shares: avss::SharesForNode {
+                    shares: vec![sk_shares[0].clone()],
+                },
+                vk,
+                outputs,
+                params: Parameters { t, f },
+                batch_size_per_weight,
+            }
+        }
+
+        /// A freshly derived batch; every call yields the same presigs.
+        fn batch(&self) -> Presignatures {
+            Presignatures::new(
+                self.outputs.clone(),
+                self.batch_size_per_weight,
+                self.params,
+                true,
+            )
+            .unwrap()
+        }
+
+        fn recover(
+            &self,
+            retained: Vec<(Presignatures, u32, u64)>,
+            num_consumed: u64,
+            pending: &HashSet<u64>,
+        ) -> anyhow::Result<(SigningManager, Vec<(u32, PresigBatchIdentity)>)> {
+            let (refill_tx, _rx) = watch::channel(0u32);
+            SigningManager::new_recovered(
+                test_address(0),
+                self.committee.clone(),
+                self.t,
+                self.key_shares.clone(),
+                self.vk,
+                test_share_owners(4),
+                retained,
+                num_consumed,
+                pending,
+                crate::constants::PRESIG_REFILL_DIVISOR,
+                Arc::new(refill_tx),
+                IdentityInputs::for_test(),
+            )
+        }
+    }
+
     #[test]
     fn test_new_recovered_retains_pending_batch_and_gates_slots() {
-        let n: u16 = 4;
-        let f = (n - 1) / 3;
-        let t = f + 1;
-        let mut rng = StdRng::seed_from_u64(7);
-
-        let encryption_keys: Vec<_> = (0..n)
-            .map(|_| EncryptionPrivateKey::new(&mut rng))
-            .collect();
-        let members: Vec<_> = (0..n as usize)
-            .map(|i| {
-                CommitteeMember::new(
-                    test_address(i),
-                    hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
-                    encryption_keys[i].public_key(),
-                    1,
-                )
-            })
-            .collect();
-        let committee = Committee::new(members, 100, 0u16, 3333u16);
-
-        let sk = S::rand(&mut rng);
-        let vk = G::generator() * sk;
-        let sk_shares = mock_shares(&mut rng, sk, t, n);
-
-        let batch_size_per_weight: u16 = 10;
-        let nonces_for_dealer: Vec<(Vec<G>, Vec<Vec<S>>)> = (0..n)
-            .map(|_| {
-                let nonces: Vec<S> = (0..batch_size_per_weight)
-                    .map(|_| S::rand(&mut rng))
-                    .collect();
-                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
-                let nonce_shares: Vec<Vec<S>> = nonces
-                    .iter()
-                    .map(|&nonce| {
-                        mock_shares(&mut rng, nonce, t, n)
-                            .iter()
-                            .map(|e| e.value)
-                            .collect()
-                    })
-                    .collect();
-                (public_keys, nonce_shares)
-            })
-            .collect();
-
-        let index = ShareIndex::new(1).unwrap();
-        let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
-            .map(|j| batch_avss::ReceiverOutput {
-                my_shares: batch_avss::SharesForNode {
-                    shares: vec![batch_avss::ShareBatch {
-                        index,
-                        batch: (0..batch_size_per_weight as usize)
-                            .map(|l| nonces_for_dealer[j].1[l][0])
-                            .collect(),
-                        blinding_share: S::zero(),
-                    }],
-                },
-                public_keys: nonces_for_dealer[j].0.clone(),
-            })
-            .collect();
-        let params = Parameters { t, f };
-        let new_batch =
-            || Presignatures::new(outputs.clone(), batch_size_per_weight, params, true).unwrap();
-        let size0 = new_batch().len() as u64;
+        let fixture = RecoveryFixture::new();
+        let size0 = fixture.batch().len() as u64;
         assert!(size0 > 6, "batch must be large enough for the index math");
 
         let num_consumed = size0 + 5;
         let pending: HashSet<u64> = HashSet::from([3u64]);
-        let (refill_tx, _rx) = watch::channel(0u32);
-        let mgr = SigningManager::new_recovered(
-            test_address(0),
-            committee.clone(),
-            t,
-            avss::SharesForNode {
-                shares: vec![sk_shares[0].clone()],
-            },
-            vk,
-            test_share_owners(4),
-            vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
-            num_consumed,
-            &pending,
-            crate::constants::PRESIG_REFILL_DIVISOR,
-            Arc::new(refill_tx),
-            IdentityInputs::for_test(),
-        )
-        .unwrap();
-        let (mgr, identities) = (mgr.0, mgr.1);
+        let (mgr, identities) = fixture
+            .recover(
+                vec![(fixture.batch(), 0, 0), (fixture.batch(), 1, size0)],
+                num_consumed,
+                &pending,
+            )
+            .unwrap();
 
-        let (fresh_refill_tx, _fresh_rx) = watch::channel(0u32);
-        let (_, unmasked) = SigningManager::new_recovered(
-            test_address(0),
-            committee.clone(),
-            t,
-            avss::SharesForNode {
-                shares: vec![sk_shares[0].clone()],
-            },
-            vk,
-            test_share_owners(4),
-            vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
-            0,
-            &HashSet::new(),
-            crate::constants::PRESIG_REFILL_DIVISOR,
-            Arc::new(fresh_refill_tx),
-            IdentityInputs::for_test(),
-        )
-        .unwrap();
+        let (_, unmasked) = fixture
+            .recover(
+                vec![(fixture.batch(), 0, 0), (fixture.batch(), 1, size0)],
+                0,
+                &HashSet::new(),
+            )
+            .unwrap();
         assert_eq!(
             identities.len(),
             2,
@@ -2481,27 +2519,50 @@ mod tests {
             );
         }
 
-        let (refill_tx2, _rx2) = watch::channel(0u32);
-        let err = SigningManager::new_recovered(
-            test_address(0),
-            committee,
-            t,
-            avss::SharesForNode {
-                shares: vec![sk_shares[0].clone()],
-            },
-            vk,
-            test_share_owners(4),
-            vec![(new_batch(), 1, size0)], // batch 0 dropped
+        let err = fixture.recover(
+            vec![(fixture.batch(), 1, size0)], // batch 0 dropped
             num_consumed,
             &pending, // pending {3} lives in the dropped batch 0
-            crate::constants::PRESIG_REFILL_DIVISOR,
-            Arc::new(refill_tx2),
-            IdentityInputs::for_test(),
         );
         assert!(
             err.is_err(),
             "must reject a rebuild that fails to cover a pending index"
         );
+    }
+
+    /// A restart must keep both halves of a pending pair that straddles two
+    /// retained batches enabled, and the recovered manager must be able to
+    /// take the pair exactly once.
+    #[test]
+    fn test_new_recovered_keeps_a_pending_pair_straddling_two_batches() {
+        let fixture = RecoveryFixture::new();
+        let size0 = fixture.batch().len() as u64;
+        let pair = PresigPair {
+            first: size0 - 1,
+            second: size0,
+        };
+        let pending = HashSet::from(pair.indices());
+
+        let (mgr, _) = fixture
+            .recover(
+                vec![(fixture.batch(), 0, 0), (fixture.batch(), 1, size0)],
+                size0 + 1,
+                &pending,
+            )
+            .unwrap();
+
+        assert!(presig_available(&mgr, pair.first));
+        assert!(presig_available(&mgr, pair.second));
+        assert!(
+            !presig_available(&mgr, size0 - 2),
+            "a consumed, non-pending neighbor stays disabled"
+        );
+        mgr.take_presig_pair(&mut mgr.state.write().unwrap(), pair)
+            .expect("the recovered pair spans both retained batches");
+        assert!(matches!(
+            mgr.take_presig_pair(&mut mgr.state.write().unwrap(), pair),
+            Err(SigningError::PoolExhausted)
+        ));
     }
 
     #[test]
