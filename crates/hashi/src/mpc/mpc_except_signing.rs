@@ -5325,8 +5325,9 @@ impl MpcManager {
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
             self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
-        // Share indices are unique across certified dealers: every honest signer of a
-        // rotation cert rejects unowned indices at ack time.
+        // Share indices are unique across certified dealers, and match what `select_rotation_indices`
+        // picks in `run_key_rotation_as_party`: every honest signer of a rotation cert rejects
+        // unowned indices at ack time.
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
