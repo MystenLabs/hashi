@@ -8,7 +8,8 @@
 # - Configures loopback network and /etc/hosts
 # - Starts traffic forwarders for S3 endpoints
 # - Forwards VSOCK port 3000 to localhost:3000 (gRPC)
-# - Launches hashi-guardian
+# - Ships hashi-guardian's output to the parent on VSOCK port 9200
+# - Runs hashi-guardian, and exits when it does
 
 set -e
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
@@ -57,10 +58,30 @@ socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
 # Forward VSOCK port 3000 to localhost:3000 (gRPC server)
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 
+# A non-debug enclave's console can't be read, so the guardian's output goes to
+# the parent, which journals it; with no parent listening it goes to the console.
+mkfifo /tmp/guardian.log
+# Keep a reader on the fifo: a write with none fails with EPIPE, and a failed
+# print! panics the guardian.
+exec 3<>/tmp/guardian.log
+(
+	set +e
+	while :; do
+		# -T ends a connection once it has moved nothing for a minute, so a parent
+		# that stops reading can hold up the guardian's writes for that long at most.
+		socat -T 60 -u OPEN:/tmp/guardian.log VSOCK-CONNECT:3:9200 && continue
+		timeout 5 cat /tmp/guardian.log >/dev/console
+	done
+) 3>&- >/dev/null 2>&1 &
+
 # CEREMONY_MODE selects ceremony vs withdraw mode (see guardian main.rs). A real
 # Nitro PID 1 starts with an empty environment, so it is baked here at build time
 # via the Containerfile (like BUCKET_NAME/AWS_REGION); empty => withdraw, "true"
 # => ceremony. A ceremony enclave is therefore a distinct EIF with its own PCR0.
 export CEREMONY_MODE=${CEREMONY_MODE}
 
-exec /guardian
+# Not exec'd: PID 1 has to outlive the guardian briefly so its last lines (a
+# panic message) reach the parent. Exiting then tears the enclave down.
+/guardian 3>&- >/tmp/guardian.log 2>&1 || :
+sleep 2
+exit 1
