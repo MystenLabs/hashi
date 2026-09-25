@@ -44,8 +44,6 @@ async fn main() -> Result<()> {
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, mode));
 
-    // The StandardWithdrawal idempotency cache now lives out-of-enclave in
-    // `hashi-guardian-proxy`; the enclave serves the bare handler.
     let svc = GuardianGrpc {
         enclave: enclave.clone(),
     };

@@ -155,9 +155,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .try_into()
         .context("invalid serving committee")?;
     let limiter_state = reader
-        .recover_limiter_state(standby.init_config.limiter_config())
+        .recover_withdrawal_state(standby.init_config.limiter_config())
         .await
-        .context("recover limiter state")?;
+        .context("recover limiter state")?
+        .limiter_state;
     let activation_state = ActivationState::new(
         standby.config_hash,
         standby.secret_sharing_instance.clone(),

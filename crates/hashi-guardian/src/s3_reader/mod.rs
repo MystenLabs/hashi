@@ -32,6 +32,7 @@ mod heartbeat_checks;
 mod limiter_recovery;
 mod verified;
 
+pub use limiter_recovery::RecoveredWithdrawals;
 pub use verified::VerifiedLogRecord;
 pub use verified::VerifiedSessionInfo;
 

@@ -5,6 +5,8 @@
 //! withdrawal enclave by deriving live serving state from S3 logs and checking the
 //! operator-pinned `ActivationState` hash.
 
+use crate::enclave::WithdrawalState;
+use crate::s3_reader::RecoveredWithdrawals;
 use crate::Enclave;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -25,7 +27,7 @@ use GuardianError::InvalidInputs;
 /// the enclave process.
 struct OAInstall {
     committee: HashiCommittee,
-    rate_limiter: RateLimiter,
+    withdrawals: WithdrawalState,
     completion_log: InitLogMessage,
 }
 
@@ -54,8 +56,14 @@ impl OAInstall {
             .try_into()
             .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
-        let limiter_state = reader.recover_limiter_state(&limiter_config).await?;
-        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+        let RecoveredWithdrawals {
+            limiter_state,
+            signed_txids,
+        } = reader.recover_withdrawal_state(&limiter_config).await?;
+        let withdrawals = WithdrawalState {
+            limiter: RateLimiter::new(limiter_config, limiter_state)?,
+            signed_txids,
+        };
         let sharing_seq = armed_instance.sharing_seq();
         let committee_epoch = committee.epoch();
 
@@ -76,7 +84,7 @@ impl OAInstall {
 
         Ok(Self {
             committee,
-            rate_limiter,
+            withdrawals,
             completion_log: InitLogMessage::OAActivated {
                 state_hash,
                 config_hash,
@@ -102,7 +110,7 @@ pub async fn operator_activate(
     let install = OAInstall::from_request(&enclave, request).await?;
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
-    info!("Committing committee and rate limiter.");
+    info!("Committing committee and withdrawal state.");
     commit_operator_activate(&enclave, install).await;
 
     info!("Operator activation complete.");
@@ -115,7 +123,7 @@ pub async fn operator_activate(
 async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
     enclave
         .state
-        .init(install.committee, install.rate_limiter)
+        .init(install.committee, install.withdrawals)
         .expect("Unable to init activation state");
 
     enclave
