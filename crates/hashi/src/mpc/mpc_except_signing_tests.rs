@@ -4575,6 +4575,13 @@ fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
                 logged.len()
             ));
         }
+        let served = lines
+            .iter()
+            .filter(|line| line.contains("Serving the response to a complaint from"))
+            .count();
+        if served != 1 {
+            return Err(format!("expected 1 served response, got {served}"));
+        }
         for line in logged {
             let field = |name: &str| {
                 let hex_str = line.split(name).nth(1).unwrap().split(',').next().unwrap();

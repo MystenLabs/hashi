@@ -230,6 +230,9 @@ pub struct Config {
     /// response is returned.
     ///
     /// Defaults to an empty allow-list, i.e. no complaint is answered.
+    ///
+    /// Allow-listing a dealer is a coordinated decision:
+    /// a wrong entry can leak private shares to the dealer.    
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complaint_response_policy: Option<ComplaintResponsePolicy>,
 

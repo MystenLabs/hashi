@@ -686,8 +686,8 @@ impl MpcManager {
             .allows(request.epoch, &request.dealer)
         {
             tracing::warn!(
-                "Withholding the response to a valid complaint from {caller:?}: dealer {:?}, \
-                 epoch {}, protocol {:?}",
+                "Withholding the response to a complaint from {caller:?}: dealer {:?}, epoch {}, \
+                 protocol {:?}",
                 request.dealer,
                 request.epoch,
                 request.protocol_type,
@@ -697,6 +697,13 @@ impl MpcManager {
                 dealer: request.dealer,
             });
         }
+        tracing::info!(
+            "Serving the response to a complaint from {caller:?}: dealer {:?}, epoch {}, \
+             protocol {:?}",
+            request.dealer,
+            request.epoch,
+            request.protocol_type,
+        );
         Ok(response)
     }
 
