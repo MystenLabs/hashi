@@ -26,6 +26,9 @@
 ///   - a stale-epoch index is never used after a reconfig — `reallocate`
 ///     overwrites EVERY `Pending` slot before any signing happens in the new
 ///     epoch, and the caller must `reallocate` whenever `epoch` is stale;
+///   - every index signs under one beacon — each slot assignment (`new` at
+///     commit, `reallocate`) happens in the call that draws the withdrawal's
+///     delta, and a batch's delta is fixed with its admitted set;
 ///   - a `Signed` slot holds no index, so there is nothing stale to reuse.
 module hashi::mpc_signing;
 
@@ -99,8 +102,9 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
 /// any epoch (this is what lets signed slots survive a reconfig). Nonce safety
 /// is NOT enforced here — it lives in presig assignment (`new`/`reallocate`)
 /// and in the off-chain rule that each presig index signs exactly one sighash
-/// and a stale-epoch index is never signed with. Caller must cert-gate the
-/// write (the entry verifies a current-epoch committee cert over these bytes).
+/// under one beacon and a stale-epoch index is never signed with. Caller must
+/// cert-gate the write (the entry verifies a current-epoch committee cert over
+/// these bytes).
 public(package) fun record(
     self: &mut SigningBatch,
     indices: vector<u64>,

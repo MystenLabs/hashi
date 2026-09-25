@@ -608,6 +608,12 @@ impl OnchainState {
         let Some(bucket) = state.hashi.tob.buckets.get(&key) else {
             return Ok(None);
         };
+        anyhow::ensure!(
+            !(protocol_type == move_types::ProtocolType::NonceGeneration
+                && bucket.layout == TobCertLayout::Bare),
+            "nonce TOB bucket {key:?} has the bare layout, which carries no per-certificate \
+             randomness to derive a batch delta from"
+        );
         let certs: Vec<(Address, move_types::StampedDealerSubmissionV1)> = bucket
             .complete_certs_in_order()
             .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
@@ -1597,6 +1603,7 @@ async fn scrape_tob_entries(
                                 value: move_types::StampedDealerSubmissionV1 {
                                     submission: bare.value,
                                     timestamp_ms: 0,
+                                    randomness: Vec::new(),
                                 },
                             }
                         }

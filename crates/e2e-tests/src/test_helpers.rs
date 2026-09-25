@@ -565,6 +565,7 @@ pub async fn fetch_tob_certs_from_chain(
                     value: StampedDealerSubmissionV1 {
                         submission: bare.value,
                         timestamp_ms: 0,
+                        randomness: Vec::new(),
                     },
                 }
             };

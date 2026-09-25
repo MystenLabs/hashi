@@ -702,17 +702,21 @@ public(package) fun finish_archive_withdrawal_txn(
 }
 
 /// Reassign fresh presig indices to the still-pending inputs of a stale-epoch
-/// withdrawal. `new_base` must be the start of a freshly allocated block of size
-/// `allocated_count`, which must equal the txn's pending count, in `current_epoch`.
+/// withdrawal and replace its delta with `randomness`, together, so no pending
+/// index is ever signed under the old delta. `new_base` must be the start of a
+/// freshly allocated block of size `allocated_count`, which must equal the txn's
+/// pending count, in `current_epoch`.
 public(package) fun reallocate_presigs_for_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     new_base: u64,
     current_epoch: u64,
     allocated_count: u64,
+    randomness: vector<u8>,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     txn.signing.reallocate(new_base, current_epoch, allocated_count);
+    txn.randomness = randomness;
     sui::event::emit(WithdrawalPresigsReassigned {
         withdrawal_txn_id: withdrawal_id,
         epoch: current_epoch,
@@ -942,6 +946,14 @@ public(package) fun has_withdrawal_txn(self: &WithdrawalRequestQueue, id: addres
 #[test_only]
 public(package) fun has_confirmed_txn(self: &WithdrawalRequestQueue, id: address): bool {
     self.confirmed_txns.contains(id)
+}
+
+#[test_only]
+public(package) fun withdrawal_txn_randomness(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): vector<u8> {
+    self.borrow_withdrawal_txn(withdrawal_id).randomness
 }
 
 /// Replicates the pre-deferred-archival commit (remove from `requests`, add

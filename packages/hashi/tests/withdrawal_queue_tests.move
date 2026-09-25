@@ -284,6 +284,25 @@ fun test_withdrawal_txn_insert_and_remove() {
 }
 
 #[test]
+fun test_reallocate_replaces_pending_slots_and_randomness() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let pending_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    let redrawn = x"0303030303030303030303030303030303030303030303030303030303030303";
+    assert!(queue.withdrawal_txn_randomness(pending_id) != redrawn);
+
+    queue.reallocate_presigs_for_withdrawal_txn(pending_id, 100, 1, 1, redrawn);
+
+    assert!(queue.withdrawal_txn_signing_epoch(pending_id) == 1);
+    assert!(queue.withdrawal_txn_randomness(pending_id) == redrawn);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
 fun test_sign_withdrawal_txn() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);

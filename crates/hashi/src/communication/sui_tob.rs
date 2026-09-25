@@ -176,8 +176,8 @@ fn tob_certificates_if_present(
     }
     let mut certificates = Vec::with_capacity(raw.len());
     for (dealer, stamped) in raw {
-        let (submission, timestamp_ms) = (stamped.submission, stamped.timestamp_ms);
-        let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
+        let (submission, timestamp_ms) = (&stamped.submission, stamped.timestamp_ms);
+        let inner_cert = match DealerMessagesHash::from_onchain_cert(submission, epoch) {
             Ok(inner_cert) => inner_cert,
             Err(e) => {
                 tracing::warn!(
@@ -187,7 +187,13 @@ fn tob_certificates_if_present(
                 continue;
             }
         };
-        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, timestamp_ms);
+        let cert = CertificateV1::new(
+            protocol_type,
+            batch_index,
+            inner_cert,
+            timestamp_ms,
+            &stamped.randomness,
+        );
         certificates.push((dealer, cert));
     }
     Ok(Some(certificates))

@@ -235,6 +235,7 @@ use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_rpc::proto::sui::rpc::v2::changed_object::IdOperation;
+use sui_rpc::proto::sui::rpc::v2::changed_object::OutputObjectState;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -338,10 +339,13 @@ pub enum SubmitCertError {
     NotSubmitted(anyhow::Error),
 }
 
+/// Counts only objects that exist after the transaction: a randomness draw
+/// creates a transient id that is never written.
 fn created_any(changed: &[ChangedObject]) -> bool {
-    changed
-        .iter()
-        .any(|o| o.id_operation() == IdOperation::Created)
+    changed.iter().any(|o| {
+        o.id_operation() == IdOperation::Created
+            && o.output_state() == OutputObjectState::ObjectWrite
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1357,13 +1361,18 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let random_arg = builder.object(
+            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
         builder.move_call(
             Function::new(
                 self.active_call_package_id(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
-            vec![hashi_arg, withdrawal_id_arg],
+            vec![hashi_arg, withdrawal_id_arg, random_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
@@ -1435,9 +1444,9 @@ impl SuiTxExecutor {
     ///
     /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
     /// certificate store. The certificate contains the dealer's message hash and
-    /// committee signature. Nonce certs additionally pass the Sui `Clock`:
-    /// `submit_nonce_cert` takes it on every published version (stamping the
-    /// submission with chain time), so the argument is unconditional, not
+    /// committee signature. Nonce certs additionally pass the Sui `Clock` and
+    /// `Random`: `submit_nonce_cert` stamps the submission with chain time and
+    /// draws its randomness, so the arguments are unconditional, not
     /// version-gated (a gate could only ever drop a required argument and
     /// fail the call). DKG and rotation certs are submitted bare by design.
     #[tracing::instrument(
@@ -1488,7 +1497,12 @@ impl SuiTxExecutor {
                     .as_shared()
                     .with_mutable(false),
             );
-            args.push(clock_arg);
+            let random_arg = builder.object(
+                ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                    .as_shared()
+                    .with_mutable(false),
+            );
+            args.extend([clock_arg, random_arg]);
         }
         builder.move_call(
             Function::new(
@@ -3239,12 +3253,18 @@ mod tests {
     fn created_any_detects_only_created_ids() {
         let mutated = ChangedObject::default().with_id_operation(IdOperation::None);
         let deleted = ChangedObject::default().with_id_operation(IdOperation::Deleted);
-        let created = ChangedObject::default().with_id_operation(IdOperation::Created);
+        let created = ChangedObject::default()
+            .with_id_operation(IdOperation::Created)
+            .with_output_state(OutputObjectState::ObjectWrite);
+        let created_unwritten = ChangedObject::default()
+            .with_id_operation(IdOperation::Created)
+            .with_output_state(OutputObjectState::DoesNotExist);
         let unset = ChangedObject::default();
 
         assert!(!created_any(&[]));
         assert!(!created_any(&[mutated.clone(), deleted.clone()]));
         assert!(!created_any(&[unset]));
+        assert!(!created_any(&[mutated.clone(), created_unwritten]));
         assert!(created_any(&[mutated, created]));
     }
 

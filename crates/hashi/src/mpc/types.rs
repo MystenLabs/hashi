@@ -224,6 +224,21 @@ impl AdmittedNonceDealers {
     pub(crate) fn floor_reached(&self) -> bool {
         self.weight >= self.required_weight
     }
+
+    pub(crate) fn batch_delta(&self) -> MpcResult<S> {
+        self.dealers
+            .iter()
+            .try_fold(S::zero(), |sum, admitted| match &admitted.cert {
+                CertificateV1::NonceGeneration {
+                    randomness: Some(randomness),
+                    ..
+                } => Ok(sum + S::from_bytes_mod_order(randomness)),
+                _ => Err(MpcError::InvalidCertificate(format!(
+                    "admitted nonce cert from dealer {} carries no on-chain randomness",
+                    admitted.dealer
+                ))),
+            })
+    }
 }
 
 pub(crate) struct AdmittedNonceDealer {
@@ -700,6 +715,7 @@ pub enum CertificateV1 {
         batch_index: u32,
         cert: DealerCertificate,
         timestamp_ms: u64,
+        randomness: Option<[u8; 32]>,
     },
 }
 
@@ -717,6 +733,7 @@ impl CertificateV1 {
         batch_index: Option<u32>,
         cert: DealerCertificate,
         timestamp_ms: u64,
+        randomness: &[u8],
     ) -> Self {
         match protocol_type {
             hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
@@ -726,6 +743,7 @@ impl CertificateV1 {
                     batch_index: batch_index.expect("batch_index required for NonceGeneration"),
                     cert,
                     timestamp_ms,
+                    randomness: randomness.try_into().ok(),
                 }
             }
         }
@@ -1146,6 +1164,7 @@ pub(crate) fn signing_request_digest(
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
     public_nonce: G,
+    batch_delta: S,
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
     request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
@@ -1155,6 +1174,7 @@ impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
         beacon: &S,
+        batch_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
@@ -1163,8 +1183,13 @@ impl PartialSigningOutput {
             signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
+            batch_delta,
             partial_sigs,
         }
+    }
+
+    pub fn batch_delta(&self) -> S {
+        self.batch_delta
     }
 
     pub fn public_nonce(&self) -> G {

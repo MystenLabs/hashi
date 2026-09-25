@@ -74,14 +74,22 @@ entry fun submit_nonce_cert(
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
     clock: &sui::clock::Clock,
+    r: &sui::random::Random,
     ctx: &mut TxContext,
 ) {
-    let key = hashi::tob::tob_key(
+    let mut rng = sui::random::new_generator(r, ctx);
+    let randomness = rng.generate_bytes(32);
+    submit_nonce_cert_with_randomness(
+        hashi,
         epoch,
-        option::some(batch_index),
-        hashi::tob::protocol_type_nonce_generation(),
+        batch_index,
+        dealer,
+        messages_hash,
+        cert,
+        clock,
+        randomness,
+        ctx,
     );
-    submit_stamped_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
 /// Deprecated entry, retained as defense in depth. Non-public `entry`
@@ -155,6 +163,37 @@ entry fun destroy_nonce_certs(hashi: &mut Hashi, epoch: u64, batch_index: u32) {
     );
 }
 
+// ~~~~~~~ Package Functions ~~~~~~~
+
+public(package) fun submit_nonce_cert_with_randomness(
+    hashi: &mut Hashi,
+    epoch: u64,
+    batch_index: u32,
+    dealer: address,
+    messages_hash: vector<u8>,
+    cert: CommitteeSignature,
+    clock: &sui::clock::Clock,
+    randomness: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    assert_can_submit(hashi, epoch, dealer, ctx);
+    let key = hashi::tob::tob_key(
+        epoch,
+        option::some(batch_index),
+        hashi::tob::protocol_type_nonce_generation(),
+    );
+    let epoch_certs = hashi.epoch_certs_stamped(key, ctx);
+    hashi::tob::submit_stamped_cert_with_signature(
+        epoch_certs,
+        epoch,
+        dealer,
+        messages_hash,
+        &cert,
+        clock.timestamp_ms(),
+        randomness,
+    );
+}
+
 // ~~~~~~~ Private Functions ~~~~~~~
 
 /// Remove a key-generation bucket only when it has the layout this version
@@ -213,33 +252,6 @@ fun submit_cert_internal(
     assert_can_submit(hashi, epoch, dealer, ctx);
     let epoch_certs = hashi.epoch_certs(key, ctx);
     hashi::tob::submit_cert_with_signature(epoch_certs, epoch, dealer, messages_hash, cert);
-}
-
-fun submit_stamped_cert_internal(
-    hashi: &mut Hashi,
-    key: hashi::tob::TobKey,
-    epoch: u64,
-    dealer: address,
-    messages_hash: vector<u8>,
-    cert: &CommitteeSignature,
-    clock: &sui::clock::Clock,
-    ctx: &mut TxContext,
-) {
-    assert_can_submit(hashi, epoch, dealer, ctx);
-    if (hashi.nonce_write_stays_bare(key)) {
-        let epoch_certs = hashi.epoch_certs(key, ctx);
-        hashi::tob::submit_cert_with_signature(epoch_certs, epoch, dealer, messages_hash, cert);
-    } else {
-        let epoch_certs = hashi.epoch_certs_stamped(key, ctx);
-        hashi::tob::submit_stamped_cert_with_signature(
-            epoch_certs,
-            epoch,
-            dealer,
-            messages_hash,
-            cert,
-            clock.timestamp_ms(),
-        );
-    };
 }
 
 fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContext) {

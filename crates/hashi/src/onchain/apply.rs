@@ -1009,6 +1009,7 @@ fn decode_tob_node(
                     value: move_types::StampedDealerSubmissionV1 {
                         submission: field.value.value,
                         timestamp_ms: 0,
+                        randomness: Vec::new(),
                     },
                 },
             )
@@ -2208,6 +2209,7 @@ mod tests {
             value: move_types::StampedDealerSubmissionV1 {
                 submission: dealer_submission(dealer),
                 timestamp_ms,
+                randomness: Vec::new(),
             },
         };
         let node_type = TypeTag::Struct(Box::new(tag(

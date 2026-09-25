@@ -12002,6 +12002,7 @@ fn valid_dealer_submission_signed_by(
                 },
             },
             timestamp_ms,
+            randomness: Vec::new(),
         },
     )
 }
@@ -13807,6 +13808,7 @@ async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
     let thin_cert = make_cert(&confirm_target, &sigs, 3); // weight 6 + 1 + 6 = 13 < 16
@@ -13870,6 +13872,7 @@ async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase()
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
 
@@ -13953,6 +13956,7 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
 
@@ -14019,6 +14023,7 @@ fn two_full_certs_fixture(
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
     let certs = vec![
@@ -14062,6 +14067,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         },
     );
 
@@ -14231,6 +14237,7 @@ fn cut_off_confirmer_fixture(setup: &TestSetup, batch_index: u32) -> CutOffConfi
         .as_dealer_messages_hash()
         .unwrap(),
         timestamp_ms: 0,
+        randomness: None,
     };
     let mut certs = vec![vote_cert];
     certs.extend(full_certs);
@@ -14370,6 +14377,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         },
     );
 
@@ -14627,6 +14635,7 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
 
@@ -14775,6 +14784,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
     let full_cert = make_full_cert(&confirm_target, sigs);
@@ -14855,6 +14865,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
                     batch_index,
                     cert: aggregator.finish().unwrap(),
                     timestamp_ms,
+                    randomness: None,
                 },
             )
         };
@@ -15041,6 +15052,7 @@ async fn test_classification_survives_the_carrier_into_sizing() {
             batch_index,
             cert: transport,
             timestamp_ms: 1_000,
+            randomness: None,
         },
     )];
 
@@ -15332,6 +15344,7 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
                     batch_index,
                     cert: aggregator.finish().unwrap(),
                     timestamp_ms,
+                    randomness: None,
                 },
             )
         };
@@ -15409,6 +15422,7 @@ async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip(
                 batch_index: 0,
                 cert: aggregator.finish().unwrap(),
                 timestamp_ms: 0,
+                randomness: None,
             },
             kind: CertKind::AvidVote,
         }],
@@ -15453,6 +15467,7 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
                 batch_index: 0,
                 cert: aggregator.finish().unwrap(),
                 timestamp_ms,
+                randomness: None,
             },
         )
     };
@@ -15474,6 +15489,71 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
     let thin = mgr.avid_admitted_nonce_dealers(&thin, Some(9_000)).unwrap();
     assert!(!thin.window_closed);
     assert!(!thin.floor_reached());
+}
+
+#[test]
+fn test_batch_delta_sums_only_the_admitted_certs() {
+    use fastcrypto_tbls::threshold_schnorr::S;
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
+    let mgr = setup.create_manager(0);
+    let make_cert = |dealer_idx: usize,
+                     timestamp_ms: u64,
+                     signers: &[usize],
+                     randomness: Option<[u8; 32]>|
+     -> (Address, CertificateV1) {
+        let dealer_address = setup.address(dealer_idx);
+        let message = DealerMessagesHash {
+            dealer_address,
+            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
+        };
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+        for &s in signers {
+            let sig = setup.signing_keys[s].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(s),
+                &message,
+            );
+            aggregator.add_signature(sig).unwrap();
+        }
+        (
+            dealer_address,
+            CertificateV1::NonceGeneration {
+                batch_index: 0,
+                cert: aggregator.finish().unwrap(),
+                timestamp_ms,
+                randomness,
+            },
+        )
+    };
+    let all = [0, 1, 2, 3];
+    let certs = avid_vote_certs(vec![
+        make_cert(0, 1_000, &all, Some([1; 32])),
+        make_cert(1, 1_100, &all, Some([2; 32])),
+        make_cert(2, 1_200, &[3], Some([3; 32])),
+        make_cert(3, 5_000, &all, Some([4; 32])),
+    ]);
+
+    let admitted = mgr
+        .avid_admitted_nonce_dealers(&certs, Some(2_000))
+        .unwrap();
+
+    let admitted_dealers: Vec<Address> = admitted.dealers.iter().map(|d| d.dealer).collect();
+    assert_eq!(admitted_dealers, vec![setup.address(0), setup.address(1)]);
+    assert_eq!(
+        admitted.batch_delta().unwrap(),
+        S::from_bytes_mod_order(&[1; 32]) + S::from_bytes_mod_order(&[2; 32]),
+    );
+
+    let unread = avid_vote_certs(vec![
+        make_cert(0, 1_000, &all, Some([1; 32])),
+        make_cert(1, 1_100, &all, None),
+    ]);
+    let unread = mgr
+        .avid_admitted_nonce_dealers(&unread, Some(2_000))
+        .unwrap();
+    assert!(unread.batch_delta().is_err());
 }
 
 #[test]
@@ -15506,6 +15586,7 @@ fn test_avid_sizing_counts_past_the_floor() {
                 batch_index: 0,
                 cert: aggregator.finish().unwrap(),
                 timestamp_ms,
+                randomness: None,
             },
         )
     };
@@ -15700,6 +15781,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
     let cert = make_full_cert(&confirm_target, sigs);
@@ -15891,6 +15973,7 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
                 .as_dealer_messages_hash()
                 .unwrap(),
             timestamp_ms: 0,
+            randomness: None,
         }
     };
     let cert = make_full_cert(&confirm_target, sigs);
