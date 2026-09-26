@@ -27,6 +27,9 @@ pub struct Metrics {
     pub(crate) peer_inflight_at_admission: HistogramVec,
     pub(crate) peer_inflight_max: IntGaugeVec,
     pub(crate) peer_requests_shed_total: IntCounterVec,
+    pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
+    pub(crate) withdrawal_signing_refused_total: IntCounterVec,
+    pub(crate) withdrawal_signing_cancelled_total: IntCounterVec,
 
     // Per-MPC-protocol body-size metrics.
     pub(crate) mpc_request_size_bytes: HistogramVec,
@@ -414,6 +417,27 @@ impl Metrics {
             peer_requests_shed_total: register_int_counter_vec_with_registry!(
                 "hashi_peer_requests_shed_total",
                 "Requests shed because the peer was at its in-flight limit",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_signing_tasks_max: register_int_gauge_vec_with_registry!(
+                "hashi_withdrawal_signing_tasks_max",
+                "Peak concurrent withdrawal signing tasks per caller since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_withdrawal_signing_refused_total",
+                "Withdrawal signing calls refused, by caller and reason (committee or cap)",
+                &["peer", "reason"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_signing_cancelled_total: register_int_counter_vec_with_registry!(
+                "hashi_withdrawal_signing_cancelled_total",
+                "Withdrawal signing sessions stopped early because their response stream closed",
                 &["peer"],
                 registry,
             )
@@ -1472,7 +1496,7 @@ impl Metrics {
             .unwrap(),
             mpc_sign_collection_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_sign_collection_duration_seconds",
-                "Duration of P2P partial signature collection from peers",
+                "Duration of P2P partial signature collection from peers, for sessions that ran to completion",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,

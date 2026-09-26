@@ -160,6 +160,60 @@ impl<B: http_body::Body + Unpin> http_body::Body for Guarded<B> {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct CallerTaskLimiter {
+    tasks: Arc<Mutex<HashMap<Address, CallerTasks>>>,
+    metrics: Arc<Metrics>,
+}
+
+#[derive(Default)]
+struct CallerTasks {
+    active: usize,
+    high_water: usize,
+}
+
+pub(crate) struct CallerTaskSlot {
+    tasks: Arc<Mutex<HashMap<Address, CallerTasks>>>,
+    caller: Address,
+}
+
+impl CallerTaskLimiter {
+    pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
+        Self {
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            metrics,
+        }
+    }
+
+    pub(crate) fn try_admit(&self, caller: Address, limit: usize) -> Option<CallerTaskSlot> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let entry = tasks.entry(caller).or_default();
+        if entry.active >= limit {
+            return None;
+        }
+        entry.active += 1;
+        if entry.active > entry.high_water {
+            entry.high_water = entry.active;
+            self.metrics
+                .withdrawal_signing_tasks_max
+                .with_label_values(&[&caller.to_string()])
+                .set(entry.high_water as i64);
+        }
+        Some(CallerTaskSlot {
+            tasks: self.tasks.clone(),
+            caller,
+        })
+    }
+}
+
+impl Drop for CallerTaskSlot {
+    fn drop(&mut self) {
+        if let Some(entry) = self.tasks.lock().unwrap().get_mut(&self.caller) {
+            entry.active -= 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::Router;
@@ -266,5 +320,29 @@ mod tests {
         for task in held {
             task.abort();
         }
+    }
+
+    #[test]
+    fn a_caller_at_its_signing_cap_is_refused_until_one_of_its_tasks_ends() {
+        let limit = 4;
+        let registry = prometheus::Registry::new();
+        let limiter = CallerTaskLimiter::new(Arc::new(Metrics::new(&registry)));
+
+        let mut held: Vec<_> = (0..limit)
+            .map(|_| limiter.try_admit(peer(b'a'), limit).unwrap())
+            .collect();
+        assert!(limiter.try_admit(peer(b'a'), limit).is_none());
+        assert!(limiter.try_admit(peer(b'b'), limit).is_some());
+
+        held.pop();
+        assert!(limiter.try_admit(peer(b'a'), limit).is_some());
+        assert_eq!(
+            limiter
+                .metrics
+                .withdrawal_signing_tasks_max
+                .with_label_values(&[&peer(b'a').to_string()])
+                .get(),
+            limit as i64
+        );
     }
 }

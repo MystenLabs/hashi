@@ -14,6 +14,7 @@ use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
+const DEFAULT_WITHDRAWAL_SIGNING_PER_CALLER_LIMIT: usize = 4;
 /// Tonic's 4 MiB default is too small to scrape a large on-chain state or
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
@@ -175,13 +176,15 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
 
-    /// Max number of withdrawal-tx inputs whose MPC signatures the signer
-    /// will collect in parallel within a single `sign_withdrawal_transaction`
-    /// RPC.
+    /// Capacity of the channel carrying one `sign_withdrawal_transaction`
+    /// stream's signatures to the caller.
     ///
     /// Defaults to 25.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_signing_concurrency: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_signing_per_caller_limit: Option<usize>,
 
     /// Number of per-input MPC signatures the leader writes to chain in one
     /// `commit_input_signatures` PTB — the on-chain write batch size `M`. Trades
@@ -337,6 +340,10 @@ impl Config {
         anyhow::ensure!(
             config.grpc_per_peer_inflight_limit != Some(0),
             "grpc_per_peer_inflight_limit must be at least 1"
+        );
+        anyhow::ensure!(
+            config.withdrawal_signing_per_caller_limit != Some(0),
+            "withdrawal_signing_per_caller_limit must be at least 1"
         );
         anyhow::ensure!(
             config
@@ -525,6 +532,11 @@ impl Config {
             .max(1)
     }
 
+    pub fn withdrawal_signing_per_caller_limit(&self) -> usize {
+        self.withdrawal_signing_per_caller_limit
+            .unwrap_or(DEFAULT_WITHDRAWAL_SIGNING_PER_CALLER_LIMIT)
+    }
+
     pub fn mpc_signing_chunk_size(&self) -> usize {
         self.mpc_signing_chunk_size
             .unwrap_or(DEFAULT_MPC_SIGNING_CHUNK_SIZE)
@@ -585,6 +597,7 @@ impl Config {
             withdrawal_batching_delay_ms: None,
             withdrawal_max_batch_size: None,
             withdrawal_signing_concurrency: None,
+            withdrawal_signing_per_caller_limit: None,
             mpc_signing_chunk_size: None,
             max_mempool_chain_depth: None,
             withdrawal_fee_conf_target: None,
