@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Read-only access to the guardian's S3 withdrawal log — the wid cache's
-//! durable tier. The enclave writes one `Success` record per signed withdrawal
+//! durable tier. The enclave writes one record per signed withdrawal
 //! *before* releasing the signatures and fails closed if the write fails
-//! (`withdraw_mode/standard.rs`), so every signature a node has seen has a
+//! (`withdraw_mode/standard_withdrawal.rs`), so every signature a node has seen has a
 //! record here; the proxy never writes.
 //!
 //! Keys are `withdraw/YYYY/MM/DD/HH/{seq:020}-{session}-wid{wid}.json`,
 //! with the wid only a suffix — so a lookup walks hour buckets newest-first.
 //! The request's `seq` bounds the walk: a retried wid was signed at `seq` or
 //! `seq - 1` (the node's mirror trails the guardian by at most the reconcile
-//! snap), so once two consecutive success-bearing buckets top out below
+//! snap), so once two consecutive non-empty buckets top out below
 //! `seq - 1` the record can't be further back (two, not one, so a forward
 //! clock step can't hide it behind a single future-labelled bucket). Exhausted
 //! prefixes are a definitive miss; hitting the LIST cap is NOT — the caller
@@ -38,8 +38,8 @@ pub enum WidLogError {
     CapExceeded,
 }
 
-/// A parsed `Success` record for a wid.
-pub struct FoundSuccess {
+/// A parsed withdrawal record for a wid.
+pub struct FoundWithdrawal {
     /// The seq the guardian consumed the wid at (`request_data.seq`).
     pub consumed_seq: u64,
     /// Timestamp of the log record, reused as the replayed response timestamp.
@@ -57,15 +57,15 @@ pub trait LogStore: Send + Sync + 'static {
     async fn get(&self, key: &str) -> anyhow::Result<Vec<u8>>;
 }
 
-/// Find the newest `Success` record for `wid`, walking hour buckets newest to
+/// Find the newest withdrawal record for `wid`, walking hour buckets newest to
 /// oldest. `Ok(None)` is a *definitive* miss (safe to forward to the enclave);
 /// any `Err` means the lookup is indeterminate and the caller must fail closed.
-pub async fn find_success_record<L: LogStore>(
+pub async fn find_withdrawal_record<L: LogStore>(
     log: &L,
     wid: &WithdrawalID,
     request_seq: u64,
     metrics: &ProxyMetrics,
-) -> Result<Option<FoundSuccess>, WidLogError> {
+) -> Result<Option<FoundWithdrawal>, WidLogError> {
     let suffix = format!("-wid{wid}.json");
     let threshold = request_seq.saturating_sub(1);
     let mut lists_used = 0usize;
@@ -85,18 +85,18 @@ pub async fn find_success_record<L: LogStore>(
                         // Newest (max-seq) candidate first within the bucket.
                         for key in keys.iter().rev().filter(|k| k.ends_with(&suffix)) {
                             let bytes = log.get(key).await.map_err(WidLogError::Store)?;
-                            match parse_success(&bytes, wid) {
+                            match parse_withdrawal(&bytes, wid) {
                                 Ok(found) => return Ok(Some(found)),
                                 Err(e) => {
                                     // Skip (schema skew): a miss re-signs and heals;
                                     // failing closed would wedge until a proxy fix.
                                     metrics.record_parse_failures.inc();
-                                    warn!(key, error = %e, "unreadable success record for wid; skipping");
+                                    warn!(key, error = %e, "unreadable withdrawal record for wid; skipping");
                                 }
                             }
                         }
 
-                        let bucket_max = keys.iter().rev().find_map(|k| parse_success_seq(k));
+                        let bucket_max = keys.iter().rev().find_map(|k| parse_withdrawal_seq(k));
                         match bucket_max {
                             Some(max) if max < threshold => {
                                 strikes += 1;
@@ -105,7 +105,7 @@ pub async fn find_success_record<L: LogStore>(
                                 }
                             }
                             Some(_) => strikes = 0,
-                            // Only unparseable success keys: indeterminate.
+                            // Only unparseable withdrawal keys: indeterminate.
                             None => {}
                         }
                     }
@@ -150,12 +150,12 @@ fn charge_list(lists_used: &mut usize) -> Result<(), WidLogError> {
 }
 
 /// Parse the zero-padded seq out of a `.../{seq:020}-...` key.
-fn parse_success_seq(key: &str) -> Option<u64> {
+fn parse_withdrawal_seq(key: &str) -> Option<u64> {
     let name = key.rsplit('/').next()?;
     name.get(..20)?.parse().ok()
 }
 
-fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSuccess> {
+fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundWithdrawal> {
     let record: LogRecord = serde_json::from_slice(bytes)?;
     let entry = record.into_entry_unchecked();
     let timestamp_ms = entry.timestamp_ms();
@@ -174,7 +174,7 @@ fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSucces
         request_data.wid,
         wid
     );
-    Ok(FoundSuccess {
+    Ok(FoundWithdrawal {
         consumed_seq: request_data.seq,
         timestamp_ms,
         response,
@@ -300,9 +300,9 @@ pub(crate) mod test_store {
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
-    /// A genuine `LogRecord` for a Success, serialized exactly as the enclave
+    /// A genuine withdrawal `LogRecord`, serialized exactly as the enclave
     /// writes it, keyed by `LogRecord::object_key()`.
-    pub(crate) fn success_record_json(
+    pub(crate) fn withdrawal_record_json(
         wid: WithdrawalID,
         seq: u64,
         timestamp_ms: u64,
@@ -400,7 +400,7 @@ pub(crate) mod test_store {
 
 #[cfg(test)]
 mod tests {
-    use super::test_store::success_record_json;
+    use super::test_store::withdrawal_record_json;
     use super::test_store::MemStore;
     use super::*;
     use std::sync::atomic::Ordering;
@@ -429,10 +429,10 @@ mod tests {
     #[tokio::test]
     async fn finds_record_in_newest_bucket() {
         let store = MemStore::default();
-        let (key, bytes) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
+        let (key, bytes) = withdrawal_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
         store.insert(key, bytes);
 
-        let found = find_success_record(&store, &wid(0xaa), 7, &test_metrics())
+        let found = find_withdrawal_record(&store, &wid(0xaa), 7, &test_metrics())
             .await
             .unwrap()
             .expect("record should be found");
@@ -444,7 +444,7 @@ mod tests {
     async fn empty_store_is_a_definitive_miss() {
         let store = MemStore::default();
         // request_seq 0 exercises the saturating threshold too.
-        let result = find_success_record(&store, &wid(0xaa), 0, &test_metrics())
+        let result = find_withdrawal_record(&store, &wid(0xaa), 0, &test_metrics())
             .await
             .unwrap();
         assert!(result.is_none());
@@ -455,10 +455,10 @@ mod tests {
         // The reconcile snap bumps the node's seq to S+1; threshold slack must
         // keep the bucket holding seq S inside the scan.
         let store = MemStore::default();
-        let (key, bytes) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
+        let (key, bytes) = withdrawal_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
         store.insert(key, bytes);
 
-        let found = find_success_record(&store, &wid(0xaa), 8, &test_metrics())
+        let found = find_withdrawal_record(&store, &wid(0xaa), 8, &test_metrics())
             .await
             .unwrap();
         assert_eq!(found.unwrap().consumed_seq, 7);
@@ -467,16 +467,16 @@ mod tests {
     #[tokio::test]
     async fn scan_stops_after_two_low_buckets() {
         let store = MemStore::default();
-        // Two success-bearing buckets both below threshold: the wid is absent
+        // Two non-empty buckets both below threshold: the wid is absent
         // and the scan must stop without walking further back.
-        let (key_b, bytes_b) = success_record_json(wid(0xbb), 5, TS_HOUR_B, mock_response());
-        let (key_a, bytes_a) = success_record_json(wid(0xcc), 4, TS_HOUR_A, mock_response());
-        let (key_z, bytes_z) = success_record_json(wid(0xdd), 3, TS_HOUR_Z, mock_response());
+        let (key_b, bytes_b) = withdrawal_record_json(wid(0xbb), 5, TS_HOUR_B, mock_response());
+        let (key_a, bytes_a) = withdrawal_record_json(wid(0xcc), 4, TS_HOUR_A, mock_response());
+        let (key_z, bytes_z) = withdrawal_record_json(wid(0xdd), 3, TS_HOUR_Z, mock_response());
         store.insert(key_b, bytes_b);
         store.insert(key_a, bytes_a);
         store.insert(key_z, bytes_z);
 
-        let result = find_success_record(&store, &wid(0xaa), 20, &test_metrics())
+        let result = find_withdrawal_record(&store, &wid(0xaa), 20, &test_metrics())
             .await
             .unwrap();
         assert!(result.is_none());
@@ -495,12 +495,13 @@ mod tests {
         // threshold), while the wid's record at seq 9 sits in an older bucket.
         // One low bucket must not terminate the scan.
         let store = MemStore::default();
-        let (key_skew, bytes_skew) = success_record_json(wid(0xbb), 5, TS_HOUR_B, mock_response());
-        let (key, bytes) = success_record_json(wid(0xaa), 9, TS_HOUR_A, mock_response());
+        let (key_skew, bytes_skew) =
+            withdrawal_record_json(wid(0xbb), 5, TS_HOUR_B, mock_response());
+        let (key, bytes) = withdrawal_record_json(wid(0xaa), 9, TS_HOUR_A, mock_response());
         store.insert(key_skew, bytes_skew);
         store.insert(key, bytes);
 
-        let found = find_success_record(&store, &wid(0xaa), 10, &test_metrics())
+        let found = find_withdrawal_record(&store, &wid(0xaa), 10, &test_metrics())
             .await
             .unwrap();
         assert_eq!(found.unwrap().consumed_seq, 9);
@@ -509,33 +510,33 @@ mod tests {
     #[tokio::test]
     async fn list_failure_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        let (key, bytes) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
+        let (key, bytes) = withdrawal_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
         store.insert(key, bytes);
         store.fail_lists.store(true, Ordering::SeqCst);
 
-        let result = find_success_record(&store, &wid(0xaa), 7, &test_metrics()).await;
+        let result = find_withdrawal_record(&store, &wid(0xaa), 7, &test_metrics()).await;
         assert!(matches!(result, Err(WidLogError::Store(_))));
     }
 
     #[tokio::test]
     async fn get_failure_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        let (key, bytes) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
+        let (key, bytes) = withdrawal_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
         store.insert(key, bytes);
         store.fail_gets.store(true, Ordering::SeqCst);
 
-        let result = find_success_record(&store, &wid(0xaa), 7, &test_metrics()).await;
+        let result = find_withdrawal_record(&store, &wid(0xaa), 7, &test_metrics()).await;
         assert!(matches!(result, Err(WidLogError::Store(_))));
     }
 
     #[tokio::test]
     async fn unparseable_matching_record_degrades_to_a_miss() {
         let store = MemStore::default();
-        let (key, _) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
+        let (key, _) = withdrawal_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
         store.insert(key, b"not json".to_vec());
 
         let metrics = test_metrics();
-        let result = find_success_record(&store, &wid(0xaa), 7, &metrics)
+        let result = find_withdrawal_record(&store, &wid(0xaa), 7, &metrics)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -550,31 +551,32 @@ mod tests {
         for day in 1..=28 {
             for hour in [4u64, 10, 16] {
                 let ts = 1_690_000_000_000 + ((day * 24 + hour) * 3_600_000);
-                let (key, bytes) = success_record_json(wid(0xbb), 1000 + day, ts, mock_response());
+                let (key, bytes) =
+                    withdrawal_record_json(wid(0xbb), 1000 + day, ts, mock_response());
                 store.insert(key, bytes);
             }
         }
 
-        let result = find_success_record(&store, &wid(0xaa), 2, &test_metrics()).await;
+        let result = find_withdrawal_record(&store, &wid(0xaa), 2, &test_metrics()).await;
         assert!(matches!(result, Err(WidLogError::CapExceeded)));
     }
 
     #[test]
-    fn success_seq_parses_from_real_key_shape() {
-        let (key, _) = success_record_json(wid(0xaa), 42, TS_HOUR_A, mock_response());
-        assert_eq!(parse_success_seq(&key), Some(42));
+    fn withdrawal_seq_parses_from_real_key_shape() {
+        let (key, _) = withdrawal_record_json(wid(0xaa), 42, TS_HOUR_A, mock_response());
+        assert_eq!(parse_withdrawal_seq(&key), Some(42));
         assert_eq!(
-            parse_success_seq("withdraw/2023/11/14/22/unknown-s-wid0xaa.json"),
+            parse_withdrawal_seq("withdraw/2023/11/14/22/unknown-s-wid0xaa.json"),
             None
         );
     }
 
     #[test]
     fn wid_suffix_matches_the_real_key_shape() {
-        // The scanner's suffix filter must match the withdrawal success-key
+        // The scanner's suffix filter must match the withdrawal key
         // pattern exactly; a drift here silently disables the durable tier.
         let w = wid(0xcd);
-        let (key, _) = success_record_json(w, 7, TS_HOUR_A, mock_response());
+        let (key, _) = withdrawal_record_json(w, 7, TS_HOUR_A, mock_response());
         assert!(key.ends_with(&format!("-wid{w}.json")));
     }
 }

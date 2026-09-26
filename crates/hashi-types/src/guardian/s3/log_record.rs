@@ -491,14 +491,14 @@ mod tests {
             })),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: Txid::from_slice(&[3; 32]).unwrap(),
-                request_data: request_data.clone(),
-                request_sign: request_sign.clone(),
-                response,
                 post_state: LimiterState {
                     num_tokens_available: 10,
                     last_updated_at: 20,
                     next_seq: request_data.seq + 1,
                 },
+                request_data,
+                request_sign: request_sign.clone(),
+                response,
             })),
             LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                 instance: instance_0.clone(),

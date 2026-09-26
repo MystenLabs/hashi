@@ -26,8 +26,8 @@
 
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
-use crate::widlog::find_success_record;
-use crate::widlog::FoundSuccess;
+use crate::widlog::find_withdrawal_record;
+use crate::widlog::FoundWithdrawal;
 use crate::widlog::LogStore;
 use crate::widlog::WidLogError;
 use bitcoin::Network;
@@ -154,7 +154,8 @@ where
         requested_seq: u64,
         request: &proto::SignedStandardWithdrawalRequest,
     ) -> Result<Option<proto::SignedStandardWithdrawalResponse>, Status> {
-        let found = match find_success_record(&self.log, wid, requested_seq, &self.metrics).await {
+        let found = match find_withdrawal_record(&self.log, wid, requested_seq, &self.metrics).await
+        {
             Ok(Some(found)) => found,
             Ok(None) => return Ok(None),
             Err(WidLogError::CapExceeded) => {
@@ -274,7 +275,7 @@ fn verify_recorded_signatures(
     Ok(())
 }
 
-fn synthesize_response(found: &FoundSuccess) -> proto::SignedStandardWithdrawalResponse {
+fn synthesize_response(found: &FoundWithdrawal) -> proto::SignedStandardWithdrawalResponse {
     proto::SignedStandardWithdrawalResponse {
         data: Some(proto::StandardWithdrawalResponseData {
             enclave_signatures: found
@@ -415,7 +416,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widlog::test_store::success_record_json;
+    use crate::widlog::test_store::withdrawal_record_json;
     use crate::widlog::test_store::MemStore;
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
@@ -648,7 +649,8 @@ mod tests {
         };
 
         let request = signed_standard_withdrawal_request_to_pb(&signed_request);
-        let (record_key, record_bytes) = success_record_json(wid, seq, 1_700_000_000_000, response);
+        let (record_key, record_bytes) =
+            withdrawal_record_json(wid, seq, 1_700_000_000_000, response);
         ReplayFixture {
             request,
             record_key,
@@ -991,7 +993,8 @@ mod tests {
             enclave_signatures: sign_btc_tx(&messages, &enclave_kp),
         };
         let request = signed_standard_withdrawal_request_to_pb(&signed_request);
-        let (record_key, record_bytes) = success_record_json(wid, 7, 1_700_000_000_000, response);
+        let (record_key, record_bytes) =
+            withdrawal_record_json(wid, 7, 1_700_000_000_000, response);
 
         // Write the record the way the enclave would have (plain put; the proxy
         // itself is read-only on the bucket).

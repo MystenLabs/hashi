@@ -13,7 +13,6 @@ use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
 use std::sync::Arc;
-use tracing::error;
 use tracing::info;
 
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -27,72 +26,68 @@ pub async fn standard_withdrawal(
     info!("/standard_withdrawal - Received request.");
 
     let wid = *signed_request.message().wid();
-    let result: GuardianResult<_> = async {
-        // 0) Validation
-        enclave.require_fully_initialized()?;
+    // 0) Validation
+    enclave.require_fully_initialized()?;
 
-        // 1) Verify certificate (before acquiring limiter lock)
-        let committee = enclave.state.get_committee()?;
+    // 1) Verify certificate (before acquiring limiter lock)
+    let committee = enclave.state.get_committee()?;
 
-        info!("Verifying request certificate.");
-        verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
-        info!("Request certificate verified.");
+    info!("Verifying request certificate.");
+    verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
+    info!("Request certificate verified.");
 
-        let (request_sign, request) = signed_request.into_parts();
+    let (request_sign, request) = signed_request.into_parts();
 
-        // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
-        //    The returned guard holds the mutex — no other withdrawal can proceed
-        //    until this one is durably logged or the enclave aborts.
-        //
-        validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
+    // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
+    //    The returned guard holds the mutex — no other withdrawal can proceed
+    //    until this one is durably logged or the enclave aborts.
+    //
+    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
-        info!("Checking rate limits.");
-        // Gross outflow (= inputs - change = external_out + miner_fee).
-        // Miner fee leaves the pool too, so it must consume the limit;
-        // change flows back, so it must not.
-        let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-        let limiter_guard = enclave
-            .state
-            .consume_from_limiter(
-                request.seq(),
-                request.timestamp_secs(),
-                consumed_amount_sats,
-            )
-            .await?;
-        info!("Rate limit check passed.");
+    info!("Checking rate limits.");
+    // Gross outflow (= inputs - change = external_out + miner_fee).
+    // Miner fee leaves the pool too, so it must consume the limit;
+    // change flows back, so it must not.
+    let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
+    let limiter_guard = enclave
+        .state
+        .consume_from_limiter(
+            request.seq(),
+            request.timestamp_secs(),
+            consumed_amount_sats,
+        )
+        .await?;
+    info!("Rate limit check passed.");
 
-        // 3) Sign tx (while holding limiter lock)
-        info!("Generating BTC signatures.");
-        let (txid, signatures) = enclave
-            .config
-            .btc_sign(request.utxos())
-            .expect("All BTC keys should be set");
-        let response = StandardWithdrawalResponse {
-            enclave_signatures: signatures,
-        };
-        info!("BTC signatures generated.");
+    // 3) Sign tx (while holding limiter lock)
+    info!("Generating BTC signatures.");
+    let (txid, signatures) = enclave
+        .config
+        .btc_sign(request.utxos())
+        .expect("All BTC keys should be set");
+    let response = StandardWithdrawalResponse {
+        enclave_signatures: signatures,
+    };
+    info!("BTC signatures generated.");
 
-        // 4) Log while holding the limiter lock, before returning signatures.
-        info!("Withdrawal {} processed successfully. Logging to S3.", wid);
-        let msg = WithdrawalLogMessage {
-            txid,
-            request_data: StandardWithdrawalRequestWire::from(request),
-            request_sign,
-            response: response.clone(),
-            post_state: *limiter_guard.state(),
-        };
-        enclave
-            .log_withdraw(msg)
-            .await
-            .expect("S3 logger must be initialized to log a withdrawal");
-        info!("Withdrawal {} logged.", wid);
-        // Publish the durable state and release the guard so the next withdrawal
-        // may begin.
-        enclave.state.set_limiter_snapshot(limiter_guard);
-        Ok(enclave.sign(response))
-    }
-    .await;
-    result.inspect_err(|withdraw_err| error!("Withdrawal {} failed: {:?}", wid, withdraw_err))
+    // 4) Log while holding the limiter lock, before returning signatures.
+    info!("Withdrawal {} processed successfully. Logging to S3.", wid);
+    let msg = WithdrawalLogMessage {
+        txid,
+        request_data: StandardWithdrawalRequestWire::from(request),
+        request_sign,
+        response: response.clone(),
+        post_state: *limiter_guard.state(),
+    };
+    enclave
+        .log_withdraw(msg)
+        .await
+        .expect("S3 logger must be initialized to log a withdrawal");
+    info!("Withdrawal {} logged.", wid);
+    // Publish the durable state and release the guard so the next withdrawal
+    // may begin.
+    enclave.state.set_limiter_snapshot(limiter_guard);
+    Ok(enclave.sign(response))
 }
 
 fn validate_request_timestamp(

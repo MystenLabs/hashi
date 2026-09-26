@@ -109,10 +109,7 @@ impl GuardianReader {
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let all_logs = self
-            .s3
-            .list_all_log_records_with_prefix(&dir.to_string())
-            .await?;
+        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for record in all_logs {
@@ -323,7 +320,7 @@ impl GuardianReader {
 
     /// Read the latest serving committee.
     ///
-    /// Prefer the latest successful `committee-update/` record, then fall back
+    /// Prefer the latest `committee-update/` record, then fall back
     /// to the KP-authorized `genesis/record.json` bootstrap record. Return
     /// `None` if neither source exists.
     pub async fn read_latest_committee(&mut self) -> GuardianResult<Option<Committee>> {
@@ -333,10 +330,10 @@ impl GuardianReader {
         Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
     }
 
-    /// Read and verify the successfully applied committee with the highest
-    /// epoch, or return `None` if no successful update exists.
+    /// Read and verify the applied committee with the highest epoch, or return
+    /// `None` if no update exists.
     ///
-    /// Success keys begin with a zero-padded epoch, so the lexicographically
+    /// Keys begin with a zero-padded epoch, so the lexicographically
     /// greatest key identifies the latest applied committee.
     async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
@@ -353,9 +350,8 @@ impl GuardianReader {
             .into_message()
             .into_committee_update()
             .ok_or_else(|| InvalidS3Log(format!("expected a committee-update log at {key}")))?;
-        let committee = msg.new_committee;
         log_verified_read(&key, &session_id);
-        Ok(Some(committee))
+        Ok(Some(msg.new_committee))
     }
 
     /// Read and verify the fixed KP-authorized bootstrap record, or return

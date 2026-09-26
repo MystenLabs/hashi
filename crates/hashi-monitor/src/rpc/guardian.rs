@@ -9,36 +9,33 @@ use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
-use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
 use tracing::debug;
+
 impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
     type Error = anyhow::Error;
 
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
         let entry = log.into_entry();
         let timestamp_ms = entry.timestamp_ms();
-        let withdrawal_message = entry
+        let withdrawal = entry
             .into_message()
             .into_withdrawal()
             .ok_or_else(|| anyhow::anyhow!("non-withdrawal logs found"))?;
 
-        let WithdrawalLogMessage {
-            txid, request_data, ..
-        } = *withdrawal_message;
         debug!(
-            wid = %request_data.wid,
-            txid = %txid,
-            "successful guardian withdrawal log"
+            wid = %withdrawal.request_data.wid,
+            txid = %withdrawal.txid,
+            "guardian withdrawal log"
         );
         Ok(MonitorWithdrawalEvent {
             event_type: WithdrawalEventType::E2GuardianApproved,
-            wid: request_data.wid,
+            wid: withdrawal.request_data.wid,
             timestamp_secs: unix_millis_to_seconds(timestamp_ms),
-            btc_txid: txid,
+            btc_txid: withdrawal.txid,
         })
     }
 }
@@ -88,11 +85,8 @@ impl GuardianWithdrawalsPoller {
         // require the current build after the upgrade window.
         let withdrawal_events = verified_logs
             .into_iter()
-            .map(MonitorWithdrawalEvent::try_from)
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .map(MonitorEvent::Withdrawal)
-            .collect::<Vec<MonitorEvent>>();
+            .map(|log| MonitorWithdrawalEvent::try_from(log).map(MonitorEvent::Withdrawal))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         self.cursor = next_cursor;
         tracing::info!(

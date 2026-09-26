@@ -42,11 +42,10 @@ pub async fn update_committee(
         .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
 
     if new_committee.epoch() != proposed_epoch {
-        let err = InvalidInputs(format!(
+        return Err(InvalidInputs(format!(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
             new_committee.epoch()
-        ));
-        return Err(err);
+        )));
     }
 
     // Log before the in-memory swap so failed S3 writes don't advance the committee.
