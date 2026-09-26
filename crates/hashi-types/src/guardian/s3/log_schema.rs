@@ -5,7 +5,6 @@
 //! that carries these to S3 lives in `super::log_record`.
 
 use super::config::S3ObjectLockPolicy;
-use super::log_layout::ObjectKeyPattern;
 use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CeremonyProposalLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
@@ -99,7 +98,7 @@ impl LogType {
 trait LogMessageSchema {
     fn log_type(&self) -> LogType;
 
-    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern;
+    fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String;
 }
 
 impl LogMessageSchema for LogMessageV1 {
@@ -116,16 +115,20 @@ impl LogMessageSchema for LogMessageV1 {
         }
     }
 
-    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+    fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
         match self {
-            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::Init(message) => message.object_key_pattern(session_id),
-            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::Ceremony(message) => message.object_key_pattern(session_id),
-            Self::KpShareState(message) => message.object_key_pattern(session_id),
-            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
-            Self::Genesis(message) => message.object_key_pattern(),
-            Self::CeremonyProposal(message) => message.object_key_pattern(session_id),
+            Self::Heartbeat(message) => message.object_key(session_id, timestamp_ms),
+            Self::Init(message) => message.object_key(session_id),
+            Self::Withdrawal(message) => message.object_key(session_id, timestamp_ms),
+            Self::Ceremony(message) => message.object_key(session_id),
+            Self::KpShareState(message) => KpShareStateLogMessage::object_key(
+                session_id,
+                message.sharing_seq,
+                message.cert_seq,
+            ),
+            Self::CommitteeUpdate(message) => message.object_key(session_id),
+            Self::Genesis(_) => GenesisLogMessage::object_key(),
+            Self::CeremonyProposal(_) => CeremonyProposalLogMessage::object_key(session_id),
         }
     }
 }
@@ -221,13 +224,9 @@ impl VersionedLogMessage {
         }
     }
 
-    pub(super) fn object_key_pattern(
-        &self,
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-    ) -> ObjectKeyPattern {
+    pub(super) fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
         match self {
-            Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::V1(message) => message.object_key(session_id, timestamp_ms),
         }
     }
 }

@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_INIT;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianError::InvalidS3Log;
@@ -64,10 +63,6 @@ impl InitLogMessage {
         };
 
         Self::object_key_for_suffix(session_id, suffix)
-    }
-
-    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
-        ObjectKeyPattern::Fixed(self.object_key(session_id))
     }
 
     pub fn attestation_object_key(session_id: &str) -> String {

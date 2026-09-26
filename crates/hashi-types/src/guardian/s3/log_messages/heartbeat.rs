@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3HourScopedDirectory;
 use crate::guardian::UnixMillis;
 use crate::guardian::unix_millis_to_seconds;
@@ -24,13 +23,5 @@ impl HeartbeatLogMessage {
             S3HourScopedDirectory::heartbeat(unix_millis_to_seconds(timestamp_ms)),
             self.seq,
         )
-    }
-
-    pub fn object_key_pattern(
-        &self,
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-    ) -> ObjectKeyPattern {
-        ObjectKeyPattern::Fixed(self.object_key(session_id, timestamp_ms))
     }
 }

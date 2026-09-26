@@ -5,14 +5,11 @@ use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
-use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
 use std::sync::Arc;
-use tracing::error;
 use tracing::info;
 
 /// Advance the committee to a future epoch with a cert from the outgoing
@@ -35,10 +32,7 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    if let Err(e) = verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed) {
-        log_failure(&enclave, current_epoch, &signed, &e).await?;
-        return Err(e);
-    }
+    verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed)?;
 
     let new_committee: HashiCommittee = signed
         .message()
@@ -52,7 +46,6 @@ pub async fn update_committee(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
             new_committee.epoch()
         ));
-        log_failure(&enclave, current_epoch, &signed, &err).await?;
         return Err(err);
     }
 
@@ -87,38 +80,12 @@ async fn log_success(
     from_epoch: u64,
     signed: &HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<()> {
-    let msg = CommitteeUpdateLogMessage::Success {
+    let msg = CommitteeUpdateLogMessage {
         from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
-        hashi_object_id: enclave.hashi_object_id()?,
     };
     enclave.log_committee_update(msg).await
-}
-
-async fn log_failure(
-    enclave: &Enclave,
-    from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransitionRequest>,
-    err: &GuardianError,
-) -> GuardianResult<()> {
-    let msg = CommitteeUpdateLogMessage::Failure {
-        from_epoch,
-        new_committee: signed.message().new_committee.clone(),
-        request_sign: signed.committee_signature().clone(),
-        error: err.to_string(),
-        hashi_object_id: enclave.hashi_object_id()?,
-    };
-    if let Err(log_err) = enclave.log_committee_update(msg).await {
-        error!(
-            from_epoch,
-            "failed to log committee update failure to S3: {log_err:?}"
-        );
-        return Err(InternalError(format!(
-            "Failed to log committee update error {err} due to S3 logging error {log_err}"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -134,6 +101,7 @@ mod tests {
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+    use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;

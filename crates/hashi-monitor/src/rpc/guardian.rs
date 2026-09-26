@@ -26,26 +26,20 @@ impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
             .into_withdrawal()
             .ok_or_else(|| anyhow::anyhow!("non-withdrawal logs found"))?;
 
-        match *withdrawal_message {
-            WithdrawalLogMessage::Success {
-                txid, request_data, ..
-            } => {
-                debug!(
-                    wid = %request_data.wid,
-                    txid = %txid,
-                    "successful guardian withdrawal log"
-                );
-                Ok(MonitorWithdrawalEvent {
-                    event_type: WithdrawalEventType::E2GuardianApproved,
-                    wid: request_data.wid,
-                    timestamp_secs: unix_millis_to_seconds(timestamp_ms),
-                    btc_txid: txid,
-                })
-            }
-            WithdrawalLogMessage::Failure { .. } => {
-                anyhow::bail!("failure log found under successful-withdrawal prefix")
-            }
-        }
+        let WithdrawalLogMessage {
+            txid, request_data, ..
+        } = *withdrawal_message;
+        debug!(
+            wid = %request_data.wid,
+            txid = %txid,
+            "successful guardian withdrawal log"
+        );
+        Ok(MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            wid: request_data.wid,
+            timestamp_secs: unix_millis_to_seconds(timestamp_ms),
+            btc_txid: txid,
+        })
     }
 }
 

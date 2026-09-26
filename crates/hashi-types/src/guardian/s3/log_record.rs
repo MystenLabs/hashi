@@ -11,7 +11,6 @@
 //! remain explicit reader operations.
 
 use super::config::S3ObjectLockPolicy;
-use super::log_layout::ObjectKeyPattern;
 use super::log_schema::LogMessage;
 use super::log_schema::LogMessageV1;
 use super::log_schema::LogType;
@@ -173,23 +172,12 @@ impl LogEntry {
     }
 
     fn validate_object_key(&self) -> GuardianResult<()> {
-        match self
-            .message
-            .object_key_pattern(&self.session_id, self.timestamp_ms)
-        {
-            ObjectKeyPattern::Fixed(expected) if self.object_key != expected => {
-                return Err(InvalidS3Log(format!(
-                    "non-canonical S3 object key: got {}, expected {expected}",
-                    self.object_key
-                )));
-            }
-            ObjectKeyPattern::RandomSuffix(prefix) if !self.object_key.starts_with(&prefix) => {
-                return Err(InvalidS3Log(format!(
-                    "non-canonical S3 object key: got {}, expected prefix {prefix}",
-                    self.object_key
-                )));
-            }
-            _ => {}
+        let expected = self.message.object_key(&self.session_id, self.timestamp_ms);
+        if self.object_key != expected {
+            return Err(InvalidS3Log(format!(
+                "non-canonical S3 object key: got {}, expected {expected}",
+                self.object_key
+            )));
         }
         Ok(())
     }
@@ -244,9 +232,7 @@ impl LogRecord {
         timestamp_ms: UnixMillis,
     ) -> Self {
         let message = VersionedLogMessage::V1(message);
-        let object_key = message
-            .object_key_pattern(&session_id, timestamp_ms)
-            .finalize();
+        let object_key = message.object_key(&session_id, timestamp_ms);
         let is_unsigned = message.is_unsigned();
         let data = LogEntry::new(session_id, object_key, message, timestamp_ms)
             .expect("writer-constructed log entry must be intrinsically valid");
@@ -400,7 +386,6 @@ mod tests {
     use crate::guardian::CeremonyProposalLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
-    use crate::guardian::GuardianError;
     use crate::guardian::GuardianInfo;
     use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
@@ -522,7 +507,7 @@ mod tests {
                     next_seq: 30,
                 },
             })),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: Txid::from_slice(&[3; 32]).unwrap(),
                 request_data: request_data.clone(),
                 request_sign: request_sign.clone(),
@@ -532,11 +517,6 @@ mod tests {
                     last_updated_at: 20,
                     next_seq: request_data.seq + 1,
                 },
-            })),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
-                request_data,
-                request_sign: request_sign.clone(),
-                error: GuardianError::RateLimitExceeded.to_string(),
             })),
             LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                 instance: instance_0.clone(),
@@ -567,18 +547,10 @@ mod tests {
                 0,
                 encrypted_shares,
             ))),
-            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
-                from_epoch: 0,
-                new_committee: committee_1.clone(),
-                request_sign: request_sign.clone(),
-                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-            })),
-            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage {
                 from_epoch: 0,
                 new_committee: committee_1,
                 request_sign,
-                error: GuardianError::InvalidInputs("test failure".into()).to_string(),
-                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
             })),
             LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee: committee_0,
@@ -605,10 +577,7 @@ mod tests {
                 }
                 InitLogMessage::OAActivated { .. } => "init/oa-activated",
             },
-            LogMessage::Withdrawal(message) => match message.as_ref() {
-                WithdrawalLogMessage::Success { .. } => "withdrawal/success",
-                WithdrawalLogMessage::Failure { .. } => "withdrawal/failure",
-            },
+            LogMessage::Withdrawal(_) => "withdrawal/success",
             LogMessage::Ceremony(message) => match message.as_ref() {
                 CeremonyLogMessage::NewKey { .. } => "ceremony/new-key",
                 CeremonyLogMessage::Rotate { .. } => "ceremony/rotate",
@@ -618,10 +587,7 @@ mod tests {
                 CeremonyLogMessage::Rotate { .. } => "ceremony-proposal/rotate",
             },
             LogMessage::KpShareState(_) => "kp-share-state/kp-share-state",
-            LogMessage::CommitteeUpdate(message) => match message.as_ref() {
-                CommitteeUpdateLogMessage::Success { .. } => "committee-update/success",
-                CommitteeUpdateLogMessage::Failure { .. } => "committee-update/failure",
-            },
+            LogMessage::CommitteeUpdate(_) => "committee-update/success",
             LogMessage::Genesis(_) => "genesis/genesis",
         }
     }
@@ -630,23 +596,10 @@ mod tests {
         GuardianSignKeyPair::from([21u8; 32])
     }
 
-    /// Fix the normally random failure suffix before signing fixture records.
     fn dummy_log_record(message: LogMessage) -> LogRecord {
-        let message = VersionedLogMessage::V1(message);
         let signing_key = fixture_signing_key();
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let timestamp_ms = 1_700_000_000_000;
-        let object_key = match message.object_key_pattern(&session_id, timestamp_ms) {
-            ObjectKeyPattern::Fixed(key) => key,
-            ObjectKeyPattern::RandomSuffix(prefix) => format!("{prefix}{:032x}.json", 0),
-        };
-        let is_unsigned = message.is_unsigned();
-        let entry = LogEntry::new(session_id, object_key, message, timestamp_ms).unwrap();
-        if is_unsigned {
-            LogRecord::Unsigned(entry)
-        } else {
-            LogRecord::Signed(GuardianSigned::sign(entry, &signing_key))
-        }
+        LogRecord::new_at_timestamp(session_id, message, &signing_key, 1_700_000_000_000)
     }
 
     fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -694,6 +647,9 @@ mod tests {
             decoded
                 .validate(signing_pubkey.as_ref())
                 .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
+            if signing_pubkey.is_some() {
+                assert_writer_key_is_stable_and_verifies(decoded, &signing_key);
+            }
         }
     }
 
@@ -806,61 +762,6 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<LogRecord>(json).is_err());
-    }
-
-    #[test]
-    fn withdrawal_failure_writer_key_is_stable_and_verifies() {
-        let signing_key = GuardianSignKeyPair::from([16u8; 32]);
-        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let (request_sign, request_data) = signed_request.into_parts();
-        let log = LogRecord::new(
-            session_id,
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
-                request_data: request_data.into(),
-                request_sign,
-                error: GuardianError::RateLimitExceeded.to_string(),
-            })),
-            &signing_key,
-        );
-        let json = serde_json::to_value(&log).unwrap();
-        assert_eq!(
-            json["message"]["Withdrawal"]["Failure"]["error"],
-            GuardianError::RateLimitExceeded.to_string()
-        );
-
-        assert_writer_key_is_stable_and_verifies(log, &signing_key);
-    }
-
-    #[test]
-    fn committee_update_failure_writer_key_is_stable_and_verifies() {
-        let signing_key = GuardianSignKeyPair::from([17u8; 32]);
-        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let (request_sign, _) = signed_request.into_parts();
-        let log = LogRecord::new(
-            session_id,
-            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
-                from_epoch: 6,
-                new_committee: crate::move_types::Committee {
-                    epoch: 7,
-                    members: vec![],
-                    total_weight: 0,
-                    config: crate::move_types::Config::default(),
-                },
-                request_sign,
-                error: GuardianError::InvalidInputs("test failure".to_string()).to_string(),
-                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-            })),
-            &signing_key,
-        );
-        let json = serde_json::to_value(&log).unwrap();
-        assert_eq!(
-            json["message"]["CommitteeUpdate"]["Failure"]["error"],
-            GuardianError::InvalidInputs("test failure".to_string()).to_string()
-        );
-
-        assert_writer_key_is_stable_and_verifies(log, &signing_key);
     }
 
     #[test]
@@ -995,37 +896,6 @@ mod tests {
         let err = tampered
             .validate(Some(&signing_key.verification_key()))
             .expect_err("signature must cover the canonical object key and message");
-
-        assert!(format!("{err:?}").contains("signature invalid"));
-    }
-
-    #[test]
-    fn signed_log_rejects_changed_failure_random_suffix_relocation() {
-        let signing_key = GuardianSignKeyPair::from([18u8; 32]);
-        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let (request_sign, request_data) = signed_request.into_parts();
-        let log = LogRecord::new(
-            session_id,
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
-                request_data: request_data.into(),
-                request_sign,
-                error: GuardianError::RateLimitExceeded.to_string(),
-            })),
-            &signing_key,
-        );
-        let original_key = log.object_key();
-        let stem = original_key.strip_suffix(".json").unwrap();
-        let (prefix, suffix_hex) = stem.rsplit_once('-').unwrap();
-        let suffix = u128::from_str_radix(suffix_hex, 16).unwrap();
-        let relocated_key = format!("{prefix}-{:032x}.json", suffix ^ 1);
-
-        let mut record_read_from_s3: LogRecord =
-            serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
-        record_read_from_s3.data_mut().object_key = relocated_key;
-        let err = record_read_from_s3
-            .validate(Some(&signing_key.verification_key()))
-            .expect_err("the signature must authenticate the random failure suffix");
 
         assert!(format!("{err:?}").contains("signature invalid"));
     }
@@ -1288,7 +1158,7 @@ mod tests {
 
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
                 request_data,
                 request_sign,
@@ -1305,7 +1175,7 @@ mod tests {
 
         assert_eq!(
             log.object_key(),
-            format!("withdraw/2023/11/14/22/success-{seq:020}-session-c-wid{wid}.json"),
+            format!("withdraw/2023/11/14/22/{seq:020}-session-c-wid{wid}.json"),
         );
     }
 }

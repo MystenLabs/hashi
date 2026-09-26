@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_KP_SHARES;
 use crate::guardian::KpEncryptedShareRoster;
 use serde::Deserialize;
@@ -42,13 +41,5 @@ impl KpShareStateLogMessage {
             Self::object_key_dir(sharing_seq),
             cert_seq
         )
-    }
-
-    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
-        ObjectKeyPattern::Fixed(Self::object_key(
-            session_id,
-            self.sharing_seq,
-            self.cert_seq,
-        ))
     }
 }

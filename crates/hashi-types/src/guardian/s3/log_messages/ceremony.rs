@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_CEREMONY;
 use super::super::log_layout::S3_DIR_KP_SHARES;
 use crate::bitcoin::BitcoinPubkey;
@@ -81,10 +80,6 @@ impl CeremonyLogMessage {
             self.sharing_seq(),
         )
     }
-
-    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
-        ObjectKeyPattern::Fixed(self.object_key(session_id))
-    }
 }
 
 /// A ceremony attempt awaiting confirmation from every key provisioner.
@@ -109,9 +104,5 @@ impl CeremonyProposalLogMessage {
     /// enclave session.
     pub fn object_key(session_id: &str) -> String {
         format!("{S3_DIR_KP_SHARES}/proposed/{session_id}.json")
-    }
-
-    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
-        ObjectKeyPattern::Fixed(Self::object_key(session_id))
     }
 }

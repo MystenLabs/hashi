@@ -23,7 +23,6 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -130,14 +129,12 @@ impl GuardianReader {
 
     /// Read and verify successful withdrawal records in `dir`.
     ///
-    /// This excludes rejected withdrawal requests, which do not represent
-    /// Guardian approval events and are not inputs to the monitor state machine.
+    /// Withdrawal directories contain only successful approvals.
     pub async fn read_successful_withdrawals_in_dir(
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let prefix = format!("{dir}{}", WithdrawalLogMessage::SUCCESS_OBJECT_KEY_PREFIX);
-        self.read_logs_with_prefix(&prefix).await
+        self.read_logs_in_dir(dir).await
     }
 
     /// Return verified session info after requiring the attested PCRs to match
@@ -355,17 +352,13 @@ impl GuardianReader {
     /// epoch, or return `None` if no successful update exists.
     ///
     /// Success keys begin with a zero-padded epoch, so the lexicographically
-    /// greatest non-failure key identifies the latest applied committee.
+    /// greatest key identifies the latest applied committee.
     async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
             .list_keys(&CommitteeUpdateLogMessage::object_key_dir(), true)
             .await?;
-        let Some(key) = keys
-            .into_iter()
-            .filter(|key| !CommitteeUpdateLogMessage::is_failure_object_key(key))
-            .max()
-        else {
+        let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
         let verified_record = self.read_verified_record(&key).await?;
@@ -375,12 +368,7 @@ impl GuardianReader {
             .into_message()
             .into_committee_update()
             .ok_or_else(|| InvalidS3Log(format!("expected a committee-update log at {key}")))?;
-        let committee = match *msg {
-            CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
-            CommitteeUpdateLogMessage::Failure { .. } => {
-                unreachable!("a verified non-failure key cannot contain a Failure log")
-            }
-        };
+        let committee = msg.new_committee;
         log_verified_read(&key, &session_id);
         Ok(Some(committee))
     }

@@ -5,8 +5,6 @@ use super::verify_hashi_cert;
 use crate::Enclave;
 use bitcoin::Txid;
 use hashi_types::guardian::now_timestamp_secs;
-use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -40,7 +38,7 @@ pub async fn standard_withdrawal(
         Ok((txid, response, limiter_guard)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
             let post_state = *limiter_guard.state();
-            let msg = WithdrawalLogMessage::Success {
+            let msg = WithdrawalLogMessage {
                 txid,
                 request_data: unsigned_request,
                 request_sign: request_signature,
@@ -54,12 +52,6 @@ pub async fn standard_withdrawal(
         }
         Err(withdraw_err) => {
             error!("Withdrawal {} failed: {:?}", wid, withdraw_err);
-            let msg = WithdrawalLogMessage::Failure {
-                request_data: unsigned_request,
-                request_sign: request_signature,
-                error: withdraw_err.to_string(),
-            };
-            log_withdrawal_failure(enclave.as_ref(), wid, msg, &withdraw_err).await?;
             Err(withdraw_err)
         }
     }
@@ -158,23 +150,6 @@ async fn log_withdrawal_success(
     Ok(())
 }
 
-async fn log_withdrawal_failure(
-    enclave: &Enclave,
-    wid: WithdrawalID,
-    msg: WithdrawalLogMessage,
-    withdraw_err: &GuardianError,
-) -> GuardianResult<()> {
-    if let Err(log_err) = enclave.log_withdraw(msg).await {
-        error!("Logging withdrawal {} to S3 failed: {:?}", wid, log_err);
-        return Err(InternalError(format!(
-            "Failed to log withdrawal {} error {} due to S3 logging error {}",
-            wid, withdraw_err, log_err
-        )));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +159,7 @@ mod tests {
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::guardian::EnclaveLifecycle;
+    use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
@@ -384,41 +360,22 @@ mod tests {
         let captured = captures.lock().unwrap();
         assert_eq!(
             captured.len(),
-            2,
-            "both withdrawal outcomes should be logged"
+            1,
+            "only successful withdrawals should be logged"
         );
         let success: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, success.object_key());
         let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) = success.message() else {
             panic!("expected V1 withdrawal record");
         };
-        let WithdrawalLogMessage::Success {
+        let WithdrawalLogMessage {
             request_data,
             post_state,
             ..
-        } = message.as_ref()
-        else {
-            panic!("expected successful withdrawal record");
-        };
+        } = message.as_ref();
         assert_eq!(request_data.seq, 0);
         assert_eq!(post_state.next_seq, 1);
         assert_eq!(post_state.num_tokens_available, 0);
-
-        let failure: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
-        assert_eq!(captured[1].0, failure.object_key());
-        let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) = failure.message() else {
-            panic!("expected V1 withdrawal record");
-        };
-        let WithdrawalLogMessage::Failure {
-            request_data,
-            error,
-            ..
-        } = message.as_ref()
-        else {
-            panic!("expected failed withdrawal record");
-        };
-        assert_eq!(request_data.seq, 1);
-        assert_eq!(error, &GuardianError::RateLimitExceeded.to_string());
     }
 
     #[test]

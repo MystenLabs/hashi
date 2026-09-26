@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3HourScopedDirectory;
 use crate::committee::CommitteeSignature;
 use crate::guardian::LimiterState;
@@ -14,58 +13,32 @@ use bitcoin::Txid;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// A successfully processed withdrawal and its durable limiter state.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum WithdrawalLogMessage {
-    Success {
-        txid: Txid,
-        request_data: StandardWithdrawalRequestWire,
-        request_sign: CommitteeSignature,
-        response: StandardWithdrawalResponse,
-        /// Limiter state after this withdrawal was consumed. The KP rotating in
-        /// the next enclave reads the max-seq Success log and uses its
-        /// `post_state` as the new enclave's initial limiter state.
-        post_state: LimiterState,
-    },
-    Failure {
-        request_data: StandardWithdrawalRequestWire,
-        request_sign: CommitteeSignature,
-        error: String,
-    },
+pub struct WithdrawalLogMessage {
+    pub txid: Txid,
+    pub request_data: StandardWithdrawalRequestWire,
+    pub request_sign: CommitteeSignature,
+    pub response: StandardWithdrawalResponse,
+    /// Limiter state after this withdrawal was consumed. The KP rotating in
+    /// the next enclave reads the max-seq log and uses its `post_state` as
+    /// the new enclave's initial limiter state.
+    pub post_state: LimiterState,
 }
 
 impl WithdrawalLogMessage {
-    /// Prefix shared by all successful withdrawal object names within an hour.
-    pub const SUCCESS_OBJECT_KEY_PREFIX: &'static str = "success-";
-
-    /// Success keys lead with `success-{seq:020}` so that lexicographic listing
-    /// within an hour bucket is also seq-sorted — the last key is the max-seq
-    /// log, which the KP reads to recover limiter state. Failures don't have a
-    /// meaningful seq (the request's seq may be stale), so they use a random
-    /// suffix for dedup.
-    pub fn object_key_pattern(
-        &self,
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-    ) -> ObjectKeyPattern {
+    /// Keys lead with `{seq:020}` so that lexicographic listing within
+    /// an hour bucket is also seq-sorted. The KP reads the max-seq log to
+    /// recover limiter state.
+    pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
         let directory = S3HourScopedDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
-        match self {
-            Self::Success { request_data, .. } => ObjectKeyPattern::Fixed(format!(
-                "{directory}{}{:020}-{session_id}-wid{}.json",
-                Self::SUCCESS_OBJECT_KEY_PREFIX,
-                request_data.seq,
-                request_data.wid,
-            )),
-            Self::Failure { request_data, .. } => ObjectKeyPattern::RandomSuffix(format!(
-                "{directory}failure-{session_id}-wid{}-",
-                request_data.wid,
-            )),
-        }
+        format!(
+            "{directory}{:020}-{session_id}-wid{}.json",
+            self.request_data.seq, self.request_data.wid,
+        )
     }
 
     pub fn wid(&self) -> WithdrawalID {
-        match self {
-            WithdrawalLogMessage::Success { request_data, .. } => request_data.wid,
-            WithdrawalLogMessage::Failure { request_data, .. } => request_data.wid,
-        }
+        self.request_data.wid
     }
 }

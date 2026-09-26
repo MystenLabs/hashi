@@ -11,24 +11,6 @@ use time::OffsetDateTime;
 use time::PrimitiveDateTime;
 use time::Time;
 
-pub enum ObjectKeyPattern {
-    Fixed(String),
-    /// Complete key prefix before the random suffix; finalize() appends the suffix.
-    RandomSuffix(String),
-}
-
-impl ObjectKeyPattern {
-    /// Finalizes the pattern into the complete S3 object key.
-    pub fn finalize(self) -> String {
-        match self {
-            Self::Fixed(key) => key,
-            Self::RandomSuffix(prefix) => {
-                format!("{prefix}{:032x}.json", rand::random::<u128>())
-            }
-        }
-    }
-}
-
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";

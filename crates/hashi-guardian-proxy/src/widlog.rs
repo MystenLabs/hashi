@@ -7,7 +7,7 @@
 //! (`withdraw_mode/standard.rs`), so every signature a node has seen has a
 //! record here; the proxy never writes.
 //!
-//! Keys are `withdraw/YYYY/MM/DD/HH/success-{seq:020}-{session}-wid{wid}.json`,
+//! Keys are `withdraw/YYYY/MM/DD/HH/{seq:020}-{session}-wid{wid}.json`,
 //! with the wid only a suffix — so a lookup walks hour buckets newest-first.
 //! The request's `seq` bounds the walk: a retried wid was signed at `seq` or
 //! `seq - 1` (the node's mirror trails the guardian by at most the reconcile
@@ -29,8 +29,6 @@ use tracing::warn;
 // A terminating scan needs ~4 tree walks + 2-3 bucket lists; the cap only
 // trips on a seq far below everything in the log (e.g. a rogue client).
 const SCAN_LIST_CAP: usize = 100;
-
-const SUCCESS_KEY_PREFIX: &str = "success-";
 
 #[derive(Debug)]
 pub enum WidLogError {
@@ -78,14 +76,9 @@ pub async fn find_success_record<L: LogStore>(
             for month in list_desc(log, &year, &mut lists_used).await? {
                 for day in list_desc(log, &month, &mut lists_used).await? {
                     for hour in list_desc(log, &day, &mut lists_used).await? {
-                        let keys = list_keys_capped(
-                            log,
-                            &format!("{hour}{SUCCESS_KEY_PREFIX}"),
-                            &mut lists_used,
-                        )
-                        .await?;
+                        let keys = list_keys_capped(log, &hour, &mut lists_used).await?;
                         if keys.is_empty() {
-                            // Failure-only bucket: says nothing about the seq bound.
+                            // An empty listing says nothing about the seq bound.
                             continue;
                         }
 
@@ -156,11 +149,10 @@ fn charge_list(lists_used: &mut usize) -> Result<(), WidLogError> {
     Ok(())
 }
 
-/// Parse the zero-padded seq out of a `.../success-{seq:020}-...` key.
+/// Parse the zero-padded seq out of a `.../{seq:020}-...` key.
 fn parse_success_seq(key: &str) -> Option<u64> {
     let name = key.rsplit('/').next()?;
-    let rest = name.strip_prefix(SUCCESS_KEY_PREFIX)?;
-    rest.get(..20)?.parse().ok()
+    name.get(..20)?.parse().ok()
 }
 
 fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSuccess> {
@@ -171,14 +163,11 @@ fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSucces
         .into_message()
         .into_withdrawal()
         .ok_or_else(|| anyhow::anyhow!("not a withdrawal record"))?;
-    let WithdrawalLogMessage::Success {
+    let WithdrawalLogMessage {
         request_data,
         response,
         ..
-    } = *message
-    else {
-        anyhow::bail!("not a success record");
-    };
+    } = *message;
     anyhow::ensure!(
         request_data.wid == *wid,
         "record is for wid {}, expected {}",
@@ -328,7 +317,7 @@ pub(crate) mod test_store {
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
         let record = LogRecord::new_at_timestamp(
             "test-session".into(),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),
                 request_data,
                 request_sign,
@@ -462,24 +451,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_only_buckets_never_terminate_the_scan() {
-        let store = MemStore::default();
-        // Newer bucket holds only failure records (not listed by the success-
-        // prefix); the wid's Success sits one bucket older.
-        store.insert(
-            "withdraw/2023/11/14/23/failure-test-session-wid0xdead-00000001.json",
-            b"{}".to_vec(),
-        );
-        let (key, bytes) = success_record_json(wid(0xaa), 7, TS_HOUR_A, mock_response());
-        store.insert(key, bytes);
-
-        let found = find_success_record(&store, &wid(0xaa), 7, &test_metrics())
-            .await
-            .unwrap();
-        assert!(found.is_some(), "failure-only bucket must be walked past");
-    }
-
-    #[tokio::test]
     async fn bumped_seq_retry_still_finds_the_record() {
         // The reconcile snap bumps the node's seq to S+1; threshold slack must
         // keep the bucket holding seq S inside the scan.
@@ -593,7 +564,7 @@ mod tests {
         let (key, _) = success_record_json(wid(0xaa), 42, TS_HOUR_A, mock_response());
         assert_eq!(parse_success_seq(&key), Some(42));
         assert_eq!(
-            parse_success_seq("withdraw/2023/11/14/22/failure-s-wid0xaa-0000.json"),
+            parse_success_seq("withdraw/2023/11/14/22/unknown-s-wid0xaa.json"),
             None
         );
     }

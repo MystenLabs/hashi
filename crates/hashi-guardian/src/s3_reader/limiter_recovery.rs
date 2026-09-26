@@ -10,7 +10,7 @@
 //!
 //! Finding that log is a 4-level S3 tree-walk over the hour-partitioned layout
 //! (`withdraw/YYYY/MM/DD/HH/`): at each level we list `CommonPrefixes`, pick the
-//! lex-greatest, and descend. The first hour bucket containing any `success-*`
+//! lex-greatest, and descend. The first hour bucket containing any withdrawal
 //! key is the latest non-empty bucket. We read it and one bucket back
 //! (sub-hour clock-skew defense across hour boundaries), then take the max-seq
 //! Success across both.
@@ -32,7 +32,6 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
 
@@ -82,7 +81,7 @@ impl GuardianReader {
 }
 
 /// Finds the latest hour bucket under `withdraw/` containing at least one
-/// `success-*` key, by descending the YYYY/MM/DD/HH tree in lex-greatest
+/// withdrawal key, by descending the YYYY/MM/DD/HH tree in lex-greatest
 /// order at each level. Returns `None` if no Success log exists anywhere.
 async fn find_latest_success_bucket(
     s3_client: &GuardianS3Client,
@@ -122,9 +121,7 @@ async fn hour_bucket_has_success(
     s3_client: &GuardianS3Client,
     bucket: &str,
 ) -> GuardianResult<bool> {
-    let keys = s3_client
-        .list_keys(&format!("{bucket}success-"), true)
-        .await?;
+    let keys = s3_client.list_keys(bucket, true).await?;
     Ok(!keys.is_empty())
 }
 
@@ -132,10 +129,7 @@ fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| {
             let boxed = log.into_entry().into_message().into_withdrawal()?;
-            match *boxed {
-                WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),
-                WithdrawalLogMessage::Failure { .. } => None,
-            }
+            Some(boxed.post_state)
         })
         .max_by_key(|s| s.next_seq)
 }
@@ -164,6 +158,7 @@ mod tests {
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
+    use hashi_types::guardian::WithdrawalLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::new("current", vec![0])
@@ -180,23 +175,12 @@ mod tests {
     fn withdrawal_success_log(next_seq: u64) -> VerifiedLogRecord {
         let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed.into_parts();
-        let msg = WithdrawalLogMessage::Success {
+        let msg = WithdrawalLogMessage {
             txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
             request_data: StandardWithdrawalRequestWire::from(request_data),
             request_sign,
             response: StandardWithdrawalResponse::mock_for_testing(),
             post_state: state_with_seq(next_seq),
-        };
-        verified_withdrawal_log(msg)
-    }
-
-    fn withdrawal_failure_log() -> VerifiedLogRecord {
-        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let (request_sign, request_data) = signed.into_parts();
-        let msg = WithdrawalLogMessage::Failure {
-            request_data: StandardWithdrawalRequestWire::from(request_data),
-            request_sign,
-            error: GuardianError::RateLimitExceeded.to_string(),
         };
         verified_withdrawal_log(msg)
     }
@@ -219,14 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn bucket_max_only_failures_is_none() {
-        assert!(
-            bucket_max_post_state(vec![withdrawal_failure_log(), withdrawal_failure_log()])
-                .is_none()
-        );
-    }
-
-    #[test]
     fn bucket_max_picks_highest_seq_success() {
         let logs = vec![
             withdrawal_success_log(3),
@@ -235,18 +211,6 @@ mod tests {
         ];
         let got = bucket_max_post_state(logs).expect("non-empty success set");
         assert_eq!(got.next_seq, 7);
-    }
-
-    #[test]
-    fn bucket_max_ignores_failures_when_picking_success() {
-        let logs = vec![
-            withdrawal_failure_log(),
-            withdrawal_success_log(2),
-            withdrawal_failure_log(),
-            withdrawal_success_log(9),
-        ];
-        let got = bucket_max_post_state(logs).expect("non-empty success set");
-        assert_eq!(got.next_seq, 9);
     }
 
     #[test]
@@ -263,13 +227,7 @@ mod tests {
     }
 
     fn withdraw_success_key(year: u16, month: u8, day: u8, hour: u8, seq: u64) -> String {
-        format!(
-            "withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/success-{seq:020}-sess-widabc.json"
-        )
-    }
-
-    fn withdraw_failure_key(year: u16, month: u8, day: u8, hour: u8, n: u32) -> String {
-        format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/failure-sess-widabc-{n:08x}.json")
+        format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/{seq:020}-sess-widabc.json")
     }
 
     fn assert_bucket(actual: Option<S3HourScopedDirectory>, expected_path: &str) {
@@ -305,19 +263,8 @@ mod tests {
         assert!(matches!(
             err,
             GuardianError::S3Error(message)
-                if message == "Delete marker found under prefix withdraw/2024/03/15/14/success-"
+                if message == "Delete marker found under prefix withdraw/2024/03/15/14/"
         ));
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_skips_latest_hour_with_only_failures() {
-        let keys = vec![
-            withdraw_failure_key(2024, 3, 15, 14, 0xdead_beef),
-            withdraw_success_key(2024, 3, 15, 13, 5),
-        ];
-        let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/03/15/13/");
     }
 
     #[tokio::test]
@@ -329,17 +276,5 @@ mod tests {
         let s3 = crate::test_utils::mock_logger_with_layout(keys);
         let got = find_latest_success_bucket(&s3).await.unwrap();
         assert_bucket(got, "withdraw/2024/01/01/00/");
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_backtracks_within_day() {
-        let keys = vec![
-            withdraw_failure_key(2024, 3, 15, 15, 1),
-            withdraw_failure_key(2024, 3, 15, 14, 2),
-            withdraw_success_key(2024, 3, 15, 12, 9),
-        ];
-        let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/03/15/12/");
     }
 }
