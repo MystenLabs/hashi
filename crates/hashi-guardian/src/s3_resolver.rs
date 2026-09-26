@@ -17,6 +17,8 @@ pub(crate) struct EnclaveS3Resolver {
 
 impl EnclaveS3Resolver {
     pub(crate) fn new(bucket: &S3BucketInfo) -> Self {
+        // These IPs reach the S3 forwarders in docker/hashi-guardian/run.sh;
+        // keep the mappings in sync with that script.
         Self {
             hosts: BTreeMap::from([
                 (
