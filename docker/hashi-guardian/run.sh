@@ -34,12 +34,11 @@ while ! printf '\267' | socat - VSOCK-CONNECT:3:9000; do
 	sleep 1
 done
 
-# Assign an IP address to local loopback
+# Configure loopback networking and localhost resolution.
 busybox ip addr add 127.0.0.1/32 dev lo
 busybox ip link set dev lo up
-
-# S3 hostname routing is configured on the Rust client during operator init.
 echo "127.0.0.1   localhost" > /etc/hosts
+# S3 hostnames are mapped to loopback IPs in crates/hashi-guardian/src/s3_resolver.rs.
 
 # Run traffic forwarders in background.
 # Forwards traffic from 127.0.0.x:443 -> VSOCK CID 3 on ports 8101-8103.
