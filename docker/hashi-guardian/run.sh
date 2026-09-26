@@ -44,6 +44,7 @@ echo "127.0.0.1   localhost" > /etc/hosts
 # Run traffic forwarders in background.
 # Forwards traffic from 127.0.0.x:443 -> VSOCK CID 3 on ports 8101-8103.
 # A vsock-proxy on the host forwards these to the actual S3 endpoints
+# Keep these three IPs in sync with crates/hashi-guardian/src/s3_resolver.rs.
 socat TCP4-LISTEN:443,bind=127.0.0.64,reuseaddr,fork VSOCK-CONNECT:3:8101 &
 socat TCP4-LISTEN:443,bind=127.0.0.65,reuseaddr,fork VSOCK-CONNECT:3:8102 &
 socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
