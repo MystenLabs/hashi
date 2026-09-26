@@ -56,7 +56,7 @@ pub async fn verified_ceremony_guardian_info(
     let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
     let verified = verify_info_response(info_pb, current_build)?;
     ensure!(
-        matches!(verified.info.lifecycle, EnclaveLifecycle::Ceremony(_)),
+        matches!(verified.info.lifecycle, Some(EnclaveLifecycle::Ceremony(_))),
         "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
          guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
          as its provisioning target; a bare endpoint must be the ceremony guardian itself",

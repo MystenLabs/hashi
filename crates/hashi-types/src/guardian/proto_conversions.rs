@@ -1119,7 +1119,6 @@ impl TryFrom<i32> for CeremonyStage {
 
     fn try_from(stage: i32) -> Result<Self, Self::Error> {
         match pb::CeremonyStage::try_from(stage) {
-            Ok(pb::CeremonyStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::CeremonyStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
             Ok(pb::CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
                 Ok(Self::AwaitingKeyProvisionerConfirmations)
@@ -1134,7 +1133,6 @@ impl TryFrom<i32> for CeremonyStage {
 
 fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     match stage {
-        CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
         CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
         CeremonyStage::AwaitingKeyProvisionerConfirmations => {
             pb::CeremonyStage::AwaitingKeyProvisionerConfirmations as i32
@@ -1148,7 +1146,6 @@ impl TryFrom<i32> for WithdrawStage {
 
     fn try_from(stage: i32) -> Result<Self, Self::Error> {
         match pb::WithdrawStage::try_from(stage) {
-            Ok(pb::WithdrawStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::WithdrawStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
             Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(Self::ProvisionerInitialized),
             Ok(pb::WithdrawStage::Activated) => Ok(Self::Activated),
@@ -1161,7 +1158,6 @@ impl TryFrom<i32> for WithdrawStage {
 
 fn withdraw_stage_to_pb(stage: WithdrawStage) -> i32 {
     match stage {
-        WithdrawStage::Uninitialized => pb::WithdrawStage::Uninitialized as i32,
         WithdrawStage::OperatorInitialized => pb::WithdrawStage::OperatorInitialized as i32,
         WithdrawStage::ProvisionerInitialized => pb::WithdrawStage::ProvisionerInitialized as i32,
         WithdrawStage::Activated => pb::WithdrawStage::Activated as i32,
@@ -1172,12 +1168,13 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
     type Error = GuardianError;
 
     fn try_from(data: pb::GuardianInfoData) -> Result<Self, Self::Error> {
-        let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
-            pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
-                EnclaveLifecycle::Ceremony(CeremonyStage::try_from(stage)?)
+        let lifecycle = match data.lifecycle {
+            None => None,
+            Some(pb::guardian_info_data::Lifecycle::Ceremony(stage)) => {
+                Some(EnclaveLifecycle::Ceremony(CeremonyStage::try_from(stage)?))
             }
-            pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
-                EnclaveLifecycle::Withdraw(WithdrawStage::try_from(stage)?)
+            Some(pb::guardian_info_data::Lifecycle::Withdraw(stage)) => {
+                Some(EnclaveLifecycle::Withdraw(WithdrawStage::try_from(stage)?))
             }
         };
         let secret_sharing_instance = data
@@ -1260,16 +1257,16 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
 }
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
-    let lifecycle = match info.lifecycle {
+    let lifecycle = info.lifecycle.map(|lifecycle| match lifecycle {
         EnclaveLifecycle::Ceremony(stage) => {
             pb::guardian_info_data::Lifecycle::Ceremony(ceremony_stage_to_pb(stage))
         }
         EnclaveLifecycle::Withdraw(stage) => {
             pb::guardian_info_data::Lifecycle::Withdraw(withdraw_stage_to_pb(stage))
         }
-    };
+    });
     pb::GuardianInfoData {
-        lifecycle: Some(lifecycle),
+        lifecycle,
         secret_sharing_instance: info
             .secret_sharing_instance
             .as_ref()

@@ -15,6 +15,16 @@ carry one recipient fingerprint and one ciphertext per share. The
 `VersionedLogMessage` wrapper retains explicit version dispatch for future
 schema changes.
 
+## Initialization and build identity
+
+One EIF serves both ceremony and withdraw sessions. `OperatorInit` selects the
+mode and supplies deployment configuration and S3 credentials; bucket, region,
+mode, and the reported Git revision are not embedded in the image.
+
+Tooling verifies an independently approved PCR before initialization and the
+signed deployment summary afterward. The revision is a label, not proof of the
+source. The host's S3 forwarders must match the configured bucket and region.
+
 ## Heartbeat write fencing
 
 Every Guardian S3 log write is serialized. After the first successful

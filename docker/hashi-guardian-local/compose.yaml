@@ -107,7 +107,6 @@ services:
       - ./run.local.sh:/run.local.sh:ro
     environment:
       <<: *s3-env
-      CEREMONY_MODE: "true"
     depends_on:
       host:
         condition: service_started

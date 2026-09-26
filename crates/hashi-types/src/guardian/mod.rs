@@ -92,8 +92,8 @@ pub struct VerifiedGuardianInfo {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Signed enclave mode and its current lifecycle stage.
-    pub lifecycle: EnclaveLifecycle,
+    /// Signed enclave mode and stage; absent until operator initialization commits.
+    pub lifecycle: Option<EnclaveLifecycle>,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// Public summary of the installed deployment configuration, absent before OI.
@@ -879,17 +879,16 @@ impl GetGuardianInfoResponse {
         }
     }
 
-    /// Verify a live guardian response.
-    ///
-    /// Used by operator and KP tooling while initializing a guardian (ceremony,
-    /// provisioning, and activation).
+    /// Verify a live guardian response against an independently approved build.
     ///
     /// Checks:
     /// - `signed_info` is signed by `signing_pub_key`;
-    /// - its installed deployment revision, when present, matches `expected_build`;
+    /// - initialized sessions report the expected deployment revision;
     /// - the Nitro attestation has a valid signature;
     /// - the certificate chain is valid now;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    ///
+    /// Callers check whether the verified lifecycle is appropriate for their operation.
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,
@@ -899,16 +898,23 @@ impl GetGuardianInfoResponse {
             .verify_signature(&self.signing_pub_key)?
             .response
             .clone();
-        // Before OI only the independently pinned attestation is available.
-        // Once installed, the signed deployment label must agree as well.
-        if let Some(deployment) = &info.deployment_info
-            && deployment.git_revision != expected_build.git_revision()
-        {
-            return Err(CryptoVerificationError::new(format!(
-                "guardian reports build '{}', expected '{}'",
-                deployment.git_revision,
-                expected_build.git_revision()
-            )));
+        if info.lifecycle.is_some() {
+            if info
+                .deployment_info
+                .as_ref()
+                .map(|d| d.git_revision.as_str())
+                != Some(expected_build.git_revision())
+            {
+                return Err(CryptoVerificationError::new(format!(
+                    "guardian reports build '{:?}', expected '{}'",
+                    info.deployment_info.as_ref().map(|d| &d.git_revision),
+                    expected_build.git_revision()
+                )));
+            }
+        } else if info.deployment_info.is_some() {
+            return Err(CryptoVerificationError::new(
+                "expected an uninitialized guardian without deployment configuration",
+            ));
         }
         self.attestation
             .verify_live(&self.signing_pub_key, expected_build)?;
@@ -1074,6 +1080,33 @@ mod tests {
                 .to_string(),
             "signature invalid"
         );
+    }
+
+    #[test]
+    fn guardian_info_verification_distinguishes_boot_from_initialized_sessions() {
+        let key = GuardianSignKeyPair::from([7; 32]);
+        let build = BuildPcrs::new("approved", vec![1]);
+        let response = |info| {
+            GetGuardianInfoResponse::new(
+                NitroAttestation::new(vec![]),
+                key.verification_key(),
+                GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
+            )
+        };
+        let mut info = GuardianInfo::mock_for_testing();
+        info.lifecycle = None;
+        info.deployment_info = None;
+        assert!(response(info.clone()).verify_live(&build).is_ok());
+        let mut deployment = DeploymentConfig::mock_for_testing().summary();
+        deployment.git_revision = "approved".into();
+        info.deployment_info = Some(deployment);
+        assert!(response(info.clone()).verify_live(&build).is_err());
+        info.lifecycle = CeremonyStage::OperatorInitialized.into();
+        assert!(response(info.clone()).verify_live(&build).is_ok());
+        info.deployment_info.as_mut().unwrap().git_revision = "wrong-label".into();
+        assert!(response(info.clone()).verify_live(&build).is_err());
+        info.deployment_info = None;
+        assert!(response(info).verify_live(&build).is_err());
     }
 
     #[test]

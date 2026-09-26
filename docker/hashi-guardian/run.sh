@@ -17,7 +17,7 @@ export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
 export SSL_CERT_FILE=/ca-certificates.crt
 echo "run.sh script is running"
 
-# The Nitro loader hands us a bare initramfs root; mount the pseudo-filesystems.
+# Linux starts this init script from the initramfs; mount the pseudo-filesystems.
 # Tolerate an already-mounted fs (the kernel auto-mounts devtmpfs).
 busybox mount -t proc proc /proc 2>/dev/null || :
 busybox mount -t sysfs sysfs /sys 2>/dev/null || :
@@ -34,33 +34,21 @@ while ! printf '\267' | socat - VSOCK-CONNECT:3:9000; do
 	sleep 1
 done
 
-# Assign an IP address to local loopback
+# Configure loopback networking and localhost resolution.
 busybox ip addr add 127.0.0.1/32 dev lo
 busybox ip link set dev lo up
-
-# Add hosts records, pointing S3 calls to local loopback
-# BUCKET_NAME and AWS_REGION are substituted at build time via Containerfile
 echo "127.0.0.1   localhost" > /etc/hosts
-echo "127.0.0.64   s3.${AWS_REGION}.amazonaws.com" >> /etc/hosts
-echo "127.0.0.65   ${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com" >> /etc/hosts
-echo "127.0.0.66   s3.amazonaws.com" >> /etc/hosts
-
-cat /etc/hosts
+# S3 hostnames are mapped to loopback IPs in crates/hashi-guardian/src/s3_resolver.rs.
 
 # Run traffic forwarders in background.
 # Forwards traffic from 127.0.0.x:443 -> VSOCK CID 3 on ports 8101-8103.
 # A vsock-proxy on the host forwards these to the actual S3 endpoints
+# Keep these three IPs in sync with crates/hashi-guardian/src/s3_resolver.rs.
 socat TCP4-LISTEN:443,bind=127.0.0.64,reuseaddr,fork VSOCK-CONNECT:3:8101 &
 socat TCP4-LISTEN:443,bind=127.0.0.65,reuseaddr,fork VSOCK-CONNECT:3:8102 &
 socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
 
 # Forward VSOCK port 3000 to localhost:3000 (gRPC server)
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
-
-# CEREMONY_MODE selects ceremony vs withdraw mode (see guardian main.rs). A real
-# Nitro PID 1 starts with an empty environment, so it is baked here at build time
-# via the Containerfile (like BUCKET_NAME/AWS_REGION); empty => withdraw, "true"
-# => ceremony. A ceremony enclave is therefore a distinct EIF with its own PCR0.
-export CEREMONY_MODE=${CEREMONY_MODE}
 
 exec /guardian

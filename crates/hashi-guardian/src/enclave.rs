@@ -80,8 +80,8 @@ pub struct EnclaveConfig {
 /// Mutable state that changes during operation.
 /// Committee + rate limiter are installed during operator_activate.
 pub struct EnclaveState {
-    /// Authoritative mode-specific lifecycle, initialized at boot.
-    lifecycle: RwLock<EnclaveLifecycle>,
+    /// Authoritative mode-specific lifecycle, absent until operator init commits.
+    lifecycle: RwLock<Option<EnclaveLifecycle>>,
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
     /// Rate limiter. Set once during operator_activate.
@@ -413,18 +413,11 @@ impl Enclave {
     // Construction
     // ========================================================================
 
-    pub fn new(
-        signing_keys: GuardianSignKeyPair,
-        encryption_keys: GuardianEncKeyPair,
-        mode: EnclaveMode,
-    ) -> Self {
+    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
-                lifecycle: RwLock::new(match mode {
-                    EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
-                    EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
-                }),
+                lifecycle: RwLock::new(None),
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
                 limiter_snapshot: RwLock::new(None),
@@ -486,12 +479,12 @@ impl Enclave {
     // Lifecycle
     // ========================================================================
 
-    /// Which flows this enclave serves (fixed at boot).
-    pub fn mode(&self) -> EnclaveMode {
-        self.lifecycle().mode()
+    /// Which flows this enclave serves after operator initialization.
+    pub fn mode(&self) -> Option<EnclaveMode> {
+        self.lifecycle().map(EnclaveLifecycle::mode)
     }
 
-    pub fn lifecycle(&self) -> EnclaveLifecycle {
+    pub fn lifecycle(&self) -> Option<EnclaveLifecycle> {
         *self
             .state
             .lifecycle
@@ -500,7 +493,7 @@ impl Enclave {
     }
 
     /// Require an exact mode and lifecycle stage.
-    pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
+    pub fn require_lifecycle(&self, expected: Option<EnclaveLifecycle>) -> GuardianResult<()> {
         let actual = self.lifecycle();
         if actual != expected {
             return Err(LifecycleMismatch { expected, actual });
@@ -511,9 +504,7 @@ impl Enclave {
     /// Transition after the operation's durable log succeeds. The lifecycle is
     /// the single source of completion state.
     pub fn advance_lifecycle_into(&self, next: EnclaveLifecycle) -> GuardianResult<()> {
-        let expected = next
-            .predecessor()
-            .ok_or_else(|| InvalidInputs(format!("cannot advance lifecycle into {next:?}")))?;
+        let expected = next.predecessor();
         let mut lifecycle = self
             .state
             .lifecycle
@@ -526,16 +517,12 @@ impl Enclave {
             });
         }
         self.assert_state_installed_for(next);
-        *lifecycle = next;
+        *lifecycle = Some(next);
         Ok(())
     }
 
     fn assert_state_installed_for(&self, next: EnclaveLifecycle) {
         let installed = match next {
-            EnclaveLifecycle::Ceremony(CeremonyStage::Uninitialized)
-            | EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized) => {
-                unreachable!("cannot advance lifecycle into {next:?}")
-            }
             EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
                 self.operator_init_state_installed(EnclaveMode::Ceremony)
             }
@@ -619,28 +606,12 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    /// Compiled build identity checked against the deployment revision and the
-    /// `PcrAllowlist` key. A real ceremony enclave is a distinct measured build
-    /// (its own PCR0) from the same-commit withdraw enclave, so it reports a
-    /// distinct identity — the allowlist forbids two entries per revision, so
-    /// otherwise the withdraw enclave and KPs couldn't pin both PCR0s.
-    /// `test`/`non-enclave-dev` skip attestation and share one entry, so the
-    /// suffix is compiled out (existing mock flow unchanged).
-    pub(crate) fn reported_git_revision(&self) -> String {
-        // Injected at build time (docker/CI); defaults outside a real build.
-        let base = option_env!("GIT_REVISION").unwrap_or("unknown");
-        if cfg!(not(any(test, feature = "non-enclave-dev"))) && self.mode() == EnclaveMode::Ceremony
-        {
-            format!("{base}-ceremony")
-        } else {
-            base.to_string()
-        }
-    }
-
+    /// Collect status; the RPC caller holds the control lock while reading it.
     pub async fn info(&self) -> GuardianInfo {
+        let lifecycle = self.lifecycle();
         let temporary_init_state = self.temporary_init_state().ok();
         GuardianInfo {
-            lifecycle: self.lifecycle(),
+            lifecycle,
             secret_sharing_instance: temporary_init_state
                 .as_ref()
                 .map(|state| state.ceremony_state.secret_sharing_instance.clone()),
@@ -696,7 +667,7 @@ impl Enclave {
     pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
         assert_eq!(
             self.mode(),
-            EnclaveMode::Withdraw,
+            Some(EnclaveMode::Withdraw),
             "heartbeats are only supported in withdraw mode"
         );
         self.write_log(LogMessage::Heartbeat(msg)).await
