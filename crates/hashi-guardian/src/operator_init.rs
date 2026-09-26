@@ -186,7 +186,7 @@ pub async fn operator_init(
             deployment.pcr_allowlist.current_build(),
         )
         .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
-    let logger = GuardianS3Client::new_enclave(
+    let logger = GuardianS3Client::new_with_custom_resolver(
         &deployment.bucket_info,
         deployment.retention_environment,
         &s3_credentials,
