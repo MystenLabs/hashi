@@ -1195,11 +1195,11 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
-        let beacon = S::from_bytes_mod_order(&txn.randomness);
+        let withdrawal_delta = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
-        let beacon_ref = &beacon;
+        let withdrawal_delta_ref = &withdrawal_delta;
         let metrics_ref = &*self.metrics;
         let txn_id = txn.id;
         // Per-input presig index is read off the on-chain signing batch slot, so
@@ -1245,7 +1245,7 @@ impl Hashi {
         let collect = signing_manager_ref.sign(
             p2p_channel_ref,
             requests,
-            beacon_ref,
+            withdrawal_delta_ref,
             WITHDRAWAL_SIGNING_TIMEOUT,
             metrics_ref,
             result_tx,

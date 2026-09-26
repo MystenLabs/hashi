@@ -255,13 +255,6 @@ public(package) fun cert_bucket_is_bare(self: &Hashi, key: hashi::tob::TobKey): 
     self.tob.contains_with_type<hashi::tob::TobKey, hashi::tob::EpochCertsV1>(key)
 }
 
-/// A nonce bucket keeps the layout it was created with: one created bare
-/// (only possible on a chain that predates stamping) keeps taking bare
-/// writes, and a new bucket is always stamped.
-public(package) fun nonce_write_stays_bare(self: &Hashi, key: hashi::tob::TobKey): bool {
-    self.tob.contains(key) && self.cert_bucket_is_bare(key)
-}
-
 public(package) fun epoch_certs_stamped(
     self: &mut Hashi,
     key: hashi::tob::TobKey,

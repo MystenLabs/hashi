@@ -1142,6 +1142,7 @@ mod tests {
                 vk,
                 share_owners.clone(),
                 presignatures,
+                S::from(7u128),
                 0,
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,

@@ -9,6 +9,8 @@ use hashi::test_utils;
 const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
 const VOTER3: address = @0x3;
+const RANDOMNESS: vector<u8> = x"0101010101010101010101010101010101010101010101010101010101010101";
+const RANDOMNESS2: vector<u8> = x"0202020202020202020202020202020202020202020202020202020202020202";
 
 #[test]
 fun test_dkg_and_rotation_certs_use_separate_buckets() {
@@ -53,7 +55,7 @@ fun test_dkg_and_rotation_certs_use_separate_buckets() {
 }
 
 #[test]
-fun test_nonce_cert_is_stamped_with_clock() {
+fun test_nonce_cert_is_stamped_with_clock_and_randomness() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
@@ -62,7 +64,7 @@ fun test_nonce_cert_is_stamped_with_clock() {
     clock.set_for_testing(123);
 
     let nonce_cert = hashi::committee::new_committee_signature(epoch, vector[], vector[]);
-    hashi::cert_submission::submit_nonce_cert(
+    hashi::cert_submission::submit_nonce_cert_with_randomness(
         &mut hashi,
         epoch,
         0,
@@ -70,6 +72,7 @@ fun test_nonce_cert_is_stamped_with_clock() {
         vector[1u8, 2, 3],
         nonce_cert,
         &clock,
+        RANDOMNESS,
         ctx,
     );
 
@@ -81,9 +84,64 @@ fun test_nonce_cert_is_stamped_with_clock() {
     assert!(hashi.tob_contains(nonce_key));
     assert!(hashi.epoch_certs_stamped_ref(nonce_key).num_stamped_certs() == 1);
     assert!(hashi.epoch_certs_stamped_ref(nonce_key).submission_timestamp_ms(VOTER1) == 123);
+    assert!(hashi.epoch_certs_stamped_ref(nonce_key).submission_randomness(VOTER1) == RANDOMNESS);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_submit_nonce_cert_draws_randomness() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut scenario = sui::test_scenario::begin(@0x0);
+    sui::random::create_for_testing(scenario.ctx());
+    scenario.next_tx(@0x0);
+    let mut random = scenario.take_shared<sui::random::Random>();
+    random.update_randomness_state_for_testing(0, RANDOMNESS, scenario.ctx());
+    scenario.next_tx(VOTER1);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, scenario.ctx());
+    let epoch = scenario.ctx().epoch();
+    let clock = sui::clock::create_for_testing(scenario.ctx());
+
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER1,
+        vector[1u8, 2, 3],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        &random,
+        scenario.ctx(),
+    );
+    scenario.next_tx(VOTER2);
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER2,
+        vector[4u8, 5, 6],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        &random,
+        scenario.ctx(),
+    );
+
+    let nonce_key = hashi::tob::tob_key(
+        epoch,
+        option::some(0),
+        hashi::tob::protocol_type_nonce_generation(),
+    );
+    let certs = hashi.epoch_certs_stamped_ref(nonce_key);
+    let drawn = certs.submission_randomness(VOTER1);
+    assert!(drawn.length() == 32);
+    assert!(drawn != RANDOMNESS);
+    assert!(drawn != certs.submission_randomness(VOTER2));
+
+    clock.destroy_for_testing();
+    sui::test_scenario::return_shared(random);
+    std::unit_test::destroy(hashi);
+    scenario.end();
 }
 
 #[test]
@@ -102,6 +160,7 @@ fun test_destroy_all_stamped_drains_nonce_bucket() {
         vector[1u8, 2, 3],
         &sig,
         123,
+        RANDOMNESS,
     );
     assert!(bucket.num_stamped_certs() == 1);
     hashi::tob::destroy_all_stamped(bucket, 2);
@@ -115,10 +174,9 @@ fun test_destroy_all_stamped_before_two_epochs_aborts() {
     hashi::tob::destroy_all_stamped(bucket, 1);
 }
 
-/// A bare nonce bucket (as a chain that predates stamping would hold) keeps
-/// taking bare writes; only a bucket that does not exist yet is stamped.
 #[test]
-fun test_nonce_cert_follows_an_existing_bare_bucket() {
+#[expected_failure(abort_code = sui::dynamic_field::EFieldTypeMismatch)]
+fun test_nonce_cert_into_a_bare_bucket_aborts() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
@@ -134,7 +192,7 @@ fun test_nonce_cert_follows_an_existing_bare_bucket() {
     hashi.epoch_certs(nonce_key, ctx);
     assert!(hashi.cert_bucket_is_bare(nonce_key));
 
-    hashi::cert_submission::submit_nonce_cert(
+    hashi::cert_submission::submit_nonce_cert_with_randomness(
         &mut hashi,
         epoch,
         0,
@@ -142,26 +200,9 @@ fun test_nonce_cert_follows_an_existing_bare_bucket() {
         vector[1u8, 2, 3],
         hashi::committee::new_committee_signature(epoch, vector[], vector[]),
         &clock,
+        RANDOMNESS,
         ctx,
     );
-
-    assert!(hashi.cert_bucket_is_bare(nonce_key));
-    assert!(hashi.epoch_certs_ref(nonce_key).num_certs() == 1);
-
-    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    hashi::cert_submission::submit_nonce_cert(
-        &mut hashi,
-        epoch,
-        0,
-        VOTER2,
-        vector[4u8, 5, 6],
-        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
-        &clock,
-        ctx2,
-    );
-
-    assert!(hashi.cert_bucket_is_bare(nonce_key));
-    assert!(hashi.epoch_certs_ref(nonce_key).num_certs() == 2);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -176,7 +217,7 @@ fun test_stamped_bucket_takes_a_second_writer() {
     let mut clock = sui::clock::create_for_testing(ctx);
     clock.set_for_testing(123);
 
-    hashi::cert_submission::submit_nonce_cert(
+    hashi::cert_submission::submit_nonce_cert_with_randomness(
         &mut hashi,
         epoch,
         0,
@@ -184,6 +225,7 @@ fun test_stamped_bucket_takes_a_second_writer() {
         vector[1u8, 2, 3],
         hashi::committee::new_committee_signature(epoch, vector[], vector[]),
         &clock,
+        RANDOMNESS,
         ctx,
     );
 
@@ -197,7 +239,7 @@ fun test_stamped_bucket_takes_a_second_writer() {
 
     clock.set_for_testing(456);
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    hashi::cert_submission::submit_nonce_cert(
+    hashi::cert_submission::submit_nonce_cert_with_randomness(
         &mut hashi,
         epoch,
         0,
@@ -205,12 +247,14 @@ fun test_stamped_bucket_takes_a_second_writer() {
         vector[4u8, 5, 6],
         hashi::committee::new_committee_signature(epoch, vector[], vector[]),
         &clock,
+        RANDOMNESS2,
         ctx2,
     );
 
     assert!(!hashi.cert_bucket_is_bare(nonce_key));
     assert!(hashi.epoch_certs_stamped_ref(nonce_key).num_stamped_certs() == 2);
     assert!(hashi.epoch_certs_stamped_ref(nonce_key).submission_timestamp_ms(VOTER2) == 456);
+    assert!(hashi.epoch_certs_stamped_ref(nonce_key).submission_randomness(VOTER2) == RANDOMNESS2);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);

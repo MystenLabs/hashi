@@ -194,7 +194,7 @@ impl NonceCollectionWindow {
         self.weight += reduced_weight;
         if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
         {
-            // A zero crossing stamp marks the bare (pre-stamped-package) cert path.
+            // A zero crossing stamp is a placeholder, not chain time.
             self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
                 NonceCollectionState::Closed { cutoff_ms: None }
             } else {
@@ -223,6 +223,21 @@ pub(crate) struct AdmittedNonceDealers {
 impl AdmittedNonceDealers {
     pub(crate) fn floor_reached(&self) -> bool {
         self.weight >= self.required_weight
+    }
+
+    pub(crate) fn batch_delta(&self) -> MpcResult<S> {
+        self.dealers
+            .iter()
+            .try_fold(S::zero(), |sum, admitted| match &admitted.cert {
+                CertificateV1::NonceGeneration {
+                    randomness: Some(randomness),
+                    ..
+                } => Ok(sum + S::from_bytes_mod_order(randomness)),
+                _ => Err(MpcError::InvalidCertificate(format!(
+                    "admitted nonce cert from dealer {} carries no on-chain randomness",
+                    admitted.dealer
+                ))),
+            })
     }
 }
 
@@ -700,6 +715,7 @@ pub enum CertificateV1 {
         batch_index: u32,
         cert: DealerCertificate,
         timestamp_ms: u64,
+        randomness: Option<[u8; 32]>,
     },
 }
 
@@ -717,6 +733,7 @@ impl CertificateV1 {
         batch_index: Option<u32>,
         cert: DealerCertificate,
         timestamp_ms: u64,
+        randomness: &[u8],
     ) -> Self {
         match protocol_type {
             hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
@@ -726,6 +743,7 @@ impl CertificateV1 {
                     batch_index: batch_index.expect("batch_index required for NonceGeneration"),
                     cert,
                     timestamp_ms,
+                    randomness: randomness.try_into().ok(),
                 }
             }
         }
@@ -1126,6 +1144,10 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
+pub(crate) fn signing_beacon(withdrawal_delta: &S, batch_delta: &S) -> S {
+    *withdrawal_delta + *batch_delta
+}
+
 pub(crate) fn signing_request_digest(
     message: &[u8],
     derivation_address: Option<&DerivationAddress>,
@@ -1146,6 +1168,7 @@ pub(crate) fn signing_request_digest(
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
     public_nonce: G,
+    batch_delta: S,
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
     request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
@@ -1154,17 +1177,26 @@ pub struct PartialSigningOutput {
 impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
-        beacon: &S,
+        withdrawal_delta: &S,
+        batch_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            signing_nonce_bytes: signing_nonce_bytes(
+                &public_nonce,
+                &signing_beacon(withdrawal_delta, &batch_delta),
+            ),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
+            batch_delta,
             partial_sigs,
         }
+    }
+
+    pub fn batch_delta(&self) -> S {
+        self.batch_delta
     }
 
     pub fn public_nonce(&self) -> G {

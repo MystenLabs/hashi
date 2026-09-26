@@ -48,6 +48,7 @@ public struct DealerSubmissionV1 has copy, drop, store {
 public struct StampedDealerSubmissionV1 has copy, drop, store {
     submission: DealerSubmissionV1,
     timestamp_ms: u64,
+    randomness: vector<u8>,
 }
 
 public struct StampedEpochCertsV1 has store {
@@ -159,6 +160,7 @@ public(package) fun submit_stamped_cert_with_signature(
     messages_hash: vector<u8>,
     sig: &CommitteeSignature,
     timestamp_ms: u64,
+    randomness: vector<u8>,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {
@@ -166,7 +168,7 @@ public(package) fun submit_stamped_cert_with_signature(
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let submission = DealerSubmissionV1 { message, signature: *sig };
-    let stamped = StampedDealerSubmissionV1 { submission, timestamp_ms };
+    let stamped = StampedDealerSubmissionV1 { submission, timestamp_ms, randomness };
     epoch_certs.certs.push_back(dealer, stamped);
 }
 
@@ -197,6 +199,11 @@ public(package) fun destroy_all_stamped(epoch_certs: StampedEpochCertsV1, curren
 #[test_only]
 public fun submission_timestamp_ms(self: &StampedEpochCertsV1, dealer: address): u64 {
     self.certs.borrow(dealer).timestamp_ms
+}
+
+#[test_only]
+public fun submission_randomness(self: &StampedEpochCertsV1, dealer: address): vector<u8> {
+    self.certs.borrow(dealer).randomness
 }
 
 #[test_only]

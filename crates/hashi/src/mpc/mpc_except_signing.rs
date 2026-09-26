@@ -4012,6 +4012,7 @@ impl MpcManager {
             batch_index,
             cert,
             timestamp_ms: 0,
+            randomness: None,
         };
         publish_dealer_cert(tob_channel, cert, MPC_LABEL_NONCE_GENERATION, metrics).await
     }

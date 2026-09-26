@@ -1120,6 +1120,7 @@ impl MoveType for DealerSubmissionV1 {
 pub struct StampedDealerSubmissionV1 {
     pub submission: DealerSubmissionV1,
     pub timestamp_ms: u64,
+    pub randomness: Vec<u8>,
 }
 
 impl MoveType for StampedDealerSubmissionV1 {

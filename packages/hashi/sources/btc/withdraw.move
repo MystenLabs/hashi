@@ -371,9 +371,25 @@ entry fun finish_archive_withdrawal_txns(hashi: &mut Hashi, withdrawal_ids: vect
 /// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
 /// in-progress reconfiguration settles first, then this runs afterward to recover
 /// the now-stale batch. Carries no committee cert: it authorizes no signatures,
-/// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
-/// by the `mpc_signing` stale-epoch guard.
-entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
+/// only re-points pending presig indices and redraws the withdrawal's delta,
+/// bounded to once-per-withdrawal-per-epoch by the `mpc_signing` stale-epoch
+/// guard.
+entry fun reallocate_presigs(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    r: &Random,
+    ctx: &mut TxContext,
+) {
+    let mut rng = sui::random::new_generator(r, ctx);
+    let randomness = rng.generate_bytes(32);
+    reallocate_presigs_with_randomness(hashi, withdrawal_id, randomness);
+}
+
+public(package) fun reallocate_presigs_with_randomness(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    randomness: vector<u8>,
+) {
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
@@ -383,7 +399,13 @@ entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, new_base, current_epoch, pending);
+        .reallocate_presigs_for_withdrawal_txn(
+            withdrawal_id,
+            new_base,
+            current_epoch,
+            pending,
+            randomness,
+        );
 }
 
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
