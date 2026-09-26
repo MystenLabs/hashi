@@ -95,7 +95,7 @@ async fn find_latest_success_bucket(
             for day in days {
                 let hours = list_subdirs_desc(s3_client, &day).await?;
                 for hour in hours {
-                    if !s3_client.list_keys(&hour, true).await?.is_empty() {
+                    if !s3_client.list_keys(&hour).await?.is_empty() {
                         let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
                             InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
                         })?;

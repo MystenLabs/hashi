@@ -150,7 +150,7 @@ impl GuardianReader {
     ) -> GuardianResult<Option<(CeremonyLogMessage, SessionID)>> {
         let keys = self
             .s3
-            .list_keys(&CeremonyLogMessage::object_key_dir(), true)
+            .list_keys(&CeremonyLogMessage::object_key_dir())
             .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
@@ -183,7 +183,7 @@ impl GuardianReader {
         require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_keys(&prefix, false).await?;
+        let keys = self.s3.list_keys_allowing_mutations(&prefix).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
@@ -341,7 +341,7 @@ impl GuardianReader {
     async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
-            .list_keys(&CommitteeUpdateLogMessage::object_key_dir(), true)
+            .list_keys(&CommitteeUpdateLogMessage::object_key_dir())
             .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
@@ -364,7 +364,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .list_keys(&GenesisLogMessage::object_key_dir(), true)
+            .list_keys(&GenesisLogMessage::object_key_dir())
             .await?;
         if keys.is_empty() {
             return Ok(None);
