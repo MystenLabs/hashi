@@ -879,17 +879,13 @@ impl GetGuardianInfoResponse {
         }
     }
 
-    /// Verify a live guardian response.
+    /// Verify a live guardian response against an independently approved build.
     ///
-    /// Used by operator and KP tooling while initializing a guardian (ceremony,
-    /// provisioning, and activation).
-    ///
-    /// Checks:
-    /// - `signed_info` is signed by `signing_pub_key`;
-    /// - its initialized deployment revision matches `expected_build`;
-    /// - the Nitro attestation has a valid signature;
-    /// - the certificate chain is valid now;
-    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    /// Always verify the response signature and Nitro attestation, including the
+    /// current certificate validity, signing public key, and expected PCR0.
+    /// Initialized sessions must report the expected deployment revision. Fresh
+    /// sessions have no deployment revision yet. Callers check whether the
+    /// verified lifecycle is appropriate for their operation.
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,
@@ -899,40 +895,20 @@ impl GetGuardianInfoResponse {
             .verify_signature(&self.signing_pub_key)?
             .response
             .clone();
-        if info.lifecycle.is_none()
-            || info
+        if info.lifecycle.is_some() {
+            if info
                 .deployment_info
                 .as_ref()
                 .map(|d| d.git_revision.as_str())
                 != Some(expected_build.git_revision())
-        {
-            return Err(CryptoVerificationError::new(format!(
-                "guardian reports build '{:?}', expected '{}'",
-                info.deployment_info.as_ref().map(|d| &d.git_revision),
-                expected_build.git_revision()
-            )));
-        }
-        self.attestation
-            .verify_live(&self.signing_pub_key, expected_build)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key: self.signing_pub_key,
-            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
-        })
-    }
-
-    /// Authenticate a fresh session before sending operator initialization inputs.
-    /// The approved PCR is known independently; no revision label exists yet.
-    pub fn verify_live_uninitialized(
-        &self,
-        expected_build: &BuildPcrs,
-    ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
-        let info = self
-            .signed_info
-            .verify_signature(&self.signing_pub_key)?
-            .response
-            .clone();
-        if info.lifecycle.is_some() || info.deployment_info.is_some() {
+            {
+                return Err(CryptoVerificationError::new(format!(
+                    "guardian reports build '{:?}', expected '{}'",
+                    info.deployment_info.as_ref().map(|d| &d.git_revision),
+                    expected_build.git_revision()
+                )));
+            }
+        } else if info.deployment_info.is_some() {
             return Err(CryptoVerificationError::new(
                 "expected an uninitialized guardian without deployment configuration",
             ));
@@ -1117,28 +1093,13 @@ mod tests {
         let mut info = GuardianInfo::mock_for_testing();
         info.lifecycle = None;
         info.deployment_info = None;
-        assert!(
-            response(info.clone())
-                .verify_live_uninitialized(&build)
-                .is_ok()
-        );
-        assert!(response(info.clone()).verify_live(&build).is_err());
+        assert!(response(info.clone()).verify_live(&build).is_ok());
         let mut deployment = DeploymentConfig::mock_for_testing().summary();
         deployment.git_revision = "approved".into();
         info.deployment_info = Some(deployment);
-        assert!(
-            response(info.clone())
-                .verify_live_uninitialized(&build)
-                .is_err()
-        );
         assert!(response(info.clone()).verify_live(&build).is_err());
         info.lifecycle = CeremonyStage::OperatorInitialized.into();
         assert!(response(info.clone()).verify_live(&build).is_ok());
-        assert!(
-            response(info.clone())
-                .verify_live_uninitialized(&build)
-                .is_err()
-        );
         info.deployment_info.as_mut().unwrap().git_revision = "wrong-label".into();
         assert!(response(info.clone()).verify_live(&build).is_err());
         info.deployment_info = None;
