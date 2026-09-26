@@ -830,9 +830,6 @@ impl SigningManager {
         metrics: &Metrics,
     ) -> SigningResult<(G, Vec<Eval<S>>)> {
         let config = &self.config;
-        // Splitting the lock is safe because a given `signing_id` is never signed concurrently
-        // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
-        // removed from the pool under the first lock section.
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
