@@ -881,11 +881,14 @@ impl GetGuardianInfoResponse {
 
     /// Verify a live guardian response against an independently approved build.
     ///
-    /// Always verify the response signature and Nitro attestation, including the
-    /// current certificate validity, signing public key, and expected PCR0.
-    /// Initialized sessions must report the expected deployment revision. Fresh
-    /// sessions have no deployment revision yet. Callers check whether the
-    /// verified lifecycle is appropriate for their operation.
+    /// Checks:
+    /// - `signed_info` is signed by `signing_pub_key`;
+    /// - initialized sessions report the expected deployment revision;
+    /// - the Nitro attestation has a valid signature;
+    /// - the certificate chain is valid now;
+    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    ///
+    /// Callers check whether the verified lifecycle is appropriate for their operation.
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,

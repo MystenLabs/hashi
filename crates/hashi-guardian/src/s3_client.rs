@@ -124,9 +124,9 @@ impl GuardianS3Client {
         Ok(client)
     }
 
-    /// Construct and check a client using the enclave's VSOCK S3 routes.
-    /// Host-side readers use `new` and retain normal networking.
-    pub(crate) async fn new_enclave(
+    /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
+    /// Tests and `non-enclave-dev` use normal networking, as do readers using `new`.
+    pub(crate) async fn new_with_custom_resolver(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
