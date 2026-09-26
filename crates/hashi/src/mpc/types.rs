@@ -194,7 +194,7 @@ impl NonceCollectionWindow {
         self.weight += reduced_weight;
         if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
         {
-            // A zero crossing stamp marks the bare (pre-stamped-package) cert path.
+            // A zero crossing stamp is a placeholder, not chain time.
             self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
                 NonceCollectionState::Closed { cutoff_ms: None }
             } else {
@@ -1144,6 +1144,10 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
+pub(crate) fn signing_beacon(withdrawal_delta: &S, batch_delta: &S) -> S {
+    *withdrawal_delta + *batch_delta
+}
+
 pub(crate) fn signing_request_digest(
     message: &[u8],
     derivation_address: Option<&DerivationAddress>,
@@ -1173,14 +1177,17 @@ pub struct PartialSigningOutput {
 impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
-        beacon: &S,
+        withdrawal_delta: &S,
         batch_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            signing_nonce_bytes: signing_nonce_bytes(
+                &public_nonce,
+                &signing_beacon(withdrawal_delta, &batch_delta),
+            ),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
             batch_delta,

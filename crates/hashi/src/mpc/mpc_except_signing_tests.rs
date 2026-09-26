@@ -15493,65 +15493,58 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
 
 #[test]
 fn test_batch_delta_sums_only_the_admitted_certs() {
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto::serde_helpers::ToFromByteArray;
     let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
     let mgr = setup.create_manager(0);
-    let make_cert = |dealer_idx: usize,
-                     timestamp_ms: u64,
-                     signers: &[usize],
-                     randomness: Option<[u8; 32]>|
-     -> (Address, CertificateV1) {
-        let dealer_address = setup.address(dealer_idx);
-        let message = DealerMessagesHash {
-            dealer_address,
-            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
-        };
-        let mut aggregator =
-            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
-        for &s in signers {
-            let sig = setup.signing_keys[s].sign(
-                TEST_HASHI_ID,
-                setup.epoch(),
-                setup.address(s),
-                &message,
-            );
-            aggregator.add_signature(sig).unwrap();
-        }
-        (
-            dealer_address,
-            CertificateV1::NonceGeneration {
-                batch_index: 0,
-                cert: aggregator.finish().unwrap(),
-                timestamp_ms,
-                randomness,
-            },
-        )
+    let epoch = setup.committee().epoch();
+    let stamped = |dealer_idx: usize, timestamp_ms: u64, signers: &[usize], randomness: &[u8]| {
+        let (dealer, mut submission) =
+            valid_dealer_submission_signed_by(&setup, dealer_idx, timestamp_ms, signers);
+        submission.randomness = randomness.to_vec();
+        (dealer, submission)
     };
+    let from_chain =
+        |submissions: Vec<(Address, hashi_types::move_types::StampedDealerSubmissionV1)>| {
+            let kinds = submissions
+                .iter()
+                .map(|(dealer, _)| (*dealer, CertKind::AvidVote))
+                .collect();
+            crate::mpc::service::nonce_certificates(
+                &VerifiedNonceCerts::new(submissions, kinds),
+                epoch,
+                0,
+            )
+        };
     let all = [0, 1, 2, 3];
-    let certs = avid_vote_certs(vec![
-        make_cert(0, 1_000, &all, Some([1; 32])),
-        make_cert(1, 1_100, &all, Some([2; 32])),
-        make_cert(2, 1_200, &[3], Some([3; 32])),
-        make_cert(3, 5_000, &all, Some([4; 32])),
-    ]);
+    let first: Vec<u8> = (1..=32).collect();
 
     let admitted = mgr
-        .avid_admitted_nonce_dealers(&certs, Some(2_000))
+        .avid_admitted_nonce_dealers(
+            &from_chain(vec![
+                stamped(0, 1_000, &all, &first),
+                stamped(1, 1_100, &all, &[0xff; 32]),
+                stamped(2, 1_200, &[3], &[3; 32]),
+                stamped(3, 5_000, &all, &[4; 32]),
+            ]),
+            Some(2_000),
+        )
         .unwrap();
 
     let admitted_dealers: Vec<Address> = admitted.dealers.iter().map(|d| d.dealer).collect();
     assert_eq!(admitted_dealers, vec![setup.address(0), setup.address(1)]);
     assert_eq!(
-        admitted.batch_delta().unwrap(),
-        S::from_bytes_mod_order(&[1; 32]) + S::from_bytes_mod_order(&[2; 32]),
+        hex::encode(admitted.batch_delta().unwrap().to_byte_array()),
+        "0102030405060708090a0b0c0d0e0f115663362d65cd76dc5947bc8f4ce7ddde",
     );
 
-    let unread = avid_vote_certs(vec![
-        make_cert(0, 1_000, &all, Some([1; 32])),
-        make_cert(1, 1_100, &all, None),
-    ]);
     let unread = mgr
-        .avid_admitted_nonce_dealers(&unread, Some(2_000))
+        .avid_admitted_nonce_dealers(
+            &from_chain(vec![
+                stamped(0, 1_000, &all, &first),
+                stamped(1, 1_100, &all, &[]),
+            ]),
+            Some(2_000),
+        )
         .unwrap();
     assert!(unread.batch_delta().is_err());
 }

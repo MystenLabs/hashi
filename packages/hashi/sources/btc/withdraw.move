@@ -371,9 +371,9 @@ entry fun finish_archive_withdrawal_txns(hashi: &mut Hashi, withdrawal_ids: vect
 /// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
 /// in-progress reconfiguration settles first, then this runs afterward to recover
 /// the now-stale batch. Carries no committee cert: it authorizes no signatures,
-/// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
-/// by the `mpc_signing` stale-epoch guard.
-
+/// only re-points pending presig indices and redraws the withdrawal's delta,
+/// bounded to once-per-withdrawal-per-epoch by the `mpc_signing` stale-epoch
+/// guard.
 entry fun reallocate_presigs(
     hashi: &mut Hashi,
     withdrawal_id: address,

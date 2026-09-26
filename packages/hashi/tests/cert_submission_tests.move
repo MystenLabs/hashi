@@ -114,15 +114,29 @@ fun test_submit_nonce_cert_draws_randomness() {
         &random,
         scenario.ctx(),
     );
+    scenario.next_tx(VOTER2);
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER2,
+        vector[4u8, 5, 6],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        &random,
+        scenario.ctx(),
+    );
 
     let nonce_key = hashi::tob::tob_key(
         epoch,
         option::some(0),
         hashi::tob::protocol_type_nonce_generation(),
     );
-    let drawn = hashi.epoch_certs_stamped_ref(nonce_key).submission_randomness(VOTER1);
+    let certs = hashi.epoch_certs_stamped_ref(nonce_key);
+    let drawn = certs.submission_randomness(VOTER1);
     assert!(drawn.length() == 32);
     assert!(drawn != RANDOMNESS);
+    assert!(drawn != certs.submission_randomness(VOTER2));
 
     clock.destroy_for_testing();
     sui::test_scenario::return_shared(random);
@@ -161,7 +175,7 @@ fun test_destroy_all_stamped_before_two_epochs_aborts() {
 }
 
 #[test]
-#[expected_failure]
+#[expected_failure(abort_code = sui::dynamic_field::EFieldTypeMismatch)]
 fun test_nonce_cert_into_a_bare_bucket_aborts() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

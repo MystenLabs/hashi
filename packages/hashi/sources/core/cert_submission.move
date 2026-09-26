@@ -210,9 +210,8 @@ fun destroy_bare_bucket_if_present(hashi: &mut Hashi, key: hashi::tob::TobKey, c
     }
 }
 
-/// Nonce buckets may use either the legacy bare layout or the stamped layout
-/// introduced in v2. As above, absence is idempotent and an unknown present
-/// layout aborts instead of being silently skipped.
+/// As above, absence is idempotent and an unknown present layout aborts
+/// instead of being silently skipped.
 fun destroy_nonce_bucket_if_present(
     hashi: &mut Hashi,
     key: hashi::tob::TobKey,

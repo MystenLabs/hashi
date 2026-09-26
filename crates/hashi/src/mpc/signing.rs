@@ -39,6 +39,7 @@ use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
+use crate::mpc::types::signing_beacon;
 use crate::mpc::types::signing_nonce_bytes;
 use crate::mpc::types::signing_request_digest;
 
@@ -833,7 +834,7 @@ impl SigningManager {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
                 let digest = signing_request_digest(message, derivation_address);
-                let beacon = *withdrawal_delta + existing.batch_delta();
+                let beacon = signing_beacon(withdrawal_delta, &existing.batch_delta());
                 let nonce = signing_nonce_bytes(&existing.public_nonce(), &beacon);
                 if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
                 {
@@ -958,7 +959,7 @@ impl SigningManager {
         let (public_nonce, partial_sigs, batch_delta) = match taken {
             CacheOrPresig::Cached(nonce, sigs, batch_delta) => (nonce, sigs, batch_delta),
             CacheOrPresig::Presig(presig, batch_delta) => {
-                let beacon = *withdrawal_delta + batch_delta;
+                let beacon = signing_beacon(withdrawal_delta, &batch_delta);
                 let _timer = metrics
                     .mpc_sign_partial_gen_duration_seconds
                     .with_label_values(&[MPC_LABEL_SIGNING])
@@ -977,7 +978,7 @@ impl SigningManager {
                     signing_id,
                     PartialSigningOutput::new(
                         public_nonce,
-                        &beacon,
+                        withdrawal_delta,
                         batch_delta,
                         message,
                         derivation_address,
@@ -987,7 +988,11 @@ impl SigningManager {
                 (public_nonce, partial_sigs, batch_delta)
             }
         };
-        Ok((public_nonce, partial_sigs, *withdrawal_delta + batch_delta))
+        Ok((
+            public_nonce,
+            partial_sigs,
+            signing_beacon(withdrawal_delta, &batch_delta),
+        ))
     }
 }
 
@@ -2076,7 +2081,7 @@ mod tests {
                         })
                         .unwrap()
                 };
-                let beacon = *withdrawal_delta + batch_delta;
+                let beacon = signing_beacon(withdrawal_delta, &batch_delta);
                 let (pn, sigs) = generate_partial_signatures(
                     message,
                     presig,
@@ -2090,7 +2095,7 @@ mod tests {
                     request_id,
                     PartialSigningOutput::new(
                         pn,
-                        &beacon,
+                        withdrawal_delta,
                         batch_delta,
                         message,
                         None,
@@ -2772,7 +2777,7 @@ mod tests {
                 req_id,
                 PartialSigningOutput::new(
                     public_nonce,
-                    &(beacon + batch_delta_for_test(0)),
+                    &beacon,
                     batch_delta_for_test(0),
                     message,
                     None,
@@ -2828,7 +2833,7 @@ mod tests {
                 req_id,
                 PartialSigningOutput::new(
                     pn,
-                    &input_beacon,
+                    &beacon,
                     batch_delta_for_test(0),
                     message,
                     None,
@@ -3790,7 +3795,7 @@ mod tests {
                 req_id,
                 PartialSigningOutput::new(
                     public_nonce,
-                    &(beacon + batch_delta_for_test(0)),
+                    &beacon,
                     batch_delta_for_test(0),
                     message,
                     None,

@@ -2524,7 +2524,7 @@ pub(crate) async fn verify_fetched_certificates(
 
 /// Live, boundary sizing and replay admit the same dealers only if they
 /// convert the served certs identically.
-fn nonce_certificates(
+pub(crate) fn nonce_certificates(
     certs: &VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>,
     epoch: u64,
     batch_index: u32,

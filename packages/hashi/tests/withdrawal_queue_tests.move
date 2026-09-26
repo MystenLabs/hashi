@@ -284,7 +284,7 @@ fun test_withdrawal_txn_insert_and_remove() {
 }
 
 #[test]
-fun test_reallocate_replaces_pending_slots_and_randomness() {
+fun test_reallocate_writes_the_new_epoch_and_randomness() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);

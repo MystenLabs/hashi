@@ -294,7 +294,7 @@ fun setup_fully_signed_txn(
     clock: &clock::Clock,
     ctx: &mut TxContext,
 ): (address, address) {
-    let (id, txn_id) = setup_committed_txn(hashi, clock, ctx);
+    let (id, txn_id) = setup_committed_txn(hashi, clock, @0xBEEF, ctx);
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
     queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
     queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
@@ -304,12 +304,13 @@ fun setup_fully_signed_txn(
 fun setup_committed_txn(
     hashi: &mut hashi::hashi::Hashi,
     clock: &clock::Clock,
+    input_txid: address,
     ctx: &mut TxContext,
 ): (address, address) {
     let id = setup_withdrawal_request(hashi, clock, 10_000, ctx);
     hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), clock);
 
-    let input_id = utxo::utxo_id(@0xBEEF, 0);
+    let input_id = utxo::utxo_id(input_txid, 0);
     let input = utxo::utxo(input_id, 1_000_000, option::none());
     hashi.bitcoin_mut().utxo_pool_mut().insert_active(input);
 
@@ -530,16 +531,17 @@ fun test_reallocate_presigs_redraws_randomness() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
     let clock = clock::create_for_testing(ctx);
-    let (_id, txn_id) = setup_committed_txn(&mut hashi, &clock, ctx);
-    let before = hashi.bitcoin().withdrawal_queue().withdrawal_txn_randomness(txn_id);
+    let (_, first) = setup_committed_txn(&mut hashi, &clock, @0xBEEF, ctx);
+    let (_, second) = setup_committed_txn(&mut hashi, &clock, @0xCAFE, ctx);
 
-    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id, &random, ctx);
+    hashi::withdraw::reallocate_presigs(&mut hashi, first, &random, ctx);
+    hashi::withdraw::reallocate_presigs(&mut hashi, second, &random, ctx);
 
     let queue = hashi.bitcoin().withdrawal_queue();
-    let after = queue.withdrawal_txn_randomness(txn_id);
-    assert!(queue.withdrawal_txn_signing_epoch(txn_id) == 1);
-    assert!(after.length() == 32);
-    assert!(after != before);
+    let drawn = queue.withdrawal_txn_randomness(first);
+    assert!(queue.withdrawal_txn_signing_epoch(first) == 1);
+    assert!(drawn.length() == 32);
+    assert!(drawn != queue.withdrawal_txn_randomness(second));
 
     clock.destroy_for_testing();
     sui::test_scenario::return_shared(random);

@@ -592,7 +592,7 @@ impl OnchainState {
     /// a bootstrap replay catches up — retryable, recognized by
     /// [`is_inconsistent_listing`]) or a stamped bucket whose stamps are
     /// not monotone in TOB order is an error rather than a silent
-    /// truncation.
+    /// truncation. A nonce bucket in the bare layout is an error too.
     pub fn tob_certs(
         &self,
         epoch: u64,

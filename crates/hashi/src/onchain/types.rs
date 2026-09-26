@@ -109,8 +109,8 @@ impl Tob {
 pub struct TobBucket {
     /// The bucket's on-chain layout family (bare or stamped), fixed at
     /// bucket creation. Nodes are stored uniformly in stamped form; a
-    /// bare bucket's submissions carry `timestamp_ms: 0`, which never
-    /// trips a nonce accumulation window's cutoff.
+    /// bare bucket's submissions carry `timestamp_ms: 0` and empty
+    /// `randomness`.
     pub layout: super::TobCertLayout,
     /// UID of the bucket's `LinkedTable` — the parent of its dealer
     /// submission node Fields.
