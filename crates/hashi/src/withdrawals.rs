@@ -43,13 +43,6 @@ use crate::utxo_pool::UtxoCandidate;
 use crate::utxo_pool::UtxoStatus;
 use thiserror::Error;
 
-/// Deadline for collecting and aggregating one batch of MPC input signatures
-/// in `mpc_sign_withdrawal_tx`. Poll rounds inside `SigningManager::sign` are
-/// bounded by this deadline (and per-peer probes are individually bounded),
-/// so it is a real upper bound, not advisory. It must stay comfortably below
-/// the leader's per-task timeout (`LEADER_TASK_TIMEOUT`, 60 s) so a signing
-/// member that exhausts the deadline still reports its partial results to the
-/// leader instead of the leader's whole chunk task timing out.
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
@@ -1126,7 +1119,7 @@ impl Hashi {
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<crate::mpc::SignOutcome> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
         self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, requested_input_indices, sink)
             .await
@@ -1173,7 +1166,7 @@ impl Hashi {
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<crate::mpc::SignOutcome> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
         if txn.signing.epoch != epoch {
@@ -1242,13 +1235,14 @@ impl Hashi {
         }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let batch_start = std::time::Instant::now();
-        let collect = signing_manager_ref.sign(
+        let collect = signing_manager_ref.sign_until(
             p2p_channel_ref,
             requests,
             beacon_ref,
             WITHDRAWAL_SIGNING_TIMEOUT,
             metrics_ref,
             result_tx,
+            sink_ref.closed(),
         );
         let forward = forward_signing_results(
             &mut result_rx,
@@ -1258,8 +1252,8 @@ impl Hashi {
             batch_start,
             || signing_manager_ref.presignatures_remaining() as i64,
         );
-        tokio::join!(collect, forward);
-        Ok(())
+        let (outcome, ()) = tokio::join!(collect, forward);
+        Ok(outcome)
     }
 
     pub(crate) fn withdrawal_signing_messages(

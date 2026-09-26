@@ -46,7 +46,7 @@ const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100
 const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Per-attempt timeout for one `get_partial_signatures` poll. Deliberately
-/// small: the collection loop in [`SigningManager::sign`] is itself the retry
+/// small: the collection loop in [`SigningManager::sign_until`] is itself the retry
 /// mechanism, so a slow peer costs at most one bounded probe per round instead
 /// of the default 10 x 30 s transport-retry budget.
 const PARTIAL_SIGS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -562,7 +562,6 @@ impl SigningManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(level = "info", skip_all, fields(num_inputs = inputs.len()))]
     pub async fn sign(
         &self,
         p2p_channel: &impl P2PChannel,
@@ -572,6 +571,30 @@ impl SigningManager {
         metrics: &Metrics,
         result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
     ) {
+        self.sign_until(
+            p2p_channel,
+            inputs,
+            beacon_value,
+            timeout,
+            metrics,
+            result_tx,
+            std::future::pending(),
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(name = "sign", level = "info", skip_all, fields(num_inputs = inputs.len()))]
+    pub async fn sign_until(
+        &self,
+        p2p_channel: &impl P2PChannel,
+        inputs: Vec<SignInput>,
+        beacon_value: &S,
+        timeout: Duration,
+        metrics: &Metrics,
+        result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
+        cancel: impl Future<Output = ()>,
+    ) -> SignOutcome {
         let threshold = self.config.threshold;
         let verifying_key = self.config.verifying_key;
         let self_address = self.config.address;
@@ -624,59 +647,68 @@ impl SigningManager {
                 &request_changed[..request_changed.len().min(8)],
             );
         }
-        let _collection_timer = metrics
-            .mpc_sign_collection_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        let mut flagged: HashSet<ShareIndex> = HashSet::new();
-        let mut backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
-        while !pending.is_empty() {
-            self.finalize_sweep(
-                &mut pending,
-                &mut flagged,
-                threshold,
-                &verifying_key,
-                metrics,
-                &result_tx,
-            )
-            .await;
-            if pending.is_empty() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                for st in pending.drain(..) {
-                    let _ = result_tx.send((
-                        st.signing_id,
-                        Err(SigningError::Timeout {
-                            collected: st.partials.len(),
-                            threshold,
-                        }),
-                    ));
-                }
-                break;
-            }
-            let progressed = self
-                .collect_partial_sigs_from_peers(
-                    p2p_channel,
+        // Cancellation starts only here, after every presig take and cache insert
+        // above, so a cancelled session never strands a presig.
+        let collect = async {
+            let started = Instant::now();
+            let mut flagged: HashSet<ShareIndex> = HashSet::new();
+            let mut backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
+            while !pending.is_empty() {
+                self.finalize_sweep(
                     &mut pending,
-                    deadline,
-                    &flagged,
+                    &mut flagged,
+                    threshold,
+                    &verifying_key,
                     metrics,
+                    &result_tx,
                 )
                 .await;
-            if progressed {
-                backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
-            } else {
-                // Clamp to the remaining time so a backed-off round never
-                // overshoots the deadline before the next deadline check.
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                tokio::time::sleep(backoff.min(remaining)).await;
-                backoff = backoff
-                    .saturating_mul(2)
-                    .min(PARTIAL_SIGS_COLLECTION_MAX_BACKOFF);
+                if pending.is_empty() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    for st in pending.drain(..) {
+                        let _ = result_tx.send((
+                            st.signing_id,
+                            Err(SigningError::Timeout {
+                                collected: st.partials.len(),
+                                threshold,
+                            }),
+                        ));
+                    }
+                    break;
+                }
+                let progressed = self
+                    .collect_partial_sigs_from_peers(
+                        p2p_channel,
+                        &mut pending,
+                        deadline,
+                        &flagged,
+                        metrics,
+                    )
+                    .await;
+                if progressed {
+                    backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
+                } else {
+                    // Clamp to the remaining time so a backed-off round never
+                    // overshoots the deadline before the next deadline check.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    tokio::time::sleep(backoff.min(remaining)).await;
+                    backoff = backoff
+                        .saturating_mul(2)
+                        .min(PARTIAL_SIGS_COLLECTION_MAX_BACKOFF);
+                }
             }
+            metrics
+                .mpc_sign_collection_duration_seconds
+                .with_label_values(&[MPC_LABEL_SIGNING])
+                .observe(started.elapsed().as_secs_f64());
+        };
+        tokio::select! {
+            biased;
+            () = cancel => SignOutcome::Cancelled,
+            () = collect => SignOutcome::Finished,
         }
-        drop(_collection_timer);
     }
 
     async fn finalize_sweep(
@@ -808,9 +840,6 @@ impl SigningManager {
         metrics: &Metrics,
     ) -> SigningResult<(G, Vec<Eval<S>>)> {
         let config = &self.config;
-        // Splitting the lock is safe because a given `signing_id` is never signed concurrently
-        // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
-        // removed from the pool under the first lock section.
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
@@ -971,6 +1000,12 @@ pub struct SignInput {
     pub derivation_address: Option<DerivationAddress>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignOutcome {
+    Finished,
+    Cancelled,
+}
+
 struct InputSigningState {
     signing_id: Address,
     message: Vec<u8>,
@@ -1110,10 +1145,7 @@ impl AggregationContext {
         sigs: Vec<Eval<S>>,
         metrics: &Metrics,
     ) -> Result<SchnorrSignature, FastCryptoError> {
-        let _timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
+        let started = Instant::now();
         let (message, nonce, beacon, vk, deriv, threshold) = (
             self.message.clone(),
             self.nonce,
@@ -1122,7 +1154,7 @@ impl AggregationContext {
             self.deriv,
             self.threshold,
         );
-        super::spawn_blocking(move || {
+        let result = super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
                 &nonce,
@@ -1133,7 +1165,12 @@ impl AggregationContext {
                 deriv.as_ref(),
             )
         })
-        .await
+        .await;
+        metrics
+            .mpc_sign_aggregation_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .observe(started.elapsed().as_secs_f64());
+        result
     }
 
     async fn recover(
@@ -1141,10 +1178,7 @@ impl AggregationContext {
         sigs: Vec<Eval<S>>,
         metrics: &Metrics,
     ) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
-        let _timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
+        let started = Instant::now();
         let (message, nonce, beacon, vk, deriv, threshold) = (
             self.message.clone(),
             self.nonce,
@@ -1153,7 +1187,7 @@ impl AggregationContext {
             self.deriv,
             self.threshold,
         );
-        super::spawn_blocking(move || {
+        let result = super::spawn_blocking(move || {
             aggregate_signatures_with_recovery(
                 &message,
                 &nonce,
@@ -1164,7 +1198,12 @@ impl AggregationContext {
                 deriv.as_ref(),
             )
         })
-        .await
+        .await;
+        metrics
+            .mpc_sign_aggregation_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .observe(started.elapsed().as_secs_f64());
+        result
     }
 }
 
@@ -1241,10 +1280,10 @@ impl SigningManager {
     /// signatures.
     ///
     /// The round is bounded twice over: each peer poll gets a small
-    /// timeout-and-retry budget (the outer loop in [`SigningManager::sign`]
+    /// timeout-and-retry budget (the outer loop in [`SigningManager::sign_until`]
     /// is the real retry mechanism), and the round as a whole stops at
     /// `deadline` rather than draining slow peers' probes — otherwise one
-    /// black-holed peer makes the deadline check in `sign` unreachable for
+    /// black-holed peer makes the deadline check in `sign_until` unreachable for
     /// its duration. Peers in cooldown are skipped for the round entirely.
     ///
     /// Returns whether any new partials were merged.
@@ -2687,6 +2726,44 @@ mod tests {
             results.get(&bad_id),
             Some(Err(SigningError::Timeout { .. }))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_sign_until_cancelled_returns_with_every_partial_cached() {
+        let setup = SigningTestSetup::new(7);
+        let beacon = S::zero();
+        let requests: Vec<SignInput> = (0..3u8)
+            .map(|j| SignInput {
+                signing_id: Address::new([0xC0 + j; 32]),
+                message: format!("input-{j}").into_bytes(),
+                global_presig_index: j as u64,
+                derivation_address: None,
+            })
+            .collect();
+        let signing_ids: Vec<Address> = requests.iter().map(|r| r.signing_id).collect();
+
+        let p2p = setup.mock_p2p_for(0);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            setup.managers[0].sign_until(
+                &p2p,
+                requests,
+                &beacon,
+                Duration::from_secs(3600),
+                &test_metrics(),
+                tx,
+                std::future::ready(()),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, SignOutcome::Cancelled);
+        let state = setup.managers[0].state.read().unwrap();
+        for signing_id in &signing_ids {
+            assert!(state.partial_signing_outputs.contains_key(signing_id));
+        }
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use crate::mpc::SignOutcome;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -39,6 +40,7 @@ use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
 use super::HttpService;
+use super::peer_limit::CallerTaskSlot;
 
 #[tonic::async_trait]
 impl BridgeService for HttpService {
@@ -215,6 +217,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<Self::SignWithdrawalTransactionStream>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        let slot = self.admit_withdrawal_signing(caller)?;
         let req = request.get_ref();
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
@@ -228,7 +231,8 @@ impl BridgeService for HttpService {
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            if let Err(e) = inner
+            let _slot = slot;
+            match inner
                 .validate_and_sign_withdrawal_tx(
                     &withdrawal_txn_id,
                     &requested_input_indices,
@@ -236,10 +240,25 @@ impl BridgeService for HttpService {
                 )
                 .await
             {
-                tracing::error!("sign_withdrawal_transaction failed: {e}");
-                let _ = tx
-                    .send(Err(Status::failed_precondition(e.to_string())))
-                    .await;
+                Ok(SignOutcome::Finished) => {}
+                Ok(SignOutcome::Cancelled) => {
+                    inner
+                        .metrics
+                        .withdrawal_signing_cancelled_total
+                        .with_label_values(&[&caller.to_string()])
+                        .inc();
+                    tracing::debug!(
+                        %caller,
+                        %withdrawal_txn_id,
+                        "sign_withdrawal_transaction stream dropped; signing session stopped"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("sign_withdrawal_transaction failed: {e}");
+                    let _ = tx
+                        .send(Err(Status::failed_precondition(e.to_string())))
+                        .await;
+                }
             }
         });
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
@@ -331,6 +350,40 @@ impl BridgeService for HttpService {
         Ok(Response::new(SignWithdrawalConfirmationResponse {
             member_signature: Some(member_signature),
         }))
+    }
+}
+
+const SIGNING_TASK_LIMIT_MSG: &str = "per-caller withdrawal signing limit reached";
+
+impl HttpService {
+    fn admit_withdrawal_signing(&self, caller: Address) -> Result<CallerTaskSlot, Status> {
+        let in_committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .is_some_and(|committee| committee.index_of(&caller).is_some());
+        let caller_label = caller.to_string();
+        let refused = |reason: &str| {
+            self.inner
+                .metrics
+                .withdrawal_signing_refused_total
+                .with_label_values(&[caller_label.as_str(), reason])
+                .inc()
+        };
+        if !in_committee {
+            refused("committee");
+            return Err(Status::permission_denied(
+                "caller is not in the current committee",
+            ));
+        }
+        let limit = self.inner.config.withdrawal_signing_per_caller_limit();
+        self.signing_tasks.try_admit(caller, limit).ok_or_else(|| {
+            refused("cap");
+            Status::unavailable(SIGNING_TASK_LIMIT_MSG)
+        })
     }
 }
 

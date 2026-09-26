@@ -12,4 +12,5 @@ pub use service::MpcHandle;
 pub use service::MpcService;
 pub use signing::IdentityInputs;
 pub use signing::SignInput;
+pub use signing::SignOutcome;
 pub use signing::SigningManager;
