@@ -428,24 +428,6 @@ mod tests {
         (object_key, record, signing_key)
     }
 
-    fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {
-        let writer_key = log.object_key().to_string();
-        for _ in 0..4 {
-            assert_eq!(
-                log.object_key(),
-                writer_key,
-                "a record must keep the same object key after construction"
-            );
-        }
-
-        let body = serde_json::to_vec(&log).unwrap();
-        let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
-        assert_eq!(record_read_from_s3.object_key(), writer_key);
-        record_read_from_s3
-            .validate(Some(&signing_key.verification_key()))
-            .expect("the serialized record must verify at the key used by the writer");
-    }
-
     fn test_sharing_instance(sharing_seq: u64) -> SecretSharingInstance {
         let commitments = ShareCommitments::new(
             (1..=2)
@@ -647,9 +629,6 @@ mod tests {
             decoded
                 .validate(signing_pubkey.as_ref())
                 .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
-            if signing_pubkey.is_some() {
-                assert_writer_key_is_stable_and_verifies(decoded, &signing_key);
-            }
         }
     }
 

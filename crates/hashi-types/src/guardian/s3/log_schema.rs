@@ -95,13 +95,7 @@ impl LogType {
     }
 }
 
-trait LogMessageSchema {
-    fn log_type(&self) -> LogType;
-
-    fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String;
-}
-
-impl LogMessageSchema for LogMessageV1 {
+impl LogMessageV1 {
     fn log_type(&self) -> LogType {
         match self {
             Self::Heartbeat(..) => LogType::Heartbeat,

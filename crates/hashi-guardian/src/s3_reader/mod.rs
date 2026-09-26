@@ -109,15 +109,10 @@ impl GuardianReader {
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let prefix = dir.to_string();
-        self.read_logs_with_prefix(&prefix).await
-    }
-
-    async fn read_logs_with_prefix(
-        &mut self,
-        prefix: &str,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let all_logs = self.s3.list_all_log_records_with_prefix(prefix).await?;
+        let all_logs = self
+            .s3
+            .list_all_log_records_with_prefix(&dir.to_string())
+            .await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for record in all_logs {
@@ -125,16 +120,6 @@ impl GuardianReader {
             out.push(verified_record);
         }
         Ok(out)
-    }
-
-    /// Read and verify successful withdrawal records in `dir`.
-    ///
-    /// Withdrawal directories contain only successful approvals.
-    pub async fn read_successful_withdrawals_in_dir(
-        &mut self,
-        dir: &S3HourScopedDirectory,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        self.read_logs_in_dir(dir).await
     }
 
     /// Return verified session info after requiring the attested PCRs to match

@@ -50,7 +50,14 @@ pub async fn update_committee(
     }
 
     // Log before the in-memory swap so failed S3 writes don't advance the committee.
-    log_success(&enclave, current_epoch, &signed).await?;
+    let (request_sign, request) = signed.into_parts();
+    enclave
+        .log_committee_update(CommitteeUpdateLogMessage {
+            from_epoch: current_epoch,
+            new_committee: request.new_committee,
+            request_sign,
+        })
+        .await?;
     enclave
         .state
         .replace_committee(new_committee, current_epoch)
@@ -73,19 +80,6 @@ pub async fn update_committee_chain(
         current_epoch = update_committee(enclave.clone(), signed).await?;
     }
     Ok(current_epoch)
-}
-
-async fn log_success(
-    enclave: &Enclave,
-    from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransitionRequest>,
-) -> GuardianResult<()> {
-    let msg = CommitteeUpdateLogMessage {
-        from_epoch,
-        new_committee: signed.message().new_committee.clone(),
-        request_sign: signed.committee_signature().clone(),
-    };
-    enclave.log_committee_update(msg).await
 }
 
 #[cfg(test)]

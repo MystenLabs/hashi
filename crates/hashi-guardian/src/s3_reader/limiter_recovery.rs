@@ -95,7 +95,7 @@ async fn find_latest_success_bucket(
             for day in days {
                 let hours = list_subdirs_desc(s3_client, &day).await?;
                 for hour in hours {
-                    if hour_bucket_has_success(s3_client, &hour).await? {
+                    if !s3_client.list_keys(&hour, true).await?.is_empty() {
                         let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
                             InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
                         })?;
@@ -115,14 +115,6 @@ async fn list_subdirs_desc(
     let mut subs = s3_client.list_common_prefixes(prefix).await?;
     subs.sort_by(|a, b| b.cmp(a));
     Ok(subs)
-}
-
-async fn hour_bucket_has_success(
-    s3_client: &GuardianS3Client,
-    bucket: &str,
-) -> GuardianResult<bool> {
-    let keys = s3_client.list_keys(bucket, true).await?;
-    Ok(!keys.is_empty())
 }
 
 fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {

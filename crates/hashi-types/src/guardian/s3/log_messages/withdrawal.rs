@@ -7,7 +7,6 @@ use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
 use crate::guardian::StandardWithdrawalResponse;
 use crate::guardian::UnixMillis;
-use crate::guardian::WithdrawalID;
 use crate::guardian::unix_millis_to_seconds;
 use bitcoin::Txid;
 use serde::Deserialize;
@@ -36,9 +35,5 @@ impl WithdrawalLogMessage {
             "{directory}{:020}-{session_id}-wid{}.json",
             self.request_data.seq, self.request_data.wid,
         )
-    }
-
-    pub fn wid(&self) -> WithdrawalID {
-        self.request_data.wid
     }
 }
