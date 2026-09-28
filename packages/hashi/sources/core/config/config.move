@@ -30,9 +30,9 @@ const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
 
 // ~~~~~~~ Errors ~~~~~~~
 
-#[error(code = 3)]
+#[error(code = 0)]
 const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key must be 32 bytes";
-#[error(code = 4)]
+#[error(code = 1)]
 const EGuardianBtcPublicKeyImmutable: vector<u8> =
     b"Guardian BTC public key cannot be changed once set";
 

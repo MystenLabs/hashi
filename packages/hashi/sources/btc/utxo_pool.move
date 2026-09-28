@@ -6,7 +6,6 @@
 /// from insertion until the withdrawal that spends them confirms on Bitcoin,
 /// after which their IDs move to `spent_utxos` — kept permanently as replay
 /// protection so an already-spent outpoint can never be re-inserted.
-#[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo_pool;
 
 use hashi::utxo::{Utxo, UtxoId};

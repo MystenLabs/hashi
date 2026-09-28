@@ -42,12 +42,12 @@ const EInvalidConfigEntry: vector<u8> = b"Proposed entry is not allowed in the e
 #[error(code = 2)]
 const ENoEntriesProvided: vector<u8> = b"AddConfig proposal must contain at least one entry";
 
+#[error(code = 3)]
+const EProtectedConfigKey: vector<u8> = b"Config key cannot be introduced through AddConfig";
+
 #[error(code = 4)]
 const EInconsistentMpcConfig: vector<u8> =
     b"mpc_weight_reduction_allowed_delta must stay below mpc_max_faulty_in_basis_points";
-
-#[error(code = 3)]
-const EProtectedConfigKey: vector<u8> = b"Config key cannot be introduced through AddConfig";
 
 // ~~~~~~~ Structs ~~~~~~~
 
