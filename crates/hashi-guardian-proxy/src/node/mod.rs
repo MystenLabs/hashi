@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! What hashi nodes call. `StandardWithdrawal` is answered idempotently by wid
-//! ([`cache`], over the guardian's withdrawal log in [`widlog`]).
+//! ([`cache`], over the guardian's withdrawal log in [`widlog`]), and node RPCs
+//! are served only to committee members ([`member_auth`], [`members`]).
 
 pub mod cache;
+pub mod member_auth;
+pub mod members;
 pub mod widlog;

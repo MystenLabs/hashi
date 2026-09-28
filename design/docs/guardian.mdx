@@ -67,7 +67,8 @@ The main components are:
   certificates, run the MPC signer, and call the guardian for the second
   Bitcoin signature.
 - **Guardian proxy**: the public gRPC endpoint. It forwards node-facing
-  guardian RPCs and relays key-provisioner shares.
+  guardian RPCs, only for current or pending committee members that sign the
+  call with their registered TLS key, and relays key-provisioner shares.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,

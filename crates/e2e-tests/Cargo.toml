@@ -46,4 +46,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 fastcrypto-tbls.workspace = true
+hashi-guardian-proxy = { path = "../hashi-guardian-proxy" }
 tracing-subscriber.workspace = true

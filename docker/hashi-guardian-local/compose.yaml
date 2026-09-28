@@ -132,10 +132,13 @@ services:
       GUARDIAN_LOG_BUCKET: hashi-guardian-dev
       GUARDIAN_LOG_REGION: us-east-1
       BTC_NETWORK: regtest
+      SUI_RPC_URL: http://host.docker.internal:9000
       AWS_ENDPOINT_URL_S3: http://minio:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: ${RUST_LOG:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       enclave:
         condition: service_healthy

@@ -1680,6 +1680,30 @@ mod tests {
         Ok(())
     }
 
+    /// The guardian proxy's own chain reader admits exactly the committee's
+    /// registered TLS keys.
+    #[tokio::test]
+    async fn test_guardian_proxy_allowlist_is_the_committee() -> Result<()> {
+        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+        let members = hashi_guardian_proxy::node::members::committee_member_keys(
+            sui_rpc::Client::new(&test_networks.sui_network().rpc_url)?,
+            test_networks.hashi_network().ids().hashi_object_id,
+        )
+        .await?;
+
+        let mut expected = std::collections::HashMap::new();
+        for node in test_networks.hashi_network().nodes() {
+            let config = &node.hashi().config;
+            expected.insert(
+                config.tls_private_key()?.verifying_key().to_bytes(),
+                config.validator_address()?,
+            );
+        }
+        assert_eq!(members, expected);
+        Ok(())
+    }
+
     /// Verify that the bootstrap scrape correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
