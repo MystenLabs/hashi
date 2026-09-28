@@ -71,14 +71,13 @@ fun test_setter_accepts_a_valid_proof() {
     );
 
     let c = &test_utils::new_tx_context(POP_ADDRESS, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key(keys, POP_HASHI_ID, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
+    hashi
+        .committee_set_mut()
+        .set_tls_public_key(POP_HASHI_ID, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
 
-    let (_, keys) = hashi.committee_set_and_tls_keys_mut();
-    assert!(
-        committee_set::tls_key_holder_for_testing(keys, POP_PUBLIC_KEY)
-            == option::some(POP_ADDRESS),
-    );
+    let cs = hashi.committee_set();
+    assert!(cs.tls_key_holder_for_testing(POP_PUBLIC_KEY)
+            == option::some(POP_ADDRESS));
 
     std::unit_test::destroy(hashi);
 }
@@ -93,8 +92,9 @@ fun test_setter_rejects_a_proof_for_another_deployment() {
     );
 
     let c = &test_utils::new_tx_context(POP_ADDRESS, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key(keys, @0xdead, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
+    hashi
+        .committee_set_mut()
+        .set_tls_public_key(@0xdead, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
 
     std::unit_test::destroy(hashi);
 }
@@ -109,8 +109,9 @@ fun test_setter_rejects_a_key_of_the_wrong_length() {
     );
 
     let c = &test_utils::new_tx_context(POP_ADDRESS, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key(keys, POP_HASHI_ID, POP_ADDRESS, x"1122", POP_SIGNATURE, c);
+    hashi
+        .committee_set_mut()
+        .set_tls_public_key(POP_HASHI_ID, POP_ADDRESS, x"1122", POP_SIGNATURE, c);
 
     std::unit_test::destroy(hashi);
 }
@@ -125,8 +126,9 @@ fun test_setter_rejects_an_unauthorized_sender() {
     );
 
     let c = &test_utils::new_tx_context(STRANGER, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key(keys, POP_HASHI_ID, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
+    hashi
+        .committee_set_mut()
+        .set_tls_public_key(POP_HASHI_ID, POP_ADDRESS, POP_PUBLIC_KEY, POP_SIGNATURE, c);
 
     std::unit_test::destroy(hashi);
 }
@@ -141,12 +143,10 @@ fun test_second_member_cannot_take_a_registered_key() {
     );
 
     let c1 = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_A, c1);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_A, c1);
 
     let c2 = &test_utils::new_tx_context(VALIDATOR2, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR2, KEY_A, c2);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR2, KEY_A, c2);
 
     std::unit_test::destroy(hashi);
 }
@@ -160,15 +160,13 @@ fun test_reregistering_own_key_is_a_noop() {
     );
 
     let c1 = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_A, c1);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_A, c1);
 
     let c2 = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_A, c2);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_A, c2);
 
-    let (_, keys) = hashi.committee_set_and_tls_keys_mut();
-    assert!(committee_set::tls_key_holder_for_testing(keys, KEY_A) == option::some(VALIDATOR1));
+    let cs = hashi.committee_set();
+    assert!(cs.tls_key_holder_for_testing(KEY_A) == option::some(VALIDATOR1));
 
     std::unit_test::destroy(hashi);
 }
@@ -182,20 +180,17 @@ fun test_rotating_frees_the_previous_key() {
     );
 
     let c1 = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_A, c1);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_A, c1);
 
     let c1b = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_B, c1b);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_B, c1b);
 
     let c2 = &test_utils::new_tx_context(VALIDATOR2, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR2, KEY_A, c2);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR2, KEY_A, c2);
 
-    let (_, keys) = hashi.committee_set_and_tls_keys_mut();
-    assert!(committee_set::tls_key_holder_for_testing(keys, KEY_A) == option::some(VALIDATOR2));
-    assert!(committee_set::tls_key_holder_for_testing(keys, KEY_B) == option::some(VALIDATOR1));
+    let cs = hashi.committee_set();
+    assert!(cs.tls_key_holder_for_testing(KEY_A) == option::some(VALIDATOR2));
+    assert!(cs.tls_key_holder_for_testing(KEY_B) == option::some(VALIDATOR1));
 
     std::unit_test::destroy(hashi);
 }
@@ -210,17 +205,15 @@ fun test_removing_a_member_frees_its_key() {
     );
 
     let c3 = &test_utils::new_tx_context(VALIDATOR3, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR3, KEY_A, c3);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR3, KEY_A, c3);
 
     hashi::validator::remove_inactive_member_for_testing(&mut hashi, VALIDATOR3, false);
 
-    let (_, keys) = hashi.committee_set_and_tls_keys_mut();
-    assert!(committee_set::tls_key_holder_for_testing(keys, KEY_A) == option::none());
+    let cs = hashi.committee_set();
+    assert!(cs.tls_key_holder_for_testing(KEY_A) == option::none());
 
     let c1 = &test_utils::new_tx_context(VALIDATOR1, 0);
-    let (cs, keys) = hashi.committee_set_and_tls_keys_mut();
-    cs.set_tls_public_key_unproven_for_testing(keys, VALIDATOR1, KEY_A, c1);
+    hashi.committee_set_mut().set_tls_public_key_unproven_for_testing(VALIDATOR1, KEY_A, c1);
 
     std::unit_test::destroy(hashi);
 }
