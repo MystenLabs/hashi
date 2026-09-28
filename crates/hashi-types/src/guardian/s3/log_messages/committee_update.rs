@@ -24,9 +24,9 @@ impl CommitteeUpdateLogMessage {
 
     /// Keys lead with the zero-padded new epoch, so the lexicographically last
     /// key identifies the latest applied committee.
-    pub fn object_key(&self, session_id: &str) -> String {
+    pub fn object_key(&self) -> String {
         format!(
-            "{}{:020}-{session_id}.json",
+            "{}{:020}.json",
             Self::object_key_dir(),
             self.new_committee.epoch,
         )

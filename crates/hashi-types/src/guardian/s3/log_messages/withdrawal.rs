@@ -29,10 +29,10 @@ impl WithdrawalLogMessage {
     /// Keys lead with `{seq:020}` so that lexicographic listing within
     /// an hour bucket is also seq-sorted. The KP reads the max-seq log to
     /// recover limiter state.
-    pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
+    pub fn object_key(&self, timestamp_ms: UnixMillis) -> String {
         let directory = S3HourDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
         format!(
-            "{directory}{:020}-{session_id}-wid{}.json",
+            "{directory}{:020}-wid{}.json",
             self.request_data.seq, self.request_data.wid,
         )
     }

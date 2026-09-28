@@ -21,6 +21,19 @@ pub async fn setup_new_key(
 
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
+    let ceremony_keys = enclave
+        .config
+        .s3_logger()?
+        .list_keys(&CeremonyLogMessage::object_key_dir())
+        .await?;
+    if !ceremony_keys.is_empty() {
+        return Err(GuardianError::InvalidInputs(
+            "a completed ceremony already exists; rotate the KP set instead of setting up a new key"
+                .into(),
+        ));
+    }
+    let sharing_seq = enclave.new_guardian_reader()?.next_sharing_seq().await?;
+
     let params = request.params();
     let n = params.num_shares();
     let t = params.threshold();
@@ -56,7 +69,7 @@ pub async fn setup_new_key(
         "Bitcoin key generated; encrypted one share for each key provisioner."
     );
 
-    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
+    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, sharing_seq)
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     let proposal = CeremonyProposalLogMessage::new(
@@ -104,6 +117,41 @@ mod tests {
             SetupNewKeyRequest::new(roster, TEST_N, TEST_T).unwrap(),
             secret_keys,
         )
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_an_existing_completed_ceremony() {
+        for sharing_seq in [0, 6] {
+            let logger = crate::test_utils::mock_logger_with_layout([format!(
+                "ceremony/{sharing_seq:020}.json"
+            )]);
+            let enclave = Enclave::create_operator_initialized_ceremony(logger);
+            let (request, _) = mock_setup_new_key_request();
+            let error = setup_new_key(enclave.clone(), request).await.unwrap_err();
+            assert!(matches!(error, GuardianError::InvalidInputs(message)
+                if message.contains("completed ceremony already exists")));
+            assert_eq!(
+                enclave.lifecycle(),
+                CeremonyStage::OperatorInitialized.into()
+            );
+            assert!(enclave.pending_ceremony().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_skips_shares_left_by_an_interrupted_attempt() {
+        let logger = crate::test_utils::mock_logger_with_layout([
+            "kp-shares/00000000000000000000/00000000000000000000.json".to_string(),
+        ]);
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let (request, _) = mock_setup_new_key_request();
+        let response = setup_new_key(enclave.clone(), request)
+            .await
+            .unwrap()
+            .verify_into_data(&enclave.signing_pubkey())
+            .unwrap()
+            .response;
+        assert_eq!(response.secret_sharing_instance.sharing_seq(), 1);
     }
 
     #[tokio::test]

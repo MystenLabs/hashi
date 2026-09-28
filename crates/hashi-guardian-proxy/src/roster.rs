@@ -9,7 +9,7 @@
 //! KP-signed request against its own roster.
 //!
 //! Shares are stored at
-//! `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`).
+//! `kp-shares/{sharing_seq:020}/{cert_seq:020}.json` (`KpShareState`).
 //! The reader parses only the fields it needs.
 //!
 //! Which `sharing_seq` is current comes from `ceremony/`, not from the newest
@@ -163,13 +163,10 @@ pub(crate) mod test_utils {
             "signature": null,
         });
         store.insert(
-            format!("kp-shares/{sharing_seq:020}/00000000000000000000-test-session.json"),
+            format!("kp-shares/{sharing_seq:020}/00000000000000000000.json"),
             serde_json::to_vec(&record).unwrap(),
         );
-        store.insert(
-            format!("ceremony/{sharing_seq:020}-test-session.json"),
-            b"{}".to_vec(),
-        );
+        store.insert(format!("ceremony/{sharing_seq:020}.json"), b"{}".to_vec());
     }
 }
 
@@ -209,12 +206,12 @@ async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<Str
         .with_context(|| format!("ceremony {ceremony_key} has no kp-shares log"))
 }
 
-/// The `sharing_seq` a `ceremony/{sharing_seq:020}-{session}.json` key records.
+/// The `sharing_seq` a `ceremony/{sharing_seq:020}.json` key records.
 /// The canonical padding is required, not just parsed: lex order over these
 /// keys is the seq order only while every one of them pads to the same width.
 fn ceremony_sharing_seq(key: &str) -> anyhow::Result<u64> {
     key.strip_prefix(&CeremonyLogMessage::object_key_dir())
-        .and_then(|name| name.split('-').next())
+        .and_then(|name| name.strip_suffix(".json"))
         .filter(|seq| seq.len() == 20 && seq.bytes().all(|b| b.is_ascii_digit()))
         .with_context(|| format!("ceremony key {key:?} has no sharing_seq"))?
         .parse()
@@ -292,10 +289,7 @@ mod tests {
     /// Mark `sharing_seq` as completed. Only the key matters — the reader takes
     /// the seq from there and never opens a ceremony record.
     fn complete_ceremony(store: &MemStore, sharing_seq: u64) {
-        store.insert(
-            format!("ceremony/{sharing_seq:020}-test-session.json"),
-            b"{}".to_vec(),
-        );
+        store.insert(format!("ceremony/{sharing_seq:020}.json"), b"{}".to_vec());
     }
 
     /// A scalar `kp-shares/` record written by the current schema version.
@@ -316,7 +310,7 @@ mod tests {
             }},
             "signature": null,
         });
-        let key = format!("kp-shares/{sharing_seq:020}/{cert_seq:020}-test-session.json");
+        let key = format!("kp-shares/{sharing_seq:020}/{cert_seq:020}.json");
         (key, serde_json::to_vec(&record).unwrap())
     }
 
@@ -376,7 +370,7 @@ mod tests {
         complete_ceremony(&store, 5);
         let (key, bytes) = kp_shares_record(3, 0, &[FP_B]);
         store.insert(key, bytes);
-        store.insert("ceremony/3-test-session.json".to_string(), b"{}".to_vec());
+        store.insert("ceremony/3.json".to_string(), b"{}".to_vec());
 
         assert!(latest_kp_roster(&store).await.is_err());
     }
@@ -428,7 +422,7 @@ mod tests {
             "signature": null,
         });
         store.insert(
-            "kp-shares/00000000000000000000/00000000000000000000-test-session.json".to_string(),
+            "kp-shares/00000000000000000000/00000000000000000000.json".to_string(),
             serde_json::to_vec(&record).unwrap(),
         );
         complete_ceremony(&store, 0);

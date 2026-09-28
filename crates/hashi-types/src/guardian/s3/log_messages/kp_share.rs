@@ -33,13 +33,9 @@ impl KpShareStateLogMessage {
         format!("{S3_DIR_KP_SHARES}/{sharing_seq:020}/")
     }
 
-    /// `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session_id}.json` — the
+    /// `kp-shares/{sharing_seq:020}/{cert_seq:020}.json` — the
     /// object key for one written KP share state.
-    pub fn object_key(session_id: &str, sharing_seq: u64, cert_seq: u64) -> String {
-        format!(
-            "{}{:020}-{session_id}.json",
-            Self::object_key_dir(sharing_seq),
-            cert_seq
-        )
+    pub fn object_key(sharing_seq: u64, cert_seq: u64) -> String {
+        format!("{}{:020}.json", Self::object_key_dir(sharing_seq), cert_seq)
     }
 }

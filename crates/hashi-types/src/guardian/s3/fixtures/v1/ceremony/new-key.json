@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "object_key": "ceremony/00000000000000000000-d54207da194977dc.json",
+  "object_key": "ceremony/00000000000000000000.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
@@ -21,5 +21,5 @@
       }
     }
   },
-  "signature": "fa113f2d9841df2e403dcb9e800457d3c9a6ed1c32fe1997b8be0d931500c466397b8684d01ee1071eb9a0597632900d13b4856540d6dc382d5f1249cb74f40c"
+  "signature": "60704005f55c7f6a785109d5e3830d9b0f429f1c1462dbba64a42d66dec24a3eba6fb32a6fe0e08fbff81f840ce7c47a9048da128f092048ac8380678a501307"
 }

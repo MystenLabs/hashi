@@ -1053,7 +1053,7 @@ mod tests {
 
         assert_eq!(
             log.object_key(),
-            "kp-shares/00000000000000000007/00000000000000000003-session-d.json"
+            "kp-shares/00000000000000000007/00000000000000000003.json"
         );
         assert_eq!(
             log.object_lock_expiry(TESTNET_S3_OBJECT_LOCK_POLICY),
@@ -1154,7 +1154,7 @@ mod tests {
 
         assert_eq!(
             log.object_key(),
-            format!("withdraw/2023/11/14/22/{seq:020}-session-c-wid{wid}.json"),
+            format!("withdraw/2023/11/14/22/{seq:020}-wid{wid}.json"),
         );
     }
 }

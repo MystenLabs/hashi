@@ -1879,7 +1879,7 @@ pub mod guardian_info_data {
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
-/// `sharing_seq` versions instances: 0 at setup, +1 per rotation.
+/// `sharing_seq` versions instances; it increases across rotations and may skip abandoned attempts.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SecretSharingInstance {
     #[prost(message, repeated, tag = "1")]

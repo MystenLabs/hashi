@@ -15,7 +15,7 @@ use serde::Serialize;
 /// is auditable from the log alone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CeremonyLogMessage {
-    /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
+    /// Initial key setup (`setup_new_key`), possibly after abandoned attempts.
     NewKey {
         instance: SecretSharingInstance,
         /// The x-only BTC master pubkey this ceremony produced; lets KPs and
@@ -38,8 +38,8 @@ impl CeremonyLogMessage {
     }
 
     /// Consume the ceremony result. `NewKey` yields its initial instance;
-    /// `Rotate` yields the new instance after verifying that it advances exactly
-    /// one `sharing_seq` from the consumed instance.
+    /// `Rotate` yields the new instance after verifying that it advances
+    /// to a greater `sharing_seq` than the consumed instance.
     pub fn into_instance_and_pubkey(self) -> (SecretSharingInstance, BitcoinPubkey) {
         match self {
             Self::NewKey {
@@ -51,14 +51,9 @@ impl CeremonyLogMessage {
                 new_instance,
                 btc_master_pubkey,
             } => {
-                let expected = old_instance
-                    .sharing_seq()
-                    .checked_add(1)
-                    .expect("Rotate old sharing_seq must not be u64::MAX");
-                assert_eq!(
-                    new_instance.sharing_seq(),
-                    expected,
-                    "Rotate must advance sharing_seq by exactly one"
+                assert!(
+                    new_instance.sharing_seq() > old_instance.sharing_seq(),
+                    "Rotate must advance sharing_seq"
                 );
                 (new_instance, btc_master_pubkey)
             }
@@ -73,12 +68,8 @@ impl CeremonyLogMessage {
         }
     }
 
-    pub fn object_key(&self, session_id: &str) -> String {
-        format!(
-            "{}{:020}-{session_id}.json",
-            Self::object_key_dir(),
-            self.sharing_seq(),
-        )
+    pub fn object_key(&self) -> String {
+        format!("{}{:020}.json", Self::object_key_dir(), self.sharing_seq())
     }
 }
 

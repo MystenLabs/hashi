@@ -67,7 +67,7 @@ pub async fn init(cfg: Config) -> Result<()> {
         "  enc_pubkey:     {}",
         hex::encode(&guardian.info.encryption_pubkey)
     );
-    println!("  sharing_seq:    {sharing_seq} -> {}", sharing_seq + 1);
+    println!("  current sharing_seq: {sharing_seq}; the enclave selects the next unused sequence");
     println!(
         "  current set:    {threshold}-of-{}",
         state.secret_sharing_instance.num_shares()
@@ -102,7 +102,6 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     let old = guardian.reader.read_latest_ceremony_state().await?;
     old.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     old.encrypted_shares.verify_recipient_set(&certs_roster)?;
-    let new_sharing_seq = old.secret_sharing_instance.sharing_seq() + 1;
 
     let submissions = submission_paths
         .iter()
@@ -122,7 +121,6 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     info!(
         phase = "rotate_kp_set",
         submissions = batch.submissions().len(),
-        new_sharing_seq,
         "calling RotateKpSet",
     );
     let response_pb = guardian
@@ -136,10 +134,10 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         .verify_into_data(&guardian.signing_pub_key)
         .map_err(|e| anyhow!("verify RotateKpSetResponse signature: {e}"))?
         .response;
+    let new_sharing_seq = response.new_instance.sharing_seq();
     ensure!(
-        response.new_instance.sharing_seq() == new_sharing_seq,
-        "RotateKpSet returned sharing_seq {}, expected {new_sharing_seq}",
-        response.new_instance.sharing_seq()
+        new_sharing_seq > old.secret_sharing_instance.sharing_seq(),
+        "RotateKpSet must advance sharing_seq"
     );
     // Dealt in the proposal's order, so each share is checked at its position.
     response

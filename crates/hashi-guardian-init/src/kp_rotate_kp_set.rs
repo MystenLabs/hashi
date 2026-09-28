@@ -142,7 +142,6 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         share_id = share_id.get(),
         signer_fingerprint = %kp_cert.fingerprint(),
         sharing_seq,
-        new_sharing_seq = sharing_seq + 1,
         new_num_shares = new_params.num_shares(),
         new_threshold = new_params.threshold(),
         "rotation submission written; send it to the operator",
@@ -154,7 +153,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     println!("  session_id:     {session_id}");
     println!("  share_id:       {}", share_id.get());
     println!("  signer:         {}", kp_cert.fingerprint());
-    println!("  sharing_seq:    {sharing_seq} -> {}", sharing_seq + 1);
+    println!("  current sharing_seq: {sharing_seq}; the enclave selects the next unused sequence");
     println!(
         "  new set:        {}-of-{}",
         new_params.threshold(),

@@ -7,7 +7,7 @@
 //! (`withdraw_mode/standard_withdrawal.rs`), so every signature a node has seen has a
 //! record here; the proxy never writes.
 //!
-//! Keys are `withdraw/YYYY/MM/DD/HH/{seq:020}-{session}-wid{wid}.json`,
+//! Keys are `withdraw/YYYY/MM/DD/HH/{seq:020}-wid{wid}.json`,
 //! with the wid only a suffix — so a lookup walks hour buckets newest-first.
 //! The request's `seq` bounds the walk: a retried wid was signed at `seq` or
 //! `seq - 1` (the node's mirror trails the guardian by at most the reconcile

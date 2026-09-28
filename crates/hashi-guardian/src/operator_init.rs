@@ -365,7 +365,7 @@ mod tests {
         let mut reader = crate::s3_reader::genesis_reader_for_test(
             Some(genesis_record(genesis, &key)),
             key.verification_key(),
-            vec!["committee-update/00000000000000000009-later-session.json".into()],
+            vec!["committee-update/00000000000000000009.json".into()],
         );
         let args = crate::test_utils::OperatorInitTestArgs::default();
         let install = OIWithdrawModeInstall::from_ceremony_state(

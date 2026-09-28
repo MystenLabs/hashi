@@ -61,7 +61,8 @@ commands both verify that proposal. Once every KP confirms, the guardian
 publishes the finalized `kp-shares/` recovery state and `ceremony/` audit log.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
-setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, shared deployment configuration) →
+setup (`sharing_seq = 0` in an empty deployment; interrupted attempts are skipped).
+Setup rejects an existing completed ceremony; use KP-set rotation for an established key. It connects over gRPC and: `operator_init` (ceremony mode, shared deployment configuration) →
 `setup_new_key` → verifies the response signature and shape → confirms each
 share's recipient matches its expected KP cert and its PGP-encrypted ciphertext
 targets that cert (parsed without decrypting) →
@@ -289,10 +290,11 @@ to compare against their own. Each current KP then runs
 pinned session, each signer's share assignment, one submission per share,
 agreement with this config's `new_kp_roster` and complete deployment configuration, the dealt
 set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
-signed response (`sharing_seq + 1`, every share encrypted to the new certs)
+signed response (a greater enclave-selected `sharing_seq`, every share encrypted to the new certs)
 and its session-scoped `kp-shares/proposed/` record, then waits for every new
 KP's `key-provisioner ceremony` confirmation. The enclave publishes finalized
-`kp-shares/{seq+1}/` and `ceremony/{seq+1}` records and completes only once
+`kp-shares/{new_sharing_seq:020}/00000000000000000000.json` and
+`ceremony/{new_sharing_seq:020}.json` records and completes only once
 all `n` new KPs have confirmed, and the wait has no timeout. Interrupting it
 is safe once the batch was accepted: `wait` reads the pinned guardian's own
 proposal, verifies it against `new_kp_roster` and resumes the wait, while

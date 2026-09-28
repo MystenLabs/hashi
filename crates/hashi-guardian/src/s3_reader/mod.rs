@@ -29,6 +29,7 @@ use tracing::info;
 
 mod heartbeat_checks;
 mod limiter_recovery;
+mod sharing_sequence;
 mod verified;
 
 pub use verified::VerifiedLogRecord;
@@ -184,7 +185,7 @@ impl GuardianReader {
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let msg = self
+        let (msg, _) = self
             .read_kp_share_state_log_at_key(&key, require_current)
             .await?;
         if msg.sharing_seq != sharing_seq {
@@ -199,17 +200,23 @@ impl GuardianReader {
     /// Read and verify an exact encrypted KP-share state written by the current
     /// build.
     ///
-    /// The object key binds the writing guardian session and the two sequence
-    /// numbers. This lets callers verify the snapshot produced by one request
-    /// even if a later request has already advanced the latest state.
+    /// The signed record must match the expected writing session. This lets
+    /// callers verify the snapshot produced by one request even if a later
+    /// request has already advanced the latest state.
     pub async fn read_kp_share_state_log_from_current_build(
         &mut self,
         session_id: &SessionID,
         sharing_seq: u64,
         cert_seq: u64,
     ) -> GuardianResult<KpShareStateLogMessage> {
-        let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
-        self.read_kp_share_state_log_at_key(&key, true).await
+        let key = KpShareStateLogMessage::object_key(sharing_seq, cert_seq);
+        let (message, writing_session) = self.read_kp_share_state_log_at_key(&key, true).await?;
+        if &writing_session != session_id {
+            return Err(InvalidS3Log(format!(
+                "kp-shares writing session {writing_session} differs from expected {session_id}"
+            )));
+        }
+        Ok(message)
     }
 
     /// Read and verify the proposal written by one live ceremony session.
@@ -242,7 +249,7 @@ impl GuardianReader {
         &mut self,
         key: &str,
         require_current: bool,
-    ) -> GuardianResult<KpShareStateLogMessage> {
+    ) -> GuardianResult<(KpShareStateLogMessage, SessionID)> {
         // KP-share locks are expected to expire, so authenticate the record
         // without claiming that S3 still makes it immutable.
         let record = self
@@ -262,7 +269,7 @@ impl GuardianReader {
             .into_kp_share_state()
             .ok_or_else(|| InvalidS3Log(format!("expected a kp-shares log at {key}")))?;
         log_verified_read(key, &session_id);
-        Ok(msg)
+        Ok((msg, session_id))
     }
 
     /// Read the latest ceremony together with the latest KP-share state for its
