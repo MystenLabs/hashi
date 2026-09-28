@@ -78,6 +78,7 @@ reqwest.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+itertools.workspace = true
 bcs.workspace = true
 rand.workspace = true
 tap.workspace = true

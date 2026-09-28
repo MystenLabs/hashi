@@ -741,7 +741,7 @@ impl MpcService {
         &self,
         epoch: u64,
         batch_index: u32,
-    ) -> anyhow::Result<(Committee, Presignatures, u16)> {
+    ) -> anyhow::Result<(Committee, Presignatures, u16, Parameters)> {
         let onchain_state = self.inner.onchain_state().clone();
         let committee = onchain_state
             .state()
@@ -859,18 +859,21 @@ impl MpcService {
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
         );
-        Ok((committee, presignatures, batch_size_per_weight))
+        Ok((committee, presignatures, batch_size_per_weight, params))
     }
 
     async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
-        let (committee, presignatures, batch_size_per_weight) =
+        let (committee, presignatures, batch_size_per_weight, params) =
             self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
         let share_owners = self.share_owners_for_epoch(epoch)?;
         let (signing_manager, _identity) = SigningManager::new(
             address,
             committee,
-            output.threshold,
+            Parameters {
+                t: output.threshold,
+                f: params.f,
+            },
             output.key_shares.clone(),
             output.public_key,
             share_owners,
@@ -1060,7 +1063,10 @@ impl MpcService {
         let (signing_manager, _identities) = SigningManager::new_recovered(
             address,
             committee,
-            output.threshold,
+            Parameters {
+                t: output.threshold,
+                f: params.f,
+            },
             output.key_shares.clone(),
             output.public_key,
             share_owners,
@@ -1542,7 +1548,7 @@ impl MpcService {
             );
             return Ok(());
         }
-        let (_, presignatures, batch_size_per_weight) =
+        let (_, presignatures, batch_size_per_weight, _) =
             self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
