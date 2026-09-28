@@ -144,10 +144,7 @@ public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &
     // never be deletable, even after they expire. Refuse explicitly so
     // the caller gets `EProposalAlreadyExecuted` instead of the bag's
     // missing-key abort.
-    assert!(
-        !hashi.proposals().executed().contains(proposal_id.to_address()),
-        EProposalAlreadyExecuted,
-    );
+    assert!(!hashi.proposals().executed().contains(proposal_id), EProposalAlreadyExecuted);
     let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(proposal.is_expired(clock), EProposalNotExpired);
@@ -227,10 +224,7 @@ public(package) fun execute<T: copy + drop + store>(
     // proposal lives only in the executed bag. Check that explicitly so
     // the failure surface is `EProposalAlreadyExecuted` rather than the
     // ObjectBag's generic missing-key abort.
-    assert!(
-        !hashi.proposals().executed().contains(proposal_id.to_address()),
-        EProposalAlreadyExecuted,
-    );
+    assert!(!hashi.proposals().executed().contains(proposal_id), EProposalAlreadyExecuted);
     let mut proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(!proposal.is_expired(clock), EProposalExpired);
@@ -241,7 +235,7 @@ public(package) fun execute<T: copy + drop + store>(
     let data = proposal.data;
     let id = proposal.id.to_inner();
 
-    hashi.proposals_mut().executed_mut().add(id.to_address(), proposal);
+    hashi.proposals_mut().executed_mut().add(id, proposal);
 
     sui::event::emit(ProposalExecuted<T> { proposal_id: id, data });
     data

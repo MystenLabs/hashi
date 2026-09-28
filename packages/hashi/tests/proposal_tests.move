@@ -269,6 +269,41 @@ fun test_execute_proposal_with_quorum() {
 }
 
 #[test]
+/// Executing a proposal moves it out of the active bag and archives it in the
+/// executed bag under the same `ID` key the active bag used.
+fun test_execute_archives_proposal_under_its_id() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx,
+    );
+    assert!(hashi.proposals().active().contains(proposal_id));
+    assert!(!hashi.proposals().executed().contains(proposal_id));
+
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    assert!(!hashi.proposals().active().contains(proposal_id));
+    assert!(hashi.proposals().executed().contains(proposal_id));
+    let archived: &proposal::Proposal<UpdateConfig> = hashi
+        .proposals()
+        .executed()
+        .borrow(proposal_id);
+    assert!(archived.votes() == &vector[VOTER1]);
+
+    // Clean up
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = proposal::EQuorumNotReached)]
 /// Test that executing without quorum fails
 fun test_execute_without_quorum_fails() {
