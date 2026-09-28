@@ -635,8 +635,6 @@ mod tests {
                 .unwrap()
                 .script_pubkey();
 
-        // Before the guardian key is pinned the node can't judge the deposit,
-        // so it must retry rather than park it until a restart.
         let err = hashi
             .validate_deposit_request_derivation_path(&expected_script, &request)
             .await
