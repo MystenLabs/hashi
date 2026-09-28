@@ -179,7 +179,7 @@ impl WithdrawalStateMachine {
                 }
                 None => self.expected_events.push((
                     predecessor_event_type,
-                    predecessor_deadline(&new_event, cfg),
+                    cfg.predecessor_deadline(&new_event),
                     EventRelation::Predecessor,
                 )),
             }
@@ -191,7 +191,7 @@ impl WithdrawalStateMachine {
                 }
                 None => self.expected_events.push((
                     successor_event_type,
-                    successor_deadline(&new_event, cfg),
+                    cfg.successor_deadline(&new_event),
                     EventRelation::Successor,
                 )),
             }
@@ -272,17 +272,6 @@ impl WithdrawalStateMachine {
     }
 }
 
-fn predecessor_deadline(event: &MonitorWithdrawalEvent, cfg: &Config) -> UnixSeconds {
-    event.timestamp_secs + cfg.clock_skew
-}
-
-fn successor_deadline(event: &MonitorWithdrawalEvent, cfg: &Config) -> UnixSeconds {
-    event.timestamp_secs
-        + cfg
-            .next_event_delay(event.event_type)
-            .expect("has a successor")
-}
-
 /// Both timing bounds between consecutive events. A Bitcoin block time is set by
 /// its miner and can precede the guardian signature, so E3 bounds only its own lateness.
 fn neighbor_timing_findings(
@@ -291,7 +280,7 @@ fn neighbor_timing_findings(
     cfg: &Config,
 ) -> Vec<MonitorFinding> {
     let mut findings = Vec::new();
-    let deadline = successor_deadline(predecessor, cfg);
+    let deadline = cfg.successor_deadline(predecessor);
     if deadline < successor.timestamp_secs {
         findings.push(MonitorFinding::EventOccurredAfterDeadline {
             event: MonitorEvent::Withdrawal(successor.clone()),
@@ -300,7 +289,7 @@ fn neighbor_timing_findings(
             occurred_at: successor.timestamp_secs,
         });
     }
-    let deadline = predecessor_deadline(successor, cfg);
+    let deadline = cfg.predecessor_deadline(successor);
     if successor.event_type != WithdrawalEventType::E3BtcConfirmed
         && deadline < predecessor.timestamp_secs
     {
