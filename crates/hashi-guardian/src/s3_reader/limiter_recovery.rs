@@ -159,7 +159,7 @@ mod tests {
     use hashi_types::guardian::WithdrawalLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
-        BuildPcrs::new("current", vec![0])
+        BuildPcrs::new("current", vec![1; 48]).unwrap()
     }
 
     fn state_with_seq(next_seq: u64) -> LimiterState {

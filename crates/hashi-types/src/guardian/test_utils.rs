@@ -63,7 +63,6 @@ use crate::bitcoin::OutputUTXOWire;
 use crate::bitcoin::TxUTXOs;
 use crate::bitcoin::create_btc_keypair_for_test;
 use crate::bitcoin::hashi_master_g_from_btc_xonly_for_test;
-use crate::bitcoin::sign_btc_tx;
 use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
@@ -411,7 +410,8 @@ impl InitConfig {
 }
 
 fn mock_pcr_allowlist() -> PcrAllowlist {
-    PcrAllowlist::new(BuildPcrs::new("unknown", vec![0]), []).expect("valid PCR allowlist")
+    PcrAllowlist::new(BuildPcrs::new("unknown", vec![1; 48]).unwrap(), [])
+        .expect("valid PCR allowlist")
 }
 
 /// A throwaway secret-sharing instance for tests that don't exercise share verification.
@@ -511,7 +511,11 @@ impl StandardWithdrawalResponse {
     pub fn mock_for_testing() -> Self {
         let kp = create_btc_keypair_for_test(&[3u8; 32]);
         let msg = Message::from_digest([5u8; 32]);
-        let enclave_signatures = sign_btc_tx(&[msg], &kp);
+        // Keep the checked-in S3 fixtures deterministic.
+        let enclave_signatures = vec![bitcoin::taproot::Signature {
+            signature: BTC_LIB.sign_schnorr_no_aux_rand(&msg, &kp),
+            sighash_type: bitcoin::TapSighashType::Default,
+        }];
         Self { enclave_signatures }
     }
 }

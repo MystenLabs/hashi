@@ -449,7 +449,7 @@ mod tests {
                 retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
                 bitcoin_network: bitcoin::Network::Regtest,
                 pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
-                    hashi_types::guardian::BuildPcrs::new("", vec![]),
+                    hashi_types::guardian::BuildPcrs::new("", vec![1; 48]).unwrap(),
                     vec![],
                 )
                 .expect("valid PCR allowlist"),

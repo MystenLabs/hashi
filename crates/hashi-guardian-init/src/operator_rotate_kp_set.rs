@@ -561,7 +561,7 @@ mod tests {
 
         let mut config = Fixture::new();
         config.deployment.pcr_allowlist =
-            PcrAllowlist::new(BuildPcrs::new("other", vec![1]), []).unwrap();
+            PcrAllowlist::new(BuildPcrs::new("other", vec![2; 48]).unwrap(), []).unwrap();
         config.new_certs_roster = f.new_certs_roster.clone();
         let err = validate_batch(
             vec![f.submission(0), f.submission(1)],

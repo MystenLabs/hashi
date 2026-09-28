@@ -470,7 +470,7 @@ mod tests {
                 .pcr_allowlist
                 .current_build()
                 .clone(),
-            [crate::guardian::BuildPcrs::new("previous", vec![1])],
+            [crate::guardian::BuildPcrs::new("previous", vec![1; 48]).unwrap()],
         )
         .unwrap();
         let committee_0: crate::move_types::Committee = (&committee_0).into();

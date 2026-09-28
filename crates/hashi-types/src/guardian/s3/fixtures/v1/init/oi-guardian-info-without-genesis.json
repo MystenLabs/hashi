@@ -16,7 +16,7 @@
           "pcr_allowlist": {
             "current_build": {
               "git_revision": "unknown",
-              "pcr0": "00"
+              "pcr0": "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
             },
             "prev_builds": []
           }
@@ -51,5 +51,5 @@
       }
     }
   },
-  "signature": "64c7c809d457318960c3cfbac1e20670b3646e7adc512a529d9fbed2be5f2962c14df700f0ac6980debe67f0b6f959d61340b72c8423fc8a8c0f65f20f9c4d01"
+  "signature": "fe1d74b1adb8197c48c31f78191f6e2398890e2d7355bf23c898ca246ef25a65b4725bd578713f9f8181893f4fcece07d102dd09bd7f526fb93af1fe688cb106"
 }

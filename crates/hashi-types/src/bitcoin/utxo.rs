@@ -22,6 +22,7 @@ use super::DerivationPath;
 use super::HashiMasterG;
 use super::taproot::taproot_script_pubkey_and_leaf_hash;
 use super::taproot::taproot_script_spend_sighashes;
+use anyhow::Context;
 use anyhow::anyhow;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -37,6 +38,7 @@ use bitcoin::Witness;
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::amount::CheckedSum;
 use bitcoin::secp256k1::Message;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
@@ -259,6 +261,7 @@ fn validate_address_for_network(
 impl TxUTXOs {
     /// Constructs a `TxUTXOs`, validating every invariant in one place: external
     /// output addresses must be valid for `network`, amounts must be non-zero,
+    /// input and output totals must not exceed `Amount::MAX_MONEY`,
     /// inputs must be unique, and fees must be positive. The single gate for both
     /// locally-built and wire-parsed UTXO sets.
     pub fn new(
@@ -386,8 +389,26 @@ impl TxUTXOs {
     }
 
     fn assert_positive_fees(&self) -> anyhow::Result<()> {
-        let input_sum: Amount = self.inputs.iter().map(|utxo| utxo.amount).sum();
-        let output_sum: Amount = self.outputs.iter().map(|utxo| utxo.amount()).sum();
+        let input_sum = self
+            .inputs
+            .iter()
+            .map(|utxo| utxo.amount)
+            .checked_sum()
+            .context("total input amount overflows")?;
+        let output_sum = self
+            .outputs
+            .iter()
+            .map(|utxo| utxo.amount())
+            .checked_sum()
+            .context("total output amount overflows")?;
+        anyhow::ensure!(
+            input_sum <= Amount::MAX_MONEY,
+            "total input amount exceeds MAX_MONEY"
+        );
+        anyhow::ensure!(
+            output_sum <= Amount::MAX_MONEY,
+            "total output amount exceeds MAX_MONEY"
+        );
         if input_sum <= output_sum {
             anyhow::bail!(
                 "fees must be greater than zero: input_sum={} output_sum={}",
@@ -409,8 +430,8 @@ impl TxUTXOs {
 pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSignature> {
     messages
         .iter()
-        // Not using aux randomness which only provides side-channel protection
-        .map(|m| BTC_LIB.sign_schnorr_no_aux_rand(m, kp))
+        // Fresh auxiliary randomness provides additional side-channel protection.
+        .map(|m| BTC_LIB.sign_schnorr_with_aux_rand(m, kp, &rand::random()))
         .map(|s| Signature {
             signature: s,
             sighash_type: TapSighashType::Default,
@@ -460,5 +481,50 @@ impl From<TxUTXOs> for TxUTXOsWire {
             inputs: utxos.inputs,
             outputs: utxos.outputs.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utxos(inputs: &[u64], outputs: &[u64]) -> anyhow::Result<TxUTXOs> {
+        TxUTXOs::new(
+            inputs
+                .iter()
+                .enumerate()
+                .map(|(vout, amount)| {
+                    let mut outpoint = OutPoint::null();
+                    outpoint.vout = vout as u32;
+                    InputUTXO::new(outpoint, Amount::from_sat(*amount), DerivationPath::ZERO)
+                })
+                .collect(),
+            outputs
+                .iter()
+                .map(|amount| {
+                    OutputUTXOWire::internal(DerivationPath::ZERO, Amount::from_sat(*amount))
+                })
+                .collect(),
+            Network::Regtest,
+        )
+    }
+
+    #[test]
+    fn rejects_out_of_range_and_overflowing_amounts() {
+        let max = Amount::MAX_MONEY.to_sat();
+        assert!(utxos(&[max + 1], &[1]).is_err());
+        assert!(utxos(&[max, 1], &[1]).is_err());
+        assert!(utxos(&[max], &[max + 1]).is_err());
+        assert!(utxos(&[max], &[max, 1]).is_err());
+        assert!(utxos(&[u64::MAX, 2], &[1]).is_err());
+        // An unchecked output sum wraps to 1, passing the positive-fee check.
+        assert!(utxos(&[100], &[u64::MAX, 2]).is_err());
+    }
+
+    #[test]
+    fn accepts_max_money_with_positive_fees() {
+        let max = Amount::MAX_MONEY.to_sat();
+        let tx = utxos(&[max - 1, 1], &[max - 1]).unwrap();
+        assert_eq!(tx.gross_outflow_amount(), Amount::from_sat(1));
     }
 }

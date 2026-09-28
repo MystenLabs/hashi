@@ -172,7 +172,10 @@ mod tests {
 
     #[test]
     fn sample_config_contains_deployment_without_credentials() {
-        let config: Config = serde_yaml::from_str(include_str!("../audit.sample.yaml")).unwrap();
+        let sample = include_str!("../audit.sample.yaml");
+        assert!(serde_yaml::from_str::<Config>(sample).is_err());
+        let sample = sample.replace("<PCR0_HEX_FROM_VERIFIED_BUILD>", &"11".repeat(48));
+        let config: Config = serde_yaml::from_str(&sample).unwrap();
         assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
         assert!(config.s3_credentials.is_none());
     }

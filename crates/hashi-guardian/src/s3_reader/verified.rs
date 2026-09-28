@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn historical_sessions_use_the_readers_allowlist() {
         let mut expected = DeploymentConfig::mock_for_testing();
-        let previous = BuildPcrs::new("previous", vec![1]);
+        let previous = BuildPcrs::new("previous", vec![2; 48]).unwrap();
         expected.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
             expected.pcr_allowlist.current_build().clone(),
             [previous.clone()],
@@ -321,7 +321,7 @@ mod tests {
             .require_current_build(&build)
             .is_err());
         reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
-            BuildPcrs::new("not-allowlisted", vec![9]),
+            BuildPcrs::new("not-allowlisted", vec![9; 48]).unwrap(),
             [],
         )
         .unwrap();
@@ -335,8 +335,9 @@ mod tests {
         reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
             BuildPcrs::new(
                 expected.pcr_allowlist.current_build().git_revision(),
-                vec![9],
-            ),
+                vec![9; 48],
+            )
+            .unwrap(),
             [],
         )
         .unwrap();
@@ -347,7 +348,7 @@ mod tests {
     }
 
     fn build_pcrs() -> BuildPcrs {
-        BuildPcrs::new("current", vec![0])
+        BuildPcrs::new("current", vec![1; 48]).unwrap()
     }
 
     fn session_info_ready_for_activation(signing_pubkey: GuardianPubKey) -> VerifiedSessionInfo {

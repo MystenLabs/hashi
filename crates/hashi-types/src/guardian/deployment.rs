@@ -91,15 +91,17 @@ mod tests {
         changed.bitcoin_network = bitcoin::Network::Bitcoin;
         changes.push(changed);
         let mut changed = original.clone();
-        changed.pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("other", vec![0]), []).unwrap();
+        changed.pcr_allowlist =
+            PcrAllowlist::new(BuildPcrs::new("other", vec![1; 48]).unwrap(), []).unwrap();
         changes.push(changed);
         let mut changed = original.clone();
-        changed.pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("unknown", vec![1]), []).unwrap();
+        changed.pcr_allowlist =
+            PcrAllowlist::new(BuildPcrs::new("unknown", vec![2; 48]).unwrap(), []).unwrap();
         changes.push(changed);
         let mut changed = original.clone();
         changed.pcr_allowlist = PcrAllowlist::new(
             original.pcr_allowlist.current_build().clone(),
-            [BuildPcrs::new("previous", vec![2])],
+            [BuildPcrs::new("previous", vec![3; 48]).unwrap()],
         )
         .unwrap();
         changes.push(changed);
@@ -128,7 +130,7 @@ mod tests {
         let mut updated = config.clone();
         updated.pcr_allowlist = PcrAllowlist::new(
             config.pcr_allowlist.current_build().clone(),
-            [BuildPcrs::new("previous", vec![2])],
+            [BuildPcrs::new("previous", vec![3; 48]).unwrap()],
         )
         .unwrap();
         assert_eq!(config.summary(), updated.summary());

@@ -203,7 +203,7 @@ mod tests {
     use hashi_types::guardian::LogMessage;
 
     fn build_pcrs() -> BuildPcrs {
-        BuildPcrs::new("current", vec![0])
+        BuildPcrs::new("current", vec![1; 48]).unwrap()
     }
 
     fn heartbeat_log(session_id: &str, timestamp_ms: UnixMillis) -> VerifiedLogRecord {
