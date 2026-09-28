@@ -19,6 +19,10 @@ use crate::guardian::time::now_timestamp_ms;
 /// Git commit revision reported by the enclave build.
 pub type GitRevision = String;
 
+// Nitro Enclave PCR0 uses SHA-384 (384 bits / 8 = 48 bytes).
+// https://github.com/aws/aws-nitro-enclaves-image-format#eif-measurements
+const NITRO_PCR0_LEN: usize = 48;
+
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NitroAttestation(#[serde(with = "crate::guardian::serde::base64_bytes")] Vec<u8>);
@@ -160,9 +164,9 @@ fn serialize_pcr0<S: serde::Serializer>(pcr0: &[u8], serializer: S) -> Result<S:
 
 impl BuildPcrs {
     pub fn new(git_revision: &str, pcr0: Vec<u8>) -> GuardianResult<Self> {
-        if pcr0.len() != 48 {
+        if pcr0.len() != NITRO_PCR0_LEN {
             return Err(InvalidInputs(format!(
-                "build '{git_revision}' PCR0 must be 48 bytes, got {}",
+                "build '{git_revision}' PCR0 must be {NITRO_PCR0_LEN} bytes, got {}",
                 pcr0.len()
             )));
         }
