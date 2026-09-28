@@ -148,6 +148,8 @@ pub struct BuildPcrs {
 }
 
 impl BuildPcrs {
+    // TODO(defence in depth): reject a pcr0 that is not 48 bytes or is all zeros (debug-mode
+    // enclaves attest zero PCRs), and make the sample-config placeholders unparseable.
     pub fn new(git_revision: &str, pcr0: Vec<u8>) -> Self {
         Self {
             git_revision: git_revision.to_string(),

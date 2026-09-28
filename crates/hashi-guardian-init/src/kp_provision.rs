@@ -245,6 +245,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
+    // TODO(Must fix): nobody checks the on-chain guardian_btc_public_key against
+    // state.btc_master_pubkey; it is published from operator stdout or unverified fetch-info.
     let state = reader.read_latest_ceremony_state().await?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(

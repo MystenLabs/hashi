@@ -342,6 +342,8 @@ impl DepositStateMachine {
         let btc_txid = deposit_id.txid();
         let cur_time = now_timestamp_secs();
 
+        // TODO(Must fix): only the txid is checked; also verify the outpoint exists with the
+        // credited amount and pays the hashi address, or a fake confirmation mints unbacked hBTC.
         match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(block_time)) => {
                 self.btc_checked_at = Some(cur_time);

@@ -15,6 +15,8 @@
 //! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
+// TODO(Must fix): bind E2's request outputs (addresses, amounts) to the users'
+// Sui withdrawal requests; today events are joined only by wid and txid.
 use std::fmt;
 
 use bitcoin::OutPoint;

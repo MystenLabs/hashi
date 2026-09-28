@@ -114,6 +114,8 @@ if [ "$SECURITY_GROUP_ID" = "None" ] || [ -z "$SECURITY_GROUP_ID" ]; then
   aws ec2 authorize-security-group-ingress --region "$REGION" \
     --group-id "$SECURITY_GROUP_ID" --protocol tcp --port 443 --cidr 0.0.0.0/0
 
+  # TODO(Must fix): this and expose_enclave.sh put the enclave gRPC on the internet, bypassing
+  # the proxy's deny list for the unauthenticated operator RPCs.
   aws ec2 authorize-security-group-ingress --region "$REGION" \
     --group-id "$SECURITY_GROUP_ID" --protocol tcp --port 3000 --cidr 0.0.0.0/0
 else

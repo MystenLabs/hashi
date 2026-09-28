@@ -40,6 +40,8 @@ pub async fn update_committee(
         return Err(e);
     }
 
+    // TODO(defence in depth): this strict-parses member encryption keys (unused here); Move only checks
+    // 32 bytes and nodes use a fallback, so one bad key strands the guardian at this epoch.
     let new_committee: HashiCommittee = signed
         .message()
         .new_committee
