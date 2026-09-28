@@ -43,11 +43,16 @@ impl Drop for ServerHandleGuard {
 #[derive(Clone)]
 pub struct HttpService {
     inner: Arc<Hashi>,
+    signing_tasks: peer_limit::CallerTaskLimiter,
 }
 
 impl HttpService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
-        Self { inner: hashi }
+        let signing_tasks = peer_limit::CallerTaskLimiter::new(hashi.metrics.clone());
+        Self {
+            inner: hashi,
+            signing_tasks,
+        }
     }
 
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
