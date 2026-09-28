@@ -46,7 +46,8 @@ pub struct SuiConfig {
     /// Sui RPC endpoint.
     pub rpc_url: String,
 
-    /// Currently deployed Hashi package.
+    /// Original Hashi package: the event and object types the monitor reads keep
+    /// its address across upgrades.
     pub package_id: String,
 }
 

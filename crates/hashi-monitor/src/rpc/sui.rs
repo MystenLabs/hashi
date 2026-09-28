@@ -7,10 +7,13 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
+use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::HashiEvent;
+use hashi_types::move_types::MoveType;
 use hashi_types::move_types::PackageVersions;
+use hashi_types::move_types::WithdrawalTransaction;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
@@ -18,14 +21,17 @@ use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::ListTransactionsRequest;
+use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_rpc::proto::sui::rpc::v2::Ordering;
 use sui_rpc::proto::sui::rpc::v2::QueryEndReason;
 use sui_rpc::proto::sui::rpc::v2::QueryOptions;
 use sui_rpc::proto::sui::rpc::v2::TransactionFilter;
 use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 use sui_sdk_types::Address;
+use sui_sdk_types::StructTag;
 
 use crate::config::SuiConfig;
 use crate::domain::DepositEventType;
@@ -73,13 +79,47 @@ fn completed_checkpoint_for_scan(
     Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
 }
 
+/// The Hashi approval recorded by the object at `wid`, or `None` if that object
+/// is not a Hashi `WithdrawalTransaction`.
+fn withdrawal_approval(
+    package_versions: &PackageVersions,
+    wid: WithdrawalID,
+    object: &Object,
+) -> anyhow::Result<Option<MonitorWithdrawalEvent>> {
+    let is_withdrawal_transaction = object
+        .object_type_opt()
+        .context("Sui object is missing its type")?
+        .parse::<StructTag>()
+        .is_ok_and(|tag| WithdrawalTransaction::matches(package_versions, &tag));
+    if !is_withdrawal_transaction {
+        return Ok(None);
+    }
+    let txn: WithdrawalTransaction = object
+        .contents()
+        .deserialize()
+        .with_context(|| format!("failed to decode withdrawal transaction {wid}"))?;
+    anyhow::ensure!(
+        txn.id == wid,
+        "Sui returned withdrawal transaction {} for {wid}",
+        txn.id
+    );
+    Ok(Some(MonitorWithdrawalEvent {
+        event_type: WithdrawalEventType::E1HashiApproved,
+        wid,
+        timestamp_secs: unix_millis_to_seconds(txn.created_timestamp_ms),
+        btc_txid: txn.txid.into(),
+    }))
+}
+
 pub struct SuiEventsPoller {
-    /// Sui v2 gRPC client used for checkpoint and transaction requests.
+    /// Sui v2 gRPC client used for checkpoint, transaction and object requests.
     client: sui_rpc::Client,
-    /// Deployed package versions used to decode Hashi event BCS.
+    /// Deployed package versions used to identify Hashi event and object types.
     package_versions: PackageVersions,
-    /// Current Hashi package used to construct server-side transaction filters.
+    /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
+    /// Timestamp from which the poller scans every checkpoint.
+    start_seconds: UnixSeconds,
     /// Latest timestamp through which the poller has completely scanned transactions.
     cursor_seconds: UnixSeconds,
     /// First checkpoint not yet scanned, once the initial timestamp lookup completes.
@@ -104,6 +144,7 @@ impl SuiEventsPoller {
             client,
             package_versions,
             package_id: config.package_id.clone(),
+            start_seconds: start,
             cursor_seconds: start,
             next_checkpoint_to_scan: None,
             checkpoint_timestamps: BTreeMap::new(),
@@ -113,6 +154,12 @@ impl SuiEventsPoller {
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
         self.cursor_seconds
+    }
+
+    /// Whether the scan covered `timestamp_secs`. The cursor's own second is
+    /// excluded, since later unscanned checkpoints can share it.
+    pub fn has_scanned(&self, timestamp_secs: UnixSeconds) -> bool {
+        (self.start_seconds..self.cursor_seconds).contains(&timestamp_secs)
     }
 
     /// Scan through the checkpoint covering `up_to`, or the observed chain head.
@@ -240,6 +287,30 @@ impl SuiEventsPoller {
             "completed Sui event range"
         );
         Ok(PollOutcome::CursorAdvanced(events))
+    }
+
+    /// Read the Hashi approval of `wid` from its `WithdrawalTransaction` object, which is
+    /// created alongside `WithdrawalPickedForProcessing` with the same txid and timestamp.
+    pub async fn fetch_withdrawal_approval(
+        &mut self,
+        wid: WithdrawalID,
+    ) -> anyhow::Result<Option<MonitorWithdrawalEvent>> {
+        let request = GetObjectRequest::new(&wid).with_read_mask(FieldMask::from_paths([
+            Object::path_builder().object_type(),
+            Object::path_builder().contents().finish(),
+        ]));
+        let object = match self.client.ledger_client().get_object(request).await {
+            Ok(response) => response
+                .into_inner()
+                .object
+                .context("Sui GetObject response is missing the object")?,
+            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+            Err(status) => {
+                return Err(status)
+                    .with_context(|| format!("failed to fetch withdrawal transaction {wid}"));
+            }
+        };
+        withdrawal_approval(&self.package_versions, wid, &object)
     }
 
     /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
@@ -526,6 +597,210 @@ impl SuiEventsPoller {
 mod tests {
     use super::*;
 
+    use hashi_types::bitcoin_txid::BitcoinTxid;
+    use hashi_types::move_types::SigningBatch;
+    use sui_rpc::proto::sui::rpc::v2::Bcs;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectResponse;
+    use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerService;
+    use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerServiceServer;
+
+    const PACKAGE_ID: Address = Address::new([0x11; 32]);
+    const WID: Address = Address::new([0x3d; 32]);
+
+    /// A ledger holding at most one object, answering every other id with
+    /// `miss`. Like a fullnode, it serves only the fields in the read mask.
+    #[derive(Clone)]
+    struct OneObjectLedger {
+        object: Option<Object>,
+        miss: tonic::Code,
+    }
+
+    #[tonic::async_trait]
+    impl LedgerService for OneObjectLedger {
+        async fn get_object(
+            &self,
+            request: tonic::Request<GetObjectRequest>,
+        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
+            let request = request.into_inner();
+            let Some(stored) = self
+                .object
+                .as_ref()
+                .filter(|object| object.object_id == request.object_id)
+            else {
+                return Err(tonic::Status::new(self.miss, "no such object"));
+            };
+            let paths = request.read_mask.map(|mask| mask.paths).unwrap_or_default();
+            let mut object = Object::default();
+            if paths.iter().any(|path| path == "object_type") {
+                object.object_type = stored.object_type.clone();
+            }
+            if paths.iter().any(|path| path == "contents") {
+                object.contents = stored.contents.clone();
+            }
+            Ok(tonic::Response::new(GetObjectResponse::new(object)))
+        }
+    }
+
+    async fn poller_for(ledger: OneObjectLedger) -> SuiEventsPoller {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(LedgerServiceServer::new(ledger))
+                .serve_with_incoming(incoming),
+        );
+        let config = SuiConfig {
+            rpc_url: format!("http://{addr}"),
+            package_id: PACKAGE_ID.to_string(),
+        };
+        SuiEventsPoller::new(&config, 0).unwrap()
+    }
+
+    fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
+        WithdrawalTransaction {
+            id,
+            txid: BitcoinTxid::from(Address::new([0x47; 32])),
+            request_ids: vec![],
+            inputs: vec![],
+            withdrawal_outputs: vec![],
+            change_outputs: vec![],
+            created_timestamp_ms: 1_789_805_327_448,
+            signed_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
+            randomness: vec![],
+            signing: SigningBatch {
+                signatures: vec![],
+                epoch: 0,
+            },
+            guardian_signatures: None,
+        }
+    }
+
+    fn object_at_wid(package_id: Address, txn: &WithdrawalTransaction) -> Object {
+        let mut object = Object::default();
+        object.object_id = Some(WID.to_string());
+        object.object_type = Some(format!(
+            "{package_id}::withdrawal_queue::WithdrawalTransaction"
+        ));
+        object.contents = Some(Bcs::serialize(txn).unwrap());
+        object
+    }
+
+    #[tokio::test]
+    async fn approval_is_read_from_the_withdrawal_transaction() {
+        let txn = withdrawal_transaction(WID);
+        let mut poller = poller_for(OneObjectLedger {
+            object: Some(object_at_wid(PACKAGE_ID, &txn)),
+            miss: tonic::Code::NotFound,
+        })
+        .await;
+
+        assert_eq!(
+            poller.fetch_withdrawal_approval(WID).await.unwrap(),
+            Some(MonitorWithdrawalEvent {
+                event_type: WithdrawalEventType::E1HashiApproved,
+                wid: WID,
+                timestamp_secs: 1_789_805_327,
+                btc_txid: txn.txid.into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_and_event_scan_build_the_same_approval() {
+        let txn = withdrawal_transaction(WID);
+        let poller = poller_for(OneObjectLedger {
+            object: None,
+            miss: tonic::Code::NotFound,
+        })
+        .await;
+        // `WithdrawalPickedForProcessing` fields, in declaration order.
+        let mut contents = Bcs::serialize(&(
+            txn.id,
+            txn.txid,
+            txn.request_ids.clone(),
+            txn.inputs.clone(),
+            txn.withdrawal_outputs.clone(),
+            txn.change_outputs.clone(),
+            txn.created_timestamp_ms,
+            txn.randomness.clone(),
+        ))
+        .unwrap();
+        contents.name = Some(format!(
+            "{PACKAGE_ID}::withdrawal_queue::WithdrawalPickedForProcessing"
+        ));
+        let mut event = Event::default();
+        event.contents = Some(contents);
+
+        let looked_up = withdrawal_approval(
+            &poller.package_versions,
+            WID,
+            &object_at_wid(PACKAGE_ID, &txn),
+        )
+        .unwrap();
+        assert_eq!(
+            poller.parse_event(event, 0).unwrap(),
+            looked_up.map(MonitorEvent::Withdrawal)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_foreign_object_is_no_approval() {
+        let foreign_type = object_at_wid(Address::new([0x22; 32]), &withdrawal_transaction(WID));
+        let mut package = object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID));
+        package.object_type = Some("package".to_string());
+
+        for object in [None, Some(foreign_type), Some(package)] {
+            let mut poller = poller_for(OneObjectLedger {
+                object,
+                miss: tonic::Code::NotFound,
+            })
+            .await;
+            assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_or_mismatched_contents_are_an_error() {
+        let another_withdrawal = object_at_wid(
+            PACKAGE_ID,
+            &withdrawal_transaction(Address::new([0x3e; 32])),
+        );
+        let mut undecodable = object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID));
+        undecodable.contents = Some(Bcs::from(vec![1, 2, 3]));
+
+        for object in [another_withdrawal, undecodable] {
+            let mut poller = poller_for(OneObjectLedger {
+                object: Some(object),
+                miss: tonic::Code::NotFound,
+            })
+            .await;
+            assert!(poller.fetch_withdrawal_approval(WID).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn any_status_but_not_found_is_an_error() {
+        let mut poller = poller_for(OneObjectLedger {
+            object: None,
+            miss: tonic::Code::Unavailable,
+        })
+        .await;
+
+        let error = poller.fetch_withdrawal_approval(WID).await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<tonic::Status>()
+                .map(|status| status.code()),
+            Some(tonic::Code::Unavailable),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn ledger_tip_only_advances_through_watermark() {
         let completed =
@@ -556,5 +831,21 @@ mod tests {
                 Some(110)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_scan_covers_its_start_but_not_its_cursor_second() {
+        let config = SuiConfig {
+            rpc_url: "http://127.0.0.1:9".to_string(),
+            package_id: PACKAGE_ID.to_string(),
+        };
+        let mut poller = SuiEventsPoller::new(&config, 100).unwrap();
+        assert!(!poller.has_scanned(100));
+
+        poller.cursor_seconds = 200;
+        assert!(!poller.has_scanned(99));
+        assert!(poller.has_scanned(100));
+        assert!(poller.has_scanned(199));
+        assert!(!poller.has_scanned(200));
     }
 }

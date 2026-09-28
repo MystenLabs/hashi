@@ -144,7 +144,9 @@ impl ContinuousAuditor {
         Ok(())
     }
 
-    fn tick_state_checks_and_gc(&mut self) {
+    async fn tick_state_checks_and_gc(&mut self) {
+        let lookup_findings = self.inner.fetch_missing_hashi_approvals(&self.window).await;
+        self.report_findings("lookup", &lookup_findings);
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("violations", &violations);
@@ -213,7 +215,7 @@ impl ContinuousAuditor {
         } else {
             tracing::info!("finished initial Bitcoin confirmation lookups");
         }
-        self.tick_state_checks_and_gc();
+        self.tick_state_checks_and_gc().await;
 
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
@@ -251,7 +253,7 @@ impl ContinuousAuditor {
                     }
                 }
                 _ = state_checks_ticker.tick() => {
-                    self.tick_state_checks_and_gc();
+                    self.tick_state_checks_and_gc().await;
                 }
             }
         }

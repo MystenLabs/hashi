@@ -24,9 +24,9 @@ Findings are tagged as:
 - **safety** for a contradictory event, a late predecessor, or a predecessor
   still missing after its source cursor passes the deadline.
 
-For withdrawals, a predecessor lookback that is too short can produce a false
-safety finding for a missing E1. Reconcile older Sui history before treating
-such a finding as conclusive.
+Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
+`WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
+lookback still matches.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.

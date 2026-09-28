@@ -264,6 +264,52 @@ impl AuditorCore {
         Ok(findings)
     }
 
+    /// Fetches each overdue Hashi approval made before the Sui event scan
+    /// started. An approval inside the scanned range, or one whose lookup
+    /// fails, stays missing, so it is still reported.
+    pub async fn fetch_missing_hashi_approvals(
+        &mut self,
+        window: &impl AuditWindow,
+    ) -> Vec<MonitorFinding> {
+        let cursors = self.get_cursors();
+        let wids = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| sm.is_in_audit_window(window) && sm.is_missing_hashi_approval(&cursors))
+            .map(WithdrawalStateMachine::wid)
+            .collect::<Vec<_>>();
+        let mut approvals = Vec::new();
+        for wid in wids {
+            match self.sui_poller.fetch_withdrawal_approval(wid).await {
+                Ok(Some(approval)) if self.sui_poller.has_scanned(approval.timestamp_secs) => {
+                    tracing::warn!(
+                        source = "sui",
+                        %wid,
+                        approved_at = %utc_timestamp(approval.timestamp_secs),
+                        sui_cursor = %utc_timestamp(cursors.sui),
+                        "Sui event scan already covered this Hashi approval; reporting it missing"
+                    )
+                }
+                Ok(Some(approval)) => {
+                    tracing::info!(
+                        %wid,
+                        approved_at = %utc_timestamp(approval.timestamp_secs),
+                        "fetched Hashi approval missing from the Sui event scan"
+                    );
+                    approvals.push(MonitorEvent::Withdrawal(approval));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    source = "sui",
+                    %wid,
+                    ?error,
+                    "Hashi approval lookup failed; reporting it missing"
+                ),
+            }
+        }
+        self.ingest_batch(approvals)
+    }
+
     pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
