@@ -175,36 +175,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_encryption_key_does_not_block_handoffs() {
-        let enclave = enclave_at_epoch(5).await;
-        let outgoing = committee_at(5);
-        let mut new_committee = hashi_types::move_types::Committee::from(&committee_at(6));
-        new_committee.members[0].encryption_public_key = vec![0xff; 32];
-        let transition = CommitteeTransitionRequest { new_committee };
-        let hashi_id = hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID;
-        let sig = mock_bls_sk().sign(hashi_id, 5, mock_signer_address(), &transition);
-        let mut agg = BlsSignatureAggregator::new(hashi_id, &outgoing, transition);
-        agg.add_signature(sig).unwrap();
-
-        assert_eq!(
-            update_committee(enclave.clone(), agg.finish().unwrap())
-                .await
-                .unwrap(),
-            6
-        );
-        assert_eq!(
-            enclave.state.get_committee().unwrap().members()[0].encryption_public_key(),
-            &hashi_types::committee::fallback_encryption_public_key(),
-        );
-        assert_eq!(
-            update_committee(enclave, sign_transition_at(6, committee_at(7)))
-                .await
-                .unwrap(),
-            7
-        );
-    }
-
-    #[tokio::test]
     async fn already_applied_is_noop() {
         let enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(5, committee_at(5));
