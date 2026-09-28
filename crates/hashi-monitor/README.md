@@ -21,12 +21,14 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
-- **safety** for a contradictory event, a late predecessor, or a predecessor
-  still missing after its source cursor passes the deadline.
+- **safety** for a contradictory event, a late predecessor, a predecessor
+  still missing after its source cursor passes the deadline, or an event the
+  Sui scan covered but never returned.
 
 Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 `WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
-lookback still matches.
+lookback still matches. An E1 found this way inside the range the Sui scan
+already covered also raises `SuiScanMissedEvent`.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.

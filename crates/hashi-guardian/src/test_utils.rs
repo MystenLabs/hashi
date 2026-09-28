@@ -5,6 +5,7 @@
 
 use crate::enclave::Enclave;
 use crate::s3_client::GuardianS3Client;
+use crate::s3_reader::GuardianReader;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
@@ -43,6 +44,11 @@ pub fn mock_logger() -> GuardianS3Client {
         S3RetentionEnvironment::Testnet,
         client,
     )
+}
+
+/// A reader over `mock_logger`, for tests that never read from it.
+pub fn mock_reader(expected_deployment: DeploymentConfig) -> GuardianReader {
+    GuardianReader::from_s3_client(mock_logger(), expected_deployment)
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.

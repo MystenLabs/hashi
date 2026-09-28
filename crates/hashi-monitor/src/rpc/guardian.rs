@@ -99,3 +99,14 @@ impl GuardianWithdrawalsPoller {
         Ok(PollOutcome::CursorAdvanced(withdrawal_events))
     }
 }
+
+#[cfg(test)]
+impl GuardianWithdrawalsPoller {
+    /// A poller over a mock S3 client, for tests that never poll it.
+    pub(crate) fn for_tests(config: &Config, start: UnixSeconds) -> Self {
+        Self {
+            reader: hashi_guardian::test_utils::mock_reader(config.deployment.clone()),
+            cursor: S3HourDirectory::withdraw(start),
+        }
+    }
+}

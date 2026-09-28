@@ -264,9 +264,10 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// Fetches each overdue Hashi approval made before the Sui event scan
-    /// started. An approval inside the scanned range, or one whose lookup
-    /// fails, stays missing, so it is still reported.
+    /// Fetches each overdue Hashi approval the Sui event scan never saw, such as
+    /// one made before the scan started. One inside the scanned range should
+    /// have come from the scan, so it is also a `SuiScanMissedEvent`. An
+    /// approval whose lookup fails stays missing, so it is still reported.
     pub async fn fetch_missing_hashi_approvals(
         &mut self,
         window: &impl AuditWindow,
@@ -278,24 +279,23 @@ impl AuditorCore {
             .filter(|sm| sm.is_in_audit_window(window) && sm.is_missing_hashi_approval(&cursors))
             .map(WithdrawalStateMachine::wid)
             .collect::<Vec<_>>();
+        let mut findings = Vec::new();
         let mut approvals = Vec::new();
         for wid in wids {
             match self.sui_poller.fetch_withdrawal_approval(wid).await {
-                Ok(Some(approval)) if self.sui_poller.has_scanned(approval.timestamp_secs) => {
-                    tracing::warn!(
-                        source = "sui",
-                        %wid,
-                        approved_at = %utc_timestamp(approval.timestamp_secs),
-                        sui_cursor = %utc_timestamp(cursors.sui),
-                        "Sui event scan already covered this Hashi approval; reporting it missing"
-                    )
-                }
                 Ok(Some(approval)) => {
-                    tracing::info!(
-                        %wid,
-                        approved_at = %utc_timestamp(approval.timestamp_secs),
-                        "fetched Hashi approval missing from the Sui event scan"
-                    );
+                    if self.sui_poller.has_scanned(approval.timestamp_secs) {
+                        findings.push(MonitorFinding::SuiScanMissedEvent {
+                            event: MonitorEvent::Withdrawal(approval.clone()),
+                            cursor: cursors.sui,
+                        });
+                    } else {
+                        tracing::info!(
+                            %wid,
+                            approved_at = %utc_timestamp(approval.timestamp_secs),
+                            "fetched Hashi approval missing from the Sui event scan"
+                        );
+                    }
                     approvals.push(MonitorEvent::Withdrawal(approval));
                 }
                 Ok(None) => {}
@@ -307,7 +307,8 @@ impl AuditorCore {
                 ),
             }
         }
-        self.ingest_batch(approvals)
+        findings.extend(self.ingest_batch(approvals));
+        findings
     }
 
     pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
@@ -451,5 +452,99 @@ impl AuditorCore {
 
     fn get_guardian_next_partition_ready_at(&self) -> UnixSeconds {
         self.guardian_poller.next_partition_ready_at()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::sui::tests::looked_up_approval;
+    use crate::rpc::sui::tests::poller_scanned;
+
+    const CONFIG: &str = r#"
+next_event_delays:
+  - [E1HashiApproved, 1200]
+  - [E2GuardianApproved, 86400]
+clock_skew: 300
+deployment:
+  bucket_info:
+    name: "bucket"
+    region: "us-west-2"
+  retention_environment: "testnet"
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    current_build:
+      git_revision: "0000000000000000000000000000000000000000"
+      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    prev_builds: []
+sui:
+  rpc_url: "http://sui"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+btc:
+  rpc_url: "http://btc"
+"#;
+
+    struct AllTime;
+
+    impl AuditWindow for AllTime {
+        fn in_window(&self, _: UnixSeconds) -> bool {
+            true
+        }
+    }
+
+    /// An auditor holding the guardian approval of `looked_up_approval`'s
+    /// withdrawal, whose Sui scan covered `[start, cursor)` without its E1.
+    async fn auditor_missing_approval(start: UnixSeconds, cursor: UnixSeconds) -> AuditorCore {
+        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        let mut auditor = AuditorCore {
+            pending_withdrawals: HashMap::new(),
+            pending_deposits: HashMap::new(),
+            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
+            sui_poller: poller_scanned(start, cursor).await,
+            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            cfg,
+        };
+        let approval = looked_up_approval();
+        let findings = auditor.ingest(MonitorEvent::Withdrawal(MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            timestamp_secs: approval.timestamp_secs + 7,
+            ..approval
+        }));
+        assert!(findings.is_empty());
+        auditor
+    }
+
+    #[tokio::test]
+    async fn an_approval_inside_the_scanned_range_is_a_scan_miss() {
+        let approved_at = looked_up_approval().timestamp_secs;
+        let cursor = approved_at + 3_600;
+        let mut auditor = auditor_missing_approval(approved_at - 3_600, cursor).await;
+
+        let findings = auditor.fetch_missing_hashi_approvals(&AllTime).await;
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::SuiScanMissedEvent {
+                event: MonitorEvent::Withdrawal(looked_up_approval()),
+                cursor,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+        // The approval is ingested, so it is not also reported missing.
+        assert!(auditor.detect_violations(&AllTime).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_approval_from_before_the_scan_is_ingested_without_a_finding() {
+        let approved_at = looked_up_approval().timestamp_secs;
+        let mut auditor = auditor_missing_approval(approved_at + 1, approved_at + 3_600).await;
+
+        assert!(
+            auditor
+                .fetch_missing_hashi_approvals(&AllTime)
+                .await
+                .is_empty()
+        );
+        assert!(auditor.detect_violations(&AllTime).is_empty());
     }
 }
