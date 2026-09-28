@@ -1450,7 +1450,7 @@ impl SigningManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
@@ -1869,8 +1869,8 @@ mod tests {
         }
     }
 
-    struct SigningTestSetup {
-        managers: Vec<Arc<SigningManager>>,
+    pub(crate) struct SigningTestSetup {
+        pub(crate) managers: Vec<Arc<SigningManager>>,
         verifying_key: G,
         refill_rx: watch::Receiver<u32>,
         n: u16,
@@ -1880,7 +1880,7 @@ mod tests {
     }
 
     impl SigningTestSetup {
-        fn new(n: u16) -> Self {
+        pub(crate) fn new(n: u16) -> Self {
             Self::with_seed(n, 42)
         }
 
