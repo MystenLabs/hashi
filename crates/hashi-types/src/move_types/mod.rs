@@ -192,7 +192,9 @@ pub struct Hashi {
     /// TOB certificates by (epoch, batch_index, protocol_type). Values are
     /// bare `EpochCertsV1` buckets or, for nonce certs, `StampedEpochCertsV1`.
     pub tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
+    /// Number of presignatures consumed in the current epoch. Mirrors Move's
+    /// `presig_allocator: PresigAllocator`, a one-field struct whose BCS
+    /// encoding is exactly this `u64`.
     pub num_consumed_presigs: u64,
 }
 
@@ -1757,7 +1759,6 @@ impl From<WithdrawalInputsSigned> for HashiEvent {
 pub struct WithdrawalPresigsReassigned {
     pub withdrawal_txn_id: Address,
     pub epoch: u64,
-    pub presig_start_index: u64,
 }
 
 impl MoveType for WithdrawalPresigsReassigned {

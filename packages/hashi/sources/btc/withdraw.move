@@ -144,9 +144,7 @@ entry fun commit_withdrawal_tx(
     // Extract request data for fee validation (read-only, before the object exists).
     let request_infos = hashi.bitcoin().withdrawal_queue().extract_request_infos(&request_ids);
 
-    // Allocate a presig pair per input from the core counter.
-    let presig_count = hashi::mpc_signing::presigs_for_inputs(inputs.length());
-    let presig_start_index = hashi.allocate_presigs(presig_count);
+    let presig_pairs = hashi.allocate_presig_pairs(inputs.length());
 
     // Create the WithdrawalTransaction object
     let withdrawal_txn = hashi::withdrawal_queue::new_withdrawal_txn(
@@ -156,8 +154,7 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
-        presig_start_index,
-        presig_count,
+        presig_pairs,
         epoch,
         hashi.config(),
         clock,
@@ -376,16 +373,14 @@ entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
     hashi.assert_not_reconfiguring();
     let current_epoch = hashi.committee_set().epoch();
     let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
-    let presig_count = hashi::mpc_signing::presigs_for_inputs(pending);
-    let new_base = hashi.allocate_presigs(presig_count);
+    let presig_pairs = hashi.allocate_presig_pairs(pending);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
         .reallocate_presigs_for_withdrawal_txn(
             withdrawal_id,
-            new_base,
+            presig_pairs,
             current_epoch,
-            presig_count,
         );
 }
 

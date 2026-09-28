@@ -66,6 +66,13 @@ fun make_test_output_with_address(amount: u64, addr: vector<u8>): withdrawal_que
     withdrawal_queue::output_utxo(amount, addr)
 }
 
+fun presig_pairs(count: u64): vector<hashi::mpc_signing::PresigPair> {
+    let mut allocator = hashi::mpc_signing::new_allocator();
+    let pairs = allocator.allocate(count);
+    allocator.destroy_allocator_for_testing();
+    pairs
+}
+
 /// Build a minimal test WithdrawalTransaction for the given request IDs.
 /// Used by tests that just need a txn handle to pass to commit_requests.
 fun make_test_txn(
@@ -543,8 +550,7 @@ fun test_miner_fee_single_request() {
         vector[utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA01,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -583,8 +589,7 @@ fun test_miner_fee_single_request_large_fee() {
         vector[utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA02,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -630,8 +635,7 @@ fun test_miner_fee_batched_even_split() {
             make_test_output(change),
         ],
         @0xBB01,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -686,8 +690,7 @@ fun test_miner_fee_batched_with_remainder_aborts() {
             make_test_output(change),
         ],
         @0xBB02,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -733,8 +736,7 @@ fun test_miner_fee_batched_unequal_amounts() {
             make_test_output(change),
         ],
         @0xBB03,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -772,8 +774,7 @@ fun test_miner_fee_zero() {
         vector[utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC01,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -813,8 +814,7 @@ fun test_miner_fee_output_at_dust_floor() {
         vector[utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC02,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -855,8 +855,7 @@ fun test_miner_fee_output_below_dust_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xDD01,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -897,8 +896,7 @@ fun test_miner_fee_wrong_output_amount_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none())],
         vector[make_test_output(wrong_output), make_test_output(change)],
         @0xDD02,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -938,8 +936,7 @@ fun test_miner_fee_wrong_address_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none())],
         vector[make_test_output_with_address(user_output, wrong_addr), make_test_output(change)],
         @0xDD03,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
@@ -980,8 +977,7 @@ fun test_miner_fee_exceeds_max_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xEE01,
-        0,
-        2,
+        presig_pairs(1),
         0,
         &config,
         &clock,
