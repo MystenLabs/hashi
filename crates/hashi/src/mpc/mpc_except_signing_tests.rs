@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::communication::ChannelResult;
+use crate::config::AllowedDealer;
+use crate::config::ComplaintResponsePolicy;
 use crate::metrics::Metrics;
 
 async fn run_nonce_generation_for_test(
@@ -11,7 +13,7 @@ async fn run_nonce_generation_for_test(
     p2p_channel: &impl P2PChannel,
     tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     metrics: &Metrics,
-) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+) -> MpcResult<Vec<batch_avss_avid::ReceiverOutput>> {
     MpcManager::run_nonce_dealer_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
         .await;
     let admitted = admitted_from_tob(tob_channel, mpc_manager, batch_index, None).await;
@@ -288,6 +290,7 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -1030,6 +1033,7 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -1063,6 +1067,7 @@ fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct rather than panic");
@@ -1090,6 +1095,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("member must construct");
@@ -1109,6 +1115,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct");
@@ -1149,6 +1156,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct");
@@ -1171,6 +1179,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("member must construct");
@@ -1228,6 +1237,7 @@ fn test_role_predicates_separate_a_departing_node_from_a_never_member() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .expect("a non-member must construct")
@@ -1293,6 +1303,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     );
 
@@ -1326,6 +1337,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     );
 
@@ -1412,6 +1424,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1497,6 +1510,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1601,6 +1615,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect(
@@ -4446,6 +4461,170 @@ fn test_handle_complain_request_caches_response() {
     assert_eq!(party2_manager.complaint_responses.len(), 1);
 }
 
+#[test]
+#[tracing_test::traced_test]
+fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_addr = setup.address(0);
+    let cheating_message = Messages::Dkg(create_cheating_message(&setup, 0, 1, &mut rng));
+    let config = setup.dkg_config();
+    let receiver1 = avss::Receiver::new(
+        config.nodes.clone(),
+        1,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
+        setup.session_id().dealer_session_id(&dealer_addr).to_vec(),
+        None,
+        setup.encryption_keys[1].inner().clone(),
+    )
+    .unwrap();
+    let Messages::Dkg(inner_msg) = &cheating_message else {
+        unreachable!()
+    };
+    let Ok(avss::ProcessedMessage::Complaint(complaint)) =
+        receiver1.process_message(inner_msg, &mut rand::thread_rng())
+    else {
+        panic!("expected a complaint");
+    };
+    let mut manager = setup.create_manager(2);
+    receive_dealer_messages(&mut manager, &cheating_message, dealer_addr).unwrap();
+    let epoch = manager.mpc_config.epoch;
+    let request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch,
+    };
+
+    // Neither the default policy nor entries for another epoch or dealer
+    // release the response. It is verified and cached on the first attempt;
+    // the cache hits that answer the later ones are gated just the same.
+    for (attempt, dealers) in [
+        vec![],
+        vec![AllowedDealer {
+            epoch: epoch + 1,
+            dealer: dealer_addr,
+        }],
+        vec![AllowedDealer {
+            epoch,
+            dealer: setup.address(3),
+        }],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        manager.complaint_response_policy = ComplaintResponsePolicy::AllowList { dealers };
+        let result = manager.handle_complain_request(setup.address(1), &request);
+        assert!(
+            matches!(
+                result,
+                Err(MpcError::ComplaintWithheld { epoch: e, dealer: d })
+                    if e == epoch && d == dealer_addr
+            ),
+            "attempt {attempt}: expected the complaint to be withheld, got {result:?}"
+        );
+        assert_eq!(manager.complaint_responses.len(), 1);
+    }
+
+    // Another validator replaying that complaint is answered from the cache
+    // without being verified, and is withheld just the same.
+    let result = manager.handle_complain_request(setup.address(3), &request);
+    assert!(
+        matches!(result, Err(MpcError::ComplaintWithheld { .. })),
+        "expected the replay to be withheld, got {result:?}"
+    );
+    // Without the cache, the same complaint from that validator fails
+    // verification: it is not that validator's complaint.
+    let mut uncached = setup.create_manager(2);
+    receive_dealer_messages(&mut uncached, &cheating_message, dealer_addr).unwrap();
+    let result = uncached.handle_complain_request(setup.address(3), &request);
+    assert!(
+        matches!(result, Err(MpcError::CryptoError(_))),
+        "expected verification to fail, got {result:?}"
+    );
+
+    // Allow-listing the (epoch, dealer) pair releases it.
+    manager.complaint_response_policy = ComplaintResponsePolicy::AllowList {
+        dealers: vec![AllowedDealer {
+            epoch,
+            dealer: dealer_addr,
+        }],
+    };
+    manager
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
+    assert_eq!(manager.complaint_responses.len(), 1);
+
+    // The one verification logged the exact request and dealer message it
+    // checked, decodable from the log alone; cache hits are not re-verified.
+    let expected_request = bcs::to_bytes(&request).unwrap();
+    let expected_message = bcs::to_bytes(&cheating_message).unwrap();
+    logs_assert(|lines: &[&str]| {
+        let logged: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("Verified complaint from"))
+            .collect();
+        if logged.len() != 1 {
+            return Err(format!(
+                "expected 1 verified complaint, got {}",
+                logged.len()
+            ));
+        }
+        let served = lines
+            .iter()
+            .filter(|line| line.contains("Serving the response to a complaint from"))
+            .count();
+        if served != 1 {
+            return Err(format!("expected 1 served response, got {served}"));
+        }
+        for line in logged {
+            let field = |name: &str| {
+                let hex_str = line.split(name).nth(1).unwrap().split(',').next().unwrap();
+                hex::decode(hex_str.trim()).unwrap()
+            };
+            let logged_request = field("request (bcs) ");
+            let logged_message = field("dealer message (bcs) ");
+            bcs::from_bytes::<ComplainRequest>(&logged_request).unwrap();
+            bcs::from_bytes::<Messages>(&logged_message).unwrap();
+            if logged_request != expected_request || logged_message != expected_message {
+                return Err(format!("logged complaint does not match: {line}"));
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn test_handle_complain_request_rejects_invalid_complaint_before_policy() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let (dealer_address, dealer_messages, complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rng);
+    let mut manager = setup.create_manager(1);
+    manager.complaint_response_policy = ComplaintResponsePolicy::AllowList { dealers: vec![] };
+    if let Messages::Dkg(msg) = dealer_messages {
+        manager.current_dkg_messages.insert(dealer_address, msg);
+    }
+    let request = ComplainRequest {
+        dealer: dealer_address,
+        share_index: None,
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: manager.mpc_config.epoch,
+    };
+
+    // An invalid complaint fails verification rather than being counted as a
+    // valid complaint that was withheld.
+    let result = manager.handle_complain_request(setup.address(1), &request);
+    assert!(matches!(result, Err(MpcError::CryptoError(_))));
+}
+
 #[tokio::test]
 async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
     let mut rng = rand::thread_rng();
@@ -6314,6 +6493,7 @@ impl RotationTestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -7890,6 +8070,7 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -9992,6 +10173,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10174,6 +10356,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10308,6 +10491,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10337,6 +10521,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10443,6 +10628,7 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -10615,6 +10801,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10706,6 +10893,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -10740,6 +10928,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -10848,6 +11037,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10937,6 +11127,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -11016,6 +11207,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -11203,6 +11395,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -11284,6 +11477,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -12413,7 +12607,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
-    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=2 echoes; the Vote cert needs W−f=4.
+    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=4 shards; the Vote cert needs W−f=5.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
@@ -12421,11 +12615,11 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         .unwrap();
     let decoder_addr = setup.address(5);
 
-    // Four voters process their dispersal -> Vote sigs (for the W−f cert) and echoes for the decoder.
+    // The voters process their dispersal -> Vote sigs (for the W−f cert) and echoes for the decoder.
     let mut vote_sigs = Vec::new();
     let mut avid_vote = None;
     let mut echoes = Vec::new();
-    for j in [1usize, 2, 3, 4] {
+    for j in [0usize, 1, 2, 3, 4] {
         let voter = &mut fx.confirmers[j];
         let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
         let (vote, av, es) = voter
@@ -12446,6 +12640,14 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
     }
     let avid_vote = avid_vote.unwrap();
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &fx.confirmers[0].mpc_config.nodes,
+            fx.confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
 
     // Form and verify the W−f Vote cert over H(AvidVote).
     let vote_target = AvidVoteMessagesHash {
@@ -14234,18 +14436,13 @@ fn test_consume_certified_nonce_outputs_drops_avid_entries_the_loop_did_not_stam
         .get_mut(&(batch_index, stamped))
         .unwrap()
         .cert_digest = Some(MessagesHash::from([1u8; 32]));
-    let indices = party
-        .mpc_config
-        .nodes
-        .share_ids_of(party.party_id().unwrap())
-        .unwrap();
 
     let (_, dealers, outputs) = consume_certified_nonce_outputs(
         &mut party.dealer_avid_nonce_outputs,
         batch_index,
         &HashSet::from([stamped, overwritten]),
         |tagged| tagged.cert_digest.is_some(),
-        |tagged| tagged.output.clone().into_legacy(&indices),
+        |tagged| tagged.output.clone(),
     );
 
     assert_eq!(dealers, vec![stamped]);
@@ -15562,6 +15759,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
 fn test_decoded_shares_match_optimistic_shares() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
+    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=4 shards; the Vote cert needs W−f=5.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
@@ -15572,7 +15770,7 @@ fn test_decoded_shares_match_optimistic_shares() {
     let mut vote_sigs = Vec::new();
     let mut avid_vote = None;
     let mut echoes = Vec::new();
-    for j in [1usize, 2, 3, 4] {
+    for j in [0usize, 1, 2, 3, 4] {
         let voter = &mut fx.confirmers[j];
         let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
         let (vote, av, es) = voter
@@ -15593,6 +15791,14 @@ fn test_decoded_shares_match_optimistic_shares() {
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
     }
     let avid_vote = avid_vote.unwrap();
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &fx.confirmers[0].mpc_config.nodes,
+            fx.confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
@@ -15659,8 +15865,7 @@ fn test_decoded_shares_match_optimistic_shares() {
         .nodes
         .share_ids_of(decoder.party_id().unwrap())
         .unwrap();
-    let decoded = decoded.into_legacy(&indices);
-    let direct = direct.output.into_legacy(&indices);
+    let direct = direct.output;
     assert_eq!(
         bcs::to_bytes(&decoded.public_keys).unwrap(),
         bcs::to_bytes(&direct.public_keys).unwrap(),
@@ -15671,24 +15876,24 @@ fn test_decoded_shares_match_optimistic_shares() {
         direct.my_shares.shares.len(),
         "share-batch counts must match"
     );
-    for (d, o) in decoded
+    for ((d, o), index) in decoded
         .my_shares
         .shares
         .iter()
         .zip(direct.my_shares.shares.iter())
+        .zip(&indices)
     {
-        assert_eq!(d.index, o.index, "share indices must match");
         assert_eq!(
             bcs::to_bytes(&d.batch).unwrap(),
             bcs::to_bytes(&o.batch).unwrap(),
             "share values must match for index {}",
-            d.index
+            index
         );
         assert_eq!(
             bcs::to_bytes(&d.blinding_share).unwrap(),
             bcs::to_bytes(&o.blinding_share).unwrap(),
             "blinding shares must match for index {}",
-            d.index
+            index
         );
     }
 }
@@ -15895,17 +16100,17 @@ fn test_avid_voter_state_survives_restart() {
         .unwrap();
 
     let mut vote_sigs = Vec::new();
-    for i in [1usize, 2, 3, 4] {
+    for i in [0usize, 1, 2, 3, 4] {
         let addr = setup.address(i);
         let (_, msg) = dispersals_a
             .iter()
             .find(|(a, _)| *a == addr)
             .unwrap()
             .clone();
-        let mgr = if i == 1 {
-            &mut voter
-        } else {
-            others.get_mut(&i).unwrap()
+        let mgr = match i {
+            0 => &mut dealer,
+            1 => &mut voter,
+            _ => others.get_mut(&i).unwrap(),
         };
         let response = mgr
             .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
@@ -15916,6 +16121,11 @@ fn test_avid_voter_state_survives_restart() {
             response.signature,
         ));
     }
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(&voter.mpc_config.nodes, voter.mpc_config.max_faulty),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let (held_vote, held_echoes, _) = voter
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
@@ -16110,6 +16320,28 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
             extract_echo_for(&held, victim),
         ));
     }
+    // The dealer also votes on its own dispersal, so the Vote cert reaches W − f.
+    let (_, msg) = dispersals
+        .iter()
+        .find(|(a, _)| *a == dealer_addr)
+        .unwrap()
+        .clone();
+    let response = dealer_mgr
+        .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+        .unwrap();
+    vote_sigs.push(MemberSignature::new(
+        dealer_mgr.mpc_config.epoch,
+        dealer_addr,
+        response.signature,
+    ));
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &confirmers[0].mpc_config.nodes,
+            confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let (held_vote, _, _) = confirmers[0]
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))

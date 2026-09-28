@@ -9,6 +9,7 @@ use crate::communication::PublishOutcome;
 use crate::communication::sui_tob::tob_wait_superseded;
 use crate::communication::with_timeout_and_retry;
 use crate::communication::with_timeout_and_retry_budget;
+use crate::config::ComplaintResponsePolicy;
 use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
@@ -90,7 +91,6 @@ use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
@@ -171,7 +171,7 @@ pub struct NoncePartyAdmission {
 }
 
 pub struct NoncePartyOutcome {
-    pub outputs: Vec<batch_avss::ReceiverOutput>,
+    pub outputs: Vec<batch_avss_avid::ReceiverOutput>,
     pub local_skips: u32,
 }
 
@@ -222,6 +222,8 @@ pub struct MpcManager {
     pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), TaggedAvidOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
+    /// Which valid complaints `handle_complain_request` answers.
+    complaint_response_policy: ComplaintResponsePolicy,
 }
 
 impl AdmittedNonceDealers {
@@ -344,6 +346,7 @@ impl MpcManager {
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
+        complaint_response_policy: ComplaintResponsePolicy,
         metrics: &Metrics,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
@@ -518,6 +521,7 @@ impl MpcManager {
             batch_size_per_weight,
             dealer_avid_nonce_outputs: BTreeMap::new(),
             test_corrupt_shares_for,
+            complaint_response_policy,
         };
         manager.load_stored_messages()?;
         Ok(manager)
@@ -660,7 +664,50 @@ impl MpcManager {
         Ok(RetrieveOutcome::NeedsStore)
     }
 
+    /// Answers a complaint, subject to `complaint_response_policy`.
+    ///
+    /// The complaint is verified before the policy is applied, so an invalid
+    /// complaint is always an error, unless the response is already cached
+    /// from an earlier verified complaint about the same dealer: a cache hit
+    /// does not verify the caller. A complaint about a dealer the policy does
+    /// not allow is withheld: the response reveals this node's share, and a
+    /// bug in the complaint flow must not let a handful of parties extract
+    /// it. This is the only place a complaint response is released.
     pub fn handle_complain_request(
+        &mut self,
+        caller: Address,
+        request: &ComplainRequest,
+    ) -> MpcResult<ComplaintResponse> {
+        let response = self.complaint_response(caller, request)?;
+        if !self
+            .complaint_response_policy
+            .allows(request.epoch, &request.dealer)
+        {
+            tracing::warn!(
+                "Withholding the response to a complaint from {caller:?}: dealer {:?}, epoch {}, \
+                 protocol {:?}",
+                request.dealer,
+                request.epoch,
+                request.protocol_type,
+            );
+            return Err(MpcError::ComplaintWithheld {
+                epoch: request.epoch,
+                dealer: request.dealer,
+            });
+        }
+        tracing::info!(
+            "Serving the response to a complaint from {caller:?}: dealer {:?}, epoch {}, \
+             protocol {:?}",
+            request.dealer,
+            request.epoch,
+            request.protocol_type,
+        );
+        Ok(response)
+    }
+
+    /// Verifies a complaint and computes the response to it, without
+    /// releasing it.
+    fn complaint_response(
         &mut self,
         caller: Address,
         request: &ComplainRequest,
@@ -768,7 +815,7 @@ impl MpcManager {
             };
             from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
         };
-        let responses = match messages {
+        let responses = match &messages {
             Messages::Dkg(message) => {
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
@@ -777,7 +824,7 @@ impl MpcManager {
                     .dealer_session_id(&request.dealer);
                 let partial_output = self.get_or_derive_dkg_output(
                     &request.dealer,
-                    &message,
+                    message,
                     request.epoch,
                     &session_id,
                 )?;
@@ -798,7 +845,7 @@ impl MpcManager {
                     });
                 };
                 let complaint_response =
-                    receiver.handle_complaint(&message, accuser_id, complaint, &partial_output)?;
+                    receiver.handle_complaint(message, accuser_id, complaint, &partial_output)?;
                 ComplaintResponse::Dkg(complaint_response)
             }
             Messages::Rotation(rotation_messages) => {
@@ -859,6 +906,7 @@ impl MpcManager {
                 ));
             }
         };
+        log_verified_complaint(caller, request, &messages);
         if cache_is_current {
             self.complaint_responses
                 .insert(cache_key, responses.clone());
@@ -1131,17 +1179,12 @@ impl MpcManager {
         )
         .await?;
         let mut mgr = mpc_manager.write().unwrap();
-        let indices = mgr
-            .mpc_config
-            .nodes
-            .share_ids_of(mgr.party_id()?)
-            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         let (pre_filter, dealers, outputs) = consume_certified_nonce_outputs(
             &mut mgr.dealer_avid_nonce_outputs,
             batch_index,
             &admission.certified,
             |tagged| tagged.cert_digest.is_some(),
-            |tagged| tagged.output.clone().into_legacy(&indices),
+            |tagged| tagged.output.clone(),
         );
         Self::finish_nonce_party_phase(
             &mgr,
@@ -1161,7 +1204,7 @@ impl MpcManager {
         admission: NoncePartyAdmission,
         pre_filter: usize,
         dealers: Vec<Address>,
-        outputs: Vec<batch_avss::ReceiverOutput>,
+        outputs: Vec<batch_avss_avid::ReceiverOutput>,
     ) -> MpcResult<NoncePartyOutcome> {
         let expected = admission
             .certified
@@ -2556,8 +2599,9 @@ impl MpcManager {
             }
             ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
         };
+        log_verified_complaint(caller, request, &state.common);
         tracing::info!(
-            "AVID nonce complaint answered: accuser {:?}, dealer {:?}, batch_index={batch_index}, \
+            "AVID nonce complaint verified: accuser {:?}, dealer {:?}, batch_index={batch_index}, \
              kind {}",
             caller,
             request.dealer,
@@ -6290,6 +6334,25 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
     }
 }
 
+/// Logs a freshly verified complaint together with the dealer message it
+/// was verified against, both BCS-encoded as hex, so it can be checked
+/// independently from the logs.
+fn log_verified_complaint(
+    caller: Address,
+    request: &ComplainRequest,
+    dealer_message: &impl serde::Serialize,
+) {
+    tracing::debug!(
+        "Verified complaint from {caller:?}: dealer {:?}, epoch {}, protocol {:?}, \
+         request (bcs) {}, dealer message (bcs) {}",
+        request.dealer,
+        request.epoch,
+        request.protocol_type,
+        hex::encode(bcs::to_bytes(request).expect(EXPECT_SERIALIZATION_SUCCESS)),
+        hex::encode(bcs::to_bytes(dealer_message).expect(EXPECT_SERIALIZATION_SUCCESS)),
+    );
+}
+
 fn fan_out_complaints<'a, P: P2PChannel + 'a>(
     signers: Vec<Address>,
     p2p_channel: &'a P,
@@ -6595,8 +6658,8 @@ fn consume_certified_nonce_outputs<T>(
     batch_index: u32,
     certified: &HashSet<Address>,
     mut keep: impl FnMut(&T) -> bool,
-    mut convert: impl FnMut(&T) -> batch_avss::ReceiverOutput,
-) -> (usize, Vec<Address>, Vec<batch_avss::ReceiverOutput>) {
+    mut convert: impl FnMut(&T) -> batch_avss_avid::ReceiverOutput,
+) -> (usize, Vec<Address>, Vec<batch_avss_avid::ReceiverOutput>) {
     let pre_filter = outputs_map
         .keys()
         .filter(|(b, _)| *b == batch_index)

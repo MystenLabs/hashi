@@ -2153,11 +2153,6 @@ pub struct InitConfig {
     pub deployment: ::core::option::Option<DeploymentConfig>,
     #[prost(message, optional, tag = "2")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// Compressed MPC public key (33 bytes).
-    #[prost(bytes = "bytes", optional, tag = "3")]
-    pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    #[prost(bytes = "bytes", optional, tag = "4")]
-    pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {

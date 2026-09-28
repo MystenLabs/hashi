@@ -31,6 +31,7 @@ pub mod upgrade_flow;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;
+use hashi::config::ComplaintResponsePolicy;
 pub use hashi_network::HashiNetwork;
 pub use hashi_network::HashiNetworkBuilder;
 pub use hashi_network::HashiNodeHandle;
@@ -258,6 +259,11 @@ impl TestNetworksBuilder {
         self.hashi_builder = self
             .hashi_builder
             .with_corrupt_shares_target(target_node_index);
+        self
+    }
+
+    pub fn with_complaint_response_policy(mut self, policy: ComplaintResponsePolicy) -> Self {
+        self.hashi_builder = self.hashi_builder.with_complaint_response_policy(policy);
         self
     }
 
@@ -849,7 +855,7 @@ mod tests {
     use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::S;
     use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
     use fastcrypto_tbls::types::ShareIndex;
 
@@ -983,15 +989,14 @@ mod tests {
         batch_size_per_weight: u16,
         params: Parameters,
     ) -> Presignatures {
-        let receiver_outputs: Vec<batch_avss::ReceiverOutput> = nonces_for_dealer
+        let receiver_outputs: Vec<batch_avss_avid::ReceiverOutput> = nonces_for_dealer
             .iter()
             .map(|dealer| {
-                let shares: Vec<batch_avss::ShareBatch> = share_ids
+                let shares: Vec<batch_avss_avid::ShareBatch> = share_ids
                     .iter()
                     .map(|&sid| {
                         let share_idx = u16::from(sid) as usize - 1;
-                        batch_avss::ShareBatch {
-                            index: sid,
+                        batch_avss_avid::ShareBatch {
                             batch: (0..batch_size_per_weight as usize)
                                 .map(|l| dealer.nonce_shares[l][share_idx])
                                 .collect(),
@@ -999,13 +1004,13 @@ mod tests {
                         }
                     })
                     .collect();
-                batch_avss::ReceiverOutput {
-                    my_shares: batch_avss::SharesForNode { shares },
+                batch_avss_avid::ReceiverOutput {
+                    my_shares: batch_avss_avid::SharesForNode { shares },
                     public_keys: dealer.public_keys.clone(),
                 }
             })
             .collect();
-        Presignatures::new(receiver_outputs, batch_size_per_weight, params, true).unwrap()
+        Presignatures::new(receiver_outputs, batch_size_per_weight, params).unwrap()
     }
 
     fn mock_shares(
@@ -1112,14 +1117,15 @@ mod tests {
                     .map(|&sid| shares_source[u16::from(sid) as usize - 1].clone())
                     .collect(),
             };
+            let params = Parameters {
+                t,
+                f: cfg.max_faulty as u16,
+            };
             let presignatures = mock_presignatures(
                 &nonces_for_dealer,
                 &info.share_ids,
                 batch_size_per_weight,
-                Parameters {
-                    t,
-                    f: cfg.max_faulty as u16,
-                },
+                params,
             );
             let committee = {
                 let mpc_mgr = node.hashi().mpc_manager().unwrap();
@@ -1131,7 +1137,7 @@ mod tests {
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
-                t,
+                params,
                 key_shares,
                 vk,
                 share_owners.clone(),
@@ -2811,6 +2817,137 @@ mod tests {
         assert_all_signatures_match(results);
 
         Ok(())
+    }
+
+    /// The victim receives corrupt shares from every other dealer, and every
+    /// peer starts with the default policy, so its complaints are verified but
+    /// withheld and it cannot finish the DKG. Two responders then allow-list
+    /// the corrupting dealers and restart; the third is left untouched with
+    /// the default policy, and the victim is restarted only if
+    /// `restart_victim`. Every node, restarted or not, must end up with the
+    /// key, with the victim's share recovered through the complaint flow.
+    ///
+    /// The victim is the last node because building the network waits for
+    /// node 0's key.
+    async fn run_complaint_recovery_after_allowlist_update(restart_victim: bool) -> Result<()> {
+        use hashi::config::AllowedDealer;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        const VICTIM: usize = 3;
+        const RESTARTED_RESPONDERS: [usize; 2] = [0, 1];
+        const UNTOUCHED_RESPONDER: usize = 2;
+        let withheld =
+            |node: &HashiNodeHandle| node.hashi().metrics.mpc_complaints_withheld_total.get();
+
+        let mut test_networks = fault_tolerant_builder()
+            .with_corrupt_shares_target(VICTIM)
+            .with_complaint_response_policy(ComplaintResponsePolicy::AllowList { dealers: vec![] })
+            .build()
+            .await?;
+
+        // 1. The victim's complaints reach its peers and are withheld.
+        let deadline = tokio::time::Instant::now() + DKG_TIMEOUT;
+        loop {
+            let nodes = test_networks.hashi_network().nodes();
+            if RESTARTED_RESPONDERS
+                .iter()
+                .all(|&i| withheld(&nodes[i]) > 0)
+            {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "no withheld complaint observed on nodes {RESTARTED_RESPONDERS:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let nodes = test_networks.hashi_network().nodes();
+        assert!(
+            nodes[VICTIM].hashi().signing_verifying_key().is_none(),
+            "the victim must not get the key while its complaints are withheld"
+        );
+
+        // 2. Allow-list every corrupting dealer for the DKG epoch on the
+        //    restarted responders.
+        let epoch = nodes[RESTARTED_RESPONDERS[0]]
+            .hashi()
+            .mpc_manager()
+            .expect("responder has an MPC manager")
+            .read()
+            .unwrap()
+            .mpc_config
+            .epoch;
+        let dealers: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != VICTIM)
+            .map(|(_, node)| AllowedDealer {
+                epoch,
+                dealer: node.validator_address(),
+            })
+            .collect();
+        let mut restarted = RESTARTED_RESPONDERS.to_vec();
+        if restart_victim {
+            restarted.push(VICTIM);
+        }
+        for &i in &restarted {
+            let node = &mut test_networks.hashi_network_mut().nodes_mut()[i];
+            if i != VICTIM {
+                node.config_mut().complaint_response_policy =
+                    Some(ComplaintResponsePolicy::AllowList {
+                        dealers: dealers.clone(),
+                    });
+            }
+            node.restart().await?;
+        }
+
+        // 3. Every node ends up with the key, the victim through complaint
+        //    responses from the restarted responders.
+        let nodes = test_networks.hashi_network().nodes();
+        let results =
+            futures::future::join_all(nodes.iter().map(|node| node.wait_for_mpc_key(DKG_TIMEOUT)))
+                .await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} did not get the MPC key: {e}"));
+        }
+        assert!(
+            withheld(&nodes[UNTOUCHED_RESPONDER]) > 0,
+            "the untouched responder kept the default policy and must have withheld the \
+             victim's complaints"
+        );
+
+        // 4. The recovered share signs consistently with everyone else's.
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
+        let results = sign_on_all_nodes(
+            nodes,
+            b"allowlist recovery",
+            epoch,
+            sui_sdk_types::Address::ZERO,
+            0,
+            None,
+        )
+        .await;
+        assert_all_signatures_match(results);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_complaint_recovery_after_allowlist_update() -> Result<()> {
+        run_complaint_recovery_after_allowlist_update(false).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_complaint_recovery_after_allowlist_update_and_victim_restart() -> Result<()> {
+        run_complaint_recovery_after_allowlist_update(true).await
     }
 
     async fn build_and_rotate_once(builder: TestNetworksBuilder) -> Result<TestNetworks> {

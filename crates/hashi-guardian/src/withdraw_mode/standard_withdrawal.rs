@@ -210,12 +210,7 @@ mod tests {
             max_bucket_capacity: max_bucket_capacity_sats,
         };
         let limiter_state = LimiterState::genesis(&limiter_config);
-        let config = InitConfig::from_parts_for_testing(
-            limiter_config,
-            hashi_btc_master_pubkey,
-            network,
-            hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
-        );
+        let config = InitConfig::from_parts_for_testing(limiter_config, network);
 
         // operator_init installs standby config; test activation installs the
         // committee and limiter before withdrawals.
@@ -223,7 +218,11 @@ mod tests {
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default()
                 .with_s3_logger(logger)
-                .with_config(config),
+                .with_config(config)
+                .with_genesis_bindings(
+                    hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
+                    hashi_btc_master_pubkey,
+                ),
         )
         .await;
 

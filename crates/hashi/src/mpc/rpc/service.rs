@@ -129,24 +129,25 @@ impl MpcService for HttpService {
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let complaint = {
-                let mut mgr = mpc_manager.write().unwrap();
-                validate_epoch_current_or_previous(
-                    mgr.mpc_config.epoch,
-                    mgr.previous_epoch,
-                    internal_request.epoch,
-                )?;
-                mgr.handle_complain_request(caller, &internal_request)
-                    .map_err(|e| {
-                        tracing::warn!("complain failed: {e}");
-                        mpc_error_to_status(e)
-                    })?
-            };
-            Ok(ComplainResponse::from(&complaint))
+        let result = spawn_blocking(move || -> Result<_, Status> {
+            let mut mgr = mpc_manager.write().unwrap();
+            validate_epoch_current_or_previous(
+                mgr.mpc_config.epoch,
+                mgr.previous_epoch,
+                internal_request.epoch,
+            )?;
+            Ok(mgr.handle_complain_request(caller, &internal_request))
         })
         .await?;
-        Ok(tonic::Response::new(response))
+        let complaint = result.map_err(|e| {
+            if matches!(e, MpcError::ComplaintWithheld { .. }) {
+                self.metrics().mpc_complaints_withheld_total.inc();
+            } else {
+                tracing::warn!("complain failed: {e}");
+            }
+            mpc_error_to_status(e)
+        })?;
+        Ok(tonic::Response::new(ComplainResponse::from(&complaint)))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -282,6 +283,7 @@ fn mpc_error_to_status(err: MpcError) -> Status {
         | InvalidConfig(_)
         | NotReady(_) => Status::failed_precondition(err.to_string()),
         NotFound(_) => Status::not_found(err.to_string()),
+        ComplaintWithheld { .. } => Status::permission_denied(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }

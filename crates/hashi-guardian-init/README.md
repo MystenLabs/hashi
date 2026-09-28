@@ -138,11 +138,9 @@ It:
 2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
    recipients against the expected KP roster and its Bitcoin network against
    the configured network.
-3. Fetches on-chain MPC master `G`, and reads the latest `committee-update/` or
-   `genesis/` record if one already exists.
-4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
-   master `G`, the KP PCR allowlist, S3 bucket and retention policy, and
-   configured Bitcoin network.
+3. Reads the latest `committee-update/` or `genesis/` record if one already exists.
+4. Builds the withdraw-mode `InitConfig` from limiter config and the shared
+   deployment policy.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. On first deploy, the flag causes it to build an
    optional `GenesisState` from the current on-chain committee, configured Hashi
@@ -150,7 +148,9 @@ It:
    exist.
 6. Calls withdraw-mode `OperatorInit` with guardian S3 config, `InitConfig`, and
    the optional genesis state; the enclave pins all three inputs plus the latest
-   complete ceremony and KP-share state.
+   complete ceremony and KP-share state. The enclave obtains the immutable Hashi
+   object id and MPC master `G` from verified genesis, or from the supplied genesis
+   state on first deploy. Only `--do-genesis` consults on-chain state.
 7. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
    instance and stable config.
 8. Prints the config and optional genesis hashes that key provisioners must
@@ -181,13 +181,13 @@ re-encrypt it. It:
    (attestation-anchored), pinning the standby session.
 2. Fetches the same session's signed `GuardianInfo` from S3 and requires it to
    match the endpoint response, then checks the enclave's config against expected
-   values — S3 bucket, limiter config, `mpc_master_g`, and that the guardian is
+   values — deployment policy, limiter config, and that the guardian is
    not already provisioner-initialized or activated.
 3. Scrapes the authoritative `ceremony/` log for the secret-sharing instance
    (commitments + N + T + sharing_seq) the new guardian was booted with, and
    confirms it matches.
-4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
-   `G`, PCR allowlist, S3 bucket and retention policy, and network, then confirms
+4. Recomputes the stable `InitConfig` from limiter config and deployment policy,
+   then confirms
    its `config_hash` matches the enclave.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. With the flag, independently derives the
@@ -217,7 +217,7 @@ marker; the signed optional genesis hash remains the authorization.
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 `kp_roster`, and `limiter_config`. The MPC committee verifying key `G` is fetched
-from on-chain Hashi state.
+from on-chain Hashi state only with `--do-genesis`.
 
 ## key-provisioner rotate-cert
 
@@ -413,8 +413,8 @@ cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sam
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian_endpoint`, `deployment`, `hashi`,
-`kp_roster`, and `limiter_config`.
+command uses `guardian_endpoint`, `deployment`,
+`kp_roster`, and `limiter_config`. Activation does not query Sui.
 
 ## tools
 

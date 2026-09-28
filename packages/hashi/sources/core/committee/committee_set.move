@@ -76,10 +76,13 @@ const EInvalidMpcPublicKey: vector<u8> =
 
 // ~~~~~~~ Structs ~~~~~~~
 
-public struct TlsKeyIndexKey has copy, drop, store {}
-
 public struct CommitteeSet has store {
     members: Bag,
+    /// Reverse index from each registered TLS public key to the validator
+    /// address of the member holding it. Kept in lockstep with
+    /// `MemberInfo.tls_public_key` so that registration can reject a key
+    /// already held by another member without scanning every member.
+    tls_public_keys: Table<vector<u8>, address>,
     /// The current epoch.
     epoch: u64,
     committees: Bag,
@@ -166,6 +169,7 @@ public struct MemberInfo has store {
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
     CommitteeSet {
         members: sui::bag::new(ctx),
+        tls_public_keys: sui::table::new(ctx),
         epoch: 0,
         committees: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
@@ -260,11 +264,8 @@ public(package) fun set_endpoint_url(
     member.endpoint_url = endpoint_url;
 }
 
-public(package) fun tls_key_index_key(): TlsKeyIndexKey { TlsKeyIndexKey {} }
-
 public(package) fun set_tls_public_key(
     self: &mut CommitteeSet,
-    tls_keys: &mut Table<vector<u8>, address>,
     hashi_id: address,
     validator_address: address,
     tls_public_key: vector<u8>,
@@ -283,27 +284,27 @@ public(package) fun set_tls_public_key(
         EInvalidTlsProofOfPossession,
     );
 
-    self.write_tls_public_key(tls_keys, validator_address, tls_public_key);
+    self.write_tls_public_key(validator_address, tls_public_key);
 }
 
 fun write_tls_public_key(
     self: &mut CommitteeSet,
-    tls_keys: &mut Table<vector<u8>, address>,
     validator_address: address,
     tls_public_key: vector<u8>,
 ) {
     assert!(tls_public_key.length() == 32, EInvalidTlsPublicKeyLength);
     assert!(
-        !tls_keys.contains(tls_public_key) || tls_keys[tls_public_key] == validator_address,
+        !self.tls_public_keys.contains(tls_public_key) ||
+        self.tls_public_keys[tls_public_key] == validator_address,
         ETlsPublicKeyInUse,
     );
     let member = self.member_mut(validator_address);
     let previous = member.tls_public_key;
     member.tls_public_key = tls_public_key;
     if (!previous.is_empty()) {
-        tls_keys.remove(previous);
+        self.tls_public_keys.remove(previous);
     };
-    tls_keys.add(tls_public_key, validator_address);
+    self.tls_public_keys.add(tls_public_key, validator_address);
 }
 
 /// Set the next_epoch_encryption_public_key of the member.
@@ -406,7 +407,6 @@ public(package) fun request_resignation(
 /// governance lifts the ignore.
 public(package) fun remove_inactive_member(
     self: &mut CommitteeSet,
-    tls_keys: &mut Table<vector<u8>, address>,
     validator_address: address,
     is_active_sui_validator: bool,
 ) {
@@ -415,7 +415,7 @@ public(package) fun remove_inactive_member(
     let member = self.member(validator_address);
     assert!(!member.is_ignored(), ECannotRemoveIgnoredMember);
     assert!(member.is_resigned() || !is_active_sui_validator, EMemberNotRemovable);
-    self.remove_member(tls_keys, validator_address);
+    self.remove_member(validator_address);
 }
 
 /// Withdraw a pending resignation. If the next committee has already been
@@ -801,11 +801,7 @@ fun assert_not_last_active_member(self: &CommitteeSet, validator_address: addres
 
 /// Delete a member's registration. The first (and only) removal path from
 /// the members bag; MemberInfo has only `store`, so it is destructured.
-fun remove_member(
-    self: &mut CommitteeSet,
-    tls_keys: &mut Table<vector<u8>, address>,
-    validator_address: address,
-) {
+fun remove_member(self: &mut CommitteeSet, validator_address: address) {
     let MemberInfo {
         validator_address: _,
         operator_address: _,
@@ -818,7 +814,7 @@ fun remove_member(
         extra_fields: _,
     } = self.members.remove(validator_address);
     if (!tls_public_key.is_empty()) {
-        tls_keys.remove(tls_public_key);
+        self.tls_public_keys.remove(tls_public_key);
     };
 }
 
@@ -925,22 +921,21 @@ public(package) fun verify_tls_proof_of_possession(
 #[test_only]
 public fun set_tls_public_key_unproven_for_testing(
     self: &mut CommitteeSet,
-    tls_keys: &mut Table<vector<u8>, address>,
     validator_address: address,
     tls_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
     self.member(validator_address).assert_authorized(ctx);
-    self.write_tls_public_key(tls_keys, validator_address, tls_public_key);
+    self.write_tls_public_key(validator_address, tls_public_key);
 }
 
 #[test_only]
 public fun tls_key_holder_for_testing(
-    tls_keys: &Table<vector<u8>, address>,
+    self: &CommitteeSet,
     tls_public_key: vector<u8>,
 ): Option<address> {
-    if (tls_keys.contains(tls_public_key)) {
-        option::some(tls_keys[tls_public_key])
+    if (self.tls_public_keys.contains(tls_public_key)) {
+        option::some(self.tls_public_keys[tls_public_key])
     } else {
         option::none()
     }

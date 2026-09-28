@@ -348,7 +348,7 @@ impl GuardianReader {
         if let Some(committee) = self.read_latest_committee_update().await? {
             return Ok(Some(committee));
         }
-        self.read_genesis_committee().await
+        Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
     }
 
     /// Read and verify the successfully applied committee with the highest
@@ -387,7 +387,7 @@ impl GuardianReader {
 
     /// Read and verify the fixed KP-authorized bootstrap record, or return
     /// `None` if `genesis/record.json` has not been written.
-    async fn read_genesis_committee(&mut self) -> GuardianResult<Option<Committee>> {
+    pub async fn read_genesis(&mut self) -> GuardianResult<Option<Box<GenesisLogMessage>>> {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
@@ -403,17 +403,90 @@ impl GuardianReader {
         }
         let verified_record = self.read_verified_record(&key).await?;
         let session_id = verified_record.entry().session_id().clone();
-        let committee = verified_record
+        let genesis = verified_record
             .into_entry()
             .into_message()
             .into_genesis()
-            .ok_or_else(|| InvalidS3Log(format!("expected a genesis log at {key}")))?
-            .committee;
+            .ok_or_else(|| InvalidS3Log(format!("expected a genesis log at {key}")))?;
         log_verified_read(&key, &session_id);
-        Ok(Some(committee))
+        Ok(Some(genesis))
     }
 }
 
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
+}
+
+#[cfg(test)]
+pub(crate) fn genesis_reader_for_test(
+    record: Option<LogRecord>,
+    signing_pubkey: hashi_types::guardian::GuardianPubKey,
+    extra_keys: Vec<String>,
+) -> GuardianReader {
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
+    use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::primitives::DateTime;
+    use aws_sdk_s3::types::ObjectLockMode;
+    use aws_sdk_s3::types::ObjectVersion;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use hashi_types::guardian::InitConfig;
+    use hashi_types::guardian::S3ObjectLockPolicy;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    let mut keys = extra_keys;
+    if let Some(record) = &record {
+        keys.push(record.object_key().to_string());
+    }
+    let prefix = Arc::new(Mutex::new(String::new()));
+    let request_prefix = prefix.clone();
+    let list = mock!(Client::list_object_versions)
+        .match_requests(move |req| {
+            *request_prefix.lock().unwrap() = req.prefix().unwrap_or_default().to_string();
+            true
+        })
+        .then_output(move || {
+            let prefix = prefix.lock().unwrap();
+            ListObjectVersionsOutput::builder()
+                .set_versions(Some(
+                    keys.iter()
+                        .filter(|key| key.starts_with(prefix.as_str()))
+                        .map(|key| ObjectVersion::builder().key(key).is_latest(true).build())
+                        .collect(),
+                ))
+                .build()
+        });
+    let config = InitConfig::mock_for_testing();
+    let policy = S3ObjectLockPolicy::for_environment(config.deployment().retention_environment);
+    let get = mock!(Client::get_object)
+        .match_requests(|req| req.key() == Some(GenesisLogMessage::object_key().as_str()))
+        .then_output(move || {
+            let record = record.as_ref().unwrap();
+            GetObjectOutput::builder()
+                .object_lock_mode(ObjectLockMode::Compliance)
+                .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
+                .body(ByteStream::from(serde_json::to_vec(record).unwrap()))
+                .build()
+        });
+    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &get]);
+    let s3 = GuardianS3Client::from_client_for_tests(
+        config.deployment().bucket_info.clone(),
+        config.deployment().retention_environment,
+        client,
+    );
+    let mut reader = GuardianReader::from_s3_client(s3, config.deployment().clone());
+    // Seed the attestation cache; the records still undergo normal signature,
+    // object-key, history, and lock verification.
+    reader.sessions.insert(
+        SessionID::from_signing_pubkey(&signing_pubkey),
+        VerifiedSessionInfo::new_for_test(
+            signing_pubkey,
+            config.deployment().pcr_allowlist.current_build().clone(),
+        ),
+    );
+    reader
 }

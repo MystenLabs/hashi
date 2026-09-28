@@ -286,6 +286,8 @@ pub struct OperatorInitTestArgs {
     pub config: InitConfig,
     pub ceremony_state: CeremonyState,
     pub genesis_state: Option<GenesisState>,
+    pub hashi_object_id: hashi_types::sui_sdk_types::Address,
+    pub mpc_master_g: HashiMasterG,
 }
 
 const TEST_N: usize = 5;
@@ -325,9 +327,12 @@ fn dummy_ceremony_state() -> CeremonyState {
 
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
+        let (_, hashi_object_id, mpc_master_g) = GenesisState::mock_for_testing().into_parts();
         Self {
+            hashi_object_id,
+            mpc_master_g,
             s3_logger: mock_logger(),
-            config: InitConfig::mock_for_testing(None),
+            config: InitConfig::mock_for_testing(),
             ceremony_state: dummy_ceremony_state(),
             genesis_state: None,
         }
@@ -335,7 +340,20 @@ impl Default for OperatorInitTestArgs {
 }
 
 impl OperatorInitTestArgs {
+    pub fn with_genesis_bindings(
+        mut self,
+        hashi_object_id: hashi_types::sui_sdk_types::Address,
+        mpc_master_g: HashiMasterG,
+    ) -> Self {
+        self.hashi_object_id = hashi_object_id;
+        self.mpc_master_g = mpc_master_g;
+        self
+    }
+
     pub fn with_genesis_state(mut self, genesis_state: GenesisState) -> Self {
+        let (_, hashi_object_id, mpc_master_g) = genesis_state.clone().into_parts();
+        self.hashi_object_id = hashi_object_id;
+        self.mpc_master_g = mpc_master_g;
         self.genesis_state = Some(genesis_state);
         self
     }
@@ -402,6 +420,8 @@ impl Enclave {
             args.config,
             args.ceremony_state,
             args.genesis_state,
+            args.hashi_object_id,
+            args.mpc_master_g,
         )
         .install_into(self);
         self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
@@ -490,15 +510,16 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let config = InitConfig::from_parts_for_testing(
-        limiter_config,
-        master_pubkey,
-        network,
-        hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
-    );
-    let enclave =
-        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_config(config))
-            .await;
+    let config = InitConfig::from_parts_for_testing(limiter_config, network);
+    let enclave = create_operator_initialized_enclave(
+        OperatorInitTestArgs::default()
+            .with_config(config)
+            .with_genesis_bindings(
+                hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
+                master_pubkey,
+            ),
+    )
+    .await;
 
     finalize_enclave(&enclave).expect("finalize_enclave should succeed on a fresh enclave");
     activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)

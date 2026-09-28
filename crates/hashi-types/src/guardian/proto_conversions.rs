@@ -596,42 +596,12 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             .ok_or_else(|| missing("limiter_config"))?;
         let limiter_config = LimiterConfig::try_from(limiter_config_pb)?;
 
-        let master_pk_bytes = config_pb
-            .hashi_btc_master_pubkey
-            .ok_or_else(|| missing("hashi_btc_master_pubkey"))?;
-
-        let master_pk_bytes_arr: [u8; 33] = master_pk_bytes.as_ref().try_into().map_err(|_| {
-            InvalidInputs(format!(
-                "hashi_btc_master_pubkey must be 33 bytes (compressed), got {}",
-                master_pk_bytes.len()
-            ))
-        })?;
-        let hashi_btc_master_pubkey = HashiMasterG::from_byte_array(&master_pk_bytes_arr)
-            .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
-
         let deployment = config_pb
             .deployment
             .ok_or_else(|| missing("deployment"))?
             .try_into()?;
 
-        let hashi_object_id_bytes = config_pb
-            .hashi_object_id
-            .ok_or_else(|| missing("hashi_object_id"))?;
-        let hashi_object_id_arr: [u8; 32] =
-            hashi_object_id_bytes.as_ref().try_into().map_err(|_| {
-                InvalidInputs(format!(
-                    "hashi_object_id must be 32 bytes, got {}",
-                    hashi_object_id_bytes.len()
-                ))
-            })?;
-        let hashi_object_id = sui_sdk_types::Address::new(hashi_object_id_arr);
-
-        Ok(InitConfig::new(
-            limiter_config,
-            hashi_btc_master_pubkey,
-            deployment,
-            hashi_object_id,
-        ))
+        Ok(InitConfig::new(limiter_config, deployment))
     }
 }
 
@@ -915,12 +885,10 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
 
 // Throws an error if network is invalid.
 pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
-    let (limiter_config, hashi_btc_master_pubkey, deployment, hashi_object_id) = s.into_parts();
+    let (limiter_config, deployment) = s.into_parts();
     Ok(pb::InitConfig {
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
-        hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         deployment: Some(deployment_config_to_pb(deployment)?),
-        hashi_object_id: Some(hashi_object_id.into_inner().to_vec().into()),
     })
 }
 
@@ -1937,6 +1905,14 @@ mod tests {
         let round_trip =
             GuardianSignedResponse::<ProvisionerRotateCertResponse>::try_from(pb).unwrap();
         assert_eq!(response, round_trip);
+    }
+
+    #[test]
+    fn init_config_round_trip_preserves_digest() {
+        let config = InitConfig::mock_for_testing();
+        let decoded = InitConfig::try_from(init_config_to_pb(config.clone()).unwrap()).unwrap();
+        assert_eq!(config, decoded);
+        assert_eq!(config.digest(), decoded.digest());
     }
 
     #[test]

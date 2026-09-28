@@ -116,10 +116,11 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// The Hashi shared-object id this guardian serves (set after
     /// operator_init). Certificates verified by this enclave must be bound
-    /// to it; operators/KPs match it against their expected deployment.
+    /// to it. Loaded from verified genesis, or pinned for KP authorization
+    /// during first-deployment bootstrap.
     pub hashi_object_id: Option<sui_sdk_types::Address>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
-    /// own BTC key). Set after operator_init; lets KPs verify it directly.
+    /// own BTC key). Set after operator_init from the same genesis source.
     #[serde(with = "crate::guardian::serde::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     /// Digest of the optional genesis state pinned during operator init. KPs
@@ -143,22 +144,14 @@ pub struct WithdrawOperatorInitRequest {
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
-/// and that the enclave exposes via `GuardianInfo`.
-// TODO(testnet-wipe): Load the immutable Hashi object id and MPC master G from
-// the verified genesis record, then remove their duplicate operator-supplied
-// fields from InitConfig.
+/// and that the enclave exposes via `GuardianInfo`. Immutable deployment bindings
+/// come from genesis rather than this config.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InitConfig {
     /// Limiter config.
     limiter_config: LimiterConfig,
-    /// Raw MPC verifying key (curve point with y-parity preserved).
-    hashi_btc_master_pubkey: HashiMasterG,
     /// Deployment settings shared with ceremony mode.
     deployment: DeploymentConfig,
-    /// The Hashi shared-object id this guardian serves. Bound into every
-    /// committee-certificate preimage the enclave verifies, so certificates
-    /// minted for another Hashi deployment can never verify here.
-    hashi_object_id: sui_sdk_types::Address,
 }
 
 /// Optional first-deploy state pinned by the operator during OI and authorized
@@ -558,34 +551,15 @@ impl ActivationState {
 }
 
 impl InitConfig {
-    pub fn new(
-        limiter_config: LimiterConfig,
-        hashi_btc_master_pubkey: HashiMasterG,
-        deployment: DeploymentConfig,
-        hashi_object_id: sui_sdk_types::Address,
-    ) -> Self {
+    pub fn new(limiter_config: LimiterConfig, deployment: DeploymentConfig) -> Self {
         Self {
             limiter_config,
-            hashi_btc_master_pubkey,
             deployment,
-            hashi_object_id,
         }
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        LimiterConfig,
-        HashiMasterG,
-        DeploymentConfig,
-        sui_sdk_types::Address,
-    ) {
-        (
-            self.limiter_config,
-            self.hashi_btc_master_pubkey,
-            self.deployment,
-            self.hashi_object_id,
-        )
+    pub fn into_parts(self) -> (LimiterConfig, DeploymentConfig) {
+        (self.limiter_config, self.deployment)
     }
 
     pub fn deployment(&self) -> &DeploymentConfig {
@@ -594,15 +568,6 @@ impl InitConfig {
 
     pub fn limiter_config(&self) -> &LimiterConfig {
         &self.limiter_config
-    }
-
-    pub fn hashi_btc_master_pubkey(&self) -> HashiMasterG {
-        self.hashi_btc_master_pubkey
-    }
-
-    /// Hashi object whose committee certificates this guardian accepts.
-    pub fn hashi_object_id(&self) -> sui_sdk_types::Address {
-        self.hashi_object_id
     }
 
     /// The config hash KPs authenticate, including the entire deployment policy.

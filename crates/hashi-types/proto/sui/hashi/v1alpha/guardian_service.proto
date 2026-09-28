@@ -376,9 +376,6 @@ message DeploymentConfigSummary {
 message InitConfig {
   DeploymentConfig deployment = 1;
   LimiterConfig limiter_config = 2;
-  // Compressed MPC public key (33 bytes).
-  optional bytes hashi_btc_master_pubkey = 3;
-  optional bytes hashi_object_id = 4;
 }
 
 message LimiterState {

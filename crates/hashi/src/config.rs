@@ -224,6 +224,18 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_corrupt_shares_for: Option<Address>,
 
+    /// Which complaints this node answers with its recovery shares.
+    /// Complaints are still verified and logged, and withheld ones counted in
+    /// `hashi_mpc_complaints_withheld_total`; this only decides whether the
+    /// response is returned.
+    ///
+    /// Defaults to an empty allow-list, i.e. no complaint is answered.
+    ///
+    /// Allow-listing a dealer is a coordinated decision:
+    /// a wrong entry can leak private shares to the dealer.    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub complaint_response_policy: Option<ComplaintResponsePolicy>,
+
     /// Configure pushing Prometheus metrics out to a sui-proxy instance. When
     /// unset, the push task is not started and the only metrics surface is the
     /// local scrape endpoint at `metrics_http_address`.
@@ -257,6 +269,40 @@ pub enum ForceRunAsLeader {
     Always,
     /// Never run as aleader
     Never,
+}
+
+/// Which complaints a node answers with its recovery shares.
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ComplaintResponsePolicy {
+    /// Answer every complaint that verifies.
+    AllowAll,
+    /// Answer only complaints about messages from these dealers.
+    AllowList { dealers: Vec<AllowedDealer> },
+}
+
+/// A dealer whose messages in `epoch` this node answers complaints about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AllowedDealer {
+    pub epoch: u64,
+    pub dealer: Address,
+}
+
+/// The default policy: an empty allow-list, answering no complaint.
+static DENY_ALL_COMPLAINTS: ComplaintResponsePolicy = ComplaintResponsePolicy::AllowList {
+    dealers: Vec::new(),
+};
+
+impl ComplaintResponsePolicy {
+    pub fn allows(&self, epoch: u64, dealer: &Address) -> bool {
+        match self {
+            Self::AllowAll => true,
+            Self::AllowList { dealers } => dealers
+                .iter()
+                .any(|allowed| allowed.epoch == epoch && allowed.dealer == *dealer),
+        }
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -431,6 +477,12 @@ impl Config {
         self.force_run_as_leader.clone().unwrap_or_default()
     }
 
+    pub fn complaint_response_policy(&self) -> &ComplaintResponsePolicy {
+        self.complaint_response_policy
+            .as_ref()
+            .unwrap_or(&DENY_ALL_COMPLAINTS)
+    }
+
     pub fn test_weight_divisor(&self) -> u16 {
         self.test_weight_divisor.unwrap_or(1)
     }
@@ -538,6 +590,7 @@ impl Config {
             withdrawal_fee_conf_target: None,
             withdrawal_min_fee_rate_sat_vb: None,
             test_corrupt_shares_for: None,
+            complaint_response_policy: None,
             metrics_push: None,
         };
 
@@ -757,5 +810,61 @@ mod tests {
         let mut config = Config::new_for_testing();
         config.withdrawal_max_batch_size = Some(70);
         assert_eq!(config.withdrawal_max_batch_size(), 70);
+    }
+
+    #[test]
+    fn test_complaint_response_policy_defaults_to_deny_all() {
+        let config = Config::new_for_testing();
+        assert_eq!(
+            config.complaint_response_policy(),
+            &ComplaintResponsePolicy::AllowList { dealers: vec![] }
+        );
+        assert!(
+            !config
+                .complaint_response_policy()
+                .allows(1, &Address::new([1; 32]))
+        );
+    }
+
+    #[test]
+    fn test_complaint_response_policy_allows() {
+        let dealer = Address::new([1; 32]);
+        let other = Address::new([2; 32]);
+        assert!(ComplaintResponsePolicy::AllowAll.allows(7, &dealer));
+
+        let list = ComplaintResponsePolicy::AllowList {
+            dealers: vec![AllowedDealer { epoch: 7, dealer }],
+        };
+        assert!(list.allows(7, &dealer));
+        assert!(!list.allows(8, &dealer));
+        assert!(!list.allows(7, &other));
+    }
+
+    #[test]
+    fn test_complaint_response_policy_toml() {
+        let dealer = Address::new([1; 32]);
+        let parse = |toml: &str| -> ComplaintResponsePolicy {
+            #[derive(serde_derive::Deserialize)]
+            #[serde(rename_all = "kebab-case")]
+            struct Wrapper {
+                complaint_response_policy: ComplaintResponsePolicy,
+            }
+            toml::from_str::<Wrapper>(toml)
+                .unwrap()
+                .complaint_response_policy
+        };
+        assert_eq!(
+            parse(r#"complaint-response-policy = "allow-all""#),
+            ComplaintResponsePolicy::AllowAll
+        );
+        assert_eq!(
+            parse(&format!(
+                "[complaint-response-policy.allow-list]\n\
+                 dealers = [{{ epoch = 7, dealer = \"{dealer}\" }}]\n"
+            )),
+            ComplaintResponsePolicy::AllowList {
+                dealers: vec![AllowedDealer { epoch: 7, dealer }],
+            }
+        );
     }
 }

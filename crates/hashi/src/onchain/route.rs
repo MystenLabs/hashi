@@ -54,6 +54,9 @@ pub(super) enum Slot {
     /// without bound; the two replay checks that need membership read
     /// it live instead (`OnchainState::is_utxo_spent`).
     SpentUtxos,
+    /// The `CommitteeSet.tls_public_keys` reverse index. The mirror derives
+    /// the same mapping from the members bag.
+    TlsPublicKeys,
     /// The `BitcoinState.user_requests` table of per-user request bags.
     UserRequests,
     /// One per-user `Bag` stored as a `user_requests` value.
@@ -108,6 +111,8 @@ impl RoutingTable {
             .insert(root.committees.members.id, Slot::Members);
         self.containers
             .insert(root.committees.committees.id, Slot::Committees);
+        self.containers
+            .insert(root.committees.tls_public_keys.id, Slot::TlsPublicKeys);
         self.containers
             .insert(root.treasury.objects.id, Slot::Treasury);
         self.containers

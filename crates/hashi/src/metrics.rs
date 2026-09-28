@@ -176,8 +176,8 @@ pub struct Metrics {
     /// per input before its eval set is inspected, so an empty eval set still
     /// counts; an input the peer omitted entirely is never reached.
     pub mpc_partial_sig_nonce_mismatch_total: IntCounterVec,
-    /// Partial signatures that disagreed with the RS-recovered polynomial,
-    /// by owner.
+    /// Partial signatures that disagreed with the RS-recovered polynomial, by
+    /// owner. Counted only when the decoding could blame that owner for them.
     pub mpc_partial_sig_mismatch_total: IntCounterVec,
     /// Partial-signature lists refused at merge, by peer.
     pub mpc_partial_sig_lists_rejected_total: IntCounterVec,
@@ -202,6 +202,10 @@ pub struct Metrics {
     pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
+    /// Complaints whose response was withheld because the dealer is outside
+    /// the complaint response policy. Should never increase: any increase
+    /// means a verified complaint about such a dealer reached this node.
+    pub mpc_complaints_withheld_total: IntCounter,
     /// Nonce batches abandoned because the checkpoint clock never passed the
     /// accumulation window's cutoff
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
@@ -1102,8 +1106,9 @@ impl Metrics {
             .unwrap(),
             mpc_partial_sig_mismatch_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_partial_sig_mismatch_total",
-                "Partial signatures that disagreed with the RS-recovered polynomial, by owner \
-                 (does not establish which side is wrong; nobody is excluded)",
+                "Partial signatures the decoding could attribute to their owner, counted only \
+                 when enough honest shares were kept to rule out a steered decode; nobody is \
+                 excluded on this alone",
                 &["peer"],
                 registry,
             )
@@ -1118,6 +1123,13 @@ impl Metrics {
             mpc_avid_complaints_recovered_total: register_int_counter_with_registry!(
                 "hashi_mpc_avid_complaints_recovered_total",
                 "AVID nonce shares recovered via the complaint protocol",
+                registry,
+            )
+            .unwrap(),
+            mpc_complaints_withheld_total: register_int_counter_with_registry!(
+                "hashi_mpc_complaints_withheld_total",
+                "Verified complaints withheld because the dealer is outside the complaint \
+                 response policy",
                 registry,
             )
             .unwrap(),
