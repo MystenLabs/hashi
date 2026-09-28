@@ -88,7 +88,7 @@ consolidation) and the dust threshold for the user's output. See
 
 The full `hBTC` amount is stored with the request and placed in a queue with a
 timestamp. The user can cancel their request at any point before it has been
-approved, subject to a cooldown period
+committed to a withdrawal transaction, subject to a cooldown period
 ([`withdrawal_cancellation_cooldown_ms`](config.mdx#withdrawal_cancellation_cooldown_ms)).
 
 ## Approve
@@ -98,11 +98,6 @@ graph LR
     A[Request] --> B[Approve]:::active --> C[Build TX] --> D[Sign] --> E[Broadcast]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
-
-Before a queued request can advance, the Guardian's token-bucket rate limiter
-must have sufficient capacity. If the request would exceed the current limit it
-remains in the queue until capacity is replenished. Requests are generally
-processed in FIFO order, but this is not a strict requirement.
 
 Each committee member independently screens the Bitcoin destination address
 and the requesting Sui address with its own TRM Labs account (see
@@ -118,10 +113,8 @@ onchain by calling `hashi::withdraw::approve_request`:
 entry fun approve_request(
     hashi: &mut Hashi,
     request_id: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    ctx: &mut TxContext,
+    cert: CommitteeSignature,
+    clock: &Clock,
 )
 ```
 
@@ -139,10 +132,16 @@ graph LR
 The leader batches multiple approved requests into a single Bitcoin
 transaction to amortize the fixed transaction overhead across users. The
 leader waits for approved requests to buffer up before constructing a
-transaction, until either a request has been waiting for roughly 10 minutes,
+transaction, until either a request has been waiting for roughly 5 minutes,
 or a threshold number of approved requests have accumulated, whichever comes
 first. This balances latency for individual users against efficiency for the
 protocol.
+
+The leader only batches requests that fit the current capacity of the
+Guardian's token-bucket rate limiter. A request that would exceed it remains
+in the queue until capacity is replenished, and a request larger than the
+bucket's maximum capacity is skipped. Requests are generally processed in FIFO
+order, but this is not a strict requirement.
 
 The leader then constructs an unsigned Bitcoin transaction:
 
@@ -165,12 +164,10 @@ calling `hashi::withdraw::commit_withdrawal_tx`:
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
-    selected_utxos: vector<vector<u8>>,
-    outputs: vector<vector<u8>>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
     txid: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -178,8 +175,9 @@ entry fun commit_withdrawal_tx(
 ```
 
 The function verifies the committee certificate, burns the `hBTC` from each
-request, spends the selected UTXOs from the pool, and creates a pending
-withdrawal record that all validators can independently verify.
+request, locks the selected UTXOs in the pool, adds the change outputs to the
+pool as pending UTXOs, and creates a pending withdrawal record that all
+validators can independently verify.
 
 ## Sign
 
@@ -192,34 +190,47 @@ graph LR
 Signing is a two-step process matching the 2-of-2 Taproot script (see
 [Bitcoin Address Scheme](address-scheme.mdx)):
 
-1. **Guardian signature**: the unsigned transaction and metadata are sent to
-   the Guardian enclave, which independently validates the request and
-   produces a Schnorr signature for each input.
-2. **MPC signature**: the committee runs the threshold Schnorr signing
-   protocol (see [MPC Protocol](mpc-protocol.mdx)) to produce the second
-   signature for each input.
+1. **MPC signature**: the committee runs the threshold Schnorr signing
+   protocol (see [MPC Protocol](mpc-protocol.mdx)) to produce a signature for
+   each input.
+2. **Guardian signature**: once every input has an MPC signature, the
+   unsigned transaction and metadata are sent to the Guardian enclave, which
+   independently validates the request, debits its rate limiter, and produces
+   the second signature for each input.
 
 Both signatures are combined into the taproot script-path witness for each
 input.
 
-The signed transaction is committed onchain by calling
-`hashi::withdraw::sign_withdrawal`:
+The MPC signatures are committed onchain in chunks, each under its own
+committee certificate, by calling `hashi::withdraw::commit_input_signatures`:
 
 ```move
-entry fun sign_withdrawal(
+entry fun commit_input_signatures(
     hashi: &mut Hashi,
     withdrawal_id: address,
-    request_ids: vector<address>,
+    indices: vector<u64>,
     signatures: vector<vector<u8>>,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    ctx: &mut TxContext,
+    cert: CommitteeSignature,
 )
 ```
 
-The function verifies the committee certificate and attaches the Schnorr
-signatures to the pending withdrawal.
+The Guardian signatures are then attached by calling
+`hashi::withdraw::finalize_withdrawal`:
+
+```move
+entry fun finalize_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    guardian_signatures: vector<vector<u8>>,
+    cert: CommitteeSignature,
+    clock: &Clock,
+)
+```
+
+The function verifies a committee certificate over both signature sets and
+marks the withdrawal fully signed. Each committee member re-checks the
+withdrawal against its own copy of the rate limiter before signing that
+certificate.
 
 ## Broadcast
 
@@ -240,15 +251,16 @@ Once confirmed, a committee member calls
 entry fun confirm_withdrawal(
     hashi: &mut Hashi,
     withdrawal_id: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-    ctx: &mut TxContext,
+    cert: CommitteeSignature,
+    clock: &Clock,
 )
 ```
 
-The function verifies the committee certificate and removes the pending
-withdrawal, returning the spent UTXOs' change output to the pool.
+The function verifies the committee certificate, marks the withdrawal
+confirmed and its input UTXOs spent, and promotes its change outputs from
+pending to confirmed UTXOs. The withdrawal record stays in place until the
+leader's garbage collection archives it with
+`hashi::withdraw::archive_confirmed_withdrawals`.
 
 If a transaction gets stuck, fee bumping is handled through CPFP. Either the
 withdrawal recipient spends their output with a high-fee child, or Hashi

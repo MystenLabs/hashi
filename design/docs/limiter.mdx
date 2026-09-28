@@ -34,7 +34,7 @@ answer: >-
   through the Guardian. Capacity is replenished continuously over a fixed
   duration. When a withdrawal would exceed the limit, Hashi waits for
   sufficient capacity before processing it. Users can cancel pending
-  withdrawal requests at any time before processing begins.
+  withdrawal requests after a cooldown, until processing begins.
 ---
 
 To protect against vulnerabilities or other exceptional scenarios, Hashi
@@ -63,4 +63,6 @@ this is not a strict requirement, and there are some scenarios where they
 might be processed out of order.
 
 The Sui address that initiated a withdrawal request can cancel that request
-at any time before Hashi selects it for processing.
+at any time before Hashi selects it for processing, once the
+[`withdrawal_cancellation_cooldown_ms`](config.mdx#withdrawal_cancellation_cooldown_ms)
+cooldown has passed.

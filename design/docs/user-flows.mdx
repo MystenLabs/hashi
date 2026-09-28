@@ -137,7 +137,7 @@ hashi deposit -c hashi-cli.toml status <request-id>
 hashi balance -c hashi-cli.toml 0x<sui-address>
 ```
 
-The deposit must meet Bitcoin's dust minimum, and Hashi waits for a confirmation threshold before minting, so expect to wait for several Signet blocks between steps 3 and 4. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
+The deposit must meet the [`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum), and Hashi waits for a confirmation threshold before minting, so expect to wait for several Signet blocks between steps 3 and 4. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
 
 ## Withdraw flow
 
