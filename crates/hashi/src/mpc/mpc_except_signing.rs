@@ -91,7 +91,6 @@ use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
@@ -173,7 +172,7 @@ pub struct NoncePartyAdmission {
 }
 
 pub struct NoncePartyOutcome {
-    pub outputs: Vec<batch_avss::ReceiverOutput>,
+    pub outputs: Vec<batch_avss_avid::ReceiverOutput>,
     pub local_skips: u32,
 }
 
@@ -1181,17 +1180,12 @@ impl MpcManager {
         )
         .await?;
         let mut mgr = mpc_manager.write().unwrap();
-        let indices = mgr
-            .mpc_config
-            .nodes
-            .share_ids_of(mgr.party_id()?)
-            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         let (pre_filter, dealers, outputs) = consume_certified_nonce_outputs(
             &mut mgr.dealer_avid_nonce_outputs,
             batch_index,
             &admission.certified,
             |tagged| tagged.cert_digest.is_some(),
-            |tagged| tagged.output.clone().into_legacy(&indices),
+            |tagged| tagged.output.clone(),
         );
         Self::finish_nonce_party_phase(
             &mgr,
@@ -1211,7 +1205,7 @@ impl MpcManager {
         admission: NoncePartyAdmission,
         pre_filter: usize,
         dealers: Vec<Address>,
-        outputs: Vec<batch_avss::ReceiverOutput>,
+        outputs: Vec<batch_avss_avid::ReceiverOutput>,
     ) -> MpcResult<NoncePartyOutcome> {
         let expected = admission
             .certified
@@ -6723,8 +6717,8 @@ fn consume_certified_nonce_outputs<T>(
     batch_index: u32,
     certified: &HashSet<Address>,
     mut keep: impl FnMut(&T) -> bool,
-    mut convert: impl FnMut(&T) -> batch_avss::ReceiverOutput,
-) -> (usize, Vec<Address>, Vec<batch_avss::ReceiverOutput>) {
+    mut convert: impl FnMut(&T) -> batch_avss_avid::ReceiverOutput,
+) -> (usize, Vec<Address>, Vec<batch_avss_avid::ReceiverOutput>) {
     let pre_filter = outputs_map
         .keys()
         .filter(|(b, _)| *b == batch_index)
