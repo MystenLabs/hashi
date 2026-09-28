@@ -268,8 +268,8 @@ pub enum CreateProposalCommands {
         /// The config key to update
         key: String,
 
-        /// The new value. Prefix with the type: u64:123, bool:true,
-        /// string:https://guardian.example
+        /// The new value. Prefix with the type: `u64:123`, `bool:true`,
+        /// `string:https://guardian.example`
         value: String,
 
         #[clap(flatten)]
