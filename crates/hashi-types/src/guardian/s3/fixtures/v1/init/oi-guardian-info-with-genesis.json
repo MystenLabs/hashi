@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "object_key": "init/d54207da194977dc/02-oi-guardian-info.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
+  "message": {
+    "Init": {
+      "OIGuardianInfo": {
+        "deployment": {
+          "bucket_info": {
+            "name": "test-bucket",
+            "region": "us-east-1"
+          },
+          "retention_environment": "testnet",
+          "bitcoin_network": "regtest",
+          "pcr_allowlist": {
+            "current_build": {
+              "git_revision": "unknown",
+              "pcr0": "00"
+            },
+            "prev_builds": [
+              {
+                "git_revision": "previous",
+                "pcr0": "01"
+              }
+            ]
+          }
+        },
+        "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": {
+          "Withdraw": {
+            "secret_sharing_instance": {
+              "commitments": {
+                "1": "0000000000000000000000000000000000000000000000000000000000000000",
+                "2": "0000000000000000000000000000000000000000000000000000000000000000",
+                "3": "0000000000000000000000000000000000000000000000000000000000000000",
+                "4": "0000000000000000000000000000000000000000000000000000000000000000",
+                "5": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "params": {
+                "num_shares": 5,
+                "threshold": 3
+              },
+              "sharing_seq": 0
+            },
+            "config_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+            "limiter_config": {
+              "refill_rate": 10,
+              "max_bucket_capacity": 1000
+            },
+            "hashi_object_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "mpc_master_g": "jwfd1en1F5z/GUhgNBge12UFuqrVPl2ZQGQSe1bFhBuA",
+            "genesis_state_hash": "c8a720f0cb545886a903096006dc5b2b0f56580de49efccbf1b134dd8c6423f1"
+          }
+        }
+      }
+    }
+  },
+  "signature": "e187aaa0e25d864af85f7757989bab292f74d23eeb5688534bb60caa8555b1af3c21b0ba436ef795df7b1aee925dc303bbf928e3126594fce0e6fd9af3e0160e"
+}
