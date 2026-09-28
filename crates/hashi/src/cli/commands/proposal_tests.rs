@@ -267,6 +267,26 @@ fn updating_an_existing_key_of_the_same_type_passes() {
 }
 
 #[test]
+fn a_guardian_url_update_is_expressible_as_a_string_config_value() {
+    use hashi_types::move_types::ConfigValue;
+    // Only the first colon separates the type prefix: the scheme and port
+    // colons belong to the value.
+    let proposed = parse_config_value("string:https://guardian.example:3000").unwrap();
+    assert!(
+        matches!(&proposed, ConfigValue::String(url) if url == "https://guardian.example:3000"),
+        "{proposed:?}"
+    );
+    refuse_bad_config_update(
+        "guardian_url",
+        &proposed,
+        ConfigStore::Instant,
+        Some(&ConfigValue::String("https://old.example".to_string())),
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
 fn updating_a_key_that_lives_in_the_other_store_names_the_right_command() {
     use hashi_types::move_types::ConfigValue;
     let err = refuse_bad_config_update(

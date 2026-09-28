@@ -976,12 +976,6 @@ pub struct EmergencyPause {
     pub pause: bool,
 }
 
-/// Rust version of the Move hashi::update_guardian::UpdateGuardian type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct UpdateGuardian {
-    pub url: String,
-}
-
 /// Rust version of the Move hashi::ignore_member::IgnoreMember type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct IgnoreMember {

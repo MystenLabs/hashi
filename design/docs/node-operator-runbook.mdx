@@ -832,11 +832,18 @@ hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=v
 hashi proposal create upgrade [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
-hashi proposal create update-guardian [--url <url>] [--public-key <hex>] [-m key=value]
 hashi proposal create emergency-pause [--unpause] [-m key=value]
 ```
 
-Config values are type-prefixed: `u64:30000`, `bool:true`.
+Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
+
+The guardian endpoint is the `guardian_url` instant config key, so changing it is an `update-config` proposal:
+
+```bash
+hashi proposal create update-config guardian_url string:<url> [-m key=value]
+```
+
+Executing the proposal changes the onchain value, but a running node keeps the guardian client it already resolved and goes on dialing the old endpoint. Restart each node after the proposal executes for the new endpoint to take effect.
 
 ### 6.7 Backup
 
@@ -910,10 +917,11 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
-| **UpdateGuardian** | 2/3 | Change guardian endpoint and key | `--url`, `--public-key` |
 | **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
+
+> The guardian endpoint has no proposal type of its own: it is the `guardian_url` key (a `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after the proposal executes. The guardian's BTC public key is pinned at launch and no proposal can change it.
 
 **Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold and the time delay gate the [deposit confirm step](deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](withdraw.mdx#request):
 
@@ -926,7 +934,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | `withdrawal_cancellation_cooldown_ms` | u64 | 3,600,000 ms (1 hr) | Cooldown before a withdrawal can be cancelled |
 | `paused` | bool | false | Pause all deposit/withdrawal processing |
 
-> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`); `bitcoin_deposit_time_delay_ms` is still settable.
+> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`); `bitcoin_deposit_time_delay_ms` is still settable.
 
 ### 7.3 Lifecycle example: UpdateConfig
 
