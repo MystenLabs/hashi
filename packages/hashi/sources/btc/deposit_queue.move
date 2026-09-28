@@ -165,6 +165,15 @@ public(package) fun borrow_request(
     self.requests.borrow(request_id)
 }
 
+/// Mutably borrow an active deposit request, so it can be updated in place
+/// without leaving the `requests` bag.
+public(package) fun borrow_request_mut(
+    self: &mut DepositRequestQueue,
+    request_id: address,
+): &mut DepositRequest {
+    self.requests.borrow_mut(request_id)
+}
+
 /// Copy the UTXO out of a deposit request (Utxo has copy).
 public(package) fun utxo(request: &DepositRequest): Utxo {
     request.utxo
