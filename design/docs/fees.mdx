@@ -98,10 +98,18 @@ after a restart, the leader doesn't build withdrawal transactions and
 validators don't sign them. Only regtest, which has no fee market, falls
 back to `1 sat/vB`.
 
-The estimated fee rate is then capped at a high fee rate threshold
-(30 sat/vB by default). This prevents a single fee spike from producing
-unexpectedly expensive withdrawals. The per-user miner fee is additionally
-bounded by the onchain `worst_case_network_fee` cap.
+The estimated fee rate is then floored at 3 sat/vB (configurable per node
+with `withdrawal_min_fee_rate_sat_vb`) but not capped, because a signed
+withdrawal can't be replaced by a higher-fee version. The onchain
+`worst_case_network_fee` bounds each user's share of the miner fee
+instead: while a batch's share would exceed it, the leader waits for fees
+to fall or for more requests to share them, rather than broadcasting a
+transaction that would sit unconfirmed.
+
+Raising that floor on the leader alone only helps so far. Validators
+derive their ceiling from their own floor and estimate, so a fee more than
+3x above what they see is rejected; a larger rescue has to be configured
+across the fleet.
 
 ## Worst-case network fee
 
