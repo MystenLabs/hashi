@@ -89,6 +89,7 @@ aws-config = "1.1.7"
 aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
 
+# fastcrypto — pinned to a `main` rev.
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "7cb95be87bb0b4c745c82824b1adb8e4aaf38aa6" }
 fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "7cb95be87bb0b4c745c82824b1adb8e4aaf38aa6" }
 
