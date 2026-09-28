@@ -201,7 +201,7 @@ public(package) fun verify_certificate<T>(
     intent: u16,
     message: T,
     signature: CommitteeSignature,
-    threshold: u64, //XXX threshold could be lookedup by type in the config
+    threshold: u64,
 ): CertifiedMessage<T> {
     assert!(signature.epoch == self.epoch());
 
