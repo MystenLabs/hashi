@@ -1000,7 +1000,18 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
         let dealer = Address::new([3u8; 32]);
-        let held: crate::mpc::types::HeldAvidEchoes = (avid_round_fixture().2, Vec::new());
+        let cert = {
+            use fastcrypto::traits::ToFromBytes;
+            let message = crate::mpc::types::AvssVoteMessagesHash {
+                dealer_address: Address::new([0u8; 32]),
+                messages_hash: crate::mpc::types::MessagesHash::from([7u8; 32]),
+                batch_index: 0,
+            };
+            let signature = hashi_types::committee::BLS12381AggregateSignature::default();
+            hashi_types::committee::SignedMessage::new(1, message, signature.as_bytes(), &[1u8])
+                .unwrap()
+        };
+        let held: crate::mpc::types::HeldAvidEchoes = (avid_round_fixture().2, Vec::new(), cert);
 
         assert!(db.get_avid_held_echoes(1, 0, &dealer).unwrap().is_none());
         db.store_avid_held_echoes(1, 0, &dealer, &held).unwrap();

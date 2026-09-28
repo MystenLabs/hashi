@@ -95,9 +95,11 @@ fn avid_nonce_message_to_proto(avid: &types::AvidNonceMessage) -> proto::AvidNon
         types::AvidNonceMessageKind::Dispersal {
             dispersal,
             confirm_cert,
+            optimistic_message,
         } => Kind::Dispersal(proto::AvidNonceDispersal {
             dispersal: Some(serialize_bcs(dispersal)),
             confirm_cert: Some(serialize_bcs(confirm_cert)),
+            optimistic_message: optimistic_message.as_ref().map(serialize_bcs),
         }),
         types::AvidNonceMessageKind::Echo { dealer, echo } => Kind::Echo(proto::AvidNonceEcho {
             dealer: Some(dealer.to_string()),
@@ -143,9 +145,15 @@ fn avid_nonce_message_from_proto(
                 )?,
                 "avid_nonce_message.dispersal.confirm_cert",
             )?;
+            let optimistic_message: Option<batch_avss_avid::AvssMessage> = dispersal_msg
+                .optimistic_message
+                .as_ref()
+                .map(|bcs| deserialize_bcs(bcs, "avid_nonce_message.dispersal.optimistic_message"))
+                .transpose()?;
             types::AvidNonceMessageKind::Dispersal {
                 dispersal,
                 confirm_cert,
+                optimistic_message,
             }
         }
         Some(Kind::Echo(echo_msg)) => {
@@ -773,10 +781,11 @@ mod avid_conversion_tests {
 
     #[test]
     fn dispersal_message_round_trips() {
-        let (_, dispersal, _) = avid_artifacts();
+        let (optimistic, dispersal, _) = avid_artifacts();
         assert_round_trips(avid_message(types::AvidNonceMessageKind::Dispersal {
             dispersal,
             confirm_cert: confirm_cert(),
+            optimistic_message: Some(optimistic),
         }));
     }
 
