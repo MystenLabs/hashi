@@ -216,6 +216,10 @@ pub struct BitcoinState {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct CommitteeSet {
     pub members: Bag,
+    /// Reverse index from each registered TLS public key to the validator
+    /// address holding it. The node derives the same mapping from
+    /// `members`, so the table's entries are not read.
+    pub tls_public_keys: Table,
     /// The current epoch.
     pub epoch: u64,
     pub committees: Bag,

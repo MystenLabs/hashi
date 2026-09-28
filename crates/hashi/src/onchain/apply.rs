@@ -770,6 +770,7 @@ fn apply_write(
         Slot::DepositProcessed
         | Slot::WithdrawalProcessed
         | Slot::ConfirmedTxns
+        | Slot::TlsPublicKeys
         | Slot::UserRequestBag => Some(TrackedKind::Ignored),
     };
 
@@ -1070,6 +1071,9 @@ mod tests {
     fn tob_id() -> Address {
         addr(0x16)
     }
+    fn tls_public_keys_id() -> Address {
+        addr(0x17)
+    }
     fn dep_requests_id() -> Address {
         addr(0x21)
     }
@@ -1310,6 +1314,7 @@ mod tests {
     #[derive(serde_derive::Serialize)]
     struct CommitteeSetEnc {
         members: BagEnc,
+        tls_public_keys: BagEnc,
         epoch: u64,
         committees: BagEnc,
         pending_epoch_change: Option<PendingEnc>,
@@ -1413,6 +1418,7 @@ mod tests {
             id: hashi_id(),
             committees: CommitteeSetEnc {
                 members: BagEnc::new(members_id()),
+                tls_public_keys: BagEnc::new(tls_public_keys_id()),
                 epoch,
                 committees: BagEnc::new(committees_id()),
                 pending_epoch_change: pending_epoch.map(|epoch| PendingEnc {
@@ -1769,6 +1775,38 @@ mod tests {
                 .withdrawal_txns
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn tls_public_key_index_entry_is_tracked_but_not_mirrored() {
+        let mut fixture = Fixture::new();
+        let field_id = addr(0x57);
+        let validator = addr(0x58);
+
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: field_id,
+            name: vec![7u8; 32],
+            value: validator,
+        })
+        .unwrap();
+        let object = obj(
+            field_tag(TypeTag::Vector(Box::new(TypeTag::U8)), TypeTag::Address),
+            1,
+            Owner::Object(tls_public_keys_id()),
+            contents,
+        );
+
+        let out = fixture.apply(&tx(vec![written(object)]));
+        assert!(out.unrouted.is_empty());
+        assert!(out.effects.is_empty());
+        assert_eq!(
+            fixture.index.get(&field_id).map(|e| &e.kind),
+            Some(&TrackedKind::Ignored)
+        );
+
+        let out = fixture.apply(&tx(vec![TxChange::Deleted { id: field_id }]));
+        assert!(out.effects.is_empty());
+        assert!(fixture.index.get(&field_id).is_none());
     }
 
     #[test]
