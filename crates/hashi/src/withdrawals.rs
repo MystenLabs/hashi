@@ -1195,7 +1195,7 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
-        let beacon = S::from_bytes_mod_order(&txn.randomness);
+        let beacon = withdrawal_beacon(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
@@ -1221,16 +1221,9 @@ impl Hashi {
                 .pending_index(input_index)
                 .expect("validated input_index is pending");
             let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
-            // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
-            // everywhere else (leaf script, `deposit_pubkey`). MPC must too —
-            // passing `None` signs for master `G`, not the `derive(G, [0; 32])`
-            // child the 2-of-2 leaf binds.
             let derivation_address = inputs
                 .get(input_index)
-                .map(|input| {
-                    crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
-                        .into_inner()
-                })
+                .map(withdrawal_input_derivation_address)
                 .expect("validated input_index is in range for txn.inputs");
             index_by_id.insert(signing_id, input_index);
             requests.push(crate::mpc::SignInput {
@@ -1789,6 +1782,14 @@ impl WithdrawalBroadcastError {
     pub fn kind(&self) -> WithdrawalBroadcastErrorKind {
         self.kind
     }
+}
+
+pub(crate) fn withdrawal_beacon(randomness: &[u8]) -> S {
+    S::from_bytes_mod_order(randomness)
+}
+
+pub(crate) fn withdrawal_input_derivation_address(input: &Utxo) -> [u8; 32] {
+    crate::deposits::normalized_derivation_path(input.derivation_path.as_ref()).into_inner()
 }
 
 fn withdrawal_input_signing_id(withdrawal_txn_id: &Address, input_index: u32) -> Address {
