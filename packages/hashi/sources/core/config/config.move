@@ -138,9 +138,10 @@ public(package) fun set_paused(self: &mut Config, paused: bool) {
 /// Whether governance holds reconfiguration: while set, `start_reconfig`
 /// refuses to form a new committee and the last committed committee keeps
 /// serving. A pending reconfiguration is unaffected. Seeded as `false` by
-/// `create`; set and cleared through `update_config`.
+/// `create`; set and cleared through `update_config`. An absent key reads as
+/// no hold.
 public(package) fun reconfig_hold(self: &Config): bool {
-    self.get(RECONFIG_HOLD_KEY).as_bool()
+    self.try_get(RECONFIG_HOLD_KEY).map!(|v| v.as_bool()).destroy_or!(false)
 }
 
 public(package) fun guardian_url(self: &Config): Option<String> {

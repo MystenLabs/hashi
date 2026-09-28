@@ -34,6 +34,13 @@ fun test_reconfig_hold_defaults_to_false() {
     std::unit_test::destroy(hashi);
 }
 
+#[test]
+fun test_reconfig_hold_reads_false_when_absent() {
+    // The accessor must not abort on a config without the key.
+    let config = config::empty();
+    assert!(!config::reconfig_hold(&config));
+}
+
 /// `create` seeds both emergency thresholds, and the accessors fall back to
 /// the same defaults for an absent key.
 #[test]
