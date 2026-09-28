@@ -25,7 +25,8 @@ pub struct MonitorMetrics {
     /// Unix time of the latest finding per category; 0 until one is reported.
     last_finding_timestamp_seconds: IntGaugeVec,
     /// Unix time each source has been checked through: the Sui and guardian
-    /// cursors, and the start of the last successful Bitcoin lookup cycle.
+    /// cursors, and for Bitcoin, which is looked up rather than scanned, the
+    /// start of the last pass over every pending confirmation.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
 }
@@ -45,7 +46,7 @@ impl MonitorMetrics {
         let checked_through_timestamp_seconds = IntGaugeVec::new(
             Opts::new(
                 "hashi_monitor_checked_through_timestamp_seconds",
-                "Unix time through which each source has been checked",
+                "Unix time through which each source has been checked; for btc, the start of the last pass that looked up every pending confirmation",
             ),
             &["source"],
         )
