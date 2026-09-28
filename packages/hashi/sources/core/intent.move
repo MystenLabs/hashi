@@ -38,6 +38,9 @@ const AVSS_VOTE_MESSAGES_HASH: u16 = 0x0004;
 const AVID_VOTE_MESSAGES_HASH: u16 = 0x0005;
 /// Proof of possession of a member TLS key (address, public key).
 const TLS_PROOF_OF_POSSESSION: u16 = 0x0006;
+/// A member's TLS-key authentication of a guardian proxy request. Verified
+/// off-chain only; reserved here so the registry is complete.
+const GUARDIAN_PROXY_AUTH: u16 = 0x0007;
 
 // ==== Bitcoin (0x0100..=0x01FF) ====
 
@@ -72,6 +75,8 @@ public(package) fun avss_vote_messages_hash(): u16 { AVSS_VOTE_MESSAGES_HASH }
 public(package) fun avid_vote_messages_hash(): u16 { AVID_VOTE_MESSAGES_HASH }
 
 public(package) fun tls_proof_of_possession(): u16 { TLS_PROOF_OF_POSSESSION }
+
+public(package) fun guardian_proxy_auth(): u16 { GUARDIAN_PROXY_AUTH }
 
 public(package) fun deposit_confirmation(): u16 { DEPOSIT_CONFIRMATION }
 

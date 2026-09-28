@@ -279,9 +279,8 @@ impl Hashi {
                 state.hashi().config.guardian_url().map(|s| s.to_string())
             });
             if let Some(endpoint) = endpoint {
-                match grpc::guardian_client::GuardianClient::new(&endpoint) {
+                match self.new_guardian_client(&endpoint) {
                     Ok(guardian) => {
-                        let guardian = guardian.with_metrics(self.metrics.clone());
                         tracing::info!(
                             "Guardian client configured from on-chain config for {}",
                             guardian.endpoint()
@@ -289,13 +288,25 @@ impl Hashi {
                         self.metrics.guardian_enabled.set(1);
                         let _ = self.guardian_client.set(Some(guardian));
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to configure guardian client for {endpoint}: {e}")
-                    }
+                    Err(e) => tracing::warn!("{e:#}"),
                 }
             }
         }
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    fn new_guardian_client(
+        &self,
+        endpoint: &str,
+    ) -> anyhow::Result<grpc::guardian_client::GuardianClient> {
+        let guardian = grpc::guardian_client::GuardianClient::new(endpoint)
+            .map_err(|e| anyhow!("Failed to configure guardian client for {endpoint}: {e}"))?;
+        Ok(guardian
+            .with_metrics(self.metrics.clone())
+            .with_member_auth(
+                self.config.tls_private_key()?,
+                self.config.hashi_ids().hashi_object_id,
+            ))
     }
 
     pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::bitcoin::BitcoinPubkey> {
@@ -862,11 +873,7 @@ impl Hashi {
 
         match guardian_endpoint {
             Some(guardian_endpoint) => {
-                let guardian = grpc::guardian_client::GuardianClient::new(&guardian_endpoint)
-                    .map_err(|e| {
-                        anyhow!("Failed to configure guardian client for {guardian_endpoint}: {e}")
-                    })?
-                    .with_metrics(self.metrics.clone());
+                let guardian = self.new_guardian_client(&guardian_endpoint)?;
                 tracing::info!("Guardian client configured for {}", guardian.endpoint());
 
                 self.metrics.guardian_enabled.set(1);
