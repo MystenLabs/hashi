@@ -75,6 +75,15 @@ impl GuardianS3Client {
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
+        Self::with_http_client(bucket_info, retention_environment, credentials, None).await
+    }
+
+    async fn with_http_client(
+        bucket_info: &S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
+        credentials: &S3Credentials,
+        http_client: Option<aws_smithy_runtime_api::client::http::SharedHttpClient>,
+    ) -> GuardianResult<Self> {
         info!("S3 Configuration:");
         info!("   Bucket: {}", bucket_info.name);
         info!("   Region: {}", bucket_info.region);
@@ -98,6 +107,9 @@ impl GuardianS3Client {
         // A custom endpoint implies an S3-compatible service (MinIO, LocalStack), which
         // need path-style addressing.
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
+        if let Some(http_client) = http_client {
+            s3_builder = s3_builder.http_client(http_client);
+        }
         if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
             s3_builder = s3_builder.force_path_style(true);
         }
@@ -110,6 +122,36 @@ impl GuardianS3Client {
         };
         client.test_s3_connectivity().await?;
         Ok(client)
+    }
+
+    /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
+    /// Tests and `non-enclave-dev` use normal networking, as do readers using `new`.
+    pub(crate) async fn new_with_custom_resolver(
+        bucket_info: &S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
+        credentials: &S3Credentials,
+    ) -> GuardianResult<Self> {
+        #[cfg(any(test, feature = "non-enclave-dev"))]
+        {
+            Self::new(bucket_info, retention_environment, credentials).await
+        }
+        #[cfg(not(any(test, feature = "non-enclave-dev")))]
+        {
+            use aws_smithy_http_client::tls;
+            use aws_smithy_http_client::Builder;
+            let http_client = Builder::new()
+                .tls_provider(tls::Provider::Rustls(
+                    tls::rustls_provider::CryptoMode::AwsLc,
+                ))
+                .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
+            Self::with_http_client(
+                bucket_info,
+                retention_environment,
+                credentials,
+                Some(http_client),
+            )
+            .await
+        }
     }
 
     /// Construct an `GuardianS3Client` from an already-configured S3 client.

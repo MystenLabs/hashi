@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Withdraw-mode flows (enabled when CEREMONY_MODE=false): standard withdrawal,
+//! Withdraw-mode flows (selected by operator initialization): standard withdrawal,
 //! committee updates, provisioner init, and heartbeats. `verify_hashi_cert` is
 //! the committee-certificate check shared by `standard_withdrawal` and
 //! `committee_update`.

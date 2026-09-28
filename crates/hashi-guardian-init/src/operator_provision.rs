@@ -259,10 +259,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
-    ensure!(
-        info.lifecycle == WithdrawStage::Uninitialized.into(),
-        "guardian is not an uninitialized withdraw enclave"
-    );
+    ensure!(info.lifecycle.is_none(), "guardian is not uninitialized");
     ensure!(
         info.secret_sharing_instance.is_none(),
         "guardian already has a secret-sharing instance"

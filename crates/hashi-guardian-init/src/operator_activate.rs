@@ -11,6 +11,7 @@ use hashi_guardian::OTHER_SESSION_QUIET_PERIOD;
 use hashi_guardian::S3_WRITE_ATTEMPT_TIMEOUT;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
+use hashi_types::guardian::EnclaveLifecycle;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
@@ -346,7 +347,7 @@ fn verify_oi_info_matches_provisioned_standby(
         anyhow::bail!("OI record is not withdraw-mode initialization");
     };
     ensure!(
-        oi_info.mode() == live_info.lifecycle.mode(),
+        Some(oi_info.mode()) == live_info.lifecycle.map(EnclaveLifecycle::mode),
         "OI enclave mode differs from live standby GuardianInfo"
     );
     ensure!(

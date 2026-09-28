@@ -5,7 +5,6 @@ use crate::Enclave;
 use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HeartbeatLogMessage;
-use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,11 +17,6 @@ pub struct HeartbeatWriter {
 
 impl HeartbeatWriter {
     pub fn new(enclave: Arc<Enclave>) -> Self {
-        assert_eq!(
-            enclave.mode(),
-            EnclaveMode::Withdraw,
-            "heartbeats are only supported in withdraw mode"
-        );
         Self {
             enclave,
             next_seq: 0,
@@ -36,7 +30,7 @@ impl HeartbeatWriter {
     /// The shared S3 writer retries failures and aborts the process on a
     /// terminal retry or heartbeat-fence failure.
     pub async fn tick(&mut self) -> GuardianResult<()> {
-        if self.enclave.lifecycle() == WithdrawStage::Uninitialized.into() {
+        if self.enclave.mode() != Some(EnclaveMode::Withdraw) {
             return Ok(());
         }
 
@@ -99,9 +93,18 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "heartbeats are only supported in withdraw mode")]
     async fn ceremony_mode_rejects_heartbeats() {
-        Enclave::create_with_random_keys_for_mode(EnclaveMode::Ceremony)
+        Enclave::create_operator_initialized_ceremony(crate::test_utils::mock_logger())
             .log_heartbeat(HeartbeatLogMessage::new(0))
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn heartbeat_writer_stays_idle_in_ceremony_mode() {
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
+        let mut writer =
+            HeartbeatWriter::new(Enclave::create_operator_initialized_ceremony(logger));
+        writer.tick().await.unwrap();
+        assert_eq!(writer.next_seq, 0);
+        assert!(captures.lock().unwrap().is_empty());
     }
 }

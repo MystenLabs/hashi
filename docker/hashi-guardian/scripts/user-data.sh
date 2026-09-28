@@ -14,6 +14,8 @@ sudo systemctl start nitro-enclaves-allocator.service && sudo systemctl enable n
 sudo systemctl start docker && sudo systemctl enable docker
 sudo systemctl enable nitro-enclaves-vsock-proxy.service
 
+# These host-side destinations must match the bucket/region sent to OperatorInit.
+# They configure forwarding only; they are not EIF build inputs.
 # == Add your endpoints to vsock-proxy config ==
 # Pattern: echo "- {address: <your-endpoint>, port: 443}" | sudo tee -a /etc/nitro_enclaves/vsock-proxy.yaml
 # Example:

@@ -1862,13 +1862,13 @@ pub struct GuardianInfoData {
     /// operator_init). Certificates verified by this enclave are bound to it.
     #[prost(bytes = "bytes", optional, tag = "13")]
     pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Signed enclave mode and its current lifecycle stage.
+    /// Signed enclave mode and stage; absent until operator initialization commits.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "10, 11")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
 }
 /// Nested message and enum types in `GuardianInfoData`.
 pub mod guardian_info_data {
-    /// Signed enclave mode and its current lifecycle stage.
+    /// Signed enclave mode and stage; absent until operator initialization commits.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Lifecycle {
         #[prost(enumeration = "super::CeremonyStage", tag = "10")]
@@ -2346,10 +2346,9 @@ pub struct UpdateCommitteeResponse {
 #[repr(i32)]
 pub enum CeremonyStage {
     Unspecified = 0,
-    Uninitialized = 1,
-    OperatorInitialized = 2,
-    AwaitingKeyProvisionerConfirmations = 3,
-    Completed = 4,
+    OperatorInitialized = 1,
+    AwaitingKeyProvisionerConfirmations = 2,
+    Completed = 3,
 }
 impl CeremonyStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2359,7 +2358,6 @@ impl CeremonyStage {
     pub fn as_str_name(&self) -> &'static str {
         match self {
             Self::Unspecified => "CEREMONY_STAGE_UNSPECIFIED",
-            Self::Uninitialized => "CEREMONY_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "CEREMONY_STAGE_OPERATOR_INITIALIZED",
             Self::AwaitingKeyProvisionerConfirmations => {
                 "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS"
@@ -2371,7 +2369,6 @@ impl CeremonyStage {
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
             "CEREMONY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
-            "CEREMONY_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "CEREMONY_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
             "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS" => {
                 Some(Self::AwaitingKeyProvisionerConfirmations)
@@ -2385,10 +2382,9 @@ impl CeremonyStage {
 #[repr(i32)]
 pub enum WithdrawStage {
     Unspecified = 0,
-    Uninitialized = 1,
-    OperatorInitialized = 2,
-    ProvisionerInitialized = 3,
-    Activated = 4,
+    OperatorInitialized = 1,
+    ProvisionerInitialized = 2,
+    Activated = 3,
 }
 impl WithdrawStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2398,7 +2394,6 @@ impl WithdrawStage {
     pub fn as_str_name(&self) -> &'static str {
         match self {
             Self::Unspecified => "WITHDRAW_STAGE_UNSPECIFIED",
-            Self::Uninitialized => "WITHDRAW_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "WITHDRAW_STAGE_OPERATOR_INITIALIZED",
             Self::ProvisionerInitialized => "WITHDRAW_STAGE_PROVISIONER_INITIALIZED",
             Self::Activated => "WITHDRAW_STAGE_ACTIVATED",
@@ -2408,7 +2403,6 @@ impl WithdrawStage {
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
             "WITHDRAW_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
-            "WITHDRAW_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "WITHDRAW_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
             "WITHDRAW_STAGE_PROVISIONER_INITIALIZED" => {
                 Some(Self::ProvisionerInitialized)

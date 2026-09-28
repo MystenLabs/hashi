@@ -1,14 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cancellation-safe task spawning for state-changing guardian RPCs.
+//! Task spawning and serialization for guardian RPCs.
 //!
 //! Transport conversion stays in `rpc`; endpoint modules contain domain logic.
-//! This module routes each mutation through the enclave's appropriate
+//! This module routes each request through the enclave's appropriate
 //! cancellation-safe execution policy.
 //!
 //! Control-plane mutations use `spawn_control_task` because they share enclave
-//! lifecycle and configuration state. Standard withdrawal uses `spawn_task`
+//! lifecycle and configuration state. GuardianInfo reads use the same lock.
+//! Standard withdrawal uses `spawn_task`
 //! because its limiter guard is the narrower serialization boundary: requests
 //! may validate concurrently, but limiter mutation through durable logging is
 //! still exclusive.
@@ -16,6 +17,7 @@
 use crate::ceremony_mode::confirm;
 use crate::ceremony_mode::rotate;
 use crate::ceremony_mode::setup;
+use crate::info;
 use crate::operator_init as operator_init_domain;
 use crate::withdraw_mode::committee_update;
 use crate::withdraw_mode::operator_activate as operator_activate_domain;
@@ -28,6 +30,7 @@ use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
@@ -42,6 +45,16 @@ use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use std::sync::Arc;
+
+/// Control operations install fields before their S3 records are durable and the
+/// lifecycle advances. Serialize status requests with those operations so signed
+/// responses cannot expose partially committed state, without per-stage masking.
+/// Withdrawals publish their limiter snapshot separately after durable logging.
+pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
+    enclave
+        .spawn_control_task((), |enclave, ()| info::get_guardian_info(enclave))
+        .await
+}
 
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
@@ -139,7 +152,6 @@ pub async fn update_committee_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::EnclaveMode;
     use hashi_types::guardian::GuardianEncKeyPair;
     use hashi_types::guardian::GuardianSignKeyPair;
     use std::time::Duration;
@@ -157,7 +169,6 @@ mod tests {
         Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
-            EnclaveMode::Withdraw,
         ))
     }
 
