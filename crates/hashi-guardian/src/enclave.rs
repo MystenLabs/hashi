@@ -606,7 +606,14 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    /// Collect status; the RPC caller holds the control lock while reading it.
+    /// Status as of the last completed control operation. Control operations
+    /// install fields before logging them, so this waits for one in progress.
+    pub async fn committed_info(&self) -> GuardianInfo {
+        let _guard = self.control_lock.lock().await;
+        self.info().await
+    }
+
+    /// Collect status without waiting for control operations; RPCs use `committed_info`.
     pub async fn info(&self) -> GuardianInfo {
         let lifecycle = self.lifecycle();
         let temporary_init_state = self.temporary_init_state().ok();

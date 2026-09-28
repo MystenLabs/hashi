@@ -13,6 +13,7 @@ use tracing::info;
 pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
     info!("/get_guardian_info - Received request");
 
+    let guardian_info = enclave.committed_info().await;
     let signing_pub_key = enclave.signing_pubkey();
     // NOTE: If serving Guardian info becomes problematic due to attestation generation,
     // consider adding a state-only RPC for callers that do not verify the attestation.
@@ -20,6 +21,6 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
     Ok(GetGuardianInfoResponse::new(
         attestation,
         signing_pub_key,
-        enclave.sign(enclave.info().await),
+        enclave.sign(guardian_info),
     ))
 }

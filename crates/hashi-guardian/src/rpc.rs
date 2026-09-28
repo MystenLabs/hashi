@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::info;
 use crate::task_spawner;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
@@ -85,7 +86,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_guardian_info(self.enclave.clone())
+        // Awaited here rather than spawned, so an abandoned request drops out of
+        // the control-lock queue instead of leaving work behind it.
+        let resp = info::get_guardian_info(self.enclave.clone())
             .await
             .map_err(to_status)?;
 
@@ -532,6 +535,38 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
         assert!(rpc.enclave.pending_ceremony().is_err());
         assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
+
+    #[tokio::test]
+    async fn abandoned_info_request_leaves_no_queued_work() {
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_with_random_keys(),
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel::<()>();
+        let control = tokio::spawn(rpc.enclave.clone().spawn_control_task(
+            (),
+            move |_, ()| async move {
+                started_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+                Ok::<_, GuardianError>(())
+            },
+        ));
+        started_rx.await.unwrap();
+
+        // A caller deadline drops the request while it waits for the control lock.
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let alive = metrics.num_alive_tasks();
+        let request = rpc.get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), request)
+                .await
+                .is_err()
+        );
+        assert_eq!(metrics.num_alive_tasks(), alive);
+
+        resume_tx.send(()).unwrap();
+        control.await.unwrap().unwrap();
     }
 
     #[test]
