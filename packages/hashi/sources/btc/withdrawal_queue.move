@@ -485,8 +485,14 @@ public(package) fun new_withdrawal_txn(
     request_count.do!(|i| {
         let info = request_infos.borrow(i);
         let output = outputs.borrow(i);
+        // Checked before subtracting, so a request smaller than its fee share
+        // aborts with the dust error instead of underflowing. The sum cannot
+        // overflow: the fee is capped at the withdrawal minimum less dust.
+        assert!(
+            info.btc_amount >= per_user_miner_fee + hashi::btc_config::dust_relay_min_value(),
+            EOutputBelowDust,
+        );
         let expected = info.btc_amount - per_user_miner_fee;
-        assert!(expected >= hashi::btc_config::dust_relay_min_value(), EOutputBelowDust);
         assert!(output.amount == expected, EOutputAmountMismatch);
         assert!(output.bitcoin_address == info.bitcoin_address, EOutputAddressMismatch);
     });

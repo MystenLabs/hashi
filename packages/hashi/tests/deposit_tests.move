@@ -550,6 +550,40 @@ fun test_deposit_confirmation_certificate_verifies() {
 }
 
 #[test]
+/// A committee whose total weight does not fit in a u16 still verifies: the
+/// certificate threshold is computed in u64 end to end.
+fun test_certificate_verifies_with_total_weight_above_u16_max() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let weights = vector[30_000, 30_000, 30_000];
+    let hashi = test_utils::create_hashi_with_weighted_committee(voters, weights, ctx);
+    assert!(hashi.current_committee().total_weight() == 90_000);
+
+    let utxo = hashi::utxo::utxo(hashi::utxo::utxo_id(@0xCAFE, 0), 1000, option::none());
+    let message = deposit::new_deposit_confirmation_message(@0xBEEF, utxo);
+    let message_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message,
+    );
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+
+    let certified = hashi.verify(hashi::intent::deposit_confirmation(), message, cert);
+    assert!(certified.stake_support() == 90_000);
+    let certified = hashi.verify_with_committee(
+        hashi.current_committee(),
+        hashi::intent::deposit_confirmation(),
+        message,
+        cert,
+    );
+    assert!(certified.stake_support() == 90_000);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure]
 fun test_deposit_confirmation_certificate_wrong_message_fails() {
     let epoch = 0;

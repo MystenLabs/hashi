@@ -25,8 +25,8 @@ const EThresholdBpsTooHigh: vector<u8> = b"Threshold basis points must be at mos
 /// Returns the minimum aggregate signer weight required for a valid
 /// certificate (>2/3 of total weight, matching the Sui system's
 /// quorum threshold of 6667 bps).
-public(package) fun certificate_threshold(total_weight: u16): u16 {
-    (weight_threshold(total_weight as u64, CERTIFICATE_THRESHOLD_BPS) as u16)
+public(package) fun certificate_threshold(total_weight: u64): u64 {
+    weight_threshold(total_weight, CERTIFICATE_THRESHOLD_BPS)
 }
 
 /// Returns the minimum weight required to meet a threshold expressed
