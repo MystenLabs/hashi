@@ -34,11 +34,11 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
-use crate::mpc::fallback_encryption_public_key;
 use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::SignedMessage;
+use hashi_types::committee::fallback_encryption_public_key;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
 

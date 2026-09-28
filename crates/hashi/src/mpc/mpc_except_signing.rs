@@ -78,7 +78,6 @@ use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
-use fastcrypto::groups::HashToGroupElement;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -108,7 +107,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -6236,12 +6234,6 @@ impl MpcManager {
     fn set_previous_output(&mut self, output: MpcOutput) {
         self.previous_output = Some(output);
     }
-}
-
-pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
-    static FALLBACK_ENCRYPTION_PK: LazyLock<PublicKey<EncryptionGroupElement>> =
-        LazyLock::new(|| PublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi")));
-    FALLBACK_ENCRYPTION_PK.clone()
 }
 
 fn verify_complaint_response_from_signer(

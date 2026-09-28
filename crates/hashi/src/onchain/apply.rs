@@ -2726,7 +2726,7 @@ mod tests {
         let enriched = fixture.hashi.committees.committees().get(&9).unwrap();
         assert_eq!(
             *enriched.members()[0].encryption_public_key(),
-            crate::mpc::fallback_encryption_public_key(),
+            hashi_types::committee::fallback_encryption_public_key(),
         );
 
         // The stored transition embeds the verbatim on-chain committee,
