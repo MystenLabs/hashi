@@ -1869,9 +1869,11 @@ impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
     fn try_from(m: CommitteeMember) -> Result<Self, Self::Error> {
         let public_key = bls_public_key_from_uncompressed_g1_bytes(&m.public_key)?;
 
+        // Match the node's local committee view. Signed payloads and logs must
+        // retain the raw Move committee, including the original key bytes.
         let encryption_public_key =
             crate::committee::EncryptionPublicKey::from_bcs(&m.encryption_public_key)
-                .map_err(|e| anyhow::anyhow!("invalid encryption public key {}", e))?;
+                .unwrap_or_else(|_| crate::committee::fallback_encryption_public_key());
 
         Ok(crate::committee::CommitteeMember::new(
             m.validator_address,
