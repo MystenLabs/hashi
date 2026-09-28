@@ -724,14 +724,12 @@ Expected after success: `hashi_epoch` > 0, `hashi_reconfig_in_progress` = 0, `ha
 --dry-run             Simulate without executing
 ```
 
-**Where these flags go.** These options belong to the **first-level subcommand** (`committee`, `config`, `proposal`, `backup`, `deposit`, `withdraw`, `balance`), not to the `hashi` binary itself and not to the sub-subcommand. Put them **after** the first-level subcommand and **before** the sub-subcommand:
+**Where these flags go.** These options belong to the **first-level subcommand** (`committee`, `config`, `proposal`, `validator`, `backup`, `deposit`, `withdraw`, `balance`), not to the `hashi` binary itself. Put them anywhere **after** the first-level subcommand, before or after the sub-subcommand:
 
 ```bash
-# Right — flag sits on the first-level subcommand
+# Right — flag sits after the first-level subcommand
 hashi committee -c hashi-cli.toml list
 hashi config -c hashi-cli.toml on-chain
-
-# Wrong — the sub-subcommand does not know this flag
 hashi committee list --config hashi-cli.toml
 
 # Wrong — the top-level `hashi` command takes no options of its own
@@ -836,11 +834,11 @@ hashi proposal create update-config <key> <value> [-m key=value]
 hashi proposal create update-mpc-config [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
 hashi proposal create update-epoch-config <key> <value> [-m key=value]
 hashi proposal create add-config <key> <value> [--epoch] [-m key=value]
-hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
 hashi proposal create emergency-pause [--unpause] [-m key=value]
+hashi proposal create ignore-member --validator <address> [--unignore] [-m key=value]
 ```
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
@@ -921,10 +919,11 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **UpdateConfig** | 2/3 | Change an existing instant config parameter (applies on execute) | `key` and type-prefixed `value` |
 | **UpdateEpochConfig** | 2/3 | Change an existing epoch config parameter (lands in the next committee) | `key` and type-prefixed `value` |
 | **AddConfig** | 2/3 | Add a new config key to either store (insert-only) | `key`, type-prefixed `value`, `--epoch` for the epoch store |
-| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta (epoch config) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta (submitted as an `UpdateEpochConfig` proposal) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
+| **IgnoreMember** | 2/3 | Leave a registered member out of the next committee formed, or re-admit it | `--validator`, `--unignore` to re-admit |
 | **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).

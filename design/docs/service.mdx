@@ -40,8 +40,11 @@ answer: >-
 
 Every committee member is responsible for running a Hashi node service. Each
 Hashi node exposes an HTTP service, secured by Transport Layer Security (TLS)
-using a self-signed cert (the ed25519 public key is available in the Hashi
-System State object), and serves a gRPC `HashiService`.
+using a self-signed cert (each member registers its ed25519 public key in the
+`CommitteeSet` on the `Hashi` object), and serves the gRPC `BridgeService` and
+`MpcService`. Peers connect with their own registered TLS key, and the node
+refuses any caller whose key belongs to no registered validator, except on
+`/health` and `/ready`.
 
 ## Sui contracts
 

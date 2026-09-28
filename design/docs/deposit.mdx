@@ -69,21 +69,13 @@ graph LR
 The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
 address. Each deposit address is a unique Taproot address derived from the
 target destination address on Sui (see [Bitcoin Address Scheme](address-scheme.mdx)).
-The deposit must meet the dust minimum (`546 sats`) to avoid creating
-unspendable UTXOs on Bitcoin.
+The deposit must meet the
+[`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum), which is never
+below the dust minimum (`546 sats`), to avoid creating unspendable UTXOs on
+Bitcoin.
 
 After the Bitcoin transaction is broadcast, the user notifies Hashi by
-constructing a `DepositRequest` and calling `hashi::deposit::deposit` on Sui.
-
-First, the user creates the request by calling `hashi::deposit_queue::deposit_request`:
-
-```move
-public fun deposit_request(
-    utxo: Utxo,
-    clock: &Clock,
-    ctx: &mut TxContext,
-): DepositRequest
-```
+constructing a `Utxo` and calling `hashi::deposit::deposit` on Sui.
 
 The `Utxo` is constructed from the Bitcoin transaction details:
 
@@ -105,10 +97,10 @@ public fun utxo_id(
 - `amount`: the deposit amount in satoshis.
 - `derivation_path`: the Sui address used to derive the deposit address.
 
-The user then submits the request:
+The user then submits it:
 
 ```move
-public fun deposit(
+entry fun deposit(
     hashi: &mut Hashi,
     utxo: Utxo,
     clock: &Clock,
@@ -117,8 +109,9 @@ public fun deposit(
 ```
 
 The function validates that the deposit meets the minimum amount and the UTXO
-has not been previously deposited. The request is then placed in the deposit
-queue, and committee members start monitoring Bitcoin for confirmation.
+has not been previously deposited, then creates a `DepositRequest` and places
+it in the deposit queue. Committee members start monitoring Bitcoin for
+confirmation.
 
 
 ## Approve

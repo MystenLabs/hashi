@@ -68,9 +68,9 @@ active version cannot be disabled, to avoid bricking the protocol.
 ## `UpdateConfig`
 
 Updates existing parameters in the instant config by key; the new values apply
-when the proposal executes. Every entry is validated when the proposal
-executes, and the whole proposal aborts if any entry fails: the key must
-already exist in the store with a value of the same type
+when the proposal executes. Every entry is validated when the proposal is
+created and again when it executes, and the whole proposal aborts if any entry
+fails: the key must already exist in the store with a value of the same type
 (`EInvalidConfigEntry`), and the key must be governable. The guardian BTC
 public key and the Bitcoin chain id are pinned for the deployment's lifetime
 and cannot be written through any config proposal (`EProtectedConfigKey`).
@@ -101,6 +101,15 @@ setting becomes governable without a package upgrade. The proposal is
 insert-only: a key already present in the target store aborts, and the first
 value fixes the key's type for later updates. The pinned key names cannot be
 introduced into either store.
+
+## `IgnoreMember`
+
+Flags a registered member as ignored, or clears the flag. The next committee
+formed leaves an ignored member out, so its weight drops out of every
+threshold from then on; the current committee is never altered, and if a
+reconfiguration is already pending the change lands one epoch later. The
+member stays registered (an ignored member cannot be removed as inactive), and
+the same proposal type with the flag cleared re-admits it.
 
 ## `EmergencyPause`
 

@@ -76,9 +76,10 @@ entry fun start_reconfig(
 
 This sets a pending epoch change flag in the onchain state, which pauses
 normal operations (deposits, withdrawals) until reconfiguration completes.
-The new committee membership is determined by the set of validators that
-registered with Hashi for the new epoch. Stake weights come from the Sui
-validator set.
+The new committee membership is determined by the active Sui validators that
+registered with Hashi and set their next-epoch keys, leaving out any that
+resigned or that governance ignored through an `IgnoreMember` proposal. Stake
+weights come from the Sui validator set.
 
 At genesis (when no MPC public key exists yet), the **launch switch**
 additionally gates `start_reconfig`: it aborts until the publisher

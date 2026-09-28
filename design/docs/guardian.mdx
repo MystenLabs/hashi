@@ -52,9 +52,9 @@ The guardian integration has four distinct flows:
 - **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
   current active guardian is still alive. The operator installs a stable
   `InitConfig`; each KP independently recomputes `config_hash` from its locally
-  configured limiter config, PCR allowlist, and network plus the onchain master
-  key, requires it to match the enclave's, and submits threshold encrypted shares
-  through the public relay.
+  configured limiter config and deployment config (S3 bucket and region,
+  retention environment, network, and PCR allowlist), requires it to match the
+  enclave's, and submits threshold encrypted shares through the public relay.
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
@@ -115,7 +115,7 @@ sequenceDiagram
     participant Guardian as Guardian enclave
     participant KPs as Key provisioners
 
-    Operator->>Guardian: OperatorInit(S3 config)
+    Operator->>Guardian: OperatorInit(deployment config, S3 credentials)
     Guardian->>S3: log(init attestation + GuardianInfo)
     Operator->>Guardian: SetupNewKey(ordered KP attested bundles, n, t)
     Guardian->>Guardian: Verify all YubiKey proofs and bind SIG/DEC keys
@@ -162,13 +162,12 @@ sequenceDiagram
     participant KPs as Key provisioners
 
     Note over Operator,Guardian: Operator initialization
-    Operator->>Operator: Gather master G from onchain state
-    Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
+    Operator->>Operator: Gather limiter config plus deployment config (bucket, region, retention environment, network, PCR allowlist)
     Operator->>Operator: Build InitConfig
     Operator->>Operator: Require S3 state to match --do-genesis intent
     Operator->>Operator: With flag, build GenesisState from committee plus Hashi object id plus master G
-    Operator->>Guardian: OperatorInit(S3 config, InitConfig, optional GenesisState)
-    Guardian->>S3: Read latest ceremony and KP-share state
+    Operator->>Guardian: OperatorInit(S3 credentials, InitConfig, optional GenesisState)
+    Guardian->>S3: Read latest ceremony and KP-share state, plus genesis record on later deploys
     Guardian->>Guardian: Snapshot CeremonyState for this arming
     Guardian->>S3: log(init GuardianInfo(config_hash, optional genesis_state_hash, sharing instance))
     Guardian->>S3: start heartbeat stream from OI onward
@@ -207,7 +206,8 @@ Hashi object id, and MPC master `G` as an optional `GenesisState` during
 `OperatorInit`, and each KP independently derives its hash and includes it in
 the normal signed PI submission. Once PI reaches threshold, the enclave writes
 the committee, Hashi object id, and master `G` to `genesis/record.json`. Later
-deploys use `None` and do not pass the flag.
+deploys use `None` and do not pass the flag; their enclave loads the Hashi
+object id and master `G` from `genesis/record.json` instead.
 
 ## Standby activation flow
 
@@ -256,7 +256,7 @@ sequenceDiagram
     MPC->>Onchain: Store MPC signatures
     MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
     Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
-    Guardian->>S3: log(withdraw success or failure)
+    Guardian->>S3: log(withdraw success)
     Guardian-->>MPC: Guardian BTC signatures
     MPC->>Onchain: Finalize withdrawal with Guardian signatures
     MPC->>Bitcoin: Broadcast fully signed transaction
