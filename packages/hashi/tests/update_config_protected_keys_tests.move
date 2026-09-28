@@ -162,6 +162,45 @@ fun test_guardian_url_stays_governable() {
 }
 
 #[test]
+fun test_guardian_url_written_at_launch_is_governable() {
+    // `UpdateConfig` only writes keys that already exist, so changing the URL
+    // through governance depends on the launch call having stored it.
+    //
+    // The registry is built first: its constructor asserts a system-address
+    // sender, and building a test context replaces the sender for the whole
+    // test, so the voter's context has to be the last one built.
+    let mut registry = sui::coin_registry::create_coin_data_registry_for_testing(
+        &mut test_utils::new_tx_context(@0x0, 0),
+    );
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = new_hashi(ctx);
+
+    hashi.finish_publish_for_testing(
+        sui::package::test_publish(std::type_name::original_id<Hashi>().to_id(), ctx),
+        @0xb17c,
+        b"https://launch.example".to_string(),
+        guardian_key(0),
+        &mut registry,
+        ctx,
+    );
+    assert!(
+        config::guardian_url(hashi.config()).destroy_some() == b"https://launch.example".to_string(),
+    );
+
+    propose_and_execute(
+        &mut hashi,
+        single(guardian_url_key(), config_value::new_string(b"https://new.example".to_string())),
+        ctx,
+    );
+    assert!(
+        config::guardian_url(hashi.config()).destroy_some() == b"https://new.example".to_string(),
+    );
+
+    std::unit_test::destroy(hashi);
+    std::unit_test::destroy(registry);
+}
+
+#[test]
 fun test_other_keys_stay_governable() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = new_hashi(ctx);

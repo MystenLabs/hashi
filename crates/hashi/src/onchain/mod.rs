@@ -2302,7 +2302,6 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
         types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
         types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
         types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
-        types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
         types::ProposalType::IgnoreMember => parse::<move_types::IgnoreMember>(contents),
         types::ProposalType::Unknown(_) => None,
     }?;
@@ -2339,7 +2338,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
-        ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         ("ignore_member", "IgnoreMember") => types::ProposalType::IgnoreMember,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
