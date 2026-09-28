@@ -48,6 +48,8 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use tokio::time::Instant;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -68,6 +70,16 @@ fn unavailable() -> Status {
     Status::unavailable(WID_CACHE_UNAVAILABLE_MSG)
 }
 
+/// `GetGuardianInfo` is public and the enclave mints a fresh Nitro attestation
+/// for every call. The request carries no nonce, so a response a second old is
+/// as good as a fresh one; caching it keeps a flood from reaching the enclave.
+const GUARDIAN_INFO_TTL: Duration = Duration::from_secs(1);
+
+struct CachedInfo {
+    at: Instant,
+    response: proto::GetGuardianInfoResponse,
+}
+
 struct CacheEntry {
     /// The seq the guardian consumed this wid at. Kept for observability only —
     /// the cache is keyed by `wid`, so lookups ignore the requester's seq.
@@ -83,6 +95,7 @@ pub struct CachingGuardianGrpc<S, L> {
     /// sighashes when verifying a log replay.
     network: Network,
     metrics: Arc<ProxyMetrics>,
+    info: tokio::sync::Mutex<Option<CachedInfo>>,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
@@ -109,6 +122,7 @@ impl<S, L> CachingGuardianGrpc<S, L> {
             log,
             network,
             metrics,
+            info: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -311,11 +325,25 @@ where
     S: GuardianService,
     L: LogStore,
 {
+    /// The lock is held across the fetch, so a burst collapses into one
+    /// backend call.
     async fn get_guardian_info(
         &self,
         request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        self.inner.get_guardian_info(request).await
+        let mut cached = self.info.lock().await;
+        if let Some(entry) = cached
+            .as_ref()
+            .filter(|entry| entry.at.elapsed() < GUARDIAN_INFO_TTL)
+        {
+            return Ok(Response::new(entry.response.clone()));
+        }
+        let response = self.inner.get_guardian_info(request).await?.into_inner();
+        *cached = Some(CachedInfo {
+            at: Instant::now(),
+            response: response.clone(),
+        });
+        Ok(Response::new(response))
     }
 
     async fn setup_new_key(
@@ -441,6 +469,7 @@ mod tests {
         call_count: Arc<AtomicUsize>,
         result: Arc<ResponseFn>,
         info: Option<proto::GetGuardianInfoResponse>,
+        info_calls: Arc<AtomicUsize>,
     }
 
     impl StubGuardian {
@@ -451,6 +480,7 @@ mod tests {
                     call_count: call_count.clone(),
                     result: Arc::new(|| Ok(mock_response())),
                     info: None,
+                    info_calls: Arc::default(),
                 },
                 call_count,
             )
@@ -463,6 +493,7 @@ mod tests {
                     call_count: call_count.clone(),
                     result: Arc::new(|| Err(Status::failed_precondition("simulated"))),
                     info: None,
+                    info_calls: Arc::default(),
                 },
                 call_count,
             )
@@ -480,6 +511,7 @@ mod tests {
             &self,
             request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            self.info_calls.fetch_add(1, Ordering::SeqCst);
             assert!(!request.into_inner().include_attestation);
             match &self.info {
                 Some(info) => Ok(Response::new(info.clone())),
@@ -715,6 +747,43 @@ mod tests {
             "same wid at a bumped seq must hit the cache, not re-consume"
         );
         assert_eq!(r1, r2, "bumped-seq retry must replay the same response");
+    }
+
+    fn info_request() -> Request<proto::GetGuardianInfoRequest> {
+        Request::new(proto::GetGuardianInfoRequest {
+            include_attestation: false,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guardian_info_is_served_from_one_backend_call_per_ttl() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
+        let info_calls = stub.info_calls.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        let (a, b, c) = tokio::join!(
+            cache.get_guardian_info(info_request()),
+            cache.get_guardian_info(info_request()),
+            cache.get_guardian_info(info_request()),
+        );
+        assert!(a.is_ok() && b.is_ok() && c.is_ok());
+        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(GUARDIAN_INFO_TTL).await;
+        cache.get_guardian_info(info_request()).await.unwrap();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn guardian_info_errors_are_not_cached() {
+        let (stub, _) = StubGuardian::ok();
+        let info_calls = stub.info_calls.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        cache.get_guardian_info(info_request()).await.unwrap_err();
+        cache.get_guardian_info(info_request()).await.unwrap_err();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
