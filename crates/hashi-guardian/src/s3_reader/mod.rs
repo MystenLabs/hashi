@@ -9,7 +9,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
 use hashi_types::guardian::CeremonyState;
@@ -23,7 +23,6 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -108,17 +107,9 @@ impl GuardianReader {
     /// directory may contain records from more than one build.
     pub async fn read_logs_in_dir(
         &mut self,
-        dir: &S3HourScopedDirectory,
+        dir: &S3HourDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let prefix = dir.to_string();
-        self.read_logs_with_prefix(&prefix).await
-    }
-
-    async fn read_logs_with_prefix(
-        &mut self,
-        prefix: &str,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let all_logs = self.s3.list_all_log_records_with_prefix(prefix).await?;
+        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for record in all_logs {
@@ -126,18 +117,6 @@ impl GuardianReader {
             out.push(verified_record);
         }
         Ok(out)
-    }
-
-    /// Read and verify successful withdrawal records in `dir`.
-    ///
-    /// This excludes rejected withdrawal requests, which do not represent
-    /// Guardian approval events and are not inputs to the monitor state machine.
-    pub async fn read_successful_withdrawals_in_dir(
-        &mut self,
-        dir: &S3HourScopedDirectory,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let prefix = format!("{dir}{}", WithdrawalLogMessage::SUCCESS_OBJECT_KEY_PREFIX);
-        self.read_logs_with_prefix(&prefix).await
     }
 
     /// Return verified session info after requiring the attested PCRs to match
@@ -168,7 +147,7 @@ impl GuardianReader {
     ) -> GuardianResult<Option<(CeremonyLogMessage, SessionID)>> {
         let keys = self
             .s3
-            .list_keys(&CeremonyLogMessage::object_key_dir(), true)
+            .list_keys(&CeremonyLogMessage::object_key_dir())
             .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
@@ -201,7 +180,7 @@ impl GuardianReader {
         require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_keys(&prefix, false).await?;
+        let keys = self.s3.list_keys_allowing_mutations(&prefix).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
@@ -341,7 +320,7 @@ impl GuardianReader {
 
     /// Read the latest serving committee.
     ///
-    /// Prefer the latest successful `committee-update/` record, then fall back
+    /// Prefer the latest `committee-update/` record, then fall back
     /// to the KP-authorized `genesis/record.json` bootstrap record. Return
     /// `None` if neither source exists.
     pub async fn read_latest_committee(&mut self) -> GuardianResult<Option<Committee>> {
@@ -351,21 +330,17 @@ impl GuardianReader {
         Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
     }
 
-    /// Read and verify the successfully applied committee with the highest
-    /// epoch, or return `None` if no successful update exists.
+    /// Read and verify the applied committee with the highest epoch, or return
+    /// `None` if no update exists.
     ///
-    /// Success keys begin with a zero-padded epoch, so the lexicographically
-    /// greatest non-failure key identifies the latest applied committee.
+    /// Keys begin with a zero-padded epoch, so the lexicographically
+    /// greatest key identifies the latest applied committee.
     async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
-            .list_keys(&CommitteeUpdateLogMessage::object_key_dir(), true)
+            .list_keys(&CommitteeUpdateLogMessage::object_key_dir())
             .await?;
-        let Some(key) = keys
-            .into_iter()
-            .filter(|key| !CommitteeUpdateLogMessage::is_failure_object_key(key))
-            .max()
-        else {
+        let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
         let verified_record = self.read_verified_record(&key).await?;
@@ -375,14 +350,8 @@ impl GuardianReader {
             .into_message()
             .into_committee_update()
             .ok_or_else(|| InvalidS3Log(format!("expected a committee-update log at {key}")))?;
-        let committee = match *msg {
-            CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
-            CommitteeUpdateLogMessage::Failure { .. } => {
-                unreachable!("a verified non-failure key cannot contain a Failure log")
-            }
-        };
         log_verified_read(&key, &session_id);
-        Ok(Some(committee))
+        Ok(Some(msg.new_committee))
     }
 
     /// Read and verify the fixed KP-authorized bootstrap record, or return
@@ -391,7 +360,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .list_keys(&GenesisLogMessage::object_key_dir(), true)
+            .list_keys(&GenesisLogMessage::object_key_dir())
             .await?;
         if keys.is_empty() {
             return Ok(None);

@@ -31,6 +31,7 @@ pub struct GuardianGrpc {
 }
 
 fn to_status(e: GuardianError) -> Status {
+    tracing::error!(error = ?e, "Guardian RPC failed");
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         Unauthenticated(msg) => Status::unauthenticated(msg),

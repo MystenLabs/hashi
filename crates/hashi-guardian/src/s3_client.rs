@@ -20,7 +20,7 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
@@ -418,12 +418,23 @@ impl GuardianS3Client {
         Ok(out.into_iter().collect())
     }
 
-    /// Lists the currently visible keys under `prefix` using S3 version
-    /// history. When `reject_mutations` is true, any overwrite or deletion is
-    /// rejected; otherwise it is logged and only the latest visible versions
-    /// are returned. Mutation validation establishes immutability only when
-    /// each selected object also has an unexpired lock.
-    pub(crate) async fn list_keys(
+    /// Lists keys under `prefix`, rejecting overwrites and deletions in S3
+    /// version history. This establishes immutability only when each selected
+    /// object also has an unexpired lock.
+    pub(crate) async fn list_keys(&self, prefix: &str) -> GuardianResult<Vec<String>> {
+        self.list_keys_inner(prefix, true).await
+    }
+
+    /// Lists only currently visible keys under `prefix`. Overwrites and
+    /// deletions in S3 version history are logged rather than rejected.
+    pub(crate) async fn list_keys_allowing_mutations(
+        &self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<String>> {
+        self.list_keys_inner(prefix, false).await
+    }
+
+    async fn list_keys_inner(
         &self,
         prefix: &str,
         reject_mutations: bool,
@@ -526,19 +537,9 @@ impl GuardianS3Client {
     /// S3 key from which it was read.
     pub async fn list_all_log_records_in_dir(
         &self,
-        dir: &S3HourScopedDirectory,
+        dir: &S3HourDirectory,
     ) -> GuardianResult<Vec<LogRecord>> {
-        let prefix = dir.to_string();
-        self.list_all_log_records_with_prefix(&prefix).await
-    }
-
-    /// Batch read all immutable log records whose keys begin with `prefix`.
-    /// The prefix history is validated before any records are fetched.
-    pub(crate) async fn list_all_log_records_with_prefix(
-        &self,
-        prefix: &str,
-    ) -> GuardianResult<Vec<LogRecord>> {
-        let keys = self.list_keys(prefix, true).await?;
+        let keys = self.list_keys(&dir.to_string()).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // The prefix history was checked above. Immutable batch logs also
@@ -561,7 +562,7 @@ impl GuardianS3Client {
         immutability_check: ImmutabilityCheck,
     ) -> GuardianResult<LogRecord> {
         if matches!(immutability_check, ImmutabilityCheck::Required) {
-            let keys = self.list_keys(key, true).await?;
+            let keys = self.list_keys(key).await?;
             if keys.len() != 1 || keys[0] != key {
                 return Err(S3Error(format!(
                     "expected exactly one object for key {}, found {:?}",

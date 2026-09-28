@@ -258,10 +258,6 @@ impl VerifiedLogRecord {
         &self.build_pcrs
     }
 
-    pub fn log_type(&self) -> LogType {
-        self.entry.log_type()
-    }
-
     pub fn into_entry(self) -> LogEntry {
         self.entry
     }
