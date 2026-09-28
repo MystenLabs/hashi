@@ -8,8 +8,10 @@ use anyhow::Context;
 use anyhow::anyhow;
 use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::S3Credentials;
+use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 
+use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 
 /// Configuration shared by the batch and continuous monitor modes.
@@ -164,6 +166,17 @@ impl Config {
 
     pub fn next_event_delay(&self, source: WithdrawalEventType) -> Option<u64> {
         self.next_event_delays.get_delay(source)
+    }
+
+    pub fn predecessor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
+        event.timestamp_secs + self.clock_skew
+    }
+
+    pub fn successor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
+        event.timestamp_secs
+            + self
+                .next_event_delay(event.event_type)
+                .expect("has a successor")
     }
 }
 
