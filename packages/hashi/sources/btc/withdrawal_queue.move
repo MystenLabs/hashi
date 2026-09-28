@@ -934,6 +934,15 @@ public(package) fun has_confirmed_txn(self: &WithdrawalRequestQueue, id: address
     self.confirmed_txns.contains(id)
 }
 
+#[test_only]
+public(package) fun withdrawal_txn_signing_for_testing(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): &SigningBatch {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    &txn.signing
+}
+
 /// Replicates the pre-deferred-archival commit (remove from `requests`, add
 /// to `processed`) so tests can simulate requests committed before the
 /// upgrade.
@@ -976,12 +985,7 @@ public(package) fun new_withdrawal_txn_for_testing(
         created_timestamp_ms: clock.timestamp_ms(),
         signed_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
-        signing: {
-            let mut allocator = mpc_signing::new_allocator_for_testing(0);
-            let pairs = allocator.allocate(num_inputs);
-            allocator.destroy_allocator_for_testing();
-            mpc_signing::new(num_inputs, pairs, 0)
-        },
+        signing: mpc_signing::new(num_inputs, mpc_signing::pairs_for_testing(0, num_inputs), 0),
         guardian_signatures: option::none(),
     }
 }

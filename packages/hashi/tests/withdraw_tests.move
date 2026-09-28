@@ -507,3 +507,98 @@ fun test_archive_runs_while_paused() {
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
+
+// ======== Presig reallocation ========
+
+/// Inserts a txn with `num_inputs` inputs whose signing batch is on epoch 0
+/// with pairs `(0, 1)`, `(2, 3)`, and so on, and returns its ID.
+fun insert_epoch_zero_txn(
+    hashi: &mut hashi::hashi::Hashi,
+    num_inputs: u64,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+): address {
+    let inputs = vector::tabulate!(num_inputs, |i| {
+        utxo::utxo(utxo::utxo_id(@0xCAFE, i as u32), 1_000_000, option::none())
+    });
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[],
+        inputs,
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        vector[],
+        @0xCAFE,
+        clock,
+        ctx,
+    );
+    let txn_id = txn.withdrawal_txn_id();
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(txn);
+    txn_id
+}
+
+#[test]
+fun test_reallocate_presigs_assigns_fresh_pairs_to_pending_inputs() {
+    // The committee is on epoch 1, so the epoch-0 batch is stale.
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+    let clock = clock::create_for_testing(ctx);
+    let txn_id = insert_epoch_zero_txn(&mut hashi, 3, &clock, ctx);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(txn_id, vector[1], vector[x"11"]);
+    // Earlier withdrawals this epoch already consumed presigs 0 through 9.
+    let _ = hashi.allocate_presig_pairs(5);
+
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+
+    let queue = hashi.bitcoin().withdrawal_queue();
+    let signing = queue.withdrawal_txn_signing_for_testing(txn_id);
+    assert!(signing.epoch() == 1);
+    assert!(signing.is_pending_on(0, 10, 11));
+    assert!(signing.is_signed(1));
+    assert!(signing.is_pending_on(2, 12, 13));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_reallocate_presigs_with_every_input_signed_only_moves_epoch() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+    let clock = clock::create_for_testing(ctx);
+    let txn_id = insert_epoch_zero_txn(&mut hashi, 2, &clock, ctx);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(txn_id, vector[0, 1], vector[x"00", x"11"]);
+
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.withdrawal_txn_signing_epoch(txn_id) == 1);
+    assert!(queue.withdrawal_txn_mpc_signatures(txn_id) == vector[x"00", x"11"]);
+    // Nothing was pending, so the next reallocation still starts at 0.
+    let other_txn_id = insert_epoch_zero_txn(&mut hashi, 1, &clock, ctx);
+    hashi::withdraw::reallocate_presigs(&mut hashi, other_txn_id);
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.withdrawal_txn_signing_for_testing(other_txn_id).is_pending_on(0, 0, 1));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::mpc_signing::ENotStale)]
+fun test_reallocate_presigs_twice_in_one_epoch_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+    let clock = clock::create_for_testing(ctx);
+    let txn_id = insert_epoch_zero_txn(&mut hashi, 1, &clock, ctx);
+
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}

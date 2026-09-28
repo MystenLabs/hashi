@@ -274,10 +274,6 @@ public(package) fun epoch_certs_stamped(
     self.tob.borrow_mut(key)
 }
 
-public(package) fun num_consumed_presigs(self: &Hashi): u64 {
-    self.presig_allocator.num_consumed()
-}
-
 /// Mint `count` fresh presignature pairs for the current epoch.
 public(package) fun allocate_presig_pairs(self: &mut Hashi, count: u64): vector<PresigPair> {
     self.presig_allocator.allocate(count)

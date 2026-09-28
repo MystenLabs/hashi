@@ -122,15 +122,12 @@ public(package) fun reset(self: &mut PresigAllocator) {
     self.num_consumed = 0;
 }
 
-public(package) fun num_consumed(self: &PresigAllocator): u64 {
-    self.num_consumed
-}
-
 // === Constructors ===
 
 /// Create a batch with one `Pending` slot per pair, in order. `num_inputs` is
-/// the caller's input count; it must equal the number of pairs so that no
-/// input is left without a pair.
+/// the caller's own input count, which is independent of the allocation; it
+/// cross-checks that the pairs were allocated for this many inputs, since the
+/// batch is the last place a miscounted allocation is visible.
 public(package) fun new(num_inputs: u64, pairs: vector<PresigPair>, epoch: u64): SigningBatch {
     assert!(num_inputs > 0, EZeroInputs);
     assert!(pairs.length() == num_inputs, EAllocationMismatch);
@@ -276,6 +273,21 @@ public(package) fun new_allocator_for_testing(num_consumed: u64): PresigAllocato
 #[test_only]
 public(package) fun destroy_allocator_for_testing(self: PresigAllocator) {
     let PresigAllocator { num_consumed: _ } = self;
+}
+
+#[test_only]
+public(package) fun num_consumed(self: &PresigAllocator): u64 {
+    self.num_consumed
+}
+
+/// Pairs `(base, base + 1)`, `(base + 2, base + 3)`, and so on, as a fresh
+/// allocator that had already consumed `base` presignatures would mint them.
+#[test_only]
+public(package) fun pairs_for_testing(base: u64, count: u64): vector<PresigPair> {
+    let mut allocator = new_allocator_for_testing(base);
+    let pairs = allocator.allocate(count);
+    allocator.destroy_allocator_for_testing();
+    pairs
 }
 
 /// True if input `i` is pending on exactly the pair `(first, second)`.

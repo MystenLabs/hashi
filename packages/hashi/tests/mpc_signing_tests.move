@@ -19,17 +19,9 @@ fun sig(byte: u8): vector<u8> {
     vector[byte]
 }
 
-/// Pairs `(base, base + 1)`, `(base + 2, base + 3)`, and so on.
-fun pairs_from(base: u64, count: u64): vector<mpc_signing::PresigPair> {
-    let mut allocator = mpc_signing::new_allocator_for_testing(base);
-    let pairs = allocator.allocate(count);
-    allocator.destroy_allocator_for_testing();
-    pairs
-}
-
 /// A fresh batch for `num_inputs` inputs on pairs starting at `base`.
 fun batch(num_inputs: u64, base: u64, epoch: u64): mpc_signing::SigningBatch {
-    mpc_signing::new(num_inputs, pairs_from(base, num_inputs), epoch)
+    mpc_signing::new(num_inputs, mpc_signing::pairs_for_testing(base, num_inputs), epoch)
 }
 
 #[test]
@@ -72,14 +64,14 @@ fun test_reset_restarts_numbering() {
 #[test]
 #[expected_failure(abort_code = EAllocationMismatch)]
 fun test_new_too_few_pairs_aborts() {
-    let b = mpc_signing::new(3, pairs_from(0, 2), 7);
+    let b = mpc_signing::new(3, mpc_signing::pairs_for_testing(0, 2), 7);
     b.destroy_for_testing();
 }
 
 #[test]
 #[expected_failure(abort_code = EAllocationMismatch)]
 fun test_new_too_many_pairs_aborts() {
-    let b = mpc_signing::new(3, pairs_from(0, 4), 7);
+    let b = mpc_signing::new(3, mpc_signing::pairs_for_testing(0, 4), 7);
     b.destroy_for_testing();
 }
 
@@ -87,7 +79,7 @@ fun test_new_too_many_pairs_aborts() {
 #[expected_failure(abort_code = EAllocationMismatch)]
 fun test_reallocate_too_many_pairs_aborts() {
     let mut b = batch(2, 0, 7);
-    b.reallocate(pairs_from(100, 3), 8);
+    b.reallocate(mpc_signing::pairs_for_testing(100, 3), 8);
     b.destroy_for_testing();
 }
 
@@ -154,7 +146,7 @@ fun test_reallocate_only_pending_tail() {
     // sign inputs 1 and 3 in the old epoch
     b.record(vector[1, 3], vector[sig(0x11), sig(0x33)]);
     // reconfig: reallocate pending inputs (0, 2) from a fresh block at 200
-    b.reallocate(pairs_from(200, 2), 8);
+    b.reallocate(mpc_signing::pairs_for_testing(200, 2), 8);
     assert!(b.epoch() == 8);
     assert!(b.signed_count() == 2);
     assert!(b.pending_count() == 2);
@@ -178,7 +170,7 @@ fun test_reallocate_only_pending_tail() {
 #[expected_failure(abort_code = ENotStale)]
 fun test_reallocate_same_epoch_aborts() {
     let mut b = batch(2, 0, 7);
-    b.reallocate(pairs_from(100, 2), 7); // same epoch -> abort
+    b.reallocate(mpc_signing::pairs_for_testing(100, 2), 7); // same epoch -> abort
     b.destroy_for_testing();
 }
 
@@ -187,7 +179,7 @@ fun test_reallocate_same_epoch_aborts() {
 fun test_reallocate_wrong_allocated_count_aborts() {
     let mut b = batch(3, 0, 7);
     b.record(vector[0], vector[sig(0xAA)]); // 2 still pending
-    b.reallocate(pairs_from(100, 1), 8); // 2 still pending -> abort
+    b.reallocate(mpc_signing::pairs_for_testing(100, 1), 8); // 2 still pending -> abort
     b.destroy_for_testing();
 }
 
@@ -195,12 +187,12 @@ fun test_reallocate_wrong_allocated_count_aborts() {
 fun test_reallocate_multiple_epochs_keeps_signed_count() {
     let mut b = batch(3, 100, 7);
     b.record(vector[0], vector[sig(0x00)]);
-    b.reallocate(pairs_from(200, 2), 8); // inputs 1,2 pending
+    b.reallocate(mpc_signing::pairs_for_testing(200, 2), 8); // inputs 1,2 pending
     assert!(b.signed_count() == 1);
     assert!(b.is_pending_on(1, 200, 201));
     assert!(b.is_pending_on(2, 202, 203));
     b.record(vector[1], vector[sig(0x11)]);
-    b.reallocate(pairs_from(300, 1), 9); // only input 2 pending
+    b.reallocate(mpc_signing::pairs_for_testing(300, 1), 9); // only input 2 pending
     assert!(b.signed_count() == 2);
     assert!(b.is_pending_on(2, 300, 301));
     b.record(vector[2], vector[sig(0x22)]);
