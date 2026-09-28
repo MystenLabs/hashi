@@ -22,7 +22,6 @@ use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
 use crate::mpc::types::MessagesHash;
 use crate::onchain::OnchainState;
-use crate::onchain::TobCertLayout;
 use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
 
@@ -158,25 +157,14 @@ fn tob_certificates_if_present(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Option<Vec<(Address, CertificateV1)>>, TobError> {
-    let Some((layout, raw)) = onchain_state
+    let Some(raw) = onchain_state
         .tob_certs(epoch, batch_index, protocol_type)
         .map_err(tob_read_error)?
     else {
         return Ok(None);
     };
-    // Only nonce buckets ever carry the stamped layout on-chain; the
-    // mirror hands every submission back in stamped form regardless (a
-    // bare one carries `timestamp_ms: 0`), so the layout only needs a
-    // sanity gate, not a decode dispatch.
-    if protocol_type != ProtocolType::NonceGeneration && layout != TobCertLayout::Bare {
-        return Err(TobError::InvalidState(format!(
-            "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses the \
-             {layout:?} cert layout, which only nonce buckets may carry"
-        )));
-    }
     let mut certificates = Vec::with_capacity(raw.len());
-    for (dealer, stamped) in raw {
-        let (submission, timestamp_ms) = (stamped.submission, stamped.timestamp_ms);
+    for (dealer, submission) in raw {
         let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
             Ok(inner_cert) => inner_cert,
             Err(e) => {
@@ -187,7 +175,14 @@ fn tob_certificates_if_present(
                 continue;
             }
         };
-        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, timestamp_ms);
+        // Only a nonce certificate keeps the timestamp; DKG and rotation
+        // certificates drop it.
+        let cert = CertificateV1::new(
+            protocol_type,
+            batch_index,
+            inner_cert,
+            submission.timestamp_ms,
+        );
         certificates.push((dealer, cert));
     }
     Ok(Some(certificates))
@@ -259,8 +254,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<PublishOutcome> {
         let ours = cert.message();
         // The dedup read is a local mirror lookup; a lagging mirror at
-        // worst resubmits, which `submit_cert`'s first-submission-wins
-        // turns into a paid on-chain no-op.
+        // worst resubmits, which the on-chain first-submission-wins rule
+        // turns into a paid no-op.
         let existing = match tob_certificates(
             &self.onchain_state,
             self.epoch,

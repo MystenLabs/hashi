@@ -11956,7 +11956,7 @@ fn valid_dealer_submission(
     setup: &TestSetup,
     dealer_idx: usize,
     timestamp_ms: u64,
-) -> (Address, hashi_types::move_types::StampedDealerSubmissionV1) {
+) -> (Address, hashi_types::move_types::DealerSubmissionV1) {
     let all: Vec<usize> = (0..setup.signing_keys.len()).collect();
     valid_dealer_submission_signed_by(setup, dealer_idx, timestamp_ms, &all)
 }
@@ -11966,7 +11966,7 @@ fn valid_dealer_submission_signed_by(
     dealer_idx: usize,
     timestamp_ms: u64,
     signer_indices: &[usize],
-) -> (Address, hashi_types::move_types::StampedDealerSubmissionV1) {
+) -> (Address, hashi_types::move_types::DealerSubmissionV1) {
     let dealer = setup.address(dealer_idx);
     let hash_bytes = [7u8; 32];
     let target = DealerMessagesHash {
@@ -11989,17 +11989,15 @@ fn valid_dealer_submission_signed_by(
     let signed = aggregator.finish().unwrap();
     (
         dealer,
-        hashi_types::move_types::StampedDealerSubmissionV1 {
-            submission: hashi_types::move_types::DealerSubmissionV1 {
-                message: hashi_types::move_types::DealerMessagesHashV1 {
-                    dealer_address: dealer,
-                    messages_hash: hash_bytes.to_vec(),
-                },
-                signature: hashi_types::move_types::CommitteeSignature {
-                    epoch,
-                    signature: signed.signature_bytes().to_vec(),
-                    signers_bitmap: signed.signers_bitmap_bytes().to_vec(),
-                },
+        hashi_types::move_types::DealerSubmissionV1 {
+            message: hashi_types::move_types::DealerMessagesHashV1 {
+                dealer_address: dealer,
+                messages_hash: hash_bytes.to_vec(),
+            },
+            signature: hashi_types::move_types::CommitteeSignature {
+                epoch,
+                signature: signed.signature_bytes().to_vec(),
+                signers_bitmap: signed.signers_bitmap_bytes().to_vec(),
             },
             timestamp_ms,
         },
@@ -12091,7 +12089,7 @@ fn test_zero_accumulation_window_is_floor_only() {
 }
 
 #[test]
-fn test_bare_zero_stamp_certs_force_floor_only_window() {
+fn test_zero_stamp_certs_force_floor_only_window() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
     mgr.mpc_config.max_faulty = 25;

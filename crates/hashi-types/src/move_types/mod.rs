@@ -82,7 +82,7 @@ impl PackageVersions {
 /// 1. Add the struct in `packages/hashi/`. An upgrade can only *add* types
 ///    — it can never change an existing struct's layout (the CI compat gate
 ///    enforces this) — so a layout change is a *new* type with a *new* name
-///    (`FooV2`, `StampedFoo`, …).
+///    (`FooV2`, …).
 /// 2. Mirror it in this module with serde derives whose field order matches
 ///    the Move declaration exactly (BCS is positional), and `impl MoveType`.
 ///    Types introduced by an upgraded package override [`PACKAGE_VERSION`]
@@ -93,9 +93,9 @@ impl PackageVersions {
 ///    address included — must match the mirror, so a same-name type from a
 ///    foreign package is rejected rather than trusted.
 /// 4. If the new type replaces what a dynamic-field slot holds (a v2 type
-///    in the same bucket), wire it into the dispatch in
-///    `hashi::onchain::versioned_decode`. Readers fail loudly on types they
-///    do not implement; they never guess a layout.
+///    in the same bucket), extend the reader's type check in
+///    `hashi::onchain::versioned_decode` to accept it. Readers fail loudly
+///    on types they do not implement; they never guess a layout.
 ///
 /// The package-wide version the *tree* ships as is a separate axis: see the
 /// `PACKAGE_VERSION` doc in `packages/hashi/sources/core/versioning.move`
@@ -189,8 +189,8 @@ pub struct Hashi {
     pub versioning: Versioning,
     pub treasury: Treasury,
     pub proposals: Proposals,
-    /// TOB certificates by (epoch, batch_index, protocol_type). Values are
-    /// bare `EpochCertsV1` buckets or, for nonce certs, `StampedEpochCertsV1`.
+    /// TOB certificates by (epoch, batch_index, protocol_type). Every value
+    /// is an `EpochCertsV1` bucket.
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     pub num_consumed_presigs: u64,
@@ -1055,17 +1055,6 @@ impl MoveType for EpochCertsV1 {
     const NAME: &'static str = "EpochCertsV1";
 }
 
-/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, the nonce-cert
-/// bucket layout. Identification only: it is BCS-identical to
-/// `EpochCertsV1`, which is what the bucket is decoded as; the layout it names
-/// selects the linked-table node type.
-pub struct StampedEpochCertsV1;
-
-impl MoveType for StampedEpochCertsV1 {
-    const MODULE: &'static str = "tob";
-    const NAME: &'static str = "StampedEpochCertsV1";
-}
-
 /// Rust version of the Move sui::linked_table::LinkedTable type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct LinkedTable<K> {
@@ -1112,23 +1101,13 @@ pub struct CertifiedMessage<T> {
 pub struct DealerSubmissionV1 {
     pub message: DealerMessagesHashV1,
     pub signature: CommitteeSignature,
+    /// Clock timestamp of the transaction that recorded the submission.
+    pub timestamp_ms: u64,
 }
 
 impl MoveType for DealerSubmissionV1 {
     const MODULE: &'static str = "tob";
     const NAME: &'static str = "DealerSubmissionV1";
-}
-
-/// Rust version of the Move hashi::tob::StampedDealerSubmissionV1 type.
-#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct StampedDealerSubmissionV1 {
-    pub submission: DealerSubmissionV1,
-    pub timestamp_ms: u64,
-}
-
-impl MoveType for StampedDealerSubmissionV1 {
-    const MODULE: &'static str = "tob";
-    const NAME: &'static str = "StampedDealerSubmissionV1";
 }
 
 #[derive(Debug)]
