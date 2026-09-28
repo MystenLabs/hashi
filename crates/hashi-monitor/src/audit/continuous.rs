@@ -28,6 +28,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// The frequency at which we do validation checks.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How far back a restart re-audits by default, so a monitor outage shorter
+/// than this leaves no unaudited gap.
+const DEFAULT_RESTART_LOOKBACK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// A continuous audit only requires a start time
 pub struct ContinuousAuditWindow {
     pub user_start: UnixSeconds,
@@ -62,18 +66,19 @@ impl ContinuousAuditWindow {
         }
     }
 
-    /// The earliest start whose checks can still be pending: the longest
-    /// next-event delay and clock skew, the lag of the hourly guardian cursor
-    /// that judges those deadlines, and one poll and state tick to report.
+    /// `DEFAULT_RESTART_LOOKBACK` back, or further if a check can stay pending
+    /// longer: the longest next-event delay and clock skew, the lag of the
+    /// hourly guardian cursor that judges those deadlines, and one poll and
+    /// state tick to report.
     pub fn default_start(cfg: &Config, now: UnixSeconds) -> UnixSeconds {
-        let lookback = cfg
+        let pending = cfg
             .next_event_delays
             .max_delay()
             .saturating_add(cfg.clock_skews.max_skew())
             .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
-        now.saturating_sub(lookback)
+        now.saturating_sub(pending.max(DEFAULT_RESTART_LOOKBACK.as_secs()))
     }
 }
 
@@ -263,6 +268,8 @@ impl ContinuousAuditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::NextEventDelays;
+    use crate::domain::WithdrawalEventType;
 
     const CONFIG: &str = r#"
 next_event_delays:
@@ -287,12 +294,27 @@ btc:
 "#;
 
     #[test]
-    fn default_start_covers_the_longest_next_event_delay() {
+    fn default_start_is_a_week_back() {
         let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
 
         assert_eq!(
             ContinuousAuditWindow::default_start(&cfg, 1_000_000),
-            1_000_000 - 86_400 - 7_200 - 4_200 - 600 - 300,
+            1_000_000 - 604_800,
+        );
+    }
+
+    #[test]
+    fn default_start_covers_a_next_event_delay_longer_than_a_week() {
+        let mut cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        cfg.next_event_delays = NextEventDelays::new(vec![
+            (WithdrawalEventType::E1HashiApproved, 1_200),
+            (WithdrawalEventType::E2GuardianApproved, 691_200),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            ContinuousAuditWindow::default_start(&cfg, 1_000_000),
+            1_000_000 - 691_200 - 7_200 - 4_200 - 600 - 300,
         );
     }
 

@@ -68,8 +68,9 @@ cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
   --start 2026-08-04T19:00:00Z
 ```
-Without `--start`, the audit resumes from the earliest time whose checks can
-still be pending, which is what a restarted service wants.
+Without `--start`, the audit starts a week back, or further if a configured
+delay is longer, so a restarted service also audits an outage of up to about a
+week. Findings from that week are reported again after a restart.
 
 ## Config
 See `audit.sample.yaml` for a complete batch/continuous example:
