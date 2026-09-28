@@ -339,10 +339,17 @@ impl Hashi {
         XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 
+    /// Prefers the key pinned from the live guardian; falls back to the
+    /// on-chain key the pin must match, which is write-once.
     fn require_guardian_btc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        self.guardian_btc_pubkey()
-            .copied()
-            .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned"))
+        if let Some(pinned) = self.guardian_btc_pubkey() {
+            return Ok(*pinned);
+        }
+        let onchain = self
+            .onchain_state()
+            .guardian_btc_public_key()
+            .context("Guardian BTC pubkey not on chain yet")?;
+        XOnlyPublicKey::from_slice(&onchain).context("Invalid on-chain guardian BTC pubkey")
     }
 
     fn sign_deposit_confirmation(
@@ -598,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deposit_is_retried_until_its_address_is_derivable() {
+    async fn deposit_to_another_address_is_never_retried() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let mut config = crate::config::Config::new_for_testing();
         config.db = Some(tmpdir.path().into());
@@ -619,6 +626,7 @@ mod tests {
         )
         .x_only_public_key()
         .0;
+        hashi.guardian_btc_pubkey.set(Some(guardian)).unwrap();
         let network = hashi.config.bitcoin_network();
         let mpc_g = hashi.signing_verifying_key().unwrap();
         let request = deposit_request(Address::new([3; 32]));
@@ -635,17 +643,6 @@ mod tests {
                 .unwrap()
                 .script_pubkey();
 
-        let err = hashi
-            .validate_deposit_request_derivation_path(&expected_script, &request)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, UnapprovedDepositError::DepositAddressUnavailable(_)),
-            "{err:#}"
-        );
-        assert_eq!(err.kind(), UnapprovedDepositErrorKind::RetryOnNextBlock);
-
-        hashi.guardian_btc_pubkey.set(Some(guardian)).unwrap();
         hashi
             .validate_deposit_request_derivation_path(&expected_script, &request)
             .await

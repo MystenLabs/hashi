@@ -498,6 +498,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deposit_confirms_while_guardian_is_down() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Deposit Without Guardian Test ===");
+
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        // Restarted without a guardian, nodes 1-3 can't pin its key, so quorum
+        // needs them to use the on-chain key. Node 0 keeps its pin for the helper.
+        networks.guardian_harness = None;
+        for node in &mut networks.hashi_network_mut().nodes_mut()[1..] {
+            node.restart().await?;
+            node.wait_for_mpc_key(Duration::from_secs(120)).await?;
+        }
+        create_deposit_and_wait(&mut networks, 31_337).await?;
+
+        info!("=== Deposit Without Guardian Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_passive_bitcoin_deposit_discovery() -> Result<()> {
         init_test_logging();
         info!("=== Starting Passive Bitcoin Deposit Discovery Test ===");
