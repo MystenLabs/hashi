@@ -287,6 +287,8 @@ impl TxUTXOs {
         }
         let outputs = checked;
 
+        // TODO(defence in depth): bound each amount by Amount::MAX_MONEY; a certified request
+        // whose output sum wraps passes assert_positive_fees and panics in gross_outflow_amount.
         // Reject zero amounts on both sides: a 0-value input is meaningless and a
         // 0-value output is invalid on Bitcoin.
         for utxo in &inputs {
@@ -410,6 +412,7 @@ pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSign
     messages
         .iter()
         // Not using aux randomness which only provides side-channel protection
+        // TODO(defence in depth): why not use aux?
         .map(|m| BTC_LIB.sign_schnorr_no_aux_rand(m, kp))
         .map(|s| Signature {
             signature: s,

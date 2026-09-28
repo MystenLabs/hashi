@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let end = end.unwrap_or_else(now_timestamp_secs);
             let mut auditor = hashi_monitor::audit::BatchAuditor::new(&cfg, start, end).await?;
+            // TODO(defence in depth): exit non-zero when the audit produced findings.
             auditor.run().await?;
         }
         Command::Continuous {

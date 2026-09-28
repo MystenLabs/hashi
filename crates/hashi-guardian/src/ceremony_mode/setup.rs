@@ -21,6 +21,8 @@ pub async fn setup_new_key(
 
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
+    // TODO(Must fix): no authorization and no check for an existing ceremony/ record; readers take
+    // the lex-max key (session id breaks ties), so a rogue seq-0 ceremony shadows the real one.
     let params = request.params();
     let n = params.num_shares();
     let t = params.threshold();

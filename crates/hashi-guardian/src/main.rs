@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
         EnclaveMode::Withdraw
     };
 
+    // TODO(defence in depth): before any key is generated, fail unless
+    // /sys/devices/virtual/misc/hw_random/rng_current reads "nsm-hwrng".
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
