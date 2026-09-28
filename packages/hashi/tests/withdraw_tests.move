@@ -286,7 +286,7 @@ fun dummy_queue_cert(): hashi::committee::CommitteeSignature {
     hashi::committee::new_committee_signature(0, vector[], vector[])
 }
 
-/// Create, approve, commit (v2 in-place), fully sign and finalize a
+/// Create, approve, commit in place, fully sign and finalize a
 /// single-request withdrawal whose input UTXO is seeded in the pool.
 /// Returns (request_id, txn_id).
 fun setup_fully_signed_txn(
@@ -427,38 +427,28 @@ fun test_archive_entry_batch_mixed() {
 
 #[test]
 #[expected_failure(abort_code = hashi::withdraw::ECannotCancelProcessingWithdrawal)]
-fun test_cancel_pre_upgrade_processed_request() {
+fun test_cancel_archived_request() {
     let epoch = 0u64;
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let mut clock = clock::create_for_testing(ctx);
 
-    // Simulate a request committed before the deferred-archival upgrade: it
-    // sits in `processed`, so the cancellation gate must trip via the
-    // fallback bag check rather than the in-place txn-link check.
-    let id = setup_withdrawal_request(&mut hashi, &clock, 10_000, ctx);
-    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), &clock);
-    let input = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
-    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
-        vector[id],
-        vector[input],
-        vector[withdrawal_queue::output_utxo(1, x"00")],
-        vector[],
-        @0xBEEF,
-        &clock,
-        ctx,
-    );
-    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests_v1_style_for_testing(&txn);
+    // An archived request has left `requests` for `processed`, so the
+    // cancellation gate must trip via the fallback bag check rather than the
+    // in-place txn-link check.
+    let (id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
+    confirm_via_entry(&mut hashi, txn_id, &clock);
+    hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id]);
+    assert!(!hashi.bitcoin().withdrawal_queue().request_in_requests(id));
+    assert!(hashi.bitcoin().withdrawal_queue().request_in_processed(id));
 
     let one_hour_ms = 1000 * 60 * 60;
     clock.set_for_testing(one_hour_ms);
     let refund = hashi::withdraw::cancel_withdrawal(&mut hashi, id, &clock, ctx);
 
-    // Cleanup — not reached.
+    // Cleanup, not reached.
     refund.destroy_for_testing();
-    btc.destroy_for_testing();
-    std::unit_test::destroy(txn);
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }

@@ -721,8 +721,6 @@ fun new_committee_from_voting_powers(
         committee_members.push_back(committee_member);
     };
 
-    // XXX do we sort by address or weight?
-
     committee::new_committee(
         epoch,
         committee_members,

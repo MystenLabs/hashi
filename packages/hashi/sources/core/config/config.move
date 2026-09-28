@@ -19,6 +19,13 @@ use sui::vec_map::{Self, VecMap};
 
 // ~~~~~~~ Constants ~~~~~~~
 
+/// Default share of committee weight, in basis points, that an emergency
+/// pause proposal needs.
+const DEFAULT_EMERGENCY_PAUSE_THRESHOLD_BPS: u64 = 500;
+/// Default share of committee weight, in basis points, that an emergency
+/// unpause proposal needs.
+const DEFAULT_EMERGENCY_UNPAUSE_THRESHOLD_BPS: u64 = 6667;
+
 const PAUSED_KEY: vector<u8> = b"paused";
 const RECONFIG_HOLD_KEY: vector<u8> = b"reconfig_hold";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
@@ -52,8 +59,14 @@ public(package) fun create(): Config {
     // Core defaults
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
     config.upsert(RECONFIG_HOLD_KEY, config_value::new_bool(false));
-    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(500));
-    config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
+    config.upsert(
+        EMERGENCY_PAUSE_THRESHOLD_BPS_KEY,
+        config_value::new_u64(DEFAULT_EMERGENCY_PAUSE_THRESHOLD_BPS),
+    );
+    config.upsert(
+        EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY,
+        config_value::new_u64(DEFAULT_EMERGENCY_UNPAUSE_THRESHOLD_BPS),
+    );
 
     config
 }
@@ -124,9 +137,9 @@ public(package) fun set_paused(self: &mut Config, paused: bool) {
 
 /// Whether governance holds reconfiguration: while set, `start_reconfig`
 /// refuses to form a new committee and the last committed committee keeps
-/// serving. A pending reconfiguration is unaffected. Set and cleared through
-/// `update_config`; absent (a deployment published before the key existed)
-/// means no hold.
+/// serving. A pending reconfiguration is unaffected. Seeded as `false` by
+/// `create`; set and cleared through `update_config`. An absent key reads as
+/// no hold.
 public(package) fun reconfig_hold(self: &Config): bool {
     self.try_get(RECONFIG_HOLD_KEY).map!(|v| v.as_bool()).destroy_or!(false)
 }
@@ -159,9 +172,15 @@ public(package) fun set_guardian_btc_public_key(self: &mut Config, btc_public_ke
 }
 
 public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
-    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(500)
+    self
+        .try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY)
+        .map!(|v| v.as_u64())
+        .destroy_or!(DEFAULT_EMERGENCY_PAUSE_THRESHOLD_BPS)
 }
 
 public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
-    self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(6667)
+    self
+        .try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY)
+        .map!(|v| v.as_u64())
+        .destroy_or!(DEFAULT_EMERGENCY_UNPAUSE_THRESHOLD_BPS)
 }

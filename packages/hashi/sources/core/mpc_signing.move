@@ -69,11 +69,10 @@ public struct SigningBatch has store {
 
 // === Constructors ===
 
-// TODO(presig-allocation-centralization): `new` and `reallocate` take a
-// pre-allocated `presig_base`/`new_base` from the caller (hashi::allocate_presigs),
-// so allocation and reassignment live across call sites. A follow-up could thread
-// an &mut to the consumed-presig counter through here to centralize it in one
-// place. Left as-is for now (see PR #667 review).
+// Note: `new` and `reallocate` take a pre-allocated `presig_base`/`new_base`
+// from the caller (hashi::allocate_presigs), so allocation and reassignment
+// live across call sites. Threading an &mut to the consumed-presig counter
+// through here would centralize them in one place.
 /// Create a batch for `num_inputs`, contiguously assigning presignature
 /// indices so that input `i` uses `presig_base + i`.
 public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningBatch {
