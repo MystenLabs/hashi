@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::log_layout::S3HourScopedDirectory;
+use super::super::log_layout::S3HourDirectory;
 use crate::committee::CommitteeSignature;
 use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
@@ -30,7 +30,7 @@ impl WithdrawalLogMessage {
     /// an hour bucket is also seq-sorted. The KP reads the max-seq log to
     /// recover limiter state.
     pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
-        let directory = S3HourScopedDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
+        let directory = S3HourDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
         format!(
             "{directory}{:020}-{session_id}-wid{}.json",
             self.request_data.seq, self.request_data.wid,

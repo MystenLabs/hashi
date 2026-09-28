@@ -9,7 +9,7 @@ use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
@@ -46,7 +46,7 @@ pub struct GuardianWithdrawalsPoller {
     /// Owns the S3 client + the trusted-key cache, so a session's attestation is
     /// verified once for the poller's lifetime.
     reader: GuardianReader,
-    cursor: S3HourScopedDirectory,
+    cursor: S3HourDirectory,
 }
 
 impl GuardianWithdrawalsPoller {
@@ -56,7 +56,7 @@ impl GuardianWithdrawalsPoller {
             hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
         Ok(Self {
             reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
-            cursor: S3HourScopedDirectory::withdraw(start),
+            cursor: S3HourDirectory::withdraw(start),
         })
     }
 

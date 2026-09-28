@@ -9,7 +9,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
 use hashi_types::guardian::CeremonyState;
@@ -107,7 +107,7 @@ impl GuardianReader {
     /// directory may contain records from more than one build.
     pub async fn read_logs_in_dir(
         &mut self,
-        dir: &S3HourScopedDirectory,
+        dir: &S3HourDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
         let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 

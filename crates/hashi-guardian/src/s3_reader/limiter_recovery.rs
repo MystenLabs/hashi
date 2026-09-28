@@ -10,8 +10,8 @@
 //!
 //! Finding that log is a 4-level S3 tree-walk over the hour-partitioned layout
 //! (`withdraw/YYYY/MM/DD/HH/`): at each level we list `CommonPrefixes`, pick the
-//! lex-greatest, and descend. The first hour bucket containing any withdrawal
-//! key is the latest non-empty bucket. We read it and one bucket back
+//! greatest numeric component, and descend. The first hour bucket containing
+//! any withdrawal key is the latest non-empty bucket. We read it and one bucket back
 //! (sub-hour clock-skew defense across hour boundaries), then take the max-seq
 //! withdrawal across both.
 //!
@@ -27,7 +27,8 @@
 use super::GuardianReader;
 use super::VerifiedLogRecord;
 use crate::s3_client::GuardianS3Client;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
+use hashi_types::guardian::s3::S3NumericDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
@@ -83,18 +84,18 @@ impl GuardianReader {
 }
 
 /// Finds the latest hour bucket under `withdraw/` containing at least one
-/// withdrawal key, by descending the YYYY/MM/DD/HH tree in lex-greatest
+/// withdrawal key, by walking the YYYY/MM/DD/HH tree in descending numeric
 /// order at each level. Returns `None` if no withdrawal log exists anywhere.
 async fn find_latest_withdrawal_bucket(
     s3_client: &GuardianS3Client,
-) -> GuardianResult<Option<S3HourScopedDirectory>> {
+) -> GuardianResult<Option<S3HourDirectory>> {
     let root = format!("{}/", S3_DIR_WITHDRAW);
     for year in list_subdirs_desc(s3_client, &root).await? {
         for month in list_subdirs_desc(s3_client, &year).await? {
             for day in list_subdirs_desc(s3_client, &month).await? {
                 for hour in list_subdirs_desc(s3_client, &day).await? {
                     if !s3_client.list_keys(&hour).await?.is_empty() {
-                        let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
+                        let dir = S3HourDirectory::from_path(&hour).map_err(|e| {
                             InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
                         })?;
                         return Ok(Some(dir));
@@ -110,10 +111,18 @@ async fn list_subdirs_desc(
     s3_client: &GuardianS3Client,
     prefix: &str,
 ) -> GuardianResult<Vec<String>> {
-    let mut subs = s3_client.list_common_prefixes(prefix).await?;
-    // The S3 client already returns unique prefixes in ascending order.
-    subs.reverse();
-    Ok(subs)
+    let mut dirs = s3_client
+        .list_common_prefixes(prefix)
+        .await?
+        .into_iter()
+        .map(|path| {
+            S3NumericDirectory::from_path(&path)
+                .map_err(|e| InvalidS3Log(format!("invalid withdrawal-log directory {path}: {e}")))
+        })
+        .collect::<GuardianResult<Vec<_>>>()?;
+    dirs.sort();
+    dirs.reverse();
+    Ok(dirs.into_iter().map(|dir| dir.to_string()).collect())
 }
 
 fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
@@ -211,12 +220,9 @@ mod tests {
         format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/{seq:020}-sess-widabc.json")
     }
 
-    fn assert_bucket(actual: Option<S3HourScopedDirectory>, expected_path: &str) {
+    fn assert_bucket(actual: Option<S3HourDirectory>, expected_path: &str) {
         let got = actual.expect("expected Some bucket");
-        assert_eq!(
-            got,
-            S3HourScopedDirectory::from_path(expected_path).unwrap()
-        );
+        assert_eq!(got, S3HourDirectory::from_path(expected_path).unwrap());
     }
 
     #[tokio::test]
@@ -249,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_latest_withdrawal_bucket_picks_lex_greatest_across_years() {
+    async fn find_latest_withdrawal_bucket_picks_latest_across_years() {
         let keys = vec![
             withdrawal_key(2023, 12, 31, 23, 1),
             withdrawal_key(2024, 1, 1, 0, 2),
@@ -257,5 +263,36 @@ mod tests {
         let s3 = crate::test_utils::mock_logger_with_layout(keys);
         let got = find_latest_withdrawal_bucket(&s3).await.unwrap();
         assert_bucket(got, "withdraw/2024/01/01/00/");
+    }
+
+    #[tokio::test]
+    async fn find_latest_withdrawal_bucket_uses_numeric_order_at_each_level() {
+        for older_key in [
+            "withdraw/999/10/18/18/x",
+            "withdraw/2026/9/18/18/x",
+            "withdraw/2026/10/9/18/x",
+            "withdraw/2026/10/18/9/x",
+        ] {
+            // Each older path sorts lexicographically above the genuine latest bucket.
+            let s3 = crate::test_utils::mock_logger_with_layout([
+                withdrawal_key(2026, 10, 18, 18, 7),
+                older_key.to_string(),
+            ]);
+            let got = find_latest_withdrawal_bucket(&s3).await.unwrap();
+            assert_bucket(got, "withdraw/2026/10/18/18/");
+        }
+    }
+
+    #[tokio::test]
+    async fn find_latest_withdrawal_bucket_rejects_noncanonical_latest_hour() {
+        let s3 = crate::test_utils::mock_logger_with_layout([
+            withdrawal_key(2026, 9, 28, 8, 7),
+            "withdraw/2026/09/28/9/x".to_string(),
+        ]);
+        let err = find_latest_withdrawal_bucket(&s3).await.unwrap_err();
+        assert!(matches!(
+            err,
+            InvalidS3Log(message) if message.contains("noncanonical directory path")
+        ));
     }
 }

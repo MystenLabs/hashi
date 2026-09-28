@@ -6,7 +6,7 @@ use super::VerifiedLogRecord;
 use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
-use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::now_timestamp_ms;
 use hashi_types::guardian::time::unix_millis_to_seconds;
 use hashi_types::guardian::time::UnixMillis;
@@ -102,7 +102,7 @@ impl GuardianReader {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = unix_millis_to_seconds(reference_time).saturating_sub(60 * 60);
-        let mut cursor = S3HourScopedDirectory::heartbeat(one_hour_ago);
+        let mut cursor = S3HourDirectory::heartbeat(one_hour_ago);
         let mut logs = Vec::new();
         for _ in 0..3 {
             logs.extend(self.read_logs_in_dir(&cursor).await?);
