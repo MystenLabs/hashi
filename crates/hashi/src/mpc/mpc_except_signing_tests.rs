@@ -17325,6 +17325,8 @@ const GOLDEN_E2E_DIVISOR: u16 = 100;
 
 const GOLDEN_DEV_CHAIN_ID: &str = "testchain";
 
+const GOLDEN_SYNTHETIC_CONFIGS: [(u16, u16); 4] = [(3333, 800), (3333, 0), (3333, 3332), (1, 0)];
+
 #[derive(serde::Serialize)]
 struct ReductionGolden {
     case: String,
@@ -17571,6 +17573,22 @@ fn golden_corpus() -> Vec<GoldenInput> {
             divisor,
             chain_id,
         );
+    }
+    let synthetic_shapes: [(&str, Vec<u64>); 6] = [
+        ("whale_40pct", [vec![4000], vec![100; 60]].concat()),
+        ("two_whales_33pct", [vec![3300; 2], vec![100; 34]].concat()),
+        (
+            "three_whales_32pct_and_dust",
+            [vec![3200; 3], vec![1; 400]].concat(),
+        ),
+        ("equal_150", vec![66; 150]),
+        ("near_equal_150", [vec![67; 100], vec![66; 50]].concat()),
+        ("ones_at_floor", vec![1; 100]),
+    ];
+    for (shape, weights) in &synthetic_shapes {
+        for config in GOLDEN_SYNTHETIC_CONFIGS {
+            push("synthetic", shape.to_string(), weights, config, 1, mainnet);
+        }
     }
     corpus
 }
