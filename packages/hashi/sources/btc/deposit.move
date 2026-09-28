@@ -7,7 +7,9 @@
 /// delay in which a faulty approval can be caught and the service paused —
 /// the deposit is confirmed: hBTC is minted to the recipient encoded in the
 /// UTXO's derivation path and the UTXO joins the active pool. Requests that
-/// are never confirmed can be garbage-collected once they expire.
+/// are never confirmed can be garbage-collected once they expire: an
+/// unapproved request a fixed maximum age after its creation, an approved
+/// request the same maximum age after its latest approval.
 module hashi::deposit;
 
 use hashi::{
@@ -254,9 +256,17 @@ entry fun confirm_deposit(
     };
 }
 
-/// Garbage collection: deliberately NOT gated on pause/reconfig — expiry
-/// refunds nothing (deposits mint on confirmation) and GC must stay
-/// callable during an emergency pause.
+/// Garbage collection of a deposit request that was never confirmed.
+/// Permissionless: anyone may delete a request once it has expired, and the
+/// call aborts until then. A request that carries an approval expires
+/// relative to its approval time, not its creation time, so an approved
+/// request whose confirmation is held up by the time delay, a pause or a
+/// reconfiguration cannot be deleted just because it was created long ago.
+/// A request that was never approved expires relative to its creation time.
+///
+/// Deliberately NOT gated on pause/reconfig: expiry refunds nothing
+/// (deposits mint on confirmation) and GC must stay callable during an
+/// emergency pause.
 entry fun delete_expired_deposit(
     hashi: &mut Hashi,
     request_id: address,

@@ -4,9 +4,11 @@
 /// Storage and bookkeeping for Bitcoin deposit requests. Active requests
 /// sit in an ObjectBag awaiting committee approval and confirmation;
 /// confirmed requests move to a processed bag, and requests that were never
-/// confirmed can be deleted once they pass the maximum age. The state
-/// transitions themselves (certificate verification, minting, time-delay
-/// enforcement) are driven by `hashi::deposit`.
+/// confirmed can be deleted once they pass the maximum age. That age is
+/// measured from the approval of a request that carries one and from the
+/// creation of a request that does not. The state transitions themselves
+/// (certificate verification, minting, time-delay enforcement) are driven by
+/// `hashi::deposit`.
 module hashi::deposit_queue;
 
 use hashi::{committee::CommitteeSignature, utxo::Utxo};
@@ -14,14 +16,15 @@ use sui::{clock::Clock, object_bag::ObjectBag};
 
 // ~~~~~~~ Constants ~~~~~~~
 
-// const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
-const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
+/// Maximum age of an active deposit request, see `is_expired`. The leader's
+/// garbage collection scans with the same value.
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 
 // ~~~~~~~ Errors ~~~~~~~
 
 #[error(code = 0)]
 const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
-#[error]
+#[error(code = 1)]
 const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been processed";
 
 // ~~~~~~~ Structs ~~~~~~~
@@ -42,7 +45,8 @@ public struct DepositRequest has key, store {
     /// `approve_deposit` has been called.
     approval_cert: Option<CommitteeSignature>,
     /// Clock timestamp at the moment of approval. `None` until
-    /// `approve_deposit` has been called.
+    /// `approve_deposit` has been called. Once set, the request expires
+    /// relative to this timestamp instead of `created_timestamp_ms`.
     approved_timestamp_ms: Option<u64>,
     /// Clock timestamp at the moment of confirmation. `None` until
     /// `confirm_deposit` has been called.
@@ -53,7 +57,8 @@ public struct DepositRequestQueue has store {
     /// Active deposits awaiting confirmation.
     /// ObjectBag so DepositRequest UIDs are directly accessible via getObject.
     requests: ObjectBag,
-    /// Completed deposits (confirmed or expired).
+    /// Completed deposits (confirmed). Expired requests are deleted, not
+    /// moved here.
     processed: ObjectBag,
 }
 
@@ -125,7 +130,9 @@ public(package) fun insert_processed(
     (request_id, recipient)
 }
 
-/// Delete an expired deposit request.
+/// Delete an expired deposit request. Aborts with
+/// `EDepositRequestNotExpired` while the request is within its maximum age,
+/// which an approval restarts (see `is_expired`).
 /// Expired requests are never confirmed, so they won't be in the user index.
 public(package) fun delete_expired(
     self: &mut DepositRequestQueue,
@@ -212,6 +219,23 @@ public(package) fun request_utxo(self: &DepositRequest): &Utxo {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
+/// A request is expired once the clock is strictly past its reference
+/// timestamp plus `MAX_DEPOSIT_REQUEST_AGE_MS`. The reference is the approval
+/// time when the request carries an approval and the creation time otherwise,
+/// so an approved request that is waiting out the time delay, a pause or a
+/// reconfiguration is not deletable just because it was created long ago. A
+/// re-approval moves the reference forward.
+///
+/// The leader's garbage collection selects requests with the same reference,
+/// the same maximum age and the same strict comparison.
 fun is_expired(request: &DepositRequest, clock: &Clock): bool {
-    clock.timestamp_ms() > request.created_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
+    // `approve` sets the certificate and the timestamp together.
+    let reference_timestamp_ms = if (
+        request.approval_cert.is_some() && request.approved_timestamp_ms.is_some()
+    ) {
+        *request.approved_timestamp_ms.borrow()
+    } else {
+        request.created_timestamp_ms
+    };
+    clock.timestamp_ms() > reference_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
 }

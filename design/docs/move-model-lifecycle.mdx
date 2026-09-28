@@ -137,6 +137,14 @@ flowchart TD
 | 8    | Certified request processed                      | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
 | 9    | Treasury mints tokens                            | `Utxo.amount` → `Balance<BTC>` to user                                                |
 
+A `DepositRequest` that is never confirmed expires one day after its reference
+time, and anyone can then remove it with `delete_expired_deposit`. The
+reference is the request's creation time until it is approved and its latest
+approval time afterwards. An approved request whose confirmation is held up by
+the time-delay window, a pause, or a reconfiguration is therefore not deletable
+because of how long ago it was created, and a re-approval by a new committee
+restarts the one-day window.
+
 ---
 
 ## Withdrawal flow
