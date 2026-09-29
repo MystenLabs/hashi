@@ -36,10 +36,22 @@ fun test_reconfig_hold_defaults_to_false() {
 
 #[test]
 fun test_reconfig_hold_reads_false_when_absent() {
-    // A deployment published before the key existed has no entry; the
-    // accessor must not abort on it.
+    // The accessor must not abort on a config without the key.
     let config = config::empty();
     assert!(!config::reconfig_hold(&config));
+}
+
+/// `create` seeds both emergency thresholds, and the accessors fall back to
+/// the same defaults for an absent key.
+#[test]
+fun test_emergency_thresholds_default_when_seeded_and_when_absent() {
+    let seeded = config::create();
+    assert!(config::emergency_pause_threshold_bps(&seeded) == 500);
+    assert!(config::emergency_unpause_threshold_bps(&seeded) == 6667);
+
+    let absent = config::empty();
+    assert!(config::emergency_pause_threshold_bps(&absent) == 500);
+    assert!(config::emergency_unpause_threshold_bps(&absent) == 6667);
 }
 
 #[test]

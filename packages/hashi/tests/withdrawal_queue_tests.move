@@ -869,6 +869,50 @@ fun test_miner_fee_output_below_dust_aborts() {
 }
 
 #[test]
+#[expected_failure(abort_code = EOutputBelowDust)]
+fun test_miner_fee_above_request_amount_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
+
+    // The request is smaller than its share of the miner fee, which is what a
+    // request admitted under a lower withdrawal minimum looks like once the
+    // minimum (and with it the fee cap) has been raised. No output amount can
+    // satisfy it, so the named dust error must fire rather than the
+    // subtraction underflowing.
+    let btc_amount = 1_000u64;
+    let miner_fee = 2_000u64;
+    let user_output = hashi::btc_config::dust_relay_min_value();
+    let change = 1_000u64;
+    let input_amount = user_output + change + miner_fee;
+
+    let id = setup_request(&mut queue, &clock, btc_amount, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let infos = queue.extract_request_infos(&vector[id]);
+
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
+        vector[id],
+        &infos,
+        vector[utxo::utxo(utxo::utxo_id(@0xDD04, 0), input_amount, option::none())],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xDD04,
+        0,
+        0,
+        &config,
+        &clock,
+        vector[],
+    );
+
+    queue.insert_withdrawal_txn(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
 #[expected_failure(abort_code = EOutputAmountMismatch)]
 fun test_miner_fee_wrong_output_amount_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
@@ -1150,29 +1194,29 @@ fun test_archive_unconfirmed_txn_aborts() {
 }
 
 #[test]
-fun test_archive_v1_leftover_stays_in_processed() {
+fun test_archive_skips_requests_already_archived_by_chunk() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Simulate a request committed before the upgrade: it already lives in
-    // `processed`.
-    let id = setup_request(&mut queue, &clock, 50_000, ctx);
-    queue.approve_withdrawal(id, dummy_cert(), &clock);
-    let txn = make_test_txn(vector[id], @0xBEEF, &clock, ctx);
-    let txn_id = txn.withdrawal_txn_id();
-    let btc = queue.commit_requests_v1_style_for_testing(&txn);
-    btc.destroy_for_testing();
-    queue.insert_withdrawal_txn(txn);
-    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
-    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    let (ids, txn_id) = setup_confirmed_three_request_txn(&mut queue, &clock, ctx);
 
-    // Confirmed under v2, archived by GC: the request needs no write and no
-    // second move; only the txn moves.
-    queue.mark_txn_confirmed(txn_id, &clock);
+    // A chunk archived two of the three requests; the txn is still hot.
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[0], ids[1]]);
+    assert!(queue.request_in_processed(ids[0]));
+    assert!(queue.request_in_processed(ids[1]));
+    assert!(queue.request_in_requests(ids[2]));
+    assert!(queue.has_withdrawal_txn(txn_id));
+
+    // The whole-txn archival skips the two archived requests instead of
+    // aborting on them, moves the remaining one, and moves the txn.
     queue.archive_withdrawal_txn(txn_id);
 
-    assert!(queue.request_in_processed(id));
+    assert!(queue.request_in_processed(ids[0]));
+    assert!(queue.request_in_processed(ids[1]));
+    assert!(queue.request_in_processed(ids[2]));
+    assert!(!queue.request_in_requests(ids[2]));
+    assert!(!queue.has_withdrawal_txn(txn_id));
     assert!(queue.has_confirmed_txn(txn_id));
 
     clock.destroy_for_testing();
@@ -1211,7 +1255,7 @@ fun test_queue_cancel_committed_request_aborts() {
 
 // ======== Chunked archival tests ========
 
-/// Three-request txn: approved, committed (v2 in-place), fully signed,
+/// Three-request txn: approved, committed in place, fully signed,
 /// finalized, and confirmed. Returns (ids, txn_id).
 fun setup_confirmed_three_request_txn(
     queue: &mut withdrawal_queue::WithdrawalRequestQueue,
@@ -1312,41 +1356,4 @@ fun test_chunked_archive_unconfirmed_txn_aborts() {
     let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
     queue.archive_withdrawal_requests(txn_id, &vector[]);
     abort 0
-}
-
-#[test]
-/// A request committed before the v2 upgrade already lives in `processed`
-/// and carries no lifecycle state of its own to flip, so it counts as
-/// archived from the start: the finish completes right after confirmation
-/// without any `archive_request` chunk, and a later chunk naming the request
-/// is a no-op rather than an abort.
-fun test_finish_archive_v1_committed_request_counts_as_archived() {
-    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
-    let mut queue = setup_queue(ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    // v1-committed (pre-upgrade): request lives in `processed`.
-    let id = setup_request(&mut queue, &clock, 60_000, ctx);
-    queue.approve_withdrawal(id, dummy_cert(), &clock);
-    let txn = make_test_txn(vector[id], @0xF00D, &clock, ctx);
-    let txn_id = txn.withdrawal_txn_id();
-    let btc = queue.commit_requests_v1_style_for_testing(&txn);
-    btc.destroy_for_testing();
-    queue.insert_withdrawal_txn(txn);
-    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
-    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
-    queue.mark_txn_confirmed(txn_id, &clock);
-    assert!(queue.request_in_processed(id));
-
-    queue.finish_archive_withdrawal_txn(txn_id);
-    assert!(!queue.has_withdrawal_txn(txn_id));
-    assert!(queue.has_confirmed_txn(txn_id));
-    assert!(queue.request_in_processed(id));
-
-    // A chunk naming the already-archived request no-ops.
-    queue.archive_withdrawal_requests(txn_id, &vector[id]);
-    assert!(queue.request_in_processed(id));
-
-    clock.destroy_for_testing();
-    std::unit_test::destroy(queue);
 }

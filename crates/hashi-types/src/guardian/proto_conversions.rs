@@ -19,6 +19,7 @@ use super::DeploymentConfig;
 use super::DeploymentConfigSummary;
 use super::EnclaveLifecycle;
 use super::GenesisState;
+use super::GetGuardianInfoRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -565,7 +566,7 @@ impl TryFrom<pb::BuildPcrs> for BuildPcrs {
             .git_revision
             .ok_or_else(|| missing("git_revision"))?;
         let pcr0 = build_pb.pcr0.ok_or_else(|| missing("pcr0"))?.to_vec();
-        Ok(BuildPcrs::new(&git_revision, pcr0))
+        BuildPcrs::new(&git_revision, pcr0)
     }
 }
 
@@ -605,12 +606,18 @@ impl TryFrom<pb::InitConfig> for InitConfig {
     }
 }
 
+impl From<pb::GetGuardianInfoRequest> for GetGuardianInfoRequest {
+    fn from(request: pb::GetGuardianInfoRequest) -> Self {
+        Self {
+            include_attestation: request.include_attestation,
+        }
+    }
+}
+
 impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
     type Error = GuardianError;
 
     fn try_from(resp: pb::GetGuardianInfoResponse) -> Result<Self, Self::Error> {
-        let attestation = resp.attestation.ok_or_else(|| missing("attestation"))?;
-
         let signing_pub_key_bytes = resp
             .signing_pub_key
             .ok_or_else(|| missing("signing_pub_key"))?;
@@ -621,7 +628,8 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info = GuardianSignedResponse::<GuardianInfo>::try_from(signed_info_pb)?;
 
         Ok(GetGuardianInfoResponse::new(
-            NitroAttestation::new(attestation.to_vec()),
+            resp.attestation
+                .map(|bytes| NitroAttestation::new(bytes.to_vec())),
             signing_pub_key,
             signed_info,
         ))
@@ -1010,7 +1018,9 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
 
 pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
-        attestation: Some(r.attestation.into_bytes().into()),
+        attestation: r
+            .attestation
+            .map(|attestation| attestation.into_bytes().into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
     }
@@ -1119,7 +1129,6 @@ impl TryFrom<i32> for CeremonyStage {
 
     fn try_from(stage: i32) -> Result<Self, Self::Error> {
         match pb::CeremonyStage::try_from(stage) {
-            Ok(pb::CeremonyStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::CeremonyStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
             Ok(pb::CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
                 Ok(Self::AwaitingKeyProvisionerConfirmations)
@@ -1134,7 +1143,6 @@ impl TryFrom<i32> for CeremonyStage {
 
 fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     match stage {
-        CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
         CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
         CeremonyStage::AwaitingKeyProvisionerConfirmations => {
             pb::CeremonyStage::AwaitingKeyProvisionerConfirmations as i32
@@ -1148,7 +1156,6 @@ impl TryFrom<i32> for WithdrawStage {
 
     fn try_from(stage: i32) -> Result<Self, Self::Error> {
         match pb::WithdrawStage::try_from(stage) {
-            Ok(pb::WithdrawStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::WithdrawStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
             Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(Self::ProvisionerInitialized),
             Ok(pb::WithdrawStage::Activated) => Ok(Self::Activated),
@@ -1161,7 +1168,6 @@ impl TryFrom<i32> for WithdrawStage {
 
 fn withdraw_stage_to_pb(stage: WithdrawStage) -> i32 {
     match stage {
-        WithdrawStage::Uninitialized => pb::WithdrawStage::Uninitialized as i32,
         WithdrawStage::OperatorInitialized => pb::WithdrawStage::OperatorInitialized as i32,
         WithdrawStage::ProvisionerInitialized => pb::WithdrawStage::ProvisionerInitialized as i32,
         WithdrawStage::Activated => pb::WithdrawStage::Activated as i32,
@@ -1172,12 +1178,13 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
     type Error = GuardianError;
 
     fn try_from(data: pb::GuardianInfoData) -> Result<Self, Self::Error> {
-        let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
-            pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
-                EnclaveLifecycle::Ceremony(CeremonyStage::try_from(stage)?)
+        let lifecycle = match data.lifecycle {
+            None => None,
+            Some(pb::guardian_info_data::Lifecycle::Ceremony(stage)) => {
+                Some(EnclaveLifecycle::Ceremony(CeremonyStage::try_from(stage)?))
             }
-            pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
-                EnclaveLifecycle::Withdraw(WithdrawStage::try_from(stage)?)
+            Some(pb::guardian_info_data::Lifecycle::Withdraw(stage)) => {
+                Some(EnclaveLifecycle::Withdraw(WithdrawStage::try_from(stage)?))
             }
         };
         let secret_sharing_instance = data
@@ -1260,16 +1267,16 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
 }
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
-    let lifecycle = match info.lifecycle {
+    let lifecycle = info.lifecycle.map(|lifecycle| match lifecycle {
         EnclaveLifecycle::Ceremony(stage) => {
             pb::guardian_info_data::Lifecycle::Ceremony(ceremony_stage_to_pb(stage))
         }
         EnclaveLifecycle::Withdraw(stage) => {
             pb::guardian_info_data::Lifecycle::Withdraw(withdraw_stage_to_pb(stage))
         }
-    };
+    });
     pb::GuardianInfoData {
-        lifecycle: Some(lifecycle),
+        lifecycle,
         secret_sharing_instance: info
             .secret_sharing_instance
             .as_ref()
@@ -1850,16 +1857,24 @@ mod tests {
 
     #[test]
     fn get_guardian_info_response_round_trip() {
-        let resp = GetGuardianInfoResponse::mock_for_testing();
-        let pb = get_guardian_info_response_to_pb(resp.clone());
-        let back = GetGuardianInfoResponse::try_from(pb).unwrap();
-        assert_eq!(resp, back);
+        for include_attestation in [false, true] {
+            let mut resp = GetGuardianInfoResponse::mock_for_testing();
+            if !include_attestation {
+                resp.attestation = None;
+            }
+            let pb = get_guardian_info_response_to_pb(resp.clone());
+            assert_eq!(pb.attestation.is_some(), include_attestation);
+            let back = GetGuardianInfoResponse::try_from(pb).unwrap();
+            assert_eq!(resp, back);
+        }
     }
 
     #[test]
     fn guardian_info_data_with_enclave_btc_pubkey_round_trip() {
-        use crate::bitcoin::create_btc_keypair_for_test;
-        let kp = create_btc_keypair_for_test(&[7u8; 32]);
+        use crate::bitcoin::BTC_LIB;
+        use crate::bitcoin::BitcoinKeypair;
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32]).expect("valid test secret key");
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {

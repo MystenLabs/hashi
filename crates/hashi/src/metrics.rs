@@ -27,6 +27,8 @@ pub struct Metrics {
     pub(crate) peer_inflight_at_admission: HistogramVec,
     pub(crate) peer_inflight_max: IntGaugeVec,
     pub(crate) peer_requests_shed_total: IntCounterVec,
+    pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
+    pub(crate) withdrawal_signing_refused_total: IntCounterVec,
 
     // Per-MPC-protocol body-size metrics.
     pub(crate) mpc_request_size_bytes: HistogramVec,
@@ -109,6 +111,7 @@ pub struct Metrics {
     pub deposit_outpoint_confirmations: IntGaugeVec,
     withdrawal_queue_size: IntGaugeVec,
     withdrawal_queue_value: IntGaugeVec,
+    withdrawal_oldest_unsigned_age_seconds: IntGauge,
     utxo_pool_size: IntGaugeVec,
     utxo_pool_value: IntGaugeVec,
     utxo_pool_average_age_blocks: IntGauge,
@@ -159,6 +162,7 @@ pub struct Metrics {
     /// on-chain (we never auto-reject); operator intervention is
     /// required (raise the cap or have the user cancel).
     pub guardian_limiter_stuck_oversize_skipped_total: IntCounter,
+    pub withdrawal_commitment_left_out_total: IntCounterVec,
 
     pub btc_fee_rate_sat_per_kvb: IntGauge,
 
@@ -414,6 +418,20 @@ impl Metrics {
                 "hashi_peer_requests_shed_total",
                 "Requests shed because the peer was at its in-flight limit",
                 &["peer"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_signing_tasks_max: register_int_gauge_vec_with_registry!(
+                "hashi_withdrawal_signing_tasks_max",
+                "Peak concurrent withdrawal signing tasks per caller since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_withdrawal_signing_refused_total",
+                "Withdrawal signing calls refused, by caller and reason (committee or cap)",
+                &["peer", "reason"],
                 registry,
             )
             .unwrap(),
@@ -822,6 +840,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            withdrawal_oldest_unsigned_age_seconds: register_int_gauge_with_registry!(
+                "hashi_withdrawal_oldest_unsigned_age_seconds",
+                "How long the oldest unsigned withdrawal has been waiting, in seconds. \
+                 New withdrawals wait behind it.",
+                registry,
+            )
+            .unwrap(),
             utxo_pool_size: register_int_gauge_vec_with_registry!(
                 "hashi_utxo_pool_size",
                 "number of UTXOs in the pool by status",
@@ -1018,6 +1043,14 @@ impl Metrics {
             guardian_limiter_stuck_oversize_skipped_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_stuck_oversize_skipped_total",
                 "Withdrawal requests skipped because their amount exceeds the limiter's max bucket capacity",
+                registry,
+            )
+            .unwrap(),
+            withdrawal_commitment_left_out_total: register_int_counter_vec_with_registry!(
+                "hashi_withdrawal_commitment_left_out_total",
+                "Times the leader's commit check refused a request or input in a batch it was \
+                 building.",
+                &["item", "reason"],
                 registry,
             )
             .unwrap(),
@@ -1725,6 +1758,19 @@ impl Metrics {
                 pending.push(w);
             }
         }
+        let oldest_unsigned_ms = signing
+            .iter()
+            .chain(&pending)
+            .map(|w| w.created_timestamp_ms)
+            .min();
+        self.withdrawal_oldest_unsigned_age_seconds.set(
+            oldest_unsigned_ms.map_or(0, |created_ms| {
+                state
+                    .latest_checkpoint_timestamp_ms()
+                    .saturating_sub(created_ms)
+                    / 1000
+            }) as i64,
+        );
         for (label, class) in [
             ("confirmed", &confirmed),
             ("signed", &signed),

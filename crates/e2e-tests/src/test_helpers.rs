@@ -13,12 +13,10 @@ use anyhow::anyhow;
 use bitcoin::Amount;
 use bitcoin::Txid;
 use futures::StreamExt;
-use hashi::onchain::TobCertLayout;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use hashi_types::bitcoin::BitcoinAddress;
+use hashi_types::move_types::DealerSubmissionV1;
 use hashi_types::move_types::DepositConfirmed;
-use hashi_types::move_types::ProtocolType;
-use hashi_types::move_types::StampedDealerSubmissionV1;
 use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalConfirmed;
 use std::sync::Arc;
@@ -499,14 +497,13 @@ pub async fn wait_for_withdrawal_archival(
 /// Chain-truth oracle for one TOB bucket, reading over RPC rather than
 /// the mirror (production cert readers are mirror reads, so the tests
 /// need an independent source): find the bucket Field in the tob bag,
-/// decode its nodes in whichever layout the bucket's on-chain value
-/// type names (bare submissions are lifted to the stamped form the
-/// mirror stores), and walk the `LinkedTable` in link order. Returns
-/// `None` when the bucket does not exist on-chain.
+/// check its on-chain value type, decode its nodes, and walk the
+/// `LinkedTable` in link order. Returns `None` when the bucket does not
+/// exist on-chain.
 pub async fn fetch_tob_certs_from_chain(
     networks: &TestNetworks,
     key: hashi_types::move_types::TobKey,
-) -> Result<Option<Vec<(Address, StampedDealerSubmissionV1)>>> {
+) -> Result<Option<Vec<(Address, DealerSubmissionV1)>>> {
     let tob_id = networks.hashi_network.nodes()[0]
         .hashi()
         .onchain_state()
@@ -525,15 +522,10 @@ pub async fn fetch_tob_certs_from_chain(
         .value_type_opt()
         .ok_or_else(|| anyhow!("TOB bucket field carried no value_type"))?
         .parse()?;
-    let stamped = if value_type.module() == "tob" && value_type.name() == "EpochCertsV1" {
-        false
-    } else if value_type.module() == "tob" && value_type.name() == "StampedEpochCertsV1" {
-        true
-    } else {
-        anyhow::bail!("unknown TOB bucket value type: {value_type}");
-    };
-    // The two bucket structs are BCS-identical; only the node layout
-    // differs.
+    anyhow::ensure!(
+        value_type.module() == "tob" && value_type.name() == "EpochCertsV1",
+        "unknown TOB bucket value type: {value_type}"
+    );
     let bucket: hashi_types::move_types::EpochCertsV1 = field
         .value()
         .deserialize()
@@ -545,29 +537,10 @@ pub async fn fetch_tob_certs_from_chain(
             .name()
             .deserialize()
             .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
-        let node: hashi_types::move_types::LinkedTableNode<Address, StampedDealerSubmissionV1> =
-            if stamped {
-                field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize a stamped tob node: {e}"))?
-            } else {
-                let bare: hashi_types::move_types::LinkedTableNode<
-                    Address,
-                    hashi_types::move_types::DealerSubmissionV1,
-                > = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
-                hashi_types::move_types::LinkedTableNode {
-                    prev: bare.prev,
-                    next: bare.next,
-                    value: StampedDealerSubmissionV1 {
-                        submission: bare.value,
-                        timestamp_ms: 0,
-                    },
-                }
-            };
+        let node: hashi_types::move_types::LinkedTableNode<Address, DealerSubmissionV1> = field
+            .value()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
         nodes.insert(dealer, node);
     }
     let mut certs = Vec::with_capacity(nodes.len());
@@ -633,13 +606,9 @@ pub async fn assert_tob_mirror_parity(networks: &TestNetworks) -> Result<()> {
         "expected at least one mirrored TOB bucket after DKG"
     );
     for (key, _) in keys {
-        let (layout, mirrored) = state
+        let mirrored = state
             .tob_certs(key.epoch, key.batch_index, key.protocol_type)?
             .ok_or_else(|| anyhow!("mirrored TOB bucket {key:?} vanished mid-check"))?;
-        anyhow::ensure!(
-            layout == TobCertLayout::Bare || key.protocol_type == ProtocolType::NonceGeneration,
-            "only nonce buckets use the stamped layout, got {key:?}"
-        );
         let fetched = fetch_tob_certs_from_chain(networks, key)
             .await?
             .ok_or_else(|| anyhow!("TOB bucket {key:?} is in the mirror but not on-chain"))?;

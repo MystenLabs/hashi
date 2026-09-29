@@ -560,12 +560,6 @@ impl LeaderService {
                     Identifier::from_static("EmergencyPause"),
                     vec![],
                 ))),
-                ProposalType::UpdateGuardian => TypeTag::Struct(Box::new(StructTag::new(
-                    type_package_id,
-                    Identifier::from_static("update_guardian"),
-                    Identifier::from_static("UpdateGuardian"),
-                    vec![],
-                ))),
                 ProposalType::IgnoreMember => TypeTag::Struct(Box::new(StructTag::new(
                     type_package_id,
                     Identifier::from_static("ignore_member"),

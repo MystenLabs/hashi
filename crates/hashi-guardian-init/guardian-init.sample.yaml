@@ -40,17 +40,17 @@ deployment:
   # Bitcoin network: mainnet (or bitcoin), testnet, regtest, or signet.
   bitcoin_network: "signet"
   pcr_allowlist:
-    # Expected live enclave build: git revision + PCR0 (hex). Select the
-    # ceremony or withdraw build for the mode being initialized.
+    # Expected live enclave build: git revision + PCR0 (hex). Ceremony and
+    # withdraw sessions use the same EIF; mode is selected during OI.
     current_build:
       git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
     # Older still-trusted builds accepted only for historical S3 logs during an upgrade window.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"
-    #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    #     pcr0: "<PREVIOUS_PCR0_HEX_FROM_VERIFIED_BUILD>"
 
 # Optional explicit credentials; omit this block to use AWS's default credential chain.
 # s3_credentials:
@@ -97,6 +97,8 @@ kp_roster:
 #     - /path/to/kp8.asc
 
 # Limiter parameters the withdraw-mode guardian will be initialized with.
+# Lowering max_bucket_capacity below a committed batch's outflow stops all
+# withdrawals. Pause the bridge first and unpause once every node has the new cap.
 limiter_config:
   refill_rate: 1000
   max_bucket_capacity: 100000000

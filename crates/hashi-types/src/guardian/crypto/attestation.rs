@@ -19,6 +19,10 @@ use crate::guardian::time::now_timestamp_ms;
 /// Git commit revision reported by the enclave build.
 pub type GitRevision = String;
 
+// Nitro Enclave PCR0 uses SHA-384 (384 bits / 8 = 48 bytes).
+// https://github.com/aws/aws-nitro-enclaves-image-format#eif-measurements
+pub(crate) const NITRO_PCR0_LEN: usize = 48;
+
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NitroAttestation(#[serde(with = "crate::guardian::serde::base64_bytes")] Vec<u8>);
@@ -144,15 +148,37 @@ enum VerifyTime {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildPcrs {
     git_revision: GitRevision,
+    #[serde(serialize_with = "serialize_pcr0")]
     pcr0: Vec<u8>,
 }
 
+// Config files accept hex PCRs. Emit the same readable form in logged policies,
+// while preserving the binary representation used by existing config digests.
+fn serialize_pcr0<S: serde::Serializer>(pcr0: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&hex::encode(pcr0))
+    } else {
+        pcr0.serialize(serializer)
+    }
+}
+
 impl BuildPcrs {
-    pub fn new(git_revision: &str, pcr0: Vec<u8>) -> Self {
-        Self {
+    pub fn new(git_revision: &str, pcr0: Vec<u8>) -> GuardianResult<Self> {
+        if pcr0.len() != NITRO_PCR0_LEN {
+            return Err(InvalidInputs(format!(
+                "build '{git_revision}' PCR0 must be {NITRO_PCR0_LEN} bytes, got {}",
+                pcr0.len()
+            )));
+        }
+        if pcr0.iter().all(|byte| *byte == 0) {
+            return Err(InvalidInputs(format!(
+                "build '{git_revision}' PCR0 must not be all zeros (Nitro debug mode)"
+            )));
+        }
+        Ok(Self {
             git_revision: git_revision.to_string(),
             pcr0,
-        }
+        })
     }
 
     pub fn git_revision(&self) -> &str {
@@ -256,7 +282,7 @@ impl<'de> Deserialize<'de> for BuildPcrs {
                 wire.git_revision
             ))
         })?;
-        Ok(BuildPcrs::new(&wire.git_revision, pcr0))
+        BuildPcrs::new(&wire.git_revision, pcr0).map_err(serde::de::Error::custom)
     }
 }
 
@@ -279,22 +305,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pcr_serialization_round_trips_json_and_preserves_binary_commitments() {
+        let build = BuildPcrs::new("current", [0, 255].repeat(24)).unwrap();
+        let json = serde_json::to_value(&build).unwrap();
+        assert_eq!(json["pcr0"], "00ff".repeat(24));
+        assert_eq!(serde_json::from_value::<BuildPcrs>(json).unwrap(), build);
+        // This is the original derived struct's BCS field order and encoding.
+        assert_eq!(
+            bcs::to_bytes(&build).unwrap(),
+            bcs::to_bytes(&(build.git_revision(), build.pcr0())).unwrap(),
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_pcr0_through_all_construction_paths() {
+        for pcr0 in [vec![], vec![1; 47], vec![1; 49], vec![0; 48]] {
+            assert!(BuildPcrs::new("current", pcr0.clone()).is_err());
+            assert!(
+                serde_json::from_value::<BuildPcrs>(serde_json::json!({
+                    "git_revision": "current",
+                    "pcr0": hex::encode(&pcr0),
+                }))
+                .is_err()
+            );
+            assert!(
+                BuildPcrs::try_from(crate::proto::BuildPcrs {
+                    git_revision: Some("current".into()),
+                    pcr0: Some(pcr0.into()),
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_pcr0_containing_some_zero_bytes() {
+        let mut pcr0 = vec![0; 48];
+        pcr0[47] = 1;
+        let build = BuildPcrs::new("current", pcr0.clone()).unwrap();
+        assert_eq!(build.pcr0(), pcr0);
+    }
+
+    #[test]
     fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
         let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
+            BuildPcrs::mock_for_testing("current", 1),
             vec![
-                BuildPcrs::new("prev-1", vec![1]),
-                BuildPcrs::new("prev-2", vec![2]),
+                BuildPcrs::mock_for_testing("prev-1", 2),
+                BuildPcrs::mock_for_testing("prev-2", 3),
             ],
         )
         .unwrap();
 
         let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0]);
+        assert_eq!(current_build.pcr0(), &[1; 48]);
         let prev_build = allowlist.resolve("prev-1").unwrap();
-        assert_eq!(prev_build.pcr0(), &[1]);
+        assert_eq!(prev_build.pcr0(), &[2; 48]);
         let prev2_build = allowlist.resolve("prev-2").unwrap();
-        assert_eq!(prev2_build.pcr0(), &[2]);
+        assert_eq!(prev2_build.pcr0(), &[3; 48]);
 
         assert!(matches!(
             allowlist.resolve("missing").unwrap_err(),
@@ -305,8 +373,8 @@ mod tests {
     #[test]
     fn pcr_allowlist_rejects_duplicate_build_revisions() {
         let err = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("current", vec![1])],
+            BuildPcrs::mock_for_testing("current", 1),
+            vec![BuildPcrs::mock_for_testing("current", 2)],
         )
         .unwrap_err();
 
@@ -318,28 +386,28 @@ mod tests {
         let allowlist: PcrAllowlist = serde_json::from_value(serde_json::json!({
             "current_build": {
                 "git_revision": "current",
-                "pcr0": "0x00ff"
+                "pcr0": format!("0x{}", "00ff".repeat(24))
             },
             "prev_builds": [
                 {
                     "git_revision": "prev",
-                    "pcr0": "01"
+                    "pcr0": "01".repeat(48)
                 }
             ]
         }))
         .unwrap();
 
         let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0x00, 0xff]);
+        assert_eq!(current_build.pcr0(), [0x00, 0xff].repeat(24));
         let prev_build = allowlist.resolve("prev").unwrap();
-        assert_eq!(prev_build.pcr0(), &[0x01]);
+        assert_eq!(prev_build.pcr0(), &[0x01; 48]);
     }
 
     #[test]
     fn pcr_allowlist_requires_current_build() {
         let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("prev", vec![1])],
+            BuildPcrs::mock_for_testing("current", 1),
+            vec![BuildPcrs::mock_for_testing("prev", 2)],
         )
         .unwrap();
 

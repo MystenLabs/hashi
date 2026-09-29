@@ -155,8 +155,8 @@ async fn ensure_bootstrapped(
         return Ok(());
     }
     // The package history is re-scraped rather than taken from local
-    // state: the TOB scrape identifies bucket layouts through it, and a
-    // bucket created by a package published during the gap would
+    // state: the TOB scrape identifies each bucket's type through it, and
+    // a bucket created by a package published during the gap would
     // otherwise stay undecodable by the very scrape that would learn of
     // the upgrade.
     let package_versions = hashi_types::move_types::PackageVersions::new(

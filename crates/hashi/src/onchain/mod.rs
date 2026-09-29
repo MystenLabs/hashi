@@ -165,14 +165,6 @@ pub struct State {
 }
 
 pub use hashi_types::move_types::TobKey;
-pub use versioned_decode::TobCertLayout;
-
-/// One mirror read of a TOB bucket: its layout plus the dealer
-/// submissions in TOB order, normalized to the stamped form.
-pub type TobBucketRead = (
-    TobCertLayout,
-    Vec<(Address, move_types::StampedDealerSubmissionV1)>,
-);
 
 /// One TOB bucket the leader's GC has selected for on-chain destruction.
 /// `KeyGen` covers both the Dkg and KeyRotation buckets of an epoch — the
@@ -585,20 +577,19 @@ impl OnchainState {
 
     /// The dealer submissions for one TOB bucket, in on-chain insertion
     /// order (the total order the TOB guarantees), read from the mirror.
-    /// Submissions come back in the normalized stamped form (a bare
-    /// bucket's carry `timestamp_ms: 0`), with the bucket's layout so
-    /// callers can insist on one. Returns `Ok(None)` when the bucket
-    /// does not exist; an incomplete link walk (a convergence gap while
-    /// a bootstrap replay catches up — retryable, recognized by
-    /// [`is_inconsistent_listing`]) or a stamped bucket whose stamps are
-    /// not monotone in TOB order is an error rather than a silent
-    /// truncation.
+    /// Returns `Ok(None)` when the bucket does not exist. An incomplete
+    /// link walk (a convergence gap while a bootstrap replay catches up,
+    /// retryable and recognized by [`is_inconsistent_listing`]) is an
+    /// error rather than a silent truncation, and so is a nonce bucket
+    /// whose timestamps are not monotone in TOB order. Only the nonce
+    /// accumulation window reads the timestamps, so key-generation
+    /// buckets are not checked for it.
     pub fn tob_certs(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<TobBucketRead>> {
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
         let key = move_types::TobKey {
             epoch,
             batch_index,
@@ -608,16 +599,14 @@ impl OnchainState {
         let Some(bucket) = state.hashi.tob.buckets.get(&key) else {
             return Ok(None);
         };
-        let certs: Vec<(Address, move_types::StampedDealerSubmissionV1)> = bucket
+        let certs: Vec<(Address, move_types::DealerSubmissionV1)> = bucket
             .complete_certs_in_order()
             .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
             .into_iter()
             .map(|(dealer, submission)| (dealer, submission.clone()))
             .collect();
-        if bucket.layout == TobCertLayout::Stamped {
-            ensure_timestamp_ordered(&certs)?;
-        }
-        Ok(Some((bucket.layout, certs)))
+        ensure_tob_read_ordered(protocol_type, &certs)?;
+        Ok(Some(certs))
     }
 
     /// Wait until the object mirror has applied every Hashi transaction
@@ -1073,9 +1062,7 @@ pub struct UnorderedCertTableRead {
     pub later_ms: u64,
 }
 
-fn ensure_timestamp_ordered(
-    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
-) -> Result<()> {
+fn ensure_timestamp_ordered(certs: &[(Address, move_types::DealerSubmissionV1)]) -> Result<()> {
     if let Some(bad) = certs
         .windows(2)
         .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
@@ -1087,6 +1074,20 @@ fn ensure_timestamp_ordered(
             later_ms: bad[1].1.timestamp_ms,
         }
         .into());
+    }
+    Ok(())
+}
+
+/// The order check one TOB bucket read must pass. Only the nonce
+/// accumulation window reads the timestamps, and it stops walking at the
+/// first one past its cutoff, so a nonce bucket must be monotone in TOB
+/// order. Key-generation buckets are accepted as read.
+fn ensure_tob_read_ordered(
+    protocol_type: move_types::ProtocolType,
+    certs: &[(Address, move_types::DealerSubmissionV1)],
+) -> Result<()> {
+    if protocol_type == move_types::ProtocolType::NonceGeneration {
+        ensure_timestamp_ordered(certs)?;
     }
     Ok(())
 }
@@ -1119,7 +1120,7 @@ impl State {
         metrics: Option<&crate::metrics::Metrics>,
     ) -> Result<(Self, CheckpointInfo, Option<route::MirrorSeed>)> {
         // Sequenced before the state scrape rather than joined with it:
-        // the TOB scrape identifies each bucket's layout from its
+        // the TOB scrape identifies each bucket's type from its
         // on-chain value type, which resolves through this history.
         let package_versions = move_types::PackageVersions::new(
             scrape_package_versions(client.clone(), ids.package_id).await?,
@@ -1498,11 +1499,7 @@ async fn scrape_tob_entries(
     // interiors walked after the bag listing completes. At steady state
     // the bag holds a couple of epochs' worth of buckets, so the
     // collection stays small.
-    let mut to_scrape: Vec<(
-        move_types::TobKey,
-        versioned_decode::TobCertLayout,
-        move_types::LinkedTable<Address>,
-    )> = Vec::new();
+    let mut to_scrape: Vec<(move_types::TobKey, move_types::LinkedTable<Address>)> = Vec::new();
     seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
             // The leader's TOB GC destroys dead buckets concurrently with this
@@ -1521,9 +1518,9 @@ async fn scrape_tob_entries(
                 .name()
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize TobKey: {e}"))?;
-            // The two bucket structs are BCS-identical, so one decode serves
-            // both; the chain-reported value type selects the node layout.
-            let layout = versioned_decode::TobCertLayout::from_struct_tag(
+            // Decode only a bucket whose chain-reported value type is the
+            // one this binary implements; any other type fails the scrape.
+            versioned_decode::ensure_tob_cert_bucket(
                 packages,
                 &versioned_decode::field_value_type(&field)?,
             )?;
@@ -1538,14 +1535,14 @@ async fn scrape_tob_entries(
             ));
             seed.interior.push((certs.certs.id, route::Slot::TobCerts));
             seed.tob_tables.push((certs.certs.id, key));
-            to_scrape.push((key, layout, certs.certs));
+            to_scrape.push((key, certs.certs));
         }
         Ok(())
     })
     .await?;
 
     let mut buckets = BTreeMap::new();
-    for (key, layout, certs) in to_scrape {
+    for (key, certs) in to_scrape {
         let node_mask = FieldMask::from_paths([
             DynamicField::path_builder().name().finish(),
             DynamicField::path_builder().field_id(),
@@ -1575,32 +1572,10 @@ async fn scrape_tob_entries(
                         .name()
                         .deserialize()
                         .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
-                    let node: move_types::LinkedTableNode<
-                        Address,
-                        move_types::StampedDealerSubmissionV1,
-                    > = match layout {
-                        versioned_decode::TobCertLayout::Stamped => {
-                            value.deserialize().map_err(|e| {
-                                anyhow!("failed to deserialize a stamped tob node: {e}")
-                            })?
-                        }
-                        versioned_decode::TobCertLayout::Bare => {
-                            let bare: move_types::LinkedTableNode<
-                                Address,
-                                move_types::DealerSubmissionV1,
-                            > = value
-                                .deserialize()
-                                .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
-                            move_types::LinkedTableNode {
-                                prev: bare.prev,
-                                next: bare.next,
-                                value: move_types::StampedDealerSubmissionV1 {
-                                    submission: bare.value,
-                                    timestamp_ms: 0,
-                                },
-                            }
-                        }
-                    };
+                    let node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1> =
+                        value
+                            .deserialize()
+                            .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
                     let node_id: Address = node_field.field_id().parse()?;
                     seed.entries.push((
                         node_id,
@@ -1617,7 +1592,6 @@ async fn scrape_tob_entries(
         buckets.insert(
             key,
             types::TobBucket {
-                layout,
                 certs_id: certs.id,
                 head: certs.head,
                 size: certs.size,
@@ -2302,7 +2276,6 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
         types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
         types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
         types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
-        types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
         types::ProposalType::IgnoreMember => parse::<move_types::IgnoreMember>(contents),
         types::ProposalType::Unknown(_) => None,
     }?;
@@ -2339,7 +2312,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
-        ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         ("ignore_member", "IgnoreMember") => types::ProposalType::IgnoreMember,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
@@ -2604,6 +2576,72 @@ mod key_rotation_epoch_tests {
     #[test]
     fn an_empty_committee_history_answers_dkg() {
         assert!(!OnchainState::epoch_after_first_committee(None, 9));
+    }
+}
+
+#[cfg(test)]
+mod tob_read_order_tests {
+    use super::Address;
+    use super::UnorderedCertTableRead;
+    use super::ensure_tob_read_ordered;
+    use super::move_types;
+    use super::move_types::ProtocolType;
+
+    fn submission(dealer: u8, timestamp_ms: u64) -> (Address, move_types::DealerSubmissionV1) {
+        let dealer_address = Address::new([dealer; 32]);
+        (
+            dealer_address,
+            move_types::DealerSubmissionV1 {
+                message: move_types::DealerMessagesHashV1 {
+                    dealer_address,
+                    messages_hash: vec![dealer; 32],
+                },
+                signature: move_types::CommitteeSignature {
+                    epoch: 7,
+                    signature: vec![],
+                    signers_bitmap: vec![],
+                },
+                timestamp_ms,
+            },
+        )
+    }
+
+    #[test]
+    fn an_out_of_order_nonce_bucket_is_rejected() {
+        let certs = [
+            submission(1, 1_000),
+            submission(2, 5_000),
+            submission(3, 4_999),
+        ];
+        let err = ensure_tob_read_ordered(ProtocolType::NonceGeneration, &certs).unwrap_err();
+        let unordered = err
+            .downcast_ref::<UnorderedCertTableRead>()
+            .expect("an unordered nonce read must surface as UnorderedCertTableRead");
+        assert_eq!(unordered.earlier, certs[1].0);
+        assert_eq!(unordered.earlier_ms, 5_000);
+        assert_eq!(unordered.later, certs[2].0);
+        assert_eq!(unordered.later_ms, 4_999);
+    }
+
+    #[test]
+    fn an_out_of_order_key_generation_bucket_is_accepted() {
+        let certs = [submission(1, 5_000), submission(2, 1_000)];
+        ensure_tob_read_ordered(ProtocolType::Dkg, &certs).unwrap();
+        ensure_tob_read_ordered(ProtocolType::KeyRotation, &certs).unwrap();
+    }
+
+    #[test]
+    fn an_ordered_nonce_bucket_is_accepted() {
+        // Submissions recorded in one checkpoint share a timestamp, so
+        // the order is non-decreasing rather than strictly increasing.
+        let certs = [
+            submission(1, 1_000),
+            submission(2, 1_000),
+            submission(3, 2_000),
+        ];
+        ensure_tob_read_ordered(ProtocolType::NonceGeneration, &certs).unwrap();
+        ensure_tob_read_ordered(ProtocolType::NonceGeneration, &[]).unwrap();
+        ensure_tob_read_ordered(ProtocolType::NonceGeneration, &certs[..1]).unwrap();
     }
 }
 

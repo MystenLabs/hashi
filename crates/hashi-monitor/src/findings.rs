@@ -47,6 +47,12 @@ pub enum MonitorFinding {
         deadline: UnixSeconds,
         cursor: UnixSeconds,
     },
+    /// The Sui event scan covered `event` but never returned it, so other events the
+    /// scan should have returned may be missing too.
+    SuiScanMissedEvent {
+        event: MonitorEvent,
+        cursor: UnixSeconds,
+    },
 }
 
 impl MonitorFinding {
@@ -58,13 +64,10 @@ impl MonitorFinding {
                 EventRelation::Successor => FindingCategory::Liveness,
             },
             Self::ExpectedEventMissing { relation, .. } => match relation {
-                // TODO: Before treating a missing withdrawal predecessor as a
-                // definitive safety finding, perform a focused Sui history
-                // search. A too-small lookback can otherwise cause a false
-                // positive.
                 EventRelation::Predecessor => FindingCategory::Safety,
                 EventRelation::Successor => FindingCategory::Liveness,
             },
+            Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -97,6 +100,11 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "ExpectedEventMissing({event_id}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
                 utc_timestamp(*deadline),
+                utc_timestamp(*cursor),
+            ),
+            Self::SuiScanMissedEvent { event, cursor } => write!(
+                f,
+                "SuiScanMissedEvent(event={event}, cursor={})",
                 utc_timestamp(*cursor),
             ),
         }

@@ -79,8 +79,7 @@ const ERequestTxnMismatch: vector<u8> =
 /// through confirmed-awaiting-archival) and is moved to the `processed`
 /// archive only by the deferred `archive_withdrawal_txn` GC — keeping the
 /// per-request cost of commit/confirm to an in-place borrow instead of a bag
-/// move. Requests committed before the v2 upgrade were moved to `processed`
-/// at commit time and stay there; dual-location helpers cover both homes.
+/// move. `processed` holds only archived requests.
 ///
 /// The BTC balance starts full and is drained to zero at commit (burned) or cancel (returned).
 public struct WithdrawalRequest has key, store {
@@ -108,9 +107,8 @@ public struct WithdrawalRequestQueue has store {
     /// in place and awaiting the archival GC.
     /// ObjectBag so WithdrawalRequest UIDs are directly accessible via getObject.
     requests: ObjectBag,
-    /// Archived requests — BTC consumed and their withdrawal transaction
-    /// confirmed (plus requests committed before the deferred-archival
-    /// upgrade, which were moved here at commit time).
+    /// Archived requests: BTC consumed and their withdrawal transaction
+    /// confirmed. A request arrives here only through the archival GC.
     processed: ObjectBag,
     /// In-flight withdrawal transactions (unsigned, signed but unconfirmed).
     /// ObjectBag so WithdrawalTransaction UIDs are directly accessible via getObject.
@@ -309,8 +307,7 @@ public(package) fun approve_withdrawal(
     let request: &mut WithdrawalRequest = self.requests.borrow_mut(request_id);
     // A committed request stays in `requests` until archival, so an approval
     // cert replayed after commit would otherwise re-stamp a request whose BTC
-    // is already drained. Before deferred archival this protection came from
-    // the request having left the bag.
+    // is already drained.
     assert!(!request.is_committed(), ECannotApproveCommittedRequest);
     // Re-approval is only allowed with a cert from a strictly later epoch
     // than the stored one: a new committee refreshing a cert left stale by
@@ -421,8 +418,7 @@ public(package) fun borrow_request(
 /// Check if a request has already been committed to a WithdrawalTransaction.
 /// Link-first: a committed request stays in `requests` until archival, so
 /// its `withdrawal_txn_id` is the authority; the `processed` fallback covers
-/// requests committed before the deferred-archival upgrade and
-/// already-archived requests.
+/// archived requests.
 public(package) fun is_request_processing(
     self: &WithdrawalRequestQueue,
     request_id: address,
@@ -485,15 +481,20 @@ public(package) fun new_withdrawal_txn(
     request_count.do!(|i| {
         let info = request_infos.borrow(i);
         let output = outputs.borrow(i);
+        // Checked before subtracting, so a request smaller than its fee share
+        // aborts with the dust error instead of underflowing. The sum cannot
+        // overflow: the fee is capped at the withdrawal minimum less dust.
+        assert!(
+            info.btc_amount >= per_user_miner_fee + hashi::btc_config::dust_relay_min_value(),
+            EOutputBelowDust,
+        );
         let expected = info.btc_amount - per_user_miner_fee;
-        assert!(expected >= hashi::btc_config::dust_relay_min_value(), EOutputBelowDust);
         assert!(output.amount == expected, EOutputAmountMismatch);
         assert!(output.bitcoin_address == info.bitcoin_address, EOutputAddressMismatch);
     });
 
-    // TODO: ensure any change output goes to the correct destination address, once we start
-    // storing the pubkey on chain.
-    // https://linear.app/mysten-labs/issue/IOP-226/dkg-commit-mpc-public-key-onchain-and-read-from-there
+    // Change output destinations are not validated on chain; the commitment
+    // certificate binds the full output list.
 
     // Split off the trailing change outputs (indices `[request_count,
     // output_count)`), preserving their on-chain order so change output `j`
@@ -589,10 +590,10 @@ public(package) fun finalize_withdrawal_txn(
 
 /// Record confirmation in place: the txn stays in `withdrawal_txns` and the
 /// move to `confirmed_txns` is deferred to `archive_withdrawal_txn`. The
-/// already-confirmed guard is load-bearing replay protection: before deferred
-/// archival, a replayed confirmation cert aborted because the txn had left
-/// the hot bag; now the timestamp is the only barrier against double-emitting
-/// events and re-running the UTXO spend marking.
+/// already-confirmed guard is load-bearing replay protection: a confirmed txn
+/// stays in the hot bag until archival, so the timestamp is the only barrier
+/// against a replayed confirmation cert double-emitting events and re-running
+/// the UTXO spend marking.
 public(package) fun mark_txn_confirmed(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -609,7 +610,7 @@ public(package) fun mark_txn_confirmed(
 /// no-ops if the txn already archived (re-run or raced GC). Aborts if the txn
 /// exists but is not confirmed (caller error).
 ///
-/// Requests committed before the deferred-archival upgrade already live in
+/// Requests already archived by `archive_withdrawal_requests` live in
 /// `processed` and need no write.
 public(package) fun archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
@@ -631,11 +632,11 @@ public(package) fun archive_withdrawal_txn(
 }
 
 /// Archive one request of a confirmed withdrawal: move it from `requests` to
-/// `processed`. A request already in `processed` (archived earlier, or
-/// committed before the deferred-archival upgrade) needs no write, so it is
-/// skipped without being touched. The `withdrawal_txn_id` cross-check matters
-/// because the chunked entry takes caller-supplied ids: without it a caller
-/// could archive a live request of an unrelated withdrawal.
+/// `processed`. A request already in `processed` (archived earlier) needs no
+/// write, so it is skipped without being touched. The `withdrawal_txn_id`
+/// cross-check matters because the chunked entry takes caller-supplied ids:
+/// without it a caller could archive a live request of an unrelated
+/// withdrawal.
 fun archive_request(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -669,14 +670,13 @@ public(package) fun archive_withdrawal_requests(
 
 /// Finish a chunked archival: move the txn to `confirmed_txns` once every
 /// one of its requests is resident in `processed`. Bag location is the whole
-/// of archival, since a request carries no lifecycle state of its own:
-/// requests committed before the v2 upgrade already live in `processed` and
-/// count as archived from the start. Silently no-ops while any request is
-/// still unarchived (or if the txn is already archived), so batched GC calls
-/// survive races with in-flight chunk transactions; the caller re-arms and
-/// retries from mirror state. The walk costs at most one runtime object per
-/// request (the `processed` field wrapper), inside Sui's object budget at
-/// the largest batch size — see the probe comment in the body.
+/// of archival, since a request carries no lifecycle state of its own.
+/// Silently no-ops while any request is still unarchived (or if the txn is
+/// already archived), so batched GC calls survive races with in-flight chunk
+/// transactions; the caller re-arms and retries from mirror state. The walk
+/// costs at most one runtime object per request (the `processed` field
+/// wrapper), inside Sui's object budget at the largest batch size; see the
+/// probe comment in the body.
 public(package) fun finish_archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -942,27 +942,6 @@ public(package) fun has_withdrawal_txn(self: &WithdrawalRequestQueue, id: addres
 #[test_only]
 public(package) fun has_confirmed_txn(self: &WithdrawalRequestQueue, id: address): bool {
     self.confirmed_txns.contains(id)
-}
-
-/// Replicates the pre-deferred-archival commit (remove from `requests`, add
-/// to `processed`) so tests can simulate requests committed before the
-/// upgrade.
-#[test_only]
-public(package) fun commit_requests_v1_style_for_testing(
-    self: &mut WithdrawalRequestQueue,
-    withdrawal_txn: &WithdrawalTransaction,
-): Balance<BTC> {
-    let withdrawal_txn_id = withdrawal_txn.id.to_address();
-    let mut total_btc = sui::balance::zero<BTC>();
-    withdrawal_txn.request_ids.do_ref!(|id| {
-        let mut request: WithdrawalRequest = self.requests.remove(*id);
-        assert!(request.is_approved(), ERequestNotApproved);
-        assert!(!request.is_committed(), ERequestAlreadyCommitted);
-        total_btc.join(request.btc.withdraw_all());
-        request.withdrawal_txn_id = option::some(withdrawal_txn_id);
-        self.processed.add(*id, request);
-    });
-    total_btc
 }
 
 #[test_only]

@@ -386,7 +386,6 @@ mod tests {
     use crate::guardian::CeremonyProposalLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
-    use crate::guardian::GuardianInfo;
     use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
@@ -396,6 +395,8 @@ mod tests {
     use crate::guardian::LimiterState;
     use crate::guardian::MAINNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::NitroAttestation;
+    use crate::guardian::OperatorInitInfo;
+    use crate::guardian::OperatorInitMode;
     use crate::guardian::RotateKpSetResponse;
     use crate::guardian::SecretSharingInstance;
     use crate::guardian::ShareCommitment;
@@ -443,9 +444,11 @@ mod tests {
 
     fn dummy_log_messages() -> Vec<LogMessage> {
         let signing_key = fixture_signing_key();
-        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
-            .x_only_public_key()
-            .0;
+        let btc_master_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[3u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
         let instance_0 = test_sharing_instance(0);
         let instance_1 = test_sharing_instance(1);
         let (signed_request, committee_0) =
@@ -454,9 +457,24 @@ mod tests {
         let request_data: StandardWithdrawalRequestWire = request_data.into();
         let response = StandardWithdrawalResponse::mock_for_testing();
         let encrypted_shares = RotateKpSetResponse::mock_for_testing().encrypted_shares;
-        let guardian_info = GuardianInfo::mock_for_testing();
+        let guardian_info = OperatorInitInfo::mock_for_testing();
         let mut ceremony_info = guardian_info.clone();
-        ceremony_info.lifecycle = crate::guardian::CeremonyStage::Uninitialized.into();
+        ceremony_info.mode = OperatorInitMode::Ceremony;
+        let mut bootstrap_info = guardian_info.clone();
+        let OperatorInitMode::Withdraw(withdraw) = &mut bootstrap_info.mode else {
+            unreachable!("withdraw dummy initialization");
+        };
+        withdraw.genesis_state_hash =
+            Some(crate::guardian::GenesisState::mock_for_testing().digest());
+        bootstrap_info.deployment.pcr_allowlist = crate::guardian::PcrAllowlist::new(
+            bootstrap_info
+                .deployment
+                .pcr_allowlist
+                .current_build()
+                .clone(),
+            [crate::guardian::BuildPcrs::mock_for_testing("previous", 1)],
+        )
+        .unwrap();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
@@ -472,6 +490,9 @@ mod tests {
             )))),
             LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
                 ceremony_info,
+            )))),
+            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                bootstrap_info,
             )))),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -548,11 +569,12 @@ mod tests {
             LogMessage::Heartbeat(_) => "heartbeat/heartbeat",
             LogMessage::Init(message) => match message.as_ref() {
                 InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
-                InitLogMessage::OIGuardianInfo(info) => match info.lifecycle {
-                    crate::guardian::EnclaveLifecycle::Ceremony(_) => {
-                        "init/oi-ceremony-guardian-info"
-                    }
-                    crate::guardian::EnclaveLifecycle::Withdraw(_) => "init/oi-guardian-info",
+                InitLogMessage::OIGuardianInfo(info) => match &info.mode {
+                    OperatorInitMode::Ceremony => "init/oi-guardian-info-ceremony",
+                    OperatorInitMode::Withdraw(withdraw) => match withdraw.genesis_state_hash {
+                        None => "init/oi-guardian-info-without-genesis",
+                        Some(_) => "init/oi-guardian-info-with-genesis",
+                    },
                 },
                 InitLogMessage::PIEnclaveFullyInitialized { .. } => {
                     "init/pi-enclave-fully-initialized"
@@ -1067,9 +1089,11 @@ mod tests {
     fn object_key_and_lock_for_ceremony_proposal() {
         let session_id: SessionID = "session-proposal".into();
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
-        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[4u8; 32])
-            .x_only_public_key()
-            .0;
+        let btc_master_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[4u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
         let proposal = CeremonyProposalLogMessage::new(
             CeremonyLogMessage::NewKey {
                 instance: test_sharing_instance(0),

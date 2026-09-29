@@ -1569,7 +1569,7 @@ impl MpcService {
         wait_for_floor: bool,
         metrics: &crate::metrics::Metrics,
     ) -> anyhow::Result<(
-        VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>,
+        VerifiedNonceCerts<move_types::DealerSubmissionV1>,
         Option<u64>,
     )> {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
@@ -1602,7 +1602,7 @@ impl MpcService {
                 Some(batch_index),
                 move_types::ProtocolType::NonceGeneration,
             ) {
-                Ok(certs) => certs.map(|(_, certs)| certs).unwrap_or_default(),
+                Ok(certs) => certs.unwrap_or_default(),
                 Err(e) if crate::onchain::is_inconsistent_listing(&e) => {
                     if tokio::time::Instant::now() >= wait_deadline {
                         return Err(e);
@@ -2515,18 +2515,18 @@ pub(crate) async fn verify_fetched_certificates(
 /// Live, boundary sizing and replay admit the same dealers only if they
 /// convert the served certs identically.
 fn nonce_certificates(
-    certs: &VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>,
+    certs: &VerifiedNonceCerts<move_types::DealerSubmissionV1>,
     epoch: u64,
     batch_index: u32,
 ) -> VerifiedNonceCerts<CertificateV1> {
-    certs.filter_map(|dealer, stamped| {
-        let cert = stamped.to_dealer_certificate(epoch).ok()?;
+    certs.filter_map(|dealer, submission| {
+        let cert = submission.to_dealer_certificate(epoch).ok()?;
         Some((
             *dealer,
             CertificateV1::NonceGeneration {
                 batch_index,
                 cert,
-                timestamp_ms: stamped.timestamp_ms,
+                timestamp_ms: submission.timestamp_ms,
             },
         ))
     })

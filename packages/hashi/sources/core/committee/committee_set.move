@@ -8,7 +8,6 @@
 /// epochs; `start_reconfig` builds the next committee from Sui's active
 /// validator set, and `end_reconfig` activates it — storing the outgoing
 /// committee's handoff certificate for non-initial reconfigs.
-#[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
 use hashi::{committee::{Self, Committee}, config::{Self, Config}};
@@ -36,6 +35,9 @@ const EMemberNotRegistered: vector<u8> = b"No member is registered under this va
 const EAlreadyResigned: vector<u8> = b"Member has already requested resignation";
 #[error(code = 2)]
 const ENotResigned: vector<u8> = b"Member has no pending resignation to withdraw";
+#[error(code = 3)]
+const ELastActiveMember: vector<u8> =
+    b"Cannot resign as the last active committee member; the committee would be unable to form";
 #[error(code = 4)]
 const EMemberStillActive: vector<u8> = b"Member is in the current or pending committee";
 #[error(code = 5)]
@@ -44,9 +46,6 @@ const ECannotRemoveIgnoredMember: vector<u8> =
 #[error(code = 6)]
 const EMemberNotRemovable: vector<u8> =
     b"Member is neither resigned nor gone from the Sui validator set";
-#[error(code = 3)]
-const ELastActiveMember: vector<u8> =
-    b"Cannot resign as the last active committee member; the committee would be unable to form";
 #[error(code = 7)]
 const ETlsPublicKeyInUse: vector<u8> =
     b"TLS public key is already registered to another member; each member needs its own key - generate a new one for this address";
@@ -73,6 +72,9 @@ const EPendingEpochStillCurrent: vector<u8> =
 #[error(code = 15)]
 const EInvalidMpcPublicKey: vector<u8> =
     b"MPC public key must be a 33-byte compressed secp256k1 point";
+#[error(code = 16)]
+const EMemberAlreadyRegistered: vector<u8> =
+    b"A member is already registered under this validator address";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -187,12 +189,23 @@ public(package) fun new_member(
     ctx: &TxContext,
 ) {
     let validator_address = ctx.sender();
-
-    // Only allow Sui Validators to register as Hashi members
-    assert!(
+    committee_set.register_member(
+        validator_address,
         sui_system.active_validator_addresses_ref().contains(&validator_address),
-        ENotAnActiveSuiValidator,
     );
+}
+
+/// The registration itself, given whether `validator_address` is in Sui's
+/// active validator set. Split from `new_member` because unit tests cannot
+/// construct a `SuiSystemState`.
+fun register_member(
+    committee_set: &mut CommitteeSet,
+    validator_address: address,
+    is_active_sui_validator: bool,
+) {
+    // Only allow Sui Validators to register as Hashi members
+    assert!(is_active_sui_validator, ENotAnActiveSuiValidator);
+    assert!(!committee_set.has_member(validator_address), EMemberAlreadyRegistered);
 
     let member = MemberInfo {
         validator_address: validator_address,
@@ -654,10 +667,6 @@ fun insert_member(self: &mut CommitteeSet, member: MemberInfo) {
     self.members.add(member.validator_address, member)
 }
 
-fun committee(self: &CommitteeSet, epoch: u64): &Committee {
-    &self.committees[epoch]
-}
-
 fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
     self.committees.add(committee.epoch(), committee)
 }
@@ -725,8 +734,6 @@ fun new_committee_from_voting_powers(
 
         committee_members.push_back(committee_member);
     };
-
-    // XXX do we sort by address or weight?
 
     committee::new_committee(
         epoch,
@@ -820,33 +827,6 @@ fun remove_member(self: &mut CommitteeSet, validator_address: address) {
 
 fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
     assert!(self.is_authorized(ctx), ENotAuthorized);
-}
-
-// === Accessors ===
-
-/// Return the address of the node.
-fun validator_address(self: &MemberInfo): &address {
-    &self.validator_address
-}
-
-/// Return the next epoch public key of the node.
-fun next_epoch_public_key(self: &MemberInfo): &Element<UncompressedG1> {
-    &self.next_epoch_public_key
-}
-
-/// Return the endpoint_url of the node.
-fun endpoint_url(self: &MemberInfo): &String {
-    &self.endpoint_url
-}
-
-/// Return the tls_public_key of the node.
-fun tls_public_key(self: &MemberInfo): &vector<u8> {
-    &self.tls_public_key
-}
-
-/// Return the next epoch encryption public key of the node.
-fun next_epoch_encryption_public_key(self: &MemberInfo): &vector<u8> {
-    &self.next_epoch_encryption_public_key
 }
 
 // Verifies that the provided bls public key is valid and there is a valid
@@ -944,6 +924,17 @@ public fun tls_key_holder_for_testing(
 #[test_only]
 public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
     self.has_committee_handoff(from_epoch)
+}
+
+#[test_only]
+/// Exercise `new_member` (checks and insertion) without a SuiSystemState by
+/// supplying the validator-set answer directly.
+public fun register_member_for_testing(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    is_active_sui_validator: bool,
+) {
+    self.register_member(validator_address, is_active_sui_validator)
 }
 
 #[test_only]

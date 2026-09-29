@@ -7,8 +7,13 @@ next_event_delays:
   - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
   - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Clock skew tolerance: E_{i+1} can occur up to clock_skew before E_i (default: 300s)
-# clock_skew: 300
+# Clock skew tolerances: E_{i+1} can occur up to this long before E_i (defaults shown)
+# clock_skews:
+#   - [E1HashiApproved, 300]
+#   - [E2GuardianApproved, 7200]
+
+# How far a deposit's block time can be after its Sui confirmation (default: 300s)
+# deposit_clock_skew: 300
 
 # Sui withdrawal history searched before the guardian audit start (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
@@ -25,14 +30,14 @@ deployment:
     # report this revision, and its attestation PCR0 must match it.
     current_build:
       git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
     # Older still-trusted builds accepted only for historical S3 logs during an
     # upgrade window. Omit or leave empty outside an upgrade.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"
-    #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    #     pcr0: "<PREVIOUS_PCR0_HEX_FROM_VERIFIED_BUILD>"
 
 # Optional explicit credentials; omit this block to use AWS's default credential chain.
 # s3_credentials:

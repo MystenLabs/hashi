@@ -5,6 +5,7 @@
 
 use crate::enclave::Enclave;
 use crate::s3_client::GuardianS3Client;
+use crate::s3_reader::GuardianReader;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
@@ -38,11 +39,16 @@ pub fn mock_logger() -> GuardianS3Client {
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
     )
+}
+
+/// A reader over `mock_logger`, for tests that never read from it.
+pub fn mock_reader(expected_deployment: DeploymentConfig) -> GuardianReader {
+    GuardianReader::from_s3_client(mock_logger(), expected_deployment)
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -144,7 +150,7 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
         RuleMode::MatchAny,
         &[&put_ok, &list_v2, &list_versions]
     );
-    let logger = GuardianS3Client::from_client_for_tests(
+    let logger = GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
@@ -271,7 +277,7 @@ pub fn mock_logger_with_deleted_layout(
         RuleMode::MatchAny,
         &[&list_dirs, &list_versions, &put_ok]
     );
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
@@ -382,16 +388,11 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
-    /// Enclave in the requested mode with fresh random keys.
-    pub fn create_with_random_keys_for_mode(mode: EnclaveMode) -> Arc<Self> {
+    /// Uninitialized enclave with fresh random keys.
+    pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys, mode))
-    }
-
-    /// Withdraw-mode enclave with fresh random keys.
-    pub fn create_with_random_keys() -> Arc<Self> {
-        Self::create_with_random_keys_for_mode(EnclaveMode::Withdraw)
+        Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -429,7 +430,7 @@ impl Enclave {
     }
 
     pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
-        let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        let enclave = Self::create_with_random_keys();
         enclave
             .config
             .set_deployment(DeploymentConfig::mock_for_testing())
@@ -494,7 +495,7 @@ pub fn activate_enclave_for_testing(
 ) -> GuardianResult<()> {
     let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
-    enclave.state.init(committee, rate_limiter)?;
+    enclave.state.init(committee.into(), rate_limiter)?;
     enclave.clear_temporary_init_state();
     enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
     Ok(())

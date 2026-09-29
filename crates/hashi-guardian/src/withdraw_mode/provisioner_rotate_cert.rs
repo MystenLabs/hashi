@@ -116,7 +116,8 @@ mod tests {
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::mock_logger_capturing;
     use crate::OperatorInitTestArgs;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
     use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
@@ -190,7 +191,10 @@ mod tests {
         .await;
         enclave
             .config
-            .set_btc_keypair(create_btc_keypair_for_test(&[8u8; 32]))
+            .set_btc_keypair(
+                BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32])
+                    .expect("valid test secret key"),
+            )
             .unwrap();
 
         (

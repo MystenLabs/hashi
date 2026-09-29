@@ -74,7 +74,7 @@ impl GuardianReader {
         }
     }
 
-    /// Load and verify a session's attestation and guardian info on first use.
+    /// Load and verify a session's attestation and completed operator initialization on first use.
     async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
         if !self.sessions.contains_key(session_id) {
             let session_info =
@@ -496,7 +496,7 @@ pub(crate) fn reader_with_record_for_test(
                 .build()
         });
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &get]);
-    let s3 = GuardianS3Client::from_client_for_tests(
+    let s3 = GuardianS3Client::from_client(
         config.deployment().bucket_info.clone(),
         config.deployment().retention_environment,
         client,

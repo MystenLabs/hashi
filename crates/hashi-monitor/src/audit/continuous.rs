@@ -69,7 +69,7 @@ impl ContinuousAuditWindow {
         let lookback = cfg
             .next_event_delays
             .max_delay()
-            .saturating_add(cfg.clock_skew)
+            .saturating_add(cfg.clock_skews.max_skew())
             .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
@@ -144,7 +144,9 @@ impl ContinuousAuditor {
         Ok(())
     }
 
-    fn tick_state_checks_and_gc(&mut self) {
+    async fn tick_state_checks_and_gc(&mut self) {
+        let lookup_findings = self.inner.fetch_missing_hashi_approvals(&self.window).await;
+        self.report_findings("lookup", &lookup_findings);
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("violations", &violations);
@@ -213,7 +215,7 @@ impl ContinuousAuditor {
         } else {
             tracing::info!("finished initial Bitcoin confirmation lookups");
         }
-        self.tick_state_checks_and_gc();
+        self.tick_state_checks_and_gc().await;
 
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
@@ -251,7 +253,7 @@ impl ContinuousAuditor {
                     }
                 }
                 _ = state_checks_ticker.tick() => {
-                    self.tick_state_checks_and_gc();
+                    self.tick_state_checks_and_gc().await;
                 }
             }
         }
@@ -266,7 +268,6 @@ mod tests {
 next_event_delays:
   - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
-clock_skew: 300
 deployment:
   bucket_info:
     name: "bucket"
@@ -276,7 +277,7 @@ deployment:
   pcr_allowlist:
     current_build:
       git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
     prev_builds: []
 sui:
   rpc_url: "http://sui"
@@ -291,7 +292,7 @@ btc:
 
         assert_eq!(
             ContinuousAuditWindow::default_start(&cfg, 1_000_000),
-            1_000_000 - 86_400 - 300 - 4_200 - 600 - 300,
+            1_000_000 - 86_400 - 7_200 - 4_200 - 600 - 300,
         );
     }
 

@@ -75,6 +75,15 @@ impl GuardianS3Client {
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
+        Self::with_http_client(bucket_info, retention_environment, credentials, None).await
+    }
+
+    async fn with_http_client(
+        bucket_info: &S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
+        credentials: &S3Credentials,
+        http_client: Option<aws_smithy_runtime_api::client::http::SharedHttpClient>,
+    ) -> GuardianResult<Self> {
         info!("S3 Configuration:");
         info!("   Bucket: {}", bucket_info.name);
         info!("   Region: {}", bucket_info.region);
@@ -98,24 +107,52 @@ impl GuardianS3Client {
         // A custom endpoint implies an S3-compatible service (MinIO, LocalStack), which
         // need path-style addressing.
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
+        if let Some(http_client) = http_client {
+            s3_builder = s3_builder.http_client(http_client);
+        }
         if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
             s3_builder = s3_builder.force_path_style(true);
         }
         let client = S3Client::from_conf(s3_builder.build());
 
-        let client = Self {
-            client,
-            bucket_info: bucket_info.clone(),
-            object_lock_policy: S3ObjectLockPolicy::for_environment(retention_environment),
-        };
+        let client = Self::from_client(bucket_info.clone(), retention_environment, client);
         client.test_s3_connectivity().await?;
         Ok(client)
     }
 
-    /// Construct an `GuardianS3Client` from an already-configured S3 client.
-    /// This is intended for unit tests that use a mock S3 Client.
-    /// This is not put behind cfg(test) as tests in the enclave crate also use it.
-    pub fn from_client_for_tests(
+    /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
+    /// Tests and `non-enclave-dev` use normal networking, as do readers using `new`.
+    pub(crate) async fn new_with_custom_resolver(
+        bucket_info: &S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
+        credentials: &S3Credentials,
+    ) -> GuardianResult<Self> {
+        #[cfg(any(test, feature = "non-enclave-dev"))]
+        {
+            Self::new(bucket_info, retention_environment, credentials).await
+        }
+        #[cfg(not(any(test, feature = "non-enclave-dev")))]
+        {
+            use aws_smithy_http_client::tls;
+            use aws_smithy_http_client::Builder;
+            let http_client = Builder::new()
+                .tls_provider(tls::Provider::Rustls(
+                    tls::rustls_provider::CryptoMode::AwsLc,
+                ))
+                .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
+            Self::with_http_client(
+                bucket_info,
+                retention_environment,
+                credentials,
+                Some(http_client),
+            )
+            .await
+        }
+    }
+
+    /// Wrap an already-configured S3 client without making network requests.
+    /// Call [`Self::test_s3_connectivity`] to check S3 access and Object Lock support.
+    pub fn from_client(
         bucket_info: S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         client: S3Client,
@@ -665,7 +702,7 @@ mod tests {
     use std::time::Duration;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
-        GuardianS3Client::from_client_for_tests(
+        GuardianS3Client::from_client(
             S3BucketInfo {
                 name: "bucket".to_string(),
                 region: "us-east-1".to_string(),

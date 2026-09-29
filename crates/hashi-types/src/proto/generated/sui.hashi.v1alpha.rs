@@ -1504,6 +1504,7 @@ pub mod guardian_relay_service_client {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
+        /// Always includes attestation for KP verification.
         pub async fn get_provisioning_target_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetProvisioningTargetInfoRequest>,
@@ -1559,6 +1560,7 @@ pub mod guardian_relay_service_server {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
+        /// Always includes attestation for KP verification.
         async fn get_provisioning_target_info(
             &self,
             request: tonic::Request<super::GetProvisioningTargetInfoRequest>,
@@ -1798,10 +1800,14 @@ pub mod guardian_relay_service_server {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetGuardianInfoRequest {}
+pub struct GetGuardianInfoRequest {
+    /// Generate a Nitro attestation document for callers that verify it (KPs and operators).
+    #[prost(bool, tag = "1")]
+    pub include_attestation: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation document.
+    /// AWS Nitro attestation document; absent unless include_attestation is true.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
     /// Guardian signing public key (Ed25519, 32 bytes).
@@ -1862,13 +1868,13 @@ pub struct GuardianInfoData {
     /// operator_init). Certificates verified by this enclave are bound to it.
     #[prost(bytes = "bytes", optional, tag = "13")]
     pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Signed enclave mode and its current lifecycle stage.
+    /// Signed enclave mode and stage; absent until operator initialization commits.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "10, 11")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
 }
 /// Nested message and enum types in `GuardianInfoData`.
 pub mod guardian_info_data {
-    /// Signed enclave mode and its current lifecycle stage.
+    /// Signed enclave mode and stage; absent until operator initialization commits.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Lifecycle {
         #[prost(enumeration = "super::CeremonyStage", tag = "10")]
@@ -2346,10 +2352,9 @@ pub struct UpdateCommitteeResponse {
 #[repr(i32)]
 pub enum CeremonyStage {
     Unspecified = 0,
-    Uninitialized = 1,
-    OperatorInitialized = 2,
-    AwaitingKeyProvisionerConfirmations = 3,
-    Completed = 4,
+    OperatorInitialized = 1,
+    AwaitingKeyProvisionerConfirmations = 2,
+    Completed = 3,
 }
 impl CeremonyStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2359,7 +2364,6 @@ impl CeremonyStage {
     pub fn as_str_name(&self) -> &'static str {
         match self {
             Self::Unspecified => "CEREMONY_STAGE_UNSPECIFIED",
-            Self::Uninitialized => "CEREMONY_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "CEREMONY_STAGE_OPERATOR_INITIALIZED",
             Self::AwaitingKeyProvisionerConfirmations => {
                 "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS"
@@ -2371,7 +2375,6 @@ impl CeremonyStage {
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
             "CEREMONY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
-            "CEREMONY_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "CEREMONY_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
             "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS" => {
                 Some(Self::AwaitingKeyProvisionerConfirmations)
@@ -2385,10 +2388,9 @@ impl CeremonyStage {
 #[repr(i32)]
 pub enum WithdrawStage {
     Unspecified = 0,
-    Uninitialized = 1,
-    OperatorInitialized = 2,
-    ProvisionerInitialized = 3,
-    Activated = 4,
+    OperatorInitialized = 1,
+    ProvisionerInitialized = 2,
+    Activated = 3,
 }
 impl WithdrawStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2398,7 +2400,6 @@ impl WithdrawStage {
     pub fn as_str_name(&self) -> &'static str {
         match self {
             Self::Unspecified => "WITHDRAW_STAGE_UNSPECIFIED",
-            Self::Uninitialized => "WITHDRAW_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "WITHDRAW_STAGE_OPERATOR_INITIALIZED",
             Self::ProvisionerInitialized => "WITHDRAW_STAGE_PROVISIONER_INITIALIZED",
             Self::Activated => "WITHDRAW_STAGE_ACTIVATED",
@@ -2408,7 +2409,6 @@ impl WithdrawStage {
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
             "WITHDRAW_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
-            "WITHDRAW_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "WITHDRAW_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
             "WITHDRAW_STAGE_PROVISIONER_INITIALIZED" => {
                 Some(Self::ProvisionerInitialized)

@@ -68,10 +68,6 @@ pub enum CreateProposalParams {
         version: u64,
         metadata: Vec<(String, String)>,
     },
-    UpdateGuardian {
-        url: String,
-        metadata: Vec<(String, String)>,
-    },
     EmergencyPause {
         /// `true` proposes a pause; `false` proposes an unpause.
         pause: bool,
@@ -499,11 +495,6 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
-                    ProposalType::UpdateGuardian => {
-                        let p: move_types::Proposal<move_types::UpdateGuardian> =
-                            bcs::from_bytes(value_bytes).context("deserialize UpdateGuardian")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                    }
                     ProposalType::IgnoreMember => {
                         let p: move_types::Proposal<move_types::IgnoreMember> =
                             bcs::from_bytes(value_bytes).context("deserialize IgnoreMember")?;
@@ -731,7 +722,6 @@ impl HashiClient {
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
-            ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Upgrade => {
                 anyhow::bail!(
@@ -1004,24 +994,6 @@ pub fn build_create_proposal_transaction(
                     hashi_arg,
                     validator_address_arg,
                     version_arg,
-                    metadata_arg,
-                    clock_arg,
-                ],
-            );
-        }
-        CreateProposalParams::UpdateGuardian { url, metadata } => {
-            let url_arg = builder.pure(&url);
-            let metadata_arg = build_metadata(&mut builder, &metadata);
-            builder.move_call(
-                Function::new(
-                    call_package,
-                    Identifier::from_static("update_guardian"),
-                    Identifier::from_static("propose"),
-                ),
-                vec![
-                    hashi_arg,
-                    validator_address_arg,
-                    url_arg,
                     metadata_arg,
                     clock_arg,
                 ],
@@ -1444,7 +1416,6 @@ pub fn get_proposal_type_arg(
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
-        ProposalType::UpdateGuardian => ("update_guardian", "UpdateGuardian"),
         ProposalType::IgnoreMember => ("ignore_member", "IgnoreMember"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(

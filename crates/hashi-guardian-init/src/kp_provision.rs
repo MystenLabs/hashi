@@ -16,7 +16,8 @@
 //!    endpoint `GuardianInfo`. Deployment policy, limiter config, and
 //!    `enclave_btc_pubkey == None` are all confirmed.
 //! 3. The authoritative `ceremony/` log is scraped for the secret-sharing
-//!    instance the new guardian was booted with; it must match.
+//!    instance the new guardian was booted with; it must match. The ceremony
+//!    BTC master public key must match the immutable on-chain guardian key.
 //! 4. The stable `InitConfig` is recomputed from limiter config and deployment
 //!    policy; its `config_hash` is confirmed.
 //! 5. The optional genesis state hash is independently derived from S3 and
@@ -56,7 +57,6 @@ use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
-use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_provisioning_target_info;
 use crate::kp_roster::decrypt_kp_share;
 
@@ -140,11 +140,11 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "relay endpoint GuardianInfo verified; pinned standby session",
     );
 
-    // 2. Fetch + verify the same session's signed `GuardianInfo` from S3.
+    // 2. Fetch + verify the same session's signed operator-init record from S3.
     info!(
         phase = "guardian info",
         session_id = %session_id,
-        "fetching + verifying pinned standby session's signed GuardianInfo from S3",
+        "fetching + verifying pinned standby session's signed operator-init record from S3",
     );
     let verified_session = reader.get_current_session_info(&session_id).await?;
     let GuardianInfo {
@@ -217,8 +217,10 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
-    ensure_oi_info_matches_post_init(verified_session.info(), &guardian_info)
-        .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
+    verified_session
+        .info()
+        .match_post_oi_guardian_info(&guardian_info)
+        .with_context(|| format!("S3 operator-init info mismatch for session {session_id}"))?;
     info!(
         phase = "guardian info",
         session_id = %session_id,
@@ -246,6 +248,17 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
     let state = reader.read_latest_ceremony_state().await?;
+    let onchain_state = cfg.hashi.onchain_state().await?;
+    let onchain_btc_pubkey = onchain_state
+        .guardian_btc_public_key()
+        .context("guardian_btc_public_key is not set on chain; launch Hashi before provisioning")?;
+    anyhow::ensure!(
+        state.btc_master_pubkey.serialize().as_slice() == onchain_btc_pubkey.as_slice(),
+        "ceremony BTC master public key does not match on-chain guardian_btc_public_key: \
+         ceremony {}, on-chain {}",
+        hex::encode(state.btc_master_pubkey.serialize()),
+        hex::encode(&onchain_btc_pubkey),
+    );
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
@@ -291,7 +304,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let expected_genesis_state_hash = match (do_genesis, latest_committee) {
         (false, Some(_)) => None,
         (true, None) => {
-            let onchain_state = cfg.hashi.onchain_state().await?;
             let master_g = onchain_state.onchain_verifying_key_g()?;
             let committee = onchain_state
                 .current_committee()

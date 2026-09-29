@@ -36,6 +36,9 @@ const EProposalExpired: vector<u8> = b"Proposal expired";
 const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
 #[error(code = 7)]
 const ENotCommitteeMember: vector<u8> = b"Validator is not a member of the current committee";
+#[error(code = 8)]
+const ENoCommittee: vector<u8> =
+    b"No committee exists for the current epoch; votes cannot be cast before genesis";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -95,6 +98,10 @@ entry fun vote<T: store>(
 ) {
     hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
+    // Before genesis no committee exists yet, so there is nothing to weigh a
+    // vote against. Refuse by name rather than letting the committee lookup
+    // below abort inside the bag.
+    assert!(hashi.committee_set().has_committee(hashi.committee_set().epoch()), ENoCommittee);
     // Registration authorizes the key; only current-committee membership
     // carries weight. A registered validator outside the committee (rotated
     // out, or not yet seated) must not record a weightless vote.
@@ -144,10 +151,7 @@ public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &
     // never be deletable, even after they expire. Refuse explicitly so
     // the caller gets `EProposalAlreadyExecuted` instead of the bag's
     // missing-key abort.
-    assert!(
-        !hashi.proposals().executed().contains(proposal_id.to_address()),
-        EProposalAlreadyExecuted,
-    );
+    assert!(!hashi.proposals().executed().contains(proposal_id), EProposalAlreadyExecuted);
     let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(proposal.is_expired(clock), EProposalNotExpired);
@@ -227,10 +231,7 @@ public(package) fun execute<T: copy + drop + store>(
     // proposal lives only in the executed bag. Check that explicitly so
     // the failure surface is `EProposalAlreadyExecuted` rather than the
     // ObjectBag's generic missing-key abort.
-    assert!(
-        !hashi.proposals().executed().contains(proposal_id.to_address()),
-        EProposalAlreadyExecuted,
-    );
+    assert!(!hashi.proposals().executed().contains(proposal_id), EProposalAlreadyExecuted);
     let mut proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(!proposal.is_expired(clock), EProposalExpired);
@@ -241,7 +242,7 @@ public(package) fun execute<T: copy + drop + store>(
     let data = proposal.data;
     let id = proposal.id.to_inner();
 
-    hashi.proposals_mut().executed_mut().add(id.to_address(), proposal);
+    hashi.proposals_mut().executed_mut().add(id, proposal);
 
     sui::event::emit(ProposalExecuted<T> { proposal_id: id, data });
     data

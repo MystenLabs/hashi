@@ -117,8 +117,9 @@ mod tests {
     use crate::activate_enclave_for_testing;
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::guardian::EnclaveLifecycle;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
@@ -138,9 +139,11 @@ mod tests {
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
     ) -> (Arc<Enclave>, crate::test_utils::CapturedPuts) {
-        let hashi_kp = create_btc_keypair_for_test(&[6u8; 32]);
+        let hashi_kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32]).expect("valid test secret key");
         let hashi_btc_master_pubkey =
-            hashi_master_g_from_btc_xonly_for_test(&hashi_kp.x_only_public_key().0);
+            HashiMasterG::with_even_y_from_x_be_bytes(&hashi_kp.x_only_public_key().0.serialize())
+                .expect("valid x-only public key");
 
         let refill_rate = 0; // no refill in tests unless specified
         let limiter_config = LimiterConfig {
@@ -167,7 +170,10 @@ mod tests {
         // The reconstructed BTC keypair (set by provisioner_init in production).
         enclave
             .config
-            .set_btc_keypair(create_btc_keypair_for_test(&[8u8; 32]))
+            .set_btc_keypair(
+                BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32])
+                    .expect("valid test secret key"),
+            )
             .unwrap();
 
         enclave
@@ -188,8 +194,8 @@ mod tests {
         assert!(matches!(
             result,
             Err(GuardianError::LifecycleMismatch {
-                expected: EnclaveLifecycle::Withdraw(WithdrawStage::Activated),
-                actual: EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized),
+                expected: Some(EnclaveLifecycle::Withdraw(WithdrawStage::Activated)),
+                actual: None,
             })
         ));
     }

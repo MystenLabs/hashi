@@ -170,6 +170,11 @@ Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
+Lowering `max_bucket_capacity` can strand a committed batch and stop all
+withdrawals. Pause the bridge first, then keep the new cap at or above the
+outflow of every batch `hashi withdraw list` shows as Committed. Unpause once
+every node's `hashi_guardian_limiter_max_capacity` shows the new cap.
+
 ## key-provisioner provision
 
 A one-shot flow run by a key provisioner for a new guardian instance, either on
@@ -352,10 +357,10 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
 2. Agree on the new set: `n`, `t` and one cert per KP (a fresh YubiKey for the
    affected KP, or a different person). It goes in `new_kp_roster`;
    `kp_roster` stays the dealt set. Steps 3 to 6 verify against the ceremony
-   EIF: `current_build` is its PCR0 under the `<sha>-ceremony` revision a
-   ceremony enclave reports (its own allowlist entry beside the same-commit
-   withdraw build), with the build that dealt the current shares in
-   `prev_builds`. The operator and every KP render from one config.
+   session: `current_build` is the approved revision label/PCR pair, with
+   older builds that dealt the current shares in `prev_builds`. Ceremony and
+   withdraw sessions use the same EIF. The operator and every KP render from
+   one config.
 3. Operator: bring up a fresh ceremony-mode guardian on the standby slot,
    against the same bucket, then `operator rotate-kp-set init`.
 4. Any `t` current KPs: `key-provisioner rotate-kp-set`, each sending the
@@ -364,11 +369,8 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
    new KPs (`wait` resumes if interrupted).
 6. Every new KP: `key-provisioner ceremony`, with `kp_roster` set to the new
    set.
-7. The withdraw EIF has a different PCR0 at the same commit, so re-render:
-   `current_build` becomes the withdraw EIF (revision `<sha>`) and the
-   ceremony EIF (`<sha>-ceremony`), which wrote the logs everyone reads, moves
-   to `prev_builds`. Then replace the standby slot with a withdraw-mode
-   guardian: `operator provision` (no `--do-genesis`) and
+7. Replace the standby slot with a fresh guardian using the same EIF and build
+   mapping. `operator provision` selects withdraw mode (no `--do-genesis`), and
    `key-provisioner provision` by the new KPs run while the old guardian still
    serves. Switch traffic to the new guardian first, while that can still be
    undone: the proxy keeps serving already-signed withdrawals from its cache,

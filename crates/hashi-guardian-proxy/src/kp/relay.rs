@@ -24,10 +24,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::roster::RosterCache;
-use crate::widlog::LogStore;
+use crate::kp;
+use crate::kp::roster::RosterCache;
+use crate::log_store::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
-use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SessionID;
 use hashi_types::proto;
@@ -97,7 +97,7 @@ struct BackendArming {
 }
 
 /// `GetProvisioningTargetInfo` is public and unauthenticated, and the enclave
-/// mints a fresh Nitro attestation for every `GetGuardianInfo`, so a flood could
+/// mints a fresh Nitro attestation for every attested `GetGuardianInfo`, so a flood could
 /// crowd out provisioning. The request carries no nonce, so a seconds-old
 /// response is as good as a fresh one; cache it briefly to bound the backend's
 /// exposure. The only effect of staleness is that a KP may pin a session that
@@ -128,33 +128,15 @@ impl<L: LogStore> Relay<L> {
         }
     }
 
-    /// Pre-authenticate a submission: its detached signature must cover these
-    /// exact (session, config, share) bytes, and the signer's cert must be in
-    /// the ceremony's committed roster. Signature first because it needs no
-    /// I/O — a submission that isn't internally consistent never costs an S3
-    /// roster read. DoS guard only; the enclave re-verifies authoritatively.
-    async fn verify_kp_submission<'a>(
-        &self,
-        signed_request: &'a KpSigned<ProvisionerInitRequest>,
-    ) -> Result<&'a ProvisionerInitRequest, Status> {
-        let request = signed_request
-            .verify_signature()
-            .map_err(|error| Status::unauthenticated(error.to_string()))?;
-        // The ceremony's committed roster, not deploy config: a rotation
-        // re-deals shares without a proxy redeploy.
-        self.roster
-            .authorize(&signed_request.signer_fingerprint())
-            .await?;
-        Ok(request)
-    }
-
     /// Backend's self-reported session, provisioning threshold, and provisioned flag.
     /// The relay is liveness-only, so it does not verify the signature or attestation.
     async fn backend_status(&self) -> Result<BackendStatus, Status> {
         let pb = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
             .await?
             .into_inner();
         let resp = GetGuardianInfoResponse::try_from(pb)
@@ -289,7 +271,9 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         let response = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: true,
+            })
             .await?
             .into_inner();
         *cached = Some(CachedTargetInfo {
@@ -304,12 +288,11 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         request: Request<proto::SignedProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
         let submission = request.into_inner();
-        let signed_request = KpSigned::<ProvisionerInitRequest>::try_from(submission.clone())
-            .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
+        let signed_request = kp::parse::<ProvisionerInitRequest, _>(&submission)?;
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        let verified_request = self.verify_kp_submission(&signed_request).await?;
+        let verified_request = kp::admit(&self.roster, &signed_request).await?;
         let id = u32::from(verified_request.encrypted_share().id.get());
 
         // Hold the accumulator across the status read + batch submit so a racing
@@ -405,16 +388,9 @@ mod tests {
     use hashi_types::guardian::ShareID;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
 
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
-
-    /// A relay whose backend is never dialled — enough to exercise the roster
-    /// mapping, which happens before any backend call.
-    fn relay_with_roster(store: MemStore) -> Relay<MemStore> {
-        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
-        Relay::new(channel, Arc::new(RosterCache::new(store)))
-    }
 
     fn submission(id: u32) -> proto::SignedProvisionerInitRequest {
         proto::SignedProvisionerInitRequest {
@@ -546,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn bad_signatures_are_rejected_before_the_roster_read() {
         let (cert, secret_armored) = mock_attested_kp_keypair();
-        let relay = relay_with_roster(MemStore::default());
+        let roster = RosterCache::new(MemStore::default());
 
         let request = |session: &str, share_id: u16| {
             ProvisionerInitRequest::new(
@@ -579,13 +555,13 @@ mod tests {
                 KpSigned::from_parts(request("sess-a", 1), cert.clone(), String::new()),
             ),
         ] {
-            let err = relay.verify_kp_submission(&signed).await.unwrap_err();
+            let err = kp::admit(&roster, &signed).await.unwrap_err();
             assert_eq!(err.code(), tonic::Code::Unauthenticated, "{case}");
         }
 
         // A signature over the exact submission gets past, on to the roster read.
         let signed = KpSigned::from_parts(request("sess-a", 1), cert, good_sig);
-        let err = relay.verify_kp_submission(&signed).await.unwrap_err();
+        let err = kp::admit(&roster, &signed).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
@@ -610,8 +586,9 @@ mod tests {
     impl hashi_types::proto::guardian_service_server::GuardianService for TaggedGuardian {
         async fn get_guardian_info(
             &self,
-            _: Request<proto::GetGuardianInfoRequest>,
+            request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert!(request.into_inner().include_attestation);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Response::new(proto::GetGuardianInfoResponse {
                 signing_pub_key: Some(vec![self.tag; 32].into()),

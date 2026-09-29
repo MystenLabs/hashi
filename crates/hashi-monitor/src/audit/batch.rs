@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
+use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -31,7 +32,11 @@ impl BatchAuditWindow {
     pub fn new(cfg: &Config, start: UnixSeconds, end: UnixSeconds, cur_time: UnixSeconds) -> Self {
         // Guardian timeline is authoritative. We still fetch Sui in a relaxed range to validate E2 -> E1.
         let sui_start = start.saturating_sub(cfg.withdrawal_predecessor_lookback);
-        let sui_end = end.saturating_add(cfg.clock_skew).min(cur_time); // guardian_e2@{end} might match sui_e1@{end+clock_skew}
+        let e1_skew = cfg
+            .clock_skews
+            .get_skew(WithdrawalEventType::E1HashiApproved)
+            .expect("E1 has a successor");
+        let sui_end = end.saturating_add(e1_skew).min(cur_time); // guardian_e2@{end} might match sui_e1@{end+e1_skew}
 
         // User [start, end] is interpreted as guardian timestamps.
         let guardian_start = start;
@@ -59,8 +64,9 @@ impl AuditWindow for BatchAuditWindow {
 /// It functions as follows:
 ///     - fetch guardian events from `[t1, t2]` (authoritative timeline)
 ///     - fetch withdrawal and deposit events from
-///       `[t1 - withdrawal_predecessor_lookback, t2 + clock_skew]`
+///       `[t1 - withdrawal_predecessor_lookback, t2 + E1's clock skew]`
 ///     - fetch BTC data for in-scope withdrawals and deposits found in the Sui range
+///     - fetch each overdue Hashi approval missing from the Sui range by its withdrawal id
 /// Finally, it logs progress watermarks that identify a safe start for the next audit.
 ///
 /// Notes:
@@ -211,6 +217,15 @@ impl BatchAuditor {
         let btc_findings = self.inner.fetch_btc_info(&self.audit_window)?;
         log_findings("batch", "btc", &btc_findings);
         if !btc_findings.is_empty() {
+            self.violation_found = true;
+        }
+
+        let lookup_findings = self
+            .inner
+            .fetch_missing_hashi_approvals(&self.audit_window)
+            .await;
+        log_findings("batch", "lookup", &lookup_findings);
+        if !lookup_findings.is_empty() {
             self.violation_found = true;
         }
 

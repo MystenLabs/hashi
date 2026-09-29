@@ -830,9 +830,6 @@ impl SigningManager {
         metrics: &Metrics,
     ) -> SigningResult<(G, Vec<Eval<S>>)> {
         let config = &self.config;
-        // Splitting the lock is safe because a given `signing_id` is never signed concurrently
-        // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
-        // removed from the pool under the first lock section.
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
@@ -1453,7 +1450,7 @@ impl SigningManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
@@ -1872,8 +1869,8 @@ mod tests {
         }
     }
 
-    struct SigningTestSetup {
-        managers: Vec<Arc<SigningManager>>,
+    pub(crate) struct SigningTestSetup {
+        pub(crate) managers: Vec<Arc<SigningManager>>,
         verifying_key: G,
         refill_rx: watch::Receiver<u32>,
         n: u16,
@@ -1883,7 +1880,7 @@ mod tests {
     }
 
     impl SigningTestSetup {
-        fn new(n: u16) -> Self {
+        pub(crate) fn new(n: u16) -> Self {
             Self::with_seed(n, 42)
         }
 

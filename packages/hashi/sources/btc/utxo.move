@@ -6,7 +6,6 @@
 /// its satoshi amount and an optional derivation path (the Sui address a
 /// deposit mints to). The constructors are `public` so PTBs can assemble
 /// UTXOs when calling into the bridge; everything else is package-only.
-#[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo;
 
 // ~~~~~~~ Structs ~~~~~~~

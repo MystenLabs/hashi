@@ -203,7 +203,7 @@ mod tests {
     use hashi_types::guardian::LogMessage;
 
     fn build_pcrs() -> BuildPcrs {
-        BuildPcrs::new("current", vec![0])
+        BuildPcrs::mock_for_testing("current", 1)
     }
 
     fn heartbeat_log(session_id: &str, timestamp_ms: UnixMillis) -> VerifiedLogRecord {
@@ -221,9 +221,13 @@ mod tests {
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
                 share_ids: vec![],
-                enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
-                    .x_only_public_key()
-                    .0,
+                enclave_btc_pubkey: hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+                    &hashi_types::bitcoin::BTC_LIB,
+                    &[1; 32],
+                )
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0,
             })),
         )
     }

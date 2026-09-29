@@ -7,7 +7,6 @@ use anyhow::ensure;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EnclaveLifecycle;
 use hashi_types::guardian::GetGuardianInfoResponse;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
@@ -21,7 +20,9 @@ pub async fn verified_live_guardian_info(
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
     let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
+        .get_guardian_info(pb::GetGuardianInfoRequest {
+            include_attestation: true,
+        })
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();
@@ -57,7 +58,7 @@ pub async fn verified_ceremony_guardian_info(
     let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
     let verified = verify_info_response(info_pb, current_build)?;
     ensure!(
-        matches!(verified.info.lifecycle, EnclaveLifecycle::Ceremony(_)),
+        matches!(verified.info.lifecycle, Some(EnclaveLifecycle::Ceremony(_))),
         "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
          guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
          as its provisioning target; a bare endpoint must be the ceremony guardian itself",
@@ -87,7 +88,9 @@ async fn ceremony_guardian_info_pb(
         Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
         Err(status) if status.code() == Code::Unimplemented => Ok((
             GuardianServiceClient::new(channel)
-                .get_guardian_info(pb::GetGuardianInfoRequest {})
+                .get_guardian_info(pb::GetGuardianInfoRequest {
+                    include_attestation: true,
+                })
                 .await
                 .context("GetGuardianInfo RPC failed")?
                 .into_inner(),
@@ -106,28 +109,6 @@ fn verify_info_response(
     info_resp
         .verify_live(current_build)
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e}"))
-}
-
-/// The OI log captures the final pre-transition snapshot. Apart from the
-/// lifecycle advancing once, it must match the live post-OI GuardianInfo.
-pub fn ensure_oi_info_matches_post_init(
-    oi_info: &GuardianInfo,
-    live_info: &GuardianInfo,
-) -> anyhow::Result<()> {
-    ensure!(
-        live_info.lifecycle.predecessor() == Some(oi_info.lifecycle),
-        "S3 OI lifecycle {:?} is not the predecessor of live lifecycle {:?}",
-        oi_info.lifecycle,
-        live_info.lifecycle
-    );
-
-    let mut expected_live_info = oi_info.clone();
-    expected_live_info.lifecycle = live_info.lifecycle;
-    ensure!(
-        &expected_live_info == live_info,
-        "S3 OI GuardianInfo differs from live post-OperatorInit GuardianInfo"
-    );
-    Ok(())
 }
 
 #[cfg(test)]
@@ -159,8 +140,9 @@ mod tests {
     impl GuardianService for Guardian {
         async fn get_guardian_info(
             &self,
-            _: Request<pb::GetGuardianInfoRequest>,
+            request: Request<pb::GetGuardianInfoRequest>,
         ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+            assert!(request.into_inner().include_attestation);
             Ok(Response::new(tagged(self.0)))
         }
         async fn setup_new_key(

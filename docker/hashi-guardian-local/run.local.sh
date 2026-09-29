@@ -8,11 +8,8 @@
 # the `host` container. The S3 hostname redirect is kept so the guardian's S3
 # traffic still traverses the forwarder chain (enclave -> host -> MinIO).
 #
-# CEREMONY_MODE (env, default unset=false) selects ceremony vs withdraw mode,
-# exactly as the real enclave `main.rs` does — so the same image serves the
-# ceremony-mode and withdraw-mode guardians in the replica.
-set -e
-echo "run.local.sh starting (CEREMONY_MODE=${CEREMONY_MODE:-false})"
+# OperatorInit selects the session mode and revision label.
+echo "run.local.sh starting"
 
 # Point S3 hostnames at loopback (kept from run.sh). AWS_REGION comes from the
 # container env. /etc/hosts is a bind mount, so append (>>) rather than truncate.

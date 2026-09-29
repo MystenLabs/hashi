@@ -16,7 +16,6 @@ use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
-use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
@@ -223,7 +222,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    ensure_oi_info_matches_post_init(verified_session.info(), &post.info)?;
+    verified_session
+        .info()
+        .match_post_oi_guardian_info(&post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,
@@ -258,10 +259,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
-    ensure!(
-        info.lifecycle == WithdrawStage::Uninitialized.into(),
-        "guardian is not an uninitialized withdraw enclave"
-    );
+    ensure!(info.lifecycle.is_none(), "guardian is not uninitialized");
     ensure!(
         info.secret_sharing_instance.is_none(),
         "guardian already has a secret-sharing instance"

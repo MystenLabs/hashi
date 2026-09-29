@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "object_key": "init/d54207da194977dc/02-oi-guardian-info.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
+  "message": {
+    "Init": {
+      "OIGuardianInfo": {
+        "deployment": {
+          "bucket_info": {
+            "name": "test-bucket",
+            "region": "us-east-1"
+          },
+          "retention_environment": "testnet",
+          "bitcoin_network": "regtest",
+          "pcr_allowlist": {
+            "current_build": {
+              "git_revision": "unknown",
+              "pcr0": "010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+            },
+            "prev_builds": []
+          }
+        },
+        "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+        "mode": "Ceremony"
+      }
+    }
+  },
+  "signature": "a9582fa4ed9600c6c3737d94579a02f59c194d70fe93565eeb359f7abd550dd6e221078445ccbeb0759996ec542fe66c728523dc2f920a471dea5a1dc9a61601"
+}

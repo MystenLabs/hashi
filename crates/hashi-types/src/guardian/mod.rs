@@ -7,9 +7,12 @@ mod deployment;
 pub mod errors;
 pub mod lifecycle;
 pub mod proto_conversions;
+mod runtime_committee;
 pub mod s3;
 pub(crate) mod serde;
+pub use runtime_committee::RuntimeCommittee;
 mod session;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 pub mod time;
 
@@ -73,10 +76,15 @@ pub enum OperatorInitRequest {
     Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetGuardianInfoRequest {
+    pub include_attestation: bool,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation
-    attestation: NitroAttestation,
+    /// AWS Nitro attestation, present only when requested.
+    attestation: Option<NitroAttestation>,
     /// Signing pub key of the guardian
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
@@ -92,8 +100,8 @@ pub struct VerifiedGuardianInfo {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Signed enclave mode and its current lifecycle stage.
-    pub lifecycle: EnclaveLifecycle,
+    /// Signed enclave mode and stage; absent until operator initialization commits.
+    pub lifecycle: Option<EnclaveLifecycle>,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// Public summary of the installed deployment configuration, absent before OI.
@@ -172,7 +180,7 @@ pub struct ActivationState {
     /// Secret-sharing instance pinned during OI and retained through activation.
     secret_sharing_instance: SecretSharingInstance,
     /// Current Hashi committee
-    committee: HashiCommittee,
+    committee: RuntimeCommittee,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
 }
@@ -507,7 +515,7 @@ impl ActivationState {
     pub fn new(
         config_hash: [u8; 32],
         secret_sharing_instance: SecretSharingInstance,
-        committee: HashiCommittee,
+        committee: RuntimeCommittee,
         limiter_state: LimiterState,
     ) -> Self {
         Self {
@@ -523,7 +531,7 @@ impl ActivationState {
     ) -> (
         [u8; 32],
         SecretSharingInstance,
-        HashiCommittee,
+        RuntimeCommittee,
         LimiterState,
     ) {
         (
@@ -534,7 +542,7 @@ impl ActivationState {
         )
     }
 
-    pub fn committee(&self) -> &HashiCommittee {
+    pub fn committee(&self) -> &RuntimeCommittee {
         &self.committee
     }
 
@@ -868,7 +876,7 @@ impl StandardWithdrawalRequest {
 
 impl GetGuardianInfoResponse {
     pub fn new(
-        attestation: NitroAttestation,
+        attestation: Option<NitroAttestation>,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSignedResponse<GuardianInfo>,
     ) -> Self {
@@ -879,17 +887,16 @@ impl GetGuardianInfoResponse {
         }
     }
 
-    /// Verify a live guardian response.
-    ///
-    /// Used by operator and KP tooling while initializing a guardian (ceremony,
-    /// provisioning, and activation).
+    /// Verify a live guardian response against an independently approved build.
     ///
     /// Checks:
     /// - `signed_info` is signed by `signing_pub_key`;
-    /// - its installed deployment revision, when present, matches `expected_build`;
-    /// - the Nitro attestation has a valid signature;
+    /// - initialized sessions report the expected deployment revision;
+    /// - the Nitro attestation is present and has a valid signature;
     /// - the certificate chain is valid now;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    ///
+    /// Callers check whether the verified lifecycle is appropriate for their operation.
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,
@@ -899,18 +906,27 @@ impl GetGuardianInfoResponse {
             .verify_signature(&self.signing_pub_key)?
             .response
             .clone();
-        // Before OI only the independently pinned attestation is available.
-        // Once installed, the signed deployment label must agree as well.
-        if let Some(deployment) = &info.deployment_info
-            && deployment.git_revision != expected_build.git_revision()
-        {
-            return Err(CryptoVerificationError::new(format!(
-                "guardian reports build '{}', expected '{}'",
-                deployment.git_revision,
-                expected_build.git_revision()
-            )));
+        if info.lifecycle.is_some() {
+            if info
+                .deployment_info
+                .as_ref()
+                .map(|d| d.git_revision.as_str())
+                != Some(expected_build.git_revision())
+            {
+                return Err(CryptoVerificationError::new(format!(
+                    "guardian reports build '{:?}', expected '{}'",
+                    info.deployment_info.as_ref().map(|d| &d.git_revision),
+                    expected_build.git_revision()
+                )));
+            }
+        } else if info.deployment_info.is_some() {
+            return Err(CryptoVerificationError::new(
+                "expected an uninitialized guardian without deployment configuration",
+            ));
         }
         self.attestation
+            .as_ref()
+            .ok_or_else(|| CryptoVerificationError::new("missing guardian attestation"))?
             .verify_live(&self.signing_pub_key, expected_build)?;
         Ok(VerifiedGuardianInfo {
             info,
@@ -953,7 +969,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct ActivationStateRepr {
     pub config_hash: [u8; 32],
     pub secret_sharing_instance: SecretSharingInstance,
-    pub committee: crate::move_types::Committee,
+    pub committee: runtime_committee::ActivationCommitteeRepr,
     pub limiter_state: LimiterState,
 }
 
@@ -1012,7 +1028,7 @@ impl From<&ActivationState> for ActivationStateRepr {
         Self {
             config_hash,
             secret_sharing_instance,
-            committee: (&committee).into(),
+            committee: committee.activation_digest_repr(),
             limiter_state,
         }
     }
@@ -1027,12 +1043,15 @@ mod tests {
     fn guardian_info_json_encodes_binary_fields_as_strings() {
         let mut info = GuardianInfo::mock_for_testing();
         info.config_hash = Some([0xab; 32]);
-        let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
-            .x_only_public_key()
-            .0;
-        info.mpc_master_g = Some(crate::bitcoin::hashi_master_g_from_btc_xonly_for_test(
-            &btc_pubkey,
-        ));
+        let btc_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[3u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
+        info.mpc_master_g = Some(
+            crate::bitcoin::HashiMasterG::with_even_y_from_x_be_bytes(&btc_pubkey.serialize())
+                .expect("valid x-only public key"),
+        );
 
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["lifecycle"]["withdraw"], "operator_initialized");
@@ -1052,7 +1071,8 @@ mod tests {
 
     #[test]
     fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
-        let resp = GetGuardianInfoResponse::mock_for_testing();
+        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+        resp.attestation = None;
         let expected_info = GuardianInfo::mock_for_testing();
         let expected_signing_pub_key = resp.signing_pub_key;
         let (info, signing_pub_key) = resp.into_info_unchecked();
@@ -1069,11 +1089,59 @@ mod tests {
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert_eq!(
-            resp.verify_live(&BuildPcrs::new("test-revision", vec![0]))
+            resp.verify_live(&BuildPcrs::mock_for_testing("test-revision", 1))
                 .unwrap_err()
                 .to_string(),
             "signature invalid"
         );
+    }
+
+    #[test]
+    fn get_guardian_info_verify_live_requires_attestation() {
+        let key = GuardianSignKeyPair::from([7; 32]);
+        let mut info = GuardianInfo::mock_for_testing();
+        info.lifecycle = None;
+        info.deployment_info = None;
+        let response = GetGuardianInfoResponse::new(
+            None,
+            key.verification_key(),
+            GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
+        );
+
+        assert_eq!(
+            response
+                .verify_live(&BuildPcrs::mock_for_testing("approved", 1))
+                .unwrap_err()
+                .to_string(),
+            "missing guardian attestation",
+        );
+    }
+
+    #[test]
+    fn guardian_info_verification_distinguishes_boot_from_initialized_sessions() {
+        let key = GuardianSignKeyPair::from([7; 32]);
+        let build = BuildPcrs::mock_for_testing("approved", 1);
+        let response = |info| {
+            GetGuardianInfoResponse::new(
+                Some(NitroAttestation::new(vec![])),
+                key.verification_key(),
+                GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
+            )
+        };
+        let mut info = GuardianInfo::mock_for_testing();
+        info.lifecycle = None;
+        info.deployment_info = None;
+        assert!(response(info.clone()).verify_live(&build).is_ok());
+        let mut deployment = DeploymentConfig::mock_for_testing().summary();
+        deployment.git_revision = "approved".into();
+        info.deployment_info = Some(deployment);
+        assert!(response(info.clone()).verify_live(&build).is_err());
+        info.lifecycle = CeremonyStage::OperatorInitialized.into();
+        assert!(response(info.clone()).verify_live(&build).is_ok());
+        info.deployment_info.as_mut().unwrap().git_revision = "wrong-label".into();
+        assert!(response(info.clone()).verify_live(&build).is_err());
+        info.deployment_info = None;
+        assert!(response(info).verify_live(&build).is_err());
     }
 
     #[test]

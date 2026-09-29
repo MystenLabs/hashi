@@ -27,8 +27,8 @@ pub enum GuardianError {
     /// The guardian build does not match the configured current build.
     BuildNotCurrent(String),
     LifecycleMismatch {
-        expected: EnclaveLifecycle,
-        actual: EnclaveLifecycle,
+        expected: Option<EnclaveLifecycle>,
+        actual: Option<EnclaveLifecycle>,
     },
     LimiterSequenceMismatch {
         expected: u64,

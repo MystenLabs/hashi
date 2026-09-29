@@ -7,8 +7,8 @@ use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::RuntimeCommittee;
 use std::sync::Arc;
 use tracing::info;
 
@@ -34,12 +34,10 @@ pub async fn update_committee(
 
     verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed)?;
 
-    let new_committee: HashiCommittee = signed
-        .message()
-        .new_committee
-        .clone()
-        .try_into()
-        .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
+    let new_committee = RuntimeCommittee::from_move_with_encryption_key_fallback(
+        signed.message().new_committee.clone(),
+    )
+    .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
 
     if new_committee.epoch() != proposed_epoch {
         return Err(InvalidInputs(format!(
@@ -87,14 +85,16 @@ mod tests {
     use crate::test_utils::create_fully_initialized_enclave;
     use crate::test_utils::FullyInitializedArgs;
     use bitcoin::Network;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::guardian::GuardianError;
+    use hashi_types::guardian::HashiCommittee;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
@@ -145,8 +145,11 @@ mod tests {
     }
 
     async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
-        let kp = create_btc_keypair_for_test(&[1u8; 32]);
-        let master_pubkey = hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1u8; 32]).expect("valid test secret key");
+        let master_pubkey =
+            HashiMasterG::with_even_y_from_x_be_bytes(&kp.x_only_public_key().0.serialize())
+                .expect("valid x-only public key");
         create_fully_initialized_enclave(FullyInitializedArgs {
             network: Network::Regtest,
             committee: committee_at(epoch),
@@ -172,6 +175,33 @@ mod tests {
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
         assert_eq!(new_epoch, 6);
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 6);
+    }
+
+    #[tokio::test]
+    async fn invalid_encryption_key_does_not_block_handoffs() {
+        let enclave = enclave_at_epoch(5).await;
+        let outgoing = committee_at(5);
+        let mut new_committee = hashi_types::move_types::Committee::from(&committee_at(6));
+        new_committee.members[0].encryption_public_key = vec![0xff; 32];
+        assert!(HashiCommittee::try_from(new_committee.clone()).is_err());
+        let transition = CommitteeTransitionRequest { new_committee };
+        let hashi_id = hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID;
+        let sig = mock_bls_sk().sign(hashi_id, 5, mock_signer_address(), &transition);
+        let mut agg = BlsSignatureAggregator::new(hashi_id, &outgoing, transition);
+        agg.add_signature(sig).unwrap();
+
+        assert_eq!(
+            update_committee(enclave.clone(), agg.finish().unwrap())
+                .await
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            update_committee(enclave, sign_transition_at(6, committee_at(7)))
+                .await
+                .unwrap(),
+            7
+        );
     }
 
     #[tokio::test]
@@ -253,7 +283,7 @@ mod tests {
 
         let err = enclave
             .state
-            .replace_committee(committee_at(6), 4)
+            .replace_committee(committee_at(6).into(), 4)
             .expect_err("stale expected_current_epoch must error");
         assert!(
             matches!(err, GuardianError::InvalidInputs(_)),

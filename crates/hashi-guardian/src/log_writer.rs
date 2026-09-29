@@ -184,10 +184,10 @@ mod tests {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::GuardianInfo;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::NitroAttestation;
+    use hashi_types::guardian::OperatorInitInfo;
     use hashi_types::guardian::S3BucketInfo;
     use hashi_types::guardian::S3RetentionEnvironment;
     use std::future::pending;
@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn mock_s3(client: Client) -> GuardianS3Client {
-        GuardianS3Client::from_client_for_tests(
+        GuardianS3Client::from_client(
             S3BucketInfo::mock_for_testing(),
             S3RetentionEnvironment::Testnet,
             client,
@@ -223,7 +223,7 @@ mod tests {
 
     fn signed_init() -> LogMessage {
         LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
-            GuardianInfo::mock_for_testing(),
+            OperatorInitInfo::mock_for_testing(),
         ))))
     }
 

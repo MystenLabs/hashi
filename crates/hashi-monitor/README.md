@@ -21,12 +21,14 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
-- **safety** for a contradictory event, a late predecessor, or a predecessor
-  still missing after its source cursor passes the deadline.
+- **safety** for a contradictory event, a late predecessor, a predecessor
+  still missing after its source cursor passes the deadline, or an event the
+  Sui scan covered but never returned.
 
-For withdrawals, a predecessor lookback that is too short can produce a false
-safety finding for a missing E1. Reconcile older Sui history before treating
-such a finding as conclusive.
+Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
+`WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
+lookback still matches. An E1 found this way inside the range the Sui scan
+already covered also raises `SuiScanMissedEvent`.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
@@ -84,8 +86,13 @@ next_event_delays:
   - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
   - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Optional: clock skew tolerance (default: 300s)
-# clock_skew: 300
+# Optional: how far each event's successor may occur before it (defaults shown)
+# clock_skews:
+#   - [E1HashiApproved, 300]
+#   - [E2GuardianApproved, 7200]
+
+# Optional: how far a deposit's block time may be after its Sui confirmation (default: 300s)
+# deposit_clock_skew: 300
 
 # Optional: Sui withdrawal history before the guardian window (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
