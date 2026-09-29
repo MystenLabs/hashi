@@ -49,10 +49,7 @@ service GuardianService {
   rpc UpdateCommitteeChain(UpdateCommitteeChainRequest) returns (UpdateCommitteeResponse);
 }
 
-message GetGuardianInfoRequest {
-  reserved 1;
-  reserved "include_attestation";
-}
+message GetGuardianInfoRequest {}
 
 message GetAttestedGuardianInfoRequest {}
 

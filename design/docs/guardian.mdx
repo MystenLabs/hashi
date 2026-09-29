@@ -141,8 +141,7 @@ these queries: an access policy must cover both `GetAttestedGuardianInfo` and
 `GetProvisioningTargetInfo`.
 
 Clients that previously set `include_attestation` on `GetGuardianInfo` must switch
-to `GetAttestedGuardianInfo`. The old field number and name are reserved; ordinary
-info no longer returns an attestation. Upgrade the guardian and proxy before
+to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation. Upgrade the guardian and proxy before
 switching KP/operator clients to the new RPC.
 
 ## Withdraw-mode provisioning flow
