@@ -124,8 +124,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_api_key: Option<String>,
 
-    /// URL of the `hashi-guardian` gRPC endpoint. When not set, the guardian
-    /// integration is bypassed.
+    /// The guardian's node endpoint, used only when the chain has no
+    /// `guardian_node_url` at startup; the node keeps it until restarted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_endpoint: Option<String>,
 
