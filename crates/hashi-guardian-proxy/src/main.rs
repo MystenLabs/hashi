@@ -3,15 +3,15 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use hashi_guardian_proxy::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::config::Config;
 use hashi_guardian_proxy::forward::Forwarding;
-use hashi_guardian_proxy::info;
+use hashi_guardian_proxy::kp::relay::Relay;
+use hashi_guardian_proxy::kp::roster::RosterCache;
+use hashi_guardian_proxy::log_store::S3LogStore;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
-use hashi_guardian_proxy::relay::Relay;
+use hashi_guardian_proxy::node::cache::CachingGuardianGrpc;
+use hashi_guardian_proxy::public::info;
 use hashi_guardian_proxy::remote_write;
-use hashi_guardian_proxy::roster::RosterCache;
-use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;

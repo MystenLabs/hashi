@@ -3,7 +3,7 @@
 
 //! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC: an
 //! in-process LRU in front of the guardian's own S3 withdrawal log
-//! ([`crate::widlog`]) as the durable, read-only tier.
+//! ([`crate::node::widlog`]) as the durable, read-only tier.
 //!
 //! Keyed by `wid`, not `(wid, seq)`: the guardian debits the limiter and
 //! advances `next_seq` when it signs, before hashi has the signed event
@@ -24,12 +24,12 @@
 //! latter re-signs a withdrawal the guardian already durably signed, the
 //! double-debit the cache exists to prevent.
 
+use crate::log_store::LogStore;
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
-use crate::widlog::find_withdrawal_record;
-use crate::widlog::FoundWithdrawal;
-use crate::widlog::LogStore;
-use crate::widlog::WidLogError;
+use crate::node::widlog::find_withdrawal_record;
+use crate::node::widlog::FoundWithdrawal;
+use crate::node::widlog::WidLogError;
 use bitcoin::Network;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
@@ -418,8 +418,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widlog::test_store::withdrawal_record_json;
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
+    use crate::node::widlog::test_utils::withdrawal_record_json;
     use hashi_types::bitcoin::sign_btc_tx;
     use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::HashiMasterG;
@@ -1025,7 +1025,7 @@ mod tests {
             .expect("write the success record");
 
         // A brand-new proxy instance: empty L1, real S3LogStore.
-        let store = crate::widlog::S3LogStore::connect(bucket, region).await;
+        let store = crate::log_store::S3LogStore::connect(bucket, region).await;
         store.probe().await.expect("bucket must be readable");
         let (stub, count) = StubGuardian::ok();
         let stub = stub.with_info(stub_info_pb(enclave_btc_pubkey, master_g, 8));

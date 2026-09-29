@@ -24,8 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::roster::RosterCache;
-use crate::widlog::LogStore;
+use crate::kp::roster::RosterCache;
+use crate::log_store::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
@@ -409,7 +409,7 @@ mod tests {
     use hashi_types::guardian::ShareID;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
 
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
