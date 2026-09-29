@@ -635,7 +635,7 @@ impl SuiEventsPoller {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::collections::VecDeque;
@@ -766,6 +766,25 @@ mod tests {
         ));
         object.contents = Some(Bcs::serialize(txn).unwrap());
         object
+    }
+
+    /// The approval a lookup of `WID` returns from `poller_scanned`'s ledger.
+    pub(crate) fn looked_up_approval() -> MonitorWithdrawalEvent {
+        let txn = withdrawal_transaction(WID);
+        MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E1HashiApproved,
+            wid: WID,
+            timestamp_secs: unix_millis_to_seconds(txn.created_timestamp_ms),
+            btc_txid: txn.txid.into(),
+        }
+    }
+
+    /// A poller over a ledger holding `WID`'s approval that has scanned `[start, cursor)`.
+    pub(crate) async fn poller_scanned(start: UnixSeconds, cursor: UnixSeconds) -> SuiEventsPoller {
+        let mut poller = poller_for(ledger_with_approval()).await;
+        poller.start_seconds = start;
+        poller.cursor_seconds = cursor;
+        poller
     }
 
     #[tokio::test]
