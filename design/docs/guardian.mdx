@@ -66,10 +66,12 @@ The main components are:
 - **MPC nodes**: the Hashi validator committee. Nodes collect committee
   certificates, run the MPC signer, and call the guardian for the second
   Bitcoin signature.
-- **Guardian proxy**: the public gRPC endpoint. It terminates TLS itself and
-  forwards node-facing guardian RPCs only for current or pending committee
-  members, who present their registered TLS key as a client certificate, and
-  relays key-provisioner shares.
+- **Guardian proxy**: the guardian's gRPC endpoints. The public one
+  (`guardian_url`) serves `/info` and relays key-provisioner shares. Nodes
+  call a separate one (`guardian_node_url`), where the proxy terminates TLS
+  itself and forwards node-facing guardian RPCs only for current or pending
+  committee members, who present their registered TLS key as a client
+  certificate.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,

@@ -54,7 +54,7 @@ pub use node::member_auth::MemberGate;
 
 use crate::log_store::LogStore;
 
-/// Everything the proxy serves on its one port: gRPC (forwarder, relay,
+/// Everything the proxy serves, on both listeners: gRPC (forwarder, relay,
 /// health) and the HTTP `/info` + `/health`. `Router::layer` only wraps the
 /// routes added before it, so the member gate goes last.
 pub fn router<L: LogStore, H: Health>(
@@ -121,6 +121,7 @@ mod tests {
     use crate::metrics::ProxyMetrics;
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
+    use crate::tls::test_utils::node_identity;
     use crate::tls::test_utils::test_cert;
     use crate::tls::test_utils::TestCert;
     use axum::body::Body;
@@ -129,6 +130,7 @@ mod tests {
     use hashi_types::proto;
     use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
     use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+    use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
     use sui_sdk_types::Address;
@@ -136,7 +138,6 @@ mod tests {
     use tonic::transport::Channel;
     use tonic::transport::ClientTlsConfig;
     use tonic::transport::Endpoint;
-    use tonic::transport::Identity;
     use tonic::Code;
     use tonic_health::pb::health_check_response::ServingStatus;
     use tonic_health::pb::health_client::HealthClient;
@@ -147,51 +148,39 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[1; 32])
     }
 
-    /// The self-signed certificate a node presents with its TLS key.
-    fn node_identity(key: &ed25519_dalek::SigningKey) -> Identity {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-
-        let pkcs8 = key.to_pkcs8_der().unwrap();
-        let key_pair = rcgen::KeyPair::from_der_and_sign_algo(
-            &rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8.as_bytes().to_vec().into()),
-            &rcgen::PKCS_ED25519,
-        )
-        .unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        Identity::from_pem(cert.pem(), key_pair.serialize_pem())
-    }
-
     struct Proxy {
         stub: StubGuardian,
         app: axum::Router,
-        server: sui_http::ServerHandle,
+        public_addr: SocketAddr,
+        node_server: sui_http::ServerHandle,
         cert: TestCert,
     }
 
     impl Proxy {
-        fn channel(&self, identity: Option<Identity>) -> Channel {
-            let mut tls = ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(&self.cert.cert_pem))
-                .domain_name("localhost");
-            if let Some(identity) = identity {
-                tls = tls.identity(identity);
-            }
-            Endpoint::from_shared(format!("https://{}", self.server.local_addr()))
-                .unwrap()
-                .tls_config(tls)
+        /// The plaintext listener the load balancer forwards to.
+        fn public(&self) -> Channel {
+            Endpoint::from_shared(format!("http://{}", self.public_addr))
                 .unwrap()
                 .connect_lazy()
         }
 
-        fn guardian(&self, identity: Option<Identity>) -> GuardianServiceClient<Channel> {
-            GuardianServiceClient::new(self.channel(identity))
+        /// The node listener, presenting `key`'s certificate.
+        fn node(&self, key: &ed25519_dalek::SigningKey) -> GuardianServiceClient<Channel> {
+            let tls = ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(&self.cert.cert_pem))
+                .domain_name("localhost")
+                .identity(node_identity(key));
+            GuardianServiceClient::new(
+                Endpoint::from_shared(format!("https://{}", self.node_server.local_addr()))
+                    .unwrap()
+                    .tls_config(tls)
+                    .unwrap()
+                    .connect_lazy(),
+            )
         }
     }
 
-    /// The real router over a stub guardian, served over TLS, with
+    /// The real router over a stub guardian, on both listeners, with
     /// `member_key` on the allowlist.
     async fn spawn_proxy() -> Proxy {
         let (stub, backend) = spawn_stub().await;
@@ -222,26 +211,33 @@ mod tests {
             Arc::new(MemberGate::new(allowlist, metrics.clone())),
         );
 
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_addr = listener.local_addr().unwrap();
+        tokio::spawn({
+            let app = app.clone();
+            async move { axum::serve(listener, app).await.unwrap() }
+        });
         let cert = test_cert();
         let served = tls::ServerCert::load(&cert.source, &metrics).await.unwrap();
-        let server = sui_http::Builder::new()
+        let node_server = sui_http::Builder::new()
             .tls_config(tls::server_config(served).unwrap())
             .serve("127.0.0.1:0", app.clone())
             .unwrap();
         Proxy {
             stub,
             app,
-            server,
+            public_addr,
+            node_server,
             cert,
         }
     }
 
     #[tokio::test]
-    async fn node_rpcs_need_a_member_certificate_even_for_a_cached_wid() {
+    async fn node_rpcs_need_the_node_listener_even_for_a_cached_wid() {
         let proxy = spawn_proxy().await;
-        let mut anonymous = proxy.guardian(None);
+        let mut public = GuardianServiceClient::new(proxy.public());
 
-        let refused = anonymous
+        let refused = public
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
             .unwrap_err();
@@ -251,9 +247,10 @@ mod tests {
             0
         );
 
-        // A member's call reaches the guardian and fills the wid cache.
+        // A member's call on the node listener reaches the guardian and fills
+        // the wid cache.
         proxy
-            .guardian(Some(node_identity(&member_key())))
+            .node(&member_key())
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
             .unwrap();
@@ -263,18 +260,18 @@ mod tests {
         );
 
         // The gate runs before the cache, so the cached wid is no way in.
-        let replay = anonymous
+        let replay = public
             .standard_withdrawal(mock_request([0x11; 32], 1))
             .await
             .unwrap_err();
         assert_eq!(replay.code(), Code::Unauthenticated);
 
-        let update = anonymous
+        let update = public
             .update_committee_chain(proto::UpdateCommitteeChainRequest::default())
             .await
             .unwrap_err();
         assert_eq!(update.code(), Code::Unauthenticated);
-        let update = anonymous
+        let update = public
             .update_committee(proto::SignedCommitteeTransition::default())
             .await
             .unwrap_err();
@@ -284,47 +281,41 @@ mod tests {
     #[tokio::test]
     async fn refuses_certificates_outside_the_committee() {
         let proxy = spawn_proxy().await;
-
         let outsider = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+
         let refused = proxy
-            .guardian(Some(node_identity(&outsider)))
+            .node(&outsider)
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
             .unwrap_err();
         assert_eq!(refused.code(), Code::PermissionDenied);
-
-        // The proxy asks only for Ed25519 signatures, so a client holding
-        // another key type connects without a certificate.
-        let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let refused = proxy
-            .guardian(Some(Identity::from_pem(cert.pem(), key.serialize_pem())))
-            .standard_withdrawal(mock_request([0x11; 32], 0))
-            .await
-            .unwrap_err();
-        assert_eq!(refused.code(), Code::Unauthenticated);
         assert_eq!(
             proxy.stub.standard_withdrawal_calls.load(Ordering::SeqCst),
             0
         );
+
+        // Guardian info stays open to any node, member or not.
+        proxy
+            .node(&outsider)
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn members_still_hit_the_operator_denial() {
         let proxy = spawn_proxy().await;
 
-        let anonymous = proxy
-            .guardian(None)
+        let anonymous = GuardianServiceClient::new(proxy.public())
             .operator_init(proto::OperatorInitRequest::default())
             .await
             .unwrap_err();
         assert_eq!(anonymous.code(), Code::Unauthenticated);
 
         let member = proxy
-            .guardian(Some(node_identity(&member_key())))
+            .node(&member_key())
             .operator_init(proto::OperatorInitRequest::default())
             .await
             .unwrap_err();
@@ -332,9 +323,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_routes_need_no_certificate() {
+    async fn public_routes_stay_open_on_the_public_listener() {
         let proxy = spawn_proxy().await;
-        let channel = proxy.channel(None);
+        let channel = proxy.public();
         let mut client = GuardianServiceClient::new(channel.clone());
 
         client
@@ -367,18 +358,7 @@ mod tests {
             .into_inner();
         assert_eq!(health.status(), ServingStatus::Serving);
 
-        // A browser's read of /info, over HTTP/1.1 and without a certificate.
-        let addr = *proxy.server.local_addr();
-        let info = reqwest::Client::builder()
-            .add_root_certificate(
-                reqwest::Certificate::from_pem(proxy.cert.cert_pem.as_bytes()).unwrap(),
-            )
-            .resolve("localhost", addr)
-            .http1_only()
-            .build()
-            .unwrap()
-            .get(format!("https://localhost:{}/info", addr.port()))
-            .send()
+        let info = reqwest::get(format!("http://{}/info", proxy.public_addr))
             .await
             .unwrap();
         assert_ne!(info.status(), reqwest::StatusCode::FORBIDDEN);

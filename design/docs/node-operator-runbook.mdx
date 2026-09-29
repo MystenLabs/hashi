@@ -614,7 +614,7 @@ Not exposed externally by default. Scrape from localhost or through a reverse pr
 - Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
 - The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
 - The node auto-generates certificates from the `tls-private-key` at startup.
-- The node also presents this key's certificate to the guardian proxy, which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.
+- The node also presents this key's certificate to the guardian's node endpoint (`guardian_node_url`), which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.
 
 ---
 

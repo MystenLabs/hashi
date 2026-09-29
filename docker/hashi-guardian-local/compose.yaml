@@ -61,9 +61,9 @@ services:
 
   # The EC2 parent host: bridges inbound (proxy -> withdraw enclave) and outbound
   # (both guardians -> S3), standing in for the host's gRPC bridge and nitro
-  # vsock-proxy daemons. Published on :3001 for the localnet nodes: the
-  # plaintext proxy can't see a TLS client certificate, so it refuses their
-  # node RPCs.
+  # vsock-proxy daemons. Published on :3001 as the localnet nodes'
+  # guardian_node_url: the local proxy has no certificate, so no node listener,
+  # and its public listener refuses node RPCs.
   host:
     <<: *build
     ports:

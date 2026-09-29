@@ -1,10 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The gate in front of every route: node RPCs are served only to members of
-//! the current or pending committee, identified by the TLS client certificate
-//! they present with their registered key ([`crate::tls`]). It mirrors the
-//! node's `require_known_validator`.
+//! The gate in front of every route, on both listeners: node RPCs are served
+//! only to members of the current or pending committee, identified by the TLS
+//! client certificate they present with their registered key on the node
+//! listener ([`crate::tls`]). It mirrors the node's `require_known_validator`.
 
 use std::sync::Arc;
 
@@ -112,8 +112,8 @@ impl Refusal {
     fn status(self) -> Status {
         match self {
             Self::NoClientCert => Status::unauthenticated(
-                "only committee members may call this RPC; present the node's registered TLS \
-                 key as a client certificate",
+                "node RPCs are served only on the guardian's node endpoint (guardian_node_url), \
+                 to committee members presenting their registered TLS key",
             ),
             Self::NotMember => {
                 Status::permission_denied("caller is not in the current or pending committee")
