@@ -442,7 +442,7 @@ pub(crate) fn genesis_reader_for_test(
                 .build()
         });
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &get]);
-    let s3 = GuardianS3Client::from_client_for_tests(
+    let s3 = GuardianS3Client::from_client(
         config.deployment().bucket_info.clone(),
         config.deployment().retention_environment,
         client,

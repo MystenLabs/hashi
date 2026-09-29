@@ -38,7 +38,7 @@ pub fn mock_logger() -> GuardianS3Client {
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
@@ -144,7 +144,7 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
         RuleMode::MatchAny,
         &[&put_ok, &list_v2, &list_versions]
     );
-    let logger = GuardianS3Client::from_client_for_tests(
+    let logger = GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
@@ -271,7 +271,7 @@ pub fn mock_logger_with_deleted_layout(
         RuleMode::MatchAny,
         &[&list_dirs, &list_versions, &put_ok]
     );
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,

@@ -2162,7 +2162,11 @@ mod test {
     // --- guardian /info BTC pubkey verification ---
 
     fn random_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
-        let kp = hashi_types::bitcoin::create_btc_keypair_for_test(&[42u8; 32]);
+        let kp = hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+            &hashi_types::bitcoin::BTC_LIB,
+            &[42u8; 32],
+        )
+        .expect("valid test secret key");
         kp.x_only_public_key().0
     }
 

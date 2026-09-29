@@ -444,9 +444,11 @@ mod tests {
 
     fn dummy_log_messages() -> Vec<LogMessage> {
         let signing_key = fixture_signing_key();
-        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
-            .x_only_public_key()
-            .0;
+        let btc_master_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[3u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
         let instance_0 = test_sharing_instance(0);
         let instance_1 = test_sharing_instance(1);
         let (signed_request, committee_0) =
@@ -1087,9 +1089,11 @@ mod tests {
     fn object_key_and_lock_for_ceremony_proposal() {
         let session_id: SessionID = "session-proposal".into();
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
-        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[4u8; 32])
-            .x_only_public_key()
-            .0;
+        let btc_master_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[4u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
         let proposal = CeremonyProposalLogMessage::new(
             CeremonyLogMessage::NewKey {
                 instance: test_sharing_instance(0),

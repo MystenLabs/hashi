@@ -115,11 +115,7 @@ impl GuardianS3Client {
         }
         let client = S3Client::from_conf(s3_builder.build());
 
-        let client = Self {
-            client,
-            bucket_info: bucket_info.clone(),
-            object_lock_policy: S3ObjectLockPolicy::for_environment(retention_environment),
-        };
+        let client = Self::from_client(bucket_info.clone(), retention_environment, client);
         client.test_s3_connectivity().await?;
         Ok(client)
     }
@@ -154,10 +150,9 @@ impl GuardianS3Client {
         }
     }
 
-    /// Construct an `GuardianS3Client` from an already-configured S3 client.
-    /// This is intended for unit tests that use a mock S3 Client.
-    /// This is not put behind cfg(test) as tests in the enclave crate also use it.
-    pub fn from_client_for_tests(
+    /// Wrap an already-configured S3 client without making network requests.
+    /// Call [`Self::test_s3_connectivity`] to check S3 access and Object Lock support.
+    pub fn from_client(
         bucket_info: S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         client: S3Client,
@@ -707,7 +702,7 @@ mod tests {
     use std::time::Duration;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
-        GuardianS3Client::from_client_for_tests(
+        GuardianS3Client::from_client(
             S3BucketInfo {
                 name: "bucket".to_string(),
                 region: "us-east-1".to_string(),

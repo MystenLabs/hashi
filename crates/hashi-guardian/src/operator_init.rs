@@ -318,11 +318,17 @@ mod tests {
         let key = GuardianSignKeyPair::from([42; 32]);
         let (committee, _, _) = GenesisState::mock_for_testing().into_parts();
         let object_id = hashi_types::sui_sdk_types::Address::new([19; 32]);
-        let master_g = hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test(
-            &hashi_types::bitcoin::create_btc_keypair_for_test(&[23; 32])
-                .x_only_public_key()
-                .0,
-        );
+        let master_g = hashi_types::bitcoin::HashiMasterG::with_even_y_from_x_be_bytes(
+            &hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+                &hashi_types::bitcoin::BTC_LIB,
+                &[23; 32],
+            )
+            .expect("valid test secret key")
+            .x_only_public_key()
+            .0
+            .serialize(),
+        )
+        .expect("valid x-only public key");
         let genesis = GenesisState::from_parts(committee, object_id, master_g);
         let mut reader = crate::s3_reader::genesis_reader_for_test(
             Some(genesis_record(genesis, &key)),

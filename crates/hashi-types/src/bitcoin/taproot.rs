@@ -206,12 +206,11 @@ mod bitcoin_tests {
     use super::*;
     use crate::bitcoin::BTC_LIB;
     use crate::bitcoin::BitcoinKeypair;
+    use crate::bitcoin::HashiMasterG;
     use crate::bitcoin::InputUTXO;
     use crate::bitcoin::OutputUTXOWire;
     use crate::bitcoin::TxUTXOs;
     use crate::bitcoin::construct_tx;
-    use crate::bitcoin::create_btc_keypair_for_test;
-    use crate::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use crate::bitcoin::sign_btc_tx;
     use bitcoin::Amount;
     use bitcoin::Network::Regtest;
@@ -236,7 +235,8 @@ mod bitcoin_tests {
             rand::Rng::fill(&mut rng, &mut bytes);
             bytes
         });
-        let keypair = create_btc_keypair_for_test(&bytes);
+        let keypair =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &bytes).expect("valid test secret key");
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
         let address = BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network);
         (keypair, address)
@@ -269,7 +269,9 @@ mod bitcoin_tests {
         hashi_derivation_path: &DerivationPath,
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
-        let hashi_master_g = hashi_master_g_from_btc_xonly_for_test(hashi_master_pubkey);
+        let hashi_master_g =
+            HashiMasterG::with_even_y_from_x_be_bytes(&hashi_master_pubkey.serialize())
+                .expect("valid x-only public key");
         let addr = taproot_address(
             enclave_pubkey,
             &hashi_master_g,
@@ -359,7 +361,8 @@ mod bitcoin_tests {
                 .unwrap(),
             vout: 1,
         };
-        let hashi_master_g = hashi_master_g_from_btc_xonly_for_test(&hashi_pk);
+        let hashi_master_g = HashiMasterG::with_even_y_from_x_be_bytes(&hashi_pk.serialize())
+            .expect("valid x-only public key");
 
         let input_amount = Amount::from_sat(100000000); // 1.0 BTC
         let input_utxo = InputUTXO::new(out_point, input_amount, DerivationPath::ZERO);
@@ -433,7 +436,8 @@ mod bitcoin_tests {
             }
         };
 
-        let enclave_pubkey = create_btc_keypair_for_test(&[7u8; 32])
+        let enclave_pubkey = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32])
+            .expect("valid test secret key")
             .x_only_public_key()
             .0;
         let path = [42u8; 32];
@@ -473,7 +477,7 @@ mod bitcoin_tests {
     // Cross-language vectors shared with the hashi-ts-sdk (bitcoin.test.ts):
     // both sides must derive the same (child, address, leaf script, tap-leaf
     // hash) or deposit addresses silently diverge. Even-y master forced via
-    // `hashi_master_g_from_btc_xonly_for_test`; odd-y is the companion test below.
+    // `with_even_y_from_x_be_bytes`; odd-y is the companion test below.
     #[test]
     fn cross_lang_2of2_test_vectors() {
         use bitcoin::hex::DisplayHex;
@@ -482,7 +486,8 @@ mod bitcoin_tests {
         let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
         let enclave_pk = enclave_keypair.x_only_public_key().0;
         let hashi_master_pk = hashi_keypair.x_only_public_key().0;
-        let master_g = hashi_master_g_from_btc_xonly_for_test(&hashi_master_pk);
+        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&hashi_master_pk.serialize())
+            .expect("valid x-only public key");
 
         // Sanity check that the well-known SKs map to the x-only pubkeys
         // the TS test hardcodes.

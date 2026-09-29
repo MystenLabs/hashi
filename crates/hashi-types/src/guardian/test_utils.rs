@@ -50,11 +50,11 @@ use super::crypto::attestation::NITRO_PCR0_LEN;
 
 use crate::bitcoin::BTC_LIB;
 use crate::bitcoin::BitcoinAddress;
+use crate::bitcoin::BitcoinKeypair;
+use crate::bitcoin::HashiMasterG;
 use crate::bitcoin::InputUTXO;
 use crate::bitcoin::OutputUTXOWire;
 use crate::bitcoin::TxUTXOs;
-use crate::bitcoin::create_btc_keypair_for_test;
-use crate::bitcoin::hashi_master_g_from_btc_xonly_for_test;
 use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
@@ -264,11 +264,13 @@ impl OperatorInitRequest {
 
 impl GenesisState {
     pub fn mock_for_testing() -> Self {
-        let kp = create_btc_keypair_for_test(&[1u8; 32]);
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1u8; 32]).expect("valid test secret key");
         Self::new(
             mock_committee_with_one_member(0),
             TEST_HASHI_OBJECT_ID,
-            hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0),
+            HashiMasterG::with_even_y_from_x_be_bytes(&kp.x_only_public_key().0.serialize())
+                .expect("valid x-only public key"),
         )
     }
 }
@@ -415,7 +417,8 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
 
 impl StandardWithdrawalRequest {
     fn mock_for_testing(network: Network, wid: WithdrawalID) -> Self {
-        let kp = create_btc_keypair_for_test(&[2u8; 32]);
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[2u8; 32]).expect("valid test secret key");
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&kp);
         let addr_unchecked =
             BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network).into_unchecked();
@@ -503,7 +506,8 @@ impl StandardWithdrawalRequest {
 
 impl StandardWithdrawalResponse {
     pub fn mock_for_testing() -> Self {
-        let kp = create_btc_keypair_for_test(&[3u8; 32]);
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[3u8; 32]).expect("valid test secret key");
         let msg = Message::from_digest([5u8; 32]);
         // Keep the checked-in S3 fixtures deterministic.
         let enclave_signatures = vec![bitcoin::taproot::Signature {
