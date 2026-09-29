@@ -163,6 +163,11 @@ fn serialize_pcr0<S: serde::Serializer>(pcr0: &[u8], serializer: S) -> Result<S:
 }
 
 impl BuildPcrs {
+    /// Dummy PCR pins for tests; `pcr0_byte` must be nonzero.
+    pub fn mock_for_testing(git_revision: &str, pcr0_byte: u8) -> Self {
+        Self::new(git_revision, vec![pcr0_byte; NITRO_PCR0_LEN]).expect("valid mock PCR pins")
+    }
+
     pub fn new(git_revision: &str, pcr0: Vec<u8>) -> GuardianResult<Self> {
         if pcr0.len() != NITRO_PCR0_LEN {
             return Err(InvalidInputs(format!(
@@ -349,10 +354,10 @@ mod tests {
     #[test]
     fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
         let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![1; 48]).unwrap(),
+            BuildPcrs::mock_for_testing("current", 1),
             vec![
-                BuildPcrs::new("prev-1", vec![2; 48]).unwrap(),
-                BuildPcrs::new("prev-2", vec![3; 48]).unwrap(),
+                BuildPcrs::mock_for_testing("prev-1", 2),
+                BuildPcrs::mock_for_testing("prev-2", 3),
             ],
         )
         .unwrap();
@@ -373,8 +378,8 @@ mod tests {
     #[test]
     fn pcr_allowlist_rejects_duplicate_build_revisions() {
         let err = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![1; 48]).unwrap(),
-            vec![BuildPcrs::new("current", vec![2; 48]).unwrap()],
+            BuildPcrs::mock_for_testing("current", 1),
+            vec![BuildPcrs::mock_for_testing("current", 2)],
         )
         .unwrap_err();
 
@@ -406,8 +411,8 @@ mod tests {
     #[test]
     fn pcr_allowlist_requires_current_build() {
         let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![1; 48]).unwrap(),
-            vec![BuildPcrs::new("prev", vec![2; 48]).unwrap()],
+            BuildPcrs::mock_for_testing("current", 1),
+            vec![BuildPcrs::mock_for_testing("prev", 2)],
         )
         .unwrap();
 

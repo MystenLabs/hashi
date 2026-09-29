@@ -410,8 +410,7 @@ impl InitConfig {
 }
 
 fn mock_pcr_allowlist() -> PcrAllowlist {
-    PcrAllowlist::new(BuildPcrs::new("unknown", vec![1; 48]).unwrap(), [])
-        .expect("valid PCR allowlist")
+    PcrAllowlist::new(BuildPcrs::mock_for_testing("unknown", 1), []).expect("valid PCR allowlist")
 }
 
 /// A throwaway secret-sharing instance for tests that don't exercise share verification.

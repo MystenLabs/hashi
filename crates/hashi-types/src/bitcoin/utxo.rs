@@ -261,7 +261,7 @@ fn validate_address_for_network(
 impl TxUTXOs {
     /// Constructs a `TxUTXOs`, validating every invariant in one place: external
     /// output addresses must be valid for `network`, amounts must be non-zero,
-    /// input and output totals must not exceed `Amount::MAX_MONEY`,
+    /// input and output totals must not overflow,
     /// inputs must be unique, and fees must be positive. The single gate for both
     /// locally-built and wire-parsed UTXO sets.
     pub fn new(
@@ -401,14 +401,6 @@ impl TxUTXOs {
             .map(|utxo| utxo.amount())
             .checked_sum()
             .context("total output amount overflows")?;
-        anyhow::ensure!(
-            input_sum <= Amount::MAX_MONEY,
-            "total input amount exceeds MAX_MONEY"
-        );
-        anyhow::ensure!(
-            output_sum <= Amount::MAX_MONEY,
-            "total output amount exceeds MAX_MONEY"
-        );
         if input_sum <= output_sum {
             anyhow::bail!(
                 "fees must be greater than zero: input_sum={} output_sum={}",
@@ -510,20 +502,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_out_of_range_and_overflowing_amounts() {
-        let max = Amount::MAX_MONEY.to_sat();
-        assert!(utxos(&[max + 1], &[1]).is_err());
-        assert!(utxos(&[max, 1], &[1]).is_err());
-        assert!(utxos(&[max], &[max + 1]).is_err());
-        assert!(utxos(&[max], &[max, 1]).is_err());
+    fn rejects_overflowing_amounts() {
         assert!(utxos(&[u64::MAX, 2], &[1]).is_err());
         // An unchecked output sum wraps to 1, passing the positive-fee check.
         assert!(utxos(&[100], &[u64::MAX, 2]).is_err());
     }
 
     #[test]
-    fn accepts_max_money_with_positive_fees() {
-        let max = Amount::MAX_MONEY.to_sat();
+    fn accepts_non_overflowing_amounts_with_positive_fees() {
+        let max = u64::MAX;
         let tx = utxos(&[max - 1, 1], &[max - 1]).unwrap();
         assert_eq!(tx.gross_outflow_amount(), Amount::from_sat(1));
     }

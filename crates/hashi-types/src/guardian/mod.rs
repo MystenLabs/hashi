@@ -1075,7 +1075,7 @@ mod tests {
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert_eq!(
-            resp.verify_live(&BuildPcrs::new("test-revision", vec![1; 48]).unwrap())
+            resp.verify_live(&BuildPcrs::mock_for_testing("test-revision", 1))
                 .unwrap_err()
                 .to_string(),
             "signature invalid"
@@ -1085,7 +1085,7 @@ mod tests {
     #[test]
     fn guardian_info_verification_distinguishes_boot_from_initialized_sessions() {
         let key = GuardianSignKeyPair::from([7; 32]);
-        let build = BuildPcrs::new("approved", vec![1; 48]).unwrap();
+        let build = BuildPcrs::mock_for_testing("approved", 1);
         let response = |info| {
             GetGuardianInfoResponse::new(
                 NitroAttestation::new(vec![]),

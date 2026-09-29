@@ -92,16 +92,16 @@ mod tests {
         changes.push(changed);
         let mut changed = original.clone();
         changed.pcr_allowlist =
-            PcrAllowlist::new(BuildPcrs::new("other", vec![1; 48]).unwrap(), []).unwrap();
+            PcrAllowlist::new(BuildPcrs::mock_for_testing("other", 1), []).unwrap();
         changes.push(changed);
         let mut changed = original.clone();
         changed.pcr_allowlist =
-            PcrAllowlist::new(BuildPcrs::new("unknown", vec![2; 48]).unwrap(), []).unwrap();
+            PcrAllowlist::new(BuildPcrs::mock_for_testing("unknown", 2), []).unwrap();
         changes.push(changed);
         let mut changed = original.clone();
         changed.pcr_allowlist = PcrAllowlist::new(
             original.pcr_allowlist.current_build().clone(),
-            [BuildPcrs::new("previous", vec![3; 48]).unwrap()],
+            [BuildPcrs::mock_for_testing("previous", 3)],
         )
         .unwrap();
         changes.push(changed);
@@ -130,7 +130,7 @@ mod tests {
         let mut updated = config.clone();
         updated.pcr_allowlist = PcrAllowlist::new(
             config.pcr_allowlist.current_build().clone(),
-            [BuildPcrs::new("previous", vec![3; 48]).unwrap()],
+            [BuildPcrs::mock_for_testing("previous", 3)],
         )
         .unwrap();
         assert_eq!(config.summary(), updated.summary());
