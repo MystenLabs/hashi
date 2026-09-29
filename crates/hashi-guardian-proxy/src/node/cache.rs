@@ -24,7 +24,7 @@
 //! latter re-signs a withdrawal the guardian already durably signed, the
 //! double-debit the cache exists to prevent.
 //!
-//! `GetGuardianInfo` is answered from a short single-flight cache of its own.
+//! `GetGuardianInfo` is answered from [`crate::public::guardian_info`].
 
 use crate::log_store::LogStore;
 use crate::metrics;
@@ -32,6 +32,7 @@ use crate::metrics::ProxyMetrics;
 use crate::node::widlog::find_withdrawal_record;
 use crate::node::widlog::FoundWithdrawal;
 use crate::node::widlog::WidLogError;
+use crate::public::guardian_info::GuardianInfoCache;
 use bitcoin::Network;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
@@ -48,12 +49,8 @@ use hashi_types::proto;
 use hashi_types::proto::guardian_service_server::GuardianService;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
-use tokio::time::Instant;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -74,17 +71,6 @@ fn unavailable() -> Status {
     Status::unavailable(WID_CACHE_UNAVAILABLE_MSG)
 }
 
-/// `GetGuardianInfo` is public and each call takes the enclave's control lock (and
-/// mints an attestation if asked), so callers share one response for this long.
-const GUARDIAN_INFO_TTL: Duration = Duration::from_secs(1);
-
-struct CachedInfo {
-    at: Instant,
-    /// `withdrawals` when the fetch started.
-    withdrawals: u64,
-    response: proto::GetGuardianInfoResponse,
-}
-
 struct CacheEntry {
     /// The seq the guardian consumed this wid at. Kept for observability only —
     /// the cache is keyed by `wid`, so lookups ignore the requester's seq.
@@ -100,11 +86,9 @@ pub struct CachingGuardianGrpc<S, L> {
     /// sighashes when verifying a log replay.
     network: Network,
     metrics: Arc<ProxyMetrics>,
-    info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
-    attested_info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
-    /// Signed withdrawals this proxy has seen. Info fetched before the latest one
-    /// is never served: a leader reading after its finalize must see the new seq.
-    withdrawals: AtomicU64,
+    /// Invalidated by every signed withdrawal: a leader reading after its finalize
+    /// must see the new seq.
+    info_cache: GuardianInfoCache<S>,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
@@ -125,15 +109,15 @@ impl<S, L> CachingGuardianGrpc<S, L> {
         metrics: Arc<ProxyMetrics>,
         capacity: NonZeroUsize,
     ) -> Self {
+        let inner = Arc::new(inner);
+        let info_cache = GuardianInfoCache::new(inner.clone());
         Self {
-            inner: Arc::new(inner),
+            inner,
             l1: Mutex::new(LruCache::new(capacity)),
             log,
             network,
             metrics,
-            info: Arc::new(tokio::sync::Mutex::new(None)),
-            attested_info: Arc::new(tokio::sync::Mutex::new(None)),
-            withdrawals: AtomicU64::new(0),
+            info_cache,
         }
     }
 
@@ -242,8 +226,8 @@ where
         }
 
         let response = synthesize_response(&found);
-        // The forward that signed it may have failed or been dropped uncounted.
-        self.withdrawals.fetch_add(1, Ordering::SeqCst);
+        // The forward that signed it may have failed or been dropped before invalidating.
+        self.info_cache.invalidate();
         self.store(*wid, found.consumed_seq, response.clone());
         self.metrics.outcome(metrics::OUTCOME_S3_HIT);
         info!(
@@ -338,43 +322,14 @@ where
     S: GuardianService,
     L: LogStore,
 {
-    /// The fetch holds the lock, so a burst shares one successful backend call. It
-    /// runs detached with a fresh request: a caller can't cancel it or pass its
-    /// deadline on.
     async fn get_guardian_info(
         &self,
         request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let include_attestation = request.into_inner().include_attestation;
-        let slot = if include_attestation {
-            &self.attested_info
-        } else {
-            &self.info
-        };
-        let mut cached = slot.clone().lock_owned().await;
-        let withdrawals = self.withdrawals.load(Ordering::SeqCst);
-        if let Some(entry) = cached.as_ref().filter(|entry| {
-            entry.withdrawals == withdrawals && entry.at.elapsed() < GUARDIAN_INFO_TTL
-        }) {
-            return Ok(Response::new(entry.response.clone()));
-        }
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            let response = inner
-                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                    include_attestation,
-                }))
-                .await?
-                .into_inner();
-            *cached = Some(CachedInfo {
-                at: Instant::now(),
-                withdrawals,
-                response: response.clone(),
-            });
-            Ok(Response::new(response))
-        })
-        .await
-        .expect("guardian info fetch task failed")
+        self.info_cache
+            .get(request.into_inner().include_attestation)
+            .await
+            .map(Response::new)
     }
 
     async fn setup_new_key(
@@ -446,7 +401,7 @@ where
         self.metrics.outcome(metrics::OUTCOME_FORWARDED);
         let response_inner = self.inner.standard_withdrawal(request).await?.into_inner();
 
-        self.withdrawals.fetch_add(1, Ordering::SeqCst);
+        self.info_cache.invalidate();
         self.store(wid, seq, response_inner.clone());
         info!(%wid, seq, "Stored StandardWithdrawal response in cache");
 
@@ -491,9 +446,9 @@ mod tests {
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalResponse;
-    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     type ResponseFn =
         dyn Fn() -> Result<proto::SignedStandardWithdrawalResponse, Status> + Send + Sync;
@@ -503,9 +458,7 @@ mod tests {
         result: Arc<ResponseFn>,
         info: Option<proto::GetGuardianInfoResponse>,
         info_calls: Arc<AtomicUsize>,
-        attested_info_calls: Arc<AtomicUsize>,
         info_delay: Duration,
-        info_saw_deadline: Arc<AtomicBool>,
     }
 
     impl StubGuardian {
@@ -517,9 +470,7 @@ mod tests {
                     result: Arc::new(|| Ok(mock_response())),
                     info: None,
                     info_calls: Arc::default(),
-                    attested_info_calls: Arc::default(),
                     info_delay: Duration::ZERO,
-                    info_saw_deadline: Arc::default(),
                 },
                 call_count,
             )
@@ -533,9 +484,7 @@ mod tests {
                     result: Arc::new(|| Err(Status::failed_precondition("simulated"))),
                     info: None,
                     info_calls: Arc::default(),
-                    attested_info_calls: Arc::default(),
                     info_delay: Duration::ZERO,
-                    info_saw_deadline: Arc::default(),
                 },
                 call_count,
             )
@@ -558,20 +507,11 @@ mod tests {
             &self,
             request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert!(!request.into_inner().include_attestation);
             self.info_calls.fetch_add(1, Ordering::SeqCst);
-            if request.metadata().contains_key("grpc-timeout") {
-                self.info_saw_deadline.store(true, Ordering::SeqCst);
-            }
-            let include_attestation = request.into_inner().include_attestation;
-            if include_attestation {
-                self.attested_info_calls.fetch_add(1, Ordering::SeqCst);
-            }
             tokio::time::sleep(self.info_delay).await;
             match &self.info {
-                Some(info) => Ok(Response::new(proto::GetGuardianInfoResponse {
-                    attestation: include_attestation.then(|| vec![1, 2, 3].into()),
-                    ..info.clone()
-                })),
+                Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
             }
         }
@@ -815,74 +755,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn guardian_info_is_served_from_one_backend_call_per_ttl() {
-        let (stub, _) = StubGuardian::ok();
-        // Slow enough that the burst overlaps the fetch.
-        let stub = stub
-            .with_info(proto::GetGuardianInfoResponse::default())
-            .with_info_delay(Duration::from_millis(100));
-        let info_calls = stub.info_calls.clone();
-        let cache = cache_over(stub, MemStore::default());
-
-        let (a, b, c) = tokio::join!(
-            cache.get_guardian_info(info_request()),
-            cache.get_guardian_info(info_request()),
-            cache.get_guardian_info(info_request()),
-        );
-        assert!(a.is_ok() && b.is_ok() && c.is_ok());
-        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
-
-        tokio::time::advance(GUARDIAN_INFO_TTL).await;
-        cache.get_guardian_info(info_request()).await.unwrap();
-        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn guardian_info_is_cached_per_attestation_flag() {
-        let (stub, _) = StubGuardian::ok();
-        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
-        let info_calls = stub.info_calls.clone();
-        let cache = cache_over(stub, MemStore::default());
-
-        for include_attestation in [false, true, false, true] {
-            let response = cache
-                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                    include_attestation,
-                }))
-                .await
-                .unwrap()
-                .into_inner();
-            assert_eq!(response.attestation.is_some(), include_attestation);
-        }
-        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn guardian_info_fetch_outlives_callers_and_drops_their_deadline() {
-        let (stub, _) = StubGuardian::ok();
-        let stub = stub
-            .with_info(proto::GetGuardianInfoResponse::default())
-            .with_info_delay(Duration::from_millis(100));
-        let info_calls = stub.info_calls.clone();
-        let saw_deadline = stub.info_saw_deadline.clone();
-        let cache = cache_over(stub, MemStore::default());
-
-        // The caller gives up while the fetch is in flight.
-        let mut request = info_request();
-        request.set_timeout(Duration::from_millis(1));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), cache.get_guardian_info(request))
-                .await
-                .is_err()
-        );
-
-        // The fetch still completes and fills the cache for the next caller.
-        cache.get_guardian_info(info_request()).await.unwrap();
-        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
-        assert!(!saw_deadline.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn guardian_info_fetched_before_a_withdrawal_is_refetched() {
         let (stub, _) = StubGuardian::ok();
         let stub = stub
@@ -948,17 +820,6 @@ mod tests {
             .unwrap();
         cache.get_guardian_info(info_request()).await.unwrap();
         assert_eq!(info_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn guardian_info_errors_are_not_cached() {
-        let (stub, _) = StubGuardian::ok();
-        let info_calls = stub.info_calls.clone();
-        let cache = cache_over(stub, MemStore::default());
-
-        cache.get_guardian_info(info_request()).await.unwrap_err();
-        cache.get_guardian_info(info_request()).await.unwrap_err();
-        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1088,7 +949,6 @@ mod tests {
             // next_seq is carried in guardian info but no longer gated on.
             fixture.consumed_seq + 1,
         ));
-        let attested_info_calls = stub.attested_info_calls.clone();
         let store = MemStore::default();
         store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
         let cache = cache_over(stub, store);
@@ -1100,7 +960,6 @@ mod tests {
             .into_inner();
 
         assert_eq!(count.load(Ordering::SeqCst), 0, "served from the log");
-        assert_eq!(attested_info_calls.load(Ordering::SeqCst), 0);
         let sigs = &replayed.data.as_ref().unwrap().enclave_signatures;
         assert!(!sigs.is_empty());
         assert_eq!(replayed.signature.as_ref().unwrap().len(), 64);
