@@ -867,13 +867,13 @@ pub struct LaunchOpts {
 
     /// Override `bitcoin_confirmation_threshold` on-chain at launch time.
     /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
-    /// Sui mainnet refuses a value below the default.
+    /// Refused on Sui mainnet, which launches with the default.
     #[clap(long)]
     pub bitcoin_confirmation_threshold: Option<u64>,
 
     /// Override `bitcoin_deposit_time_delay_ms` on-chain at launch time.
     /// Falls back to the Move package's `init_defaults` (currently 600_000) when omitted.
-    /// Sui mainnet refuses a value below the default.
+    /// Refused on Sui mainnet, which launches with the default.
     #[clap(long)]
     pub bitcoin_deposit_time_delay_ms: Option<u64>,
 
