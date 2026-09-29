@@ -47,6 +47,8 @@ echo "127.0.0.1   localhost" > /etc/hosts
 socat TCP4-LISTEN:443,bind=127.0.0.64,reuseaddr,fork VSOCK-CONNECT:3:8101 &
 socat TCP4-LISTEN:443,bind=127.0.0.65,reuseaddr,fork VSOCK-CONNECT:3:8102 &
 socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
+# Mock-attestation (`non-enclave-dev`) builds route S3 through these only when set.
+export HASHI_GUARDIAN_ENCLAVE_S3_ROUTES=1
 
 # Forward VSOCK port 3000 to localhost:3000 (gRPC server)
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
