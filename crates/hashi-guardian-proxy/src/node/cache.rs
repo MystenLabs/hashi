@@ -24,15 +24,15 @@
 //! latter re-signs a withdrawal the guardian already durably signed, the
 //! double-debit the cache exists to prevent.
 //!
-//! `GetGuardianInfo` is answered from [`crate::public::guardian_info`].
+//! `GetGuardianInfo` is answered from [`crate::guardian_info`].
 
+use crate::guardian_info::GuardianInfoCache;
 use crate::log_store::LogStore;
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
 use crate::node::widlog::find_withdrawal_record;
 use crate::node::widlog::FoundWithdrawal;
 use crate::node::widlog::WidLogError;
-use crate::public::guardian_info::GuardianInfoCache;
 use bitcoin::Network;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
