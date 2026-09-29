@@ -1435,11 +1435,8 @@ impl SuiTxExecutor {
     ///
     /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
     /// certificate store. The certificate contains the dealer's message hash and
-    /// committee signature. Nonce certs additionally pass the Sui `Clock`:
-    /// `submit_nonce_cert` takes it on every published version (stamping the
-    /// submission with chain time), so the argument is unconditional, not
-    /// version-gated (a gate could only ever drop a required argument and
-    /// fail the call). DKG and rotation certs are submitted bare by design.
+    /// committee signature. Every submit entry takes the Sui `Clock` and stamps
+    /// the submission with chain time, so the argument is unconditional.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -1481,15 +1478,12 @@ impl SuiTxExecutor {
         let message_hash_arg = builder.pure(&message_hash);
         let package_id = self.active_call_package_id();
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, committee_sig);
-        args.extend([dealer_arg, message_hash_arg, cert_arg]);
-        if batch_index.is_some() {
-            let clock_arg = builder.object(
-                ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                    .as_shared()
-                    .with_mutable(false),
-            );
-            args.push(clock_arg);
-        }
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        args.extend([dealer_arg, message_hash_arg, cert_arg, clock_arg]);
         builder.move_call(
             Function::new(
                 package_id,
@@ -2052,7 +2046,7 @@ impl SuiTxExecutor {
         Ok(max_checkpoint)
     }
 
-    /// Destroy dead TOB cert buckets via the v2 GC entries
+    /// Destroy dead TOB cert buckets via the GC entries
     /// (`cert_submission::destroy_key_gen_certs` / `destroy_nonce_certs`).
     ///
     /// One move call per bucket — scalar pure args only, so the builder's

@@ -51,8 +51,8 @@ public struct Hashi has key {
     versioning: Versioning,
     treasury: Treasury,
     proposals: Proposals,
-    /// TOB certificates by (epoch, batch_index, protocol_type). Values are
-    /// bare `EpochCertsV1` buckets or, for nonce certs, `StampedEpochCertsV1`.
+    /// TOB certificates by (epoch, batch_index, protocol_type). Every value
+    /// is an `EpochCertsV1` bucket.
     tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
@@ -241,29 +241,6 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
-public(package) fun cert_bucket_is_bare(self: &Hashi, key: hashi::tob::TobKey): bool {
-    self.tob.contains_with_type<hashi::tob::TobKey, hashi::tob::EpochCertsV1>(key)
-}
-
-/// A nonce bucket keeps the layout it was created with: one created bare
-/// (only possible on a chain that predates stamping) keeps taking bare
-/// writes, and a new bucket is always stamped.
-public(package) fun nonce_write_stays_bare(self: &Hashi, key: hashi::tob::TobKey): bool {
-    self.tob.contains(key) && self.cert_bucket_is_bare(key)
-}
-
-public(package) fun epoch_certs_stamped(
-    self: &mut Hashi,
-    key: hashi::tob::TobKey,
-    ctx: &mut TxContext,
-): &mut hashi::tob::StampedEpochCertsV1 {
-    let epoch = key.epoch();
-    if (!self.tob.contains(key)) {
-        self.tob.add(key, hashi::tob::create_stamped(epoch, key.protocol_type(), ctx));
-    };
-    self.tob.borrow_mut(key)
-}
-
 public(package) fun num_consumed_presigs(self: &Hashi): u64 {
     self.num_consumed_presigs
 }
@@ -319,14 +296,6 @@ public(package) fun epoch_certs_ref(
     self: &Hashi,
     key: hashi::tob::TobKey,
 ): &hashi::tob::EpochCertsV1 {
-    self.tob.borrow(key)
-}
-
-#[test_only]
-public(package) fun epoch_certs_stamped_ref(
-    self: &Hashi,
-    key: hashi::tob::TobKey,
-): &hashi::tob::StampedEpochCertsV1 {
     self.tob.borrow(key)
 }
 

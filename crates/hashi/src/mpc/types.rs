@@ -27,7 +27,6 @@ use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
-use hashi_types::move_types::StampedDealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -199,7 +198,7 @@ impl NonceCollectionWindow {
         self.weight += reduced_weight;
         if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
         {
-            // A zero crossing stamp marks the bare (pre-stamped-package) cert path.
+            // A zero crossing stamp carries no chain time to anchor a window on.
             self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
                 NonceCollectionState::Closed { cutoff_ms: None }
             } else {
@@ -656,19 +655,13 @@ impl NonceCertToVerify for CertificateV1 {
     }
 }
 
-impl NonceCertToVerify for StampedDealerSubmissionV1 {
-    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate> {
-        self.submission.to_dealer_certificate(epoch)
-    }
-}
-
 pub(crate) trait NonceCertTimestamp {
     fn nonce_timestamp_ms(&self) -> u64;
 
     fn signed_dealer(&self, epoch: u64) -> Option<Address>;
 }
 
-impl NonceCertTimestamp for StampedDealerSubmissionV1 {
+impl NonceCertTimestamp for DealerSubmissionV1 {
     fn nonce_timestamp_ms(&self) -> u64 {
         self.timestamp_ms
     }
@@ -1721,6 +1714,7 @@ mod tests {
                 signature: signed_message.signature_bytes().to_vec(),
                 signers_bitmap: signed_message.signers_bitmap_bytes().to_vec(),
             },
+            timestamp_ms: 1_000,
         };
 
         // Parse back using from_onchain_cert
@@ -1754,6 +1748,7 @@ mod tests {
                 signature: vec![],
                 signers_bitmap: vec![],
             },
+            timestamp_ms: 1_000,
         };
 
         let result = DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch);
