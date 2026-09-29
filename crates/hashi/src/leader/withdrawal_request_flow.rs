@@ -18,6 +18,7 @@ use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
+use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
@@ -196,7 +197,7 @@ impl LeaderService {
         checkpoint_timestamp_ms: u64,
         this_validator_address: Address,
         members: &[CommitteeMember],
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
     ) -> anyhow::Result<()> {
         let approval = WithdrawalRequestApproval {
             request_id: request.id,
@@ -227,8 +228,11 @@ impl LeaderService {
         let proto_request = approval.to_proto();
         let required_weight = certificate_threshold(committee.total_weight());
 
-        let mut aggregator =
-            (committee).signature_aggregator(inner.config.hashi_ids().hashi_object_id, approval);
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            committee,
+            approval,
+        );
         if let Err(e) = aggregator.add_signature(local_sig) {
             error!("Failed to add local approval signature: {e}");
         }
@@ -612,8 +616,11 @@ impl LeaderService {
         }
 
         // Collect signatures, stopping once we reach quorum.
-        let mut aggregator = (committee)
-            .signature_aggregator(inner.config.hashi_ids().hashi_object_id, approval.clone());
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            approval.clone(),
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

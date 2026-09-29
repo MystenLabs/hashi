@@ -34,7 +34,7 @@ use tracing::info;
 use crate::log_writer::LogWriter;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;
-use hashi_types::committee::RuntimeCommittee;
+use hashi_types::guardian::RuntimeCommittee;
 
 /// Enclave's config & state
 pub struct Enclave {

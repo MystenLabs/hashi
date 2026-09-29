@@ -7,8 +7,10 @@ mod deployment;
 pub mod errors;
 pub mod lifecycle;
 pub mod proto_conversions;
+mod runtime_committee;
 pub mod s3;
 pub(crate) mod serde;
+pub use runtime_committee::RuntimeCommittee;
 mod session;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -49,7 +51,6 @@ use crate::bitcoin::TxUTXOs;
 use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
-use crate::committee::RuntimeCommittee;
 pub use crate::committee::SignedMessage as HashiSigned;
 use ::serde::Deserialize;
 use ::serde::Serialize;
@@ -968,7 +969,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct ActivationStateRepr {
     pub config_hash: [u8; 32],
     pub secret_sharing_instance: SecretSharingInstance,
-    pub committee: crate::committee::ActivationCommitteeRepr,
+    pub committee: runtime_committee::ActivationCommitteeRepr,
     pub limiter_state: LimiterState,
 }
 

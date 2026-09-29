@@ -447,7 +447,7 @@ impl Hashi {
 
     fn find_encryption_key_for_committee(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<EncryptionPrivateKey> {
@@ -457,7 +457,7 @@ impl Hashi {
 
     fn try_find_encryption_key_for_committee(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Option<EncryptionPrivateKey>> {
@@ -485,7 +485,7 @@ impl Hashi {
 
     pub(crate) fn committee_encryption_key_lost(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         committee
@@ -503,7 +503,7 @@ impl Hashi {
 
     pub(crate) fn committee_signing_key_lost(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         committee
@@ -515,7 +515,7 @@ impl Hashi {
 
     pub(crate) fn committee_key_lost(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         self.committee_encryption_key_lost(committee, validator_address)
@@ -535,7 +535,7 @@ impl Hashi {
 
     pub(crate) fn find_signing_key_for_committee(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Bls12381PrivateKey> {
@@ -545,7 +545,7 @@ impl Hashi {
 
     fn try_find_signing_key_for_committee(
         &self,
-        committee: &hashi_types::committee::RuntimeCommittee,
+        committee: &hashi_types::committee::Committee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Option<Bls12381PrivateKey>> {
@@ -1873,14 +1873,13 @@ mod test {
         address: Address,
         bls_pub: hashi_types::committee::BLS12381PublicKey,
         enc_pub: EncryptionPublicKey,
-    ) -> hashi_types::committee::RuntimeCommittee {
+    ) -> Committee {
         Committee::new(
             vec![CommitteeMember::new(address, bls_pub, enc_pub, 1)],
             epoch,
             0,
             5_000,
         )
-        .into()
     }
 
     #[test]

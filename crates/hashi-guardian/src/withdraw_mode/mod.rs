@@ -14,10 +14,10 @@ pub mod provisioner_rotate_cert;
 pub mod standard_withdrawal;
 
 use hashi_types::committee::certificate_threshold;
-use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::RuntimeCommittee;
 
 /// Verify the committee certificate on `signed_request` meets the certificate
 /// threshold for `committee`. This matches the threshold at which Hashi's leader

@@ -17,7 +17,7 @@ use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-use hashi_types::committee::RuntimeCommittee as Committee;
+use hashi_types::committee::Committee;
 use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -1903,8 +1903,7 @@ pub(crate) mod tests {
                     )
                 })
                 .collect();
-            let committee: Committee =
-                hashi_types::committee::Committee::new(members, 100, 0u16, 3333u16).into();
+            let committee = Committee::new(members, 100, 0u16, 3333u16);
 
             // Fake DKG
             let sk = S::rand(&mut rng);
@@ -2257,8 +2256,7 @@ pub(crate) mod tests {
                 )
             })
             .collect();
-        let committee: Committee =
-            hashi_types::committee::Committee::new(members, 100, 0u16, 3333u16).into();
+        let committee = Committee::new(members, 100, 0u16, 3333u16);
 
         let sk = S::rand(&mut rng);
         let vk = G::generator() * sk;

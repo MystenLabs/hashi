@@ -3,12 +3,12 @@
 
 use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
-use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::RuntimeCommittee;
 use std::sync::Arc;
 use tracing::info;
 
@@ -195,10 +195,6 @@ mod tests {
                 .await
                 .unwrap(),
             6
-        );
-        assert_eq!(
-            enclave.state.get_committee().unwrap().members()[0].encryption_public_key(),
-            &hashi_types::committee::fallback_encryption_public_key(),
         );
         assert_eq!(
             update_committee(enclave, sign_transition_at(6, committee_at(7)))

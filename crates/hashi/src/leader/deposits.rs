@@ -12,6 +12,7 @@ use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
+use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
@@ -505,8 +506,9 @@ impl LeaderService {
             request_id: deposit_request.id,
             utxo: deposit_request.utxo.clone(),
         };
-        let mut aggregator = (committee).signature_aggregator(
+        let mut aggregator = BlsSignatureAggregator::new(
             inner.config.hashi_ids().hashi_object_id,
+            &committee,
             confirmation_message,
         );
         while let Some(result) = sig_tasks.join_next().await {

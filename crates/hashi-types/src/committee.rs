@@ -1,11 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-mod runtime;
-pub(crate) use runtime::ActivationCommitteeRepr;
-pub use runtime::RuntimeCommittee;
-pub use runtime::fallback_encryption_public_key;
-
 use std::collections::HashMap;
 use std::fmt;
 

@@ -1,13 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
+use crate::committee::Committee;
+use crate::committee::EncryptionGroupElement;
+use crate::committee::EncryptionPublicKey;
+use crate::committee::SignedMessage;
+use crate::intent::IntentMessage;
 use fastcrypto::groups::HashToGroupElement;
+use serde::Serialize;
 use std::sync::LazyLock;
+use sui_crypto::SignatureError;
+use sui_sdk_types::Address;
 use sui_sdk_types::bcs::FromBcs;
 use sui_sdk_types::bcs::ToBcs;
 
-/// An operational committee with the node fallback substituted for malformed
+/// Guardian's operational committee with the node fallback substituted for malformed
 /// member encryption keys. BLS keys are still parsed strictly.
 ///
 /// # Representation warning
@@ -24,20 +31,20 @@ use sui_sdk_types::bcs::ToBcs;
 ///
 /// A runtime view cannot be converted back into an ordinary or wire committee:
 /// ```compile_fail
-/// use hashi_types::committee::{Committee, RuntimeCommittee};
+/// use hashi_types::{committee::Committee, guardian::RuntimeCommittee};
 /// fn into_committee(runtime: RuntimeCommittee) -> Committee {
 ///     runtime.into()
 /// }
 /// ```
 /// ```compile_fail
-/// use hashi_types::{committee::RuntimeCommittee, move_types};
+/// use hashi_types::{guardian::RuntimeCommittee, move_types};
 /// fn into_move(runtime: &RuntimeCommittee) -> move_types::Committee {
 ///     runtime.into()
 /// }
 /// ```
 /// Nor can it be serialized as if it were the original committee:
 /// ```compile_fail
-/// use hashi_types::committee::RuntimeCommittee;
+/// use hashi_types::guardian::RuntimeCommittee;
 /// fn serialize(runtime: &RuntimeCommittee) {
 ///     bcs::to_bytes(runtime).unwrap();
 /// }
@@ -67,40 +74,12 @@ impl RuntimeCommittee {
         Committee::try_from(committee).map(Self)
     }
 
-    pub fn members(&self) -> &[CommitteeMember] {
-        self.0.members()
-    }
     pub fn epoch(&self) -> u64 {
         self.0.epoch()
     }
+
     pub fn total_weight(&self) -> u64 {
         self.0.total_weight()
-    }
-    pub fn config(&self) -> &Config {
-        self.0.config()
-    }
-    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
-        self.0.mpc_weight_reduction_allowed_delta()
-    }
-    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
-        self.0.mpc_max_faulty_in_basis_points()
-    }
-    pub fn mpc_nonce_accumulation_window_ms(&self) -> u64 {
-        self.0.mpc_nonce_accumulation_window_ms()
-    }
-    pub fn weight_of(&self, member: &Address) -> Result<u64, SignatureError> {
-        self.0.weight_of(member)
-    }
-    pub fn index_of(&self, member: &Address) -> Option<usize> {
-        self.0.index_of(member)
-    }
-
-    pub fn verify_signature_any_weight<T: IntentMessage>(
-        &self,
-        hashi_id: Address,
-        message: &SignedMessage<T>,
-    ) -> Result<(), SignatureError> {
-        self.0.verify_signature_any_weight(hashi_id, message)
     }
 
     pub fn verify_signature_and_weight<T: IntentMessage>(
@@ -113,60 +92,8 @@ impl RuntimeCommittee {
             .verify_signature_and_weight(hashi_id, message, required_weight)
     }
 
-    pub fn verify_signature_and_reduced_weight<T: IntentMessage>(
-        &self,
-        hashi_id: Address,
-        message: &SignedMessage<T>,
-        nodes: &Nodes<EncryptionGroupElement>,
-        required_weight: u32,
-    ) -> Result<u32, SignatureError> {
-        self.0
-            .verify_signature_and_reduced_weight(hashi_id, message, nodes, required_weight)
-    }
-
-    pub fn signers(&self, signature: &CommitteeSignature) -> Result<Vec<Address>, SignatureError> {
-        signature.signers(&self.0)
-    }
-
-    pub fn signed_weight(&self, signature: &CommitteeSignature) -> Result<u64, SignatureError> {
-        signature.weight(&self.0)
-    }
-
-    pub fn is_signer(
-        &self,
-        signature: &CommitteeSignature,
-        address: &Address,
-    ) -> Result<bool, SignatureError> {
-        signature.is_signer(address, &self.0)
-    }
-
-    pub fn reduced_signed_weight(
-        &self,
-        signature: &CommitteeSignature,
-        nodes: &Nodes<EncryptionGroupElement>,
-    ) -> Result<u32, SignatureError> {
-        signature.reduced_weight(&self.0, nodes)
-    }
-
-    pub fn signature_aggregator<T: IntentMessage + Clone>(
-        &self,
-        hashi_id: Address,
-        message: T,
-    ) -> BlsSignatureAggregator<'_, T> {
-        BlsSignatureAggregator::new(hashi_id, &self.0, message)
-    }
-
-    pub fn reduced_signature_aggregator<'a, T: IntentMessage + Clone>(
-        &'a self,
-        hashi_id: Address,
-        message: T,
-        nodes: &'a Nodes<EncryptionGroupElement>,
-    ) -> Result<BlsSignatureAggregator<'a, T, ReducedWeight<'a>>, SignatureError> {
-        BlsSignatureAggregator::new_reduced(hashi_id, &self.0, message, nodes)
-    }
-
     /// Dedicated encoding for activation-state hashing, not a wire committee.
-    pub(crate) fn activation_digest_repr(&self) -> ActivationCommitteeRepr {
+    pub(super) fn activation_digest_repr(&self) -> ActivationCommitteeRepr {
         ActivationCommitteeRepr((&self.0).into())
     }
 }
@@ -175,11 +102,11 @@ impl RuntimeCommittee {
 /// committee reconstructed from a runtime view.
 #[derive(Serialize)]
 #[serde(transparent)]
-pub(crate) struct ActivationCommitteeRepr(crate::move_types::Committee);
+pub(super) struct ActivationCommitteeRepr(crate::move_types::Committee);
 
-/// Nodes with invalid encryption keys cannot decrypt shares but still count
-/// toward committee thresholds.
-pub fn fallback_encryption_public_key() -> EncryptionPublicKey {
+// Match the existing node fallback in hashi::mpc::mpc_except_signing. Guardian
+// needs the same effective state, but cannot depend on the node crate here.
+fn fallback_encryption_public_key() -> EncryptionPublicKey {
     static FALLBACK: LazyLock<EncryptionPublicKey> = LazyLock::new(|| {
         EncryptionPublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi"))
     });
@@ -189,6 +116,9 @@ pub fn fallback_encryption_public_key() -> EncryptionPublicKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::committee::Bls12381PrivateKey;
+    use crate::committee::CommitteeMember;
+    use crate::committee::EncryptionPrivateKey;
 
     fn raw_committee() -> crate::move_types::Committee {
         let mut rng = rand::thread_rng();
@@ -212,7 +142,7 @@ mod tests {
         assert_eq!(runtime.epoch(), raw.epoch);
         assert_eq!(runtime.total_weight(), raw.total_weight);
         assert_eq!(
-            runtime.members()[0].encryption_public_key(),
+            runtime.0.members()[0].encryption_public_key(),
             &fallback_encryption_public_key()
         );
 

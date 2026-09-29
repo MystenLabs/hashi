@@ -395,7 +395,7 @@ impl HashiClient {
     }
 
     /// Fetch the current `Committee` (with weights). Returns `None` before DKG.
-    pub fn fetch_current_committee(&self) -> Option<hashi_types::committee::RuntimeCommittee> {
+    pub fn fetch_current_committee(&self) -> Option<hashi_types::committee::Committee> {
         self.onchain_state.current_committee()
     }
 

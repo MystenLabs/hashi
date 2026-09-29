@@ -6,13 +6,13 @@
 //! operator-pinned `ActivationState` hash.
 
 use crate::Enclave;
-use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
+use hashi_types::guardian::RuntimeCommittee;
 use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use tracing::info;
