@@ -13,11 +13,13 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use hashi_types::guardian::now_timestamp_secs;
+use hashi_types::guardian::now_timestamp_ms;
+use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::move_types;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
@@ -27,7 +29,6 @@ use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::bcs::ToBcs;
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
-use tokio::time::Instant;
 use tonic::transport::Channel;
 use tracing::info;
 use tracing::warn;
@@ -36,18 +37,20 @@ use crate::metrics::ProxyMetrics;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
-/// Past this age a snapshot admits no one, so a long Sui RPC outage fails
-/// closed instead of trusting a committee that may have changed.
+/// Once the chain state it was read from is this old, a snapshot admits no one,
+/// so a Sui RPC outage or a stalled fullnode fails closed.
 const MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(10 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const PAGE_SIZE: u32 = 1000;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct MemberSnapshot {
     /// The deployment whose committees the allowlist follows.
     pub hashi_object_id: Address,
     /// The members' registered TLS public keys.
     pub members: HashSet<[u8; 32]>,
+    /// Checkpoint time of the Hashi object read.
+    pub checkpoint_timestamp_ms: u64,
 }
 
 #[tonic::async_trait]
@@ -56,7 +59,7 @@ pub trait MemberSource: Send + Sync + 'static {
 }
 
 pub struct MemberAllowlist {
-    latest: RwLock<Option<(Instant, Arc<MemberSnapshot>)>>,
+    latest: RwLock<Option<Arc<MemberSnapshot>>>,
     metrics: Arc<ProxyMetrics>,
 }
 
@@ -70,12 +73,13 @@ impl MemberAllowlist {
 
     /// The latest snapshot, unless it is too old to trust.
     pub fn current(&self) -> Option<Arc<MemberSnapshot>> {
-        self.latest
+        let snapshot = self
+            .latest
             .read()
             .expect("allowlist lock poisoned")
-            .as_ref()
-            .filter(|(at, _)| at.elapsed() <= MAX_SNAPSHOT_AGE)
-            .map(|(_, snapshot)| snapshot.clone())
+            .clone()?;
+        let age_ms = now_timestamp_ms().saturating_sub(snapshot.checkpoint_timestamp_ms);
+        (u128::from(age_ms) <= MAX_SNAPSHOT_AGE.as_millis()).then_some(snapshot)
     }
 
     /// Refresh from `source` forever. A failed read keeps the last snapshot
@@ -101,24 +105,35 @@ impl MemberAllowlist {
     }
 
     pub(crate) fn store(&self, snapshot: MemberSnapshot) {
+        let mut latest = self.latest.write().expect("allowlist lock poisoned");
+        if let Some(previous) = latest.as_ref() {
+            // A lagging fullnode behind a load balancer can answer with older state.
+            if snapshot.checkpoint_timestamp_ms < previous.checkpoint_timestamp_ms {
+                warn!(
+                    read_ms = snapshot.checkpoint_timestamp_ms,
+                    current_ms = previous.checkpoint_timestamp_ms,
+                    "Ignoring a committee member read older than the current snapshot."
+                );
+                return;
+            }
+        }
         self.metrics
             .member_allowlist_size
             .set(snapshot.members.len() as i64);
         self.metrics
             .member_snapshot_timestamp_seconds
-            .set(now_timestamp_secs() as i64);
-        let mut latest = self.latest.write().expect("allowlist lock poisoned");
-        if latest
-            .as_ref()
-            .is_none_or(|(_, previous)| **previous != snapshot)
-        {
+            .set(unix_millis_to_seconds(snapshot.checkpoint_timestamp_ms) as i64);
+        if latest.as_ref().is_none_or(|previous| {
+            previous.hashi_object_id != snapshot.hashi_object_id
+                || previous.members != snapshot.members
+        }) {
             info!(
                 hashi_object_id = %snapshot.hashi_object_id,
                 members = snapshot.members.len(),
                 "Committee member allowlist changed."
             );
         }
-        *latest = Some((Instant::now(), Arc::new(snapshot)));
+        *latest = Some(Arc::new(snapshot));
     }
 }
 
@@ -167,24 +182,30 @@ impl ChainMemberSource {
 #[tonic::async_trait]
 impl MemberSource for ChainMemberSource {
     async fn fetch(&self) -> anyhow::Result<MemberSnapshot> {
-        let hashi_object_id = self.hashi_object_id().await?;
-        let members = committee_member_keys(self.sui.clone(), hashi_object_id).await?;
-        Ok(MemberSnapshot {
-            hashi_object_id,
-            members,
-        })
+        read_snapshot(self.sui.clone(), self.hashi_object_id().await?).await
     }
 }
 
 /// Registered TLS keys of the members of the current committee and, during a
 /// reconfig, the pending one.
-pub async fn committee_member_keys(
+pub async fn read_snapshot(
     mut sui: sui_rpc::Client,
     hashi_object_id: Address,
-) -> anyhow::Result<HashSet<[u8; 32]>> {
-    let root: move_types::Hashi = get_object(&mut sui, hashi_object_id)
-        .await?
-        .with_context(|| format!("Hashi object {hashi_object_id} not found"))?;
+) -> anyhow::Result<MemberSnapshot> {
+    let response = sui
+        .ledger_client()
+        .get_object(contents_request(&hashi_object_id))
+        .await
+        .with_context(|| format!("get Hashi object {hashi_object_id}"))?;
+    let checkpoint_timestamp_ms = response
+        .timestamp_ms()
+        .context("the Hashi object read has no checkpoint timestamp")?;
+    let root: move_types::Hashi = response
+        .into_inner()
+        .object()
+        .contents()
+        .deserialize()
+        .context("decode the Hashi object")?;
     let committee_set = root.committees;
 
     let mut committee = HashSet::new();
@@ -239,7 +260,11 @@ pub async fn committee_member_keys(
             None => break,
         }
     }
-    Ok(members)
+    Ok(MemberSnapshot {
+        hashi_object_id,
+        members,
+        checkpoint_timestamp_ms,
+    })
 }
 
 async fn get_committee(
@@ -257,11 +282,7 @@ async fn get_object<T: serde::de::DeserializeOwned>(
     sui: &mut sui_rpc::Client,
     id: Address,
 ) -> anyhow::Result<Option<T>> {
-    let request =
-        GetObjectRequest::new(&id).with_read_mask(FieldMask::from_paths([Object::path_builder()
-            .contents()
-            .finish()]));
-    match sui.ledger_client().get_object(request).await {
+    match sui.ledger_client().get_object(contents_request(&id)).await {
         Ok(response) => {
             let object = response
                 .into_inner()
@@ -276,10 +297,17 @@ async fn get_object<T: serde::de::DeserializeOwned>(
     }
 }
 
+fn contents_request(id: &Address) -> GetObjectRequest {
+    GetObjectRequest::new(id).with_read_mask(FieldMask::from_paths([Object::path_builder()
+        .contents()
+        .finish()]))
+}
+
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
 
+    /// A snapshot of current chain state.
     pub(crate) fn snapshot(
         hashi_object_id: Address,
         members: &[&ed25519_dalek::SigningKey],
@@ -290,6 +318,7 @@ pub(crate) mod test_utils {
                 .iter()
                 .map(|key| key.verifying_key().to_bytes())
                 .collect(),
+            checkpoint_timestamp_ms: now_timestamp_ms(),
         }
     }
 }
@@ -379,7 +408,7 @@ mod tests {
         tokio::time::advance(RETRY_INTERVAL).await;
         settle().await;
         assert_eq!(source.calls(), 2);
-        assert_eq!(*allowlist.current().unwrap(), one_member());
+        assert_eq!(allowlist.current().unwrap().members, one_member().members);
     }
 
     #[tokio::test(start_paused = true)]
@@ -398,38 +427,70 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn keeps_the_last_snapshot_until_it_ages_out() {
+    async fn keeps_the_last_snapshot_across_failed_reads() {
         let allowlist = Arc::new(MemberAllowlist::new(Arc::new(ProxyMetrics::new())));
         let source = ScriptedSource::new(vec![Ok(one_member())]);
         tokio::spawn(allowlist.clone().refresh_forever(source.clone()));
         settle().await;
-        assert!(allowlist.current().is_some());
+        let first = allowlist.current().unwrap();
 
-        // Every later refresh fails; the snapshot keeps admitting until it is
-        // older than the limit, and never after.
+        // Every later refresh fails.
         tokio::time::advance(REFRESH_INTERVAL).await;
         settle().await;
-        let retries = (MAX_SNAPSHOT_AGE - REFRESH_INTERVAL).as_secs() / RETRY_INTERVAL.as_secs();
-        for _ in 0..retries {
+        for _ in 0..10 {
             tokio::time::advance(RETRY_INTERVAL).await;
             settle().await;
-            assert_eq!(*allowlist.current().unwrap(), one_member());
         }
-        assert_eq!(source.calls() as u64, 2 + retries);
+        assert_eq!(source.calls(), 12);
+        assert!(Arc::ptr_eq(&allowlist.current().unwrap(), &first));
+    }
 
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(allowlist.current().is_none());
+    #[test]
+    fn ages_a_snapshot_by_the_chain_state_it_was_read_from() {
+        let limit_ms = MAX_SNAPSHOT_AGE.as_millis() as u64;
+        let admits_a_read_of_age = |age_ms: u64| {
+            let allowlist = MemberAllowlist::new(Arc::new(ProxyMetrics::new()));
+            allowlist.store(MemberSnapshot {
+                checkpoint_timestamp_ms: now_timestamp_ms() - age_ms,
+                ..one_member()
+            });
+            allowlist.current().is_some()
+        };
+        assert!(admits_a_read_of_age(limit_ms - 60_000));
+        // A fullnode that stopped syncing answers every refresh with this.
+        assert!(!admits_a_read_of_age(limit_ms + 1));
+    }
+
+    #[test]
+    fn never_goes_back_to_older_chain_state() {
+        let allowlist = MemberAllowlist::new(Arc::new(ProxyMetrics::new()));
+        let current = one_member();
+        let rotated = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let older = MemberSnapshot {
+            checkpoint_timestamp_ms: current.checkpoint_timestamp_ms - 1,
+            ..snapshot(Address::new([7; 32]), &[&rotated])
+        };
+        let members = current.members.clone();
+
+        allowlist.store(current);
+        allowlist.store(older);
+        assert_eq!(allowlist.current().unwrap().members, members);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_successful_refresh_replaces_the_snapshot() {
         let allowlist = Arc::new(MemberAllowlist::new(Arc::new(ProxyMetrics::new())));
+        let first = one_member();
         let rotated = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
-        let next = snapshot(Address::new([7; 32]), &[&rotated]);
-        let source = ScriptedSource::new(vec![Ok(one_member()), Ok(next)]);
+        let next = MemberSnapshot {
+            checkpoint_timestamp_ms: first.checkpoint_timestamp_ms + 1,
+            ..snapshot(Address::new([7; 32]), &[&rotated])
+        };
+        let first_members = first.members.clone();
+        let source = ScriptedSource::new(vec![Ok(first), Ok(next)]);
         tokio::spawn(allowlist.clone().refresh_forever(source));
         settle().await;
-        assert_eq!(*allowlist.current().unwrap(), one_member());
+        assert_eq!(allowlist.current().unwrap().members, first_members);
 
         tokio::time::advance(REFRESH_INTERVAL).await;
         settle().await;

@@ -2192,11 +2192,10 @@ mod tests {
         // member: the new member only once the rotation seats it.
         let sui = test_networks.sui_network.client.clone();
         let hashi_object_id = test_networks.hashi_network().ids().hashi_object_id;
-        let proxy_allowlist = || {
-            hashi_guardian_proxy::node::members::committee_member_keys(sui.clone(), hashi_object_id)
-        };
+        let proxy_allowlist =
+            || hashi_guardian_proxy::node::members::read_snapshot(sui.clone(), hashi_object_id);
         assert_eq!(
-            proxy_allowlist().await?,
+            proxy_allowlist().await?.members,
             tls_keys(&test_networks.hashi_network().nodes()[..INITIAL_NODES])?
         );
 
@@ -2206,7 +2205,7 @@ mod tests {
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         assert_eq!(
-            proxy_allowlist().await?,
+            proxy_allowlist().await?.members,
             tls_keys(test_networks.hashi_network().nodes())?
         );
 

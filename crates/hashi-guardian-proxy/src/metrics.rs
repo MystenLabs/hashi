@@ -42,7 +42,7 @@ pub struct ProxyMetrics {
     pub member_refused: IntCounterVec,
     /// Members on the current allowlist snapshot.
     pub member_allowlist_size: IntGauge,
-    /// When the allowlist was last read from chain; its age is what to alert on.
+    /// Checkpoint time of the chain state on the allowlist; its age is what to alert on.
     pub member_snapshot_timestamp_seconds: IntGauge,
     /// Failed allowlist reads.
     pub member_refresh_failures: IntCounter,
@@ -98,7 +98,7 @@ impl ProxyMetrics {
         .expect("valid metric");
         let member_snapshot_timestamp_seconds = IntGauge::new(
             "guardian_proxy_member_snapshot_timestamp_seconds",
-            "Unix time the committee member allowlist was last read from chain",
+            "Checkpoint time, in unix seconds, of the chain state on the committee member allowlist",
         )
         .expect("valid metric");
         let member_refresh_failures = IntCounter::new(
