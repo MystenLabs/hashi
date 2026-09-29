@@ -164,7 +164,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
-    use hashi_types::guardian::member_auth::MEMBER_AUTH_METADATA_KEY;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -180,8 +179,6 @@ pub(crate) mod test_utils {
         pub(crate) get_guardian_info_calls: Arc<AtomicUsize>,
         pub(crate) get_attested_guardian_info_calls: Arc<AtomicUsize>,
         pub(crate) confirm_ceremony_calls: Arc<AtomicUsize>,
-        /// `StandardWithdrawal` calls that still carried a member auth token.
-        pub(crate) member_auth_seen: Arc<AtomicUsize>,
         /// Served by `GetGuardianInfo`; the default response when unset.
         pub(crate) info: Arc<std::sync::Mutex<Option<proto::GetGuardianInfoResponse>>>,
     }
@@ -207,17 +204,10 @@ pub(crate) mod test_utils {
 
         async fn standard_withdrawal(
             &self,
-            request: Request<proto::SignedStandardWithdrawalRequest>,
+            _: Request<proto::SignedStandardWithdrawalRequest>,
         ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
             self.standard_withdrawal_calls
                 .fetch_add(1, Ordering::SeqCst);
-            if request
-                .metadata()
-                .get_bin(MEMBER_AUTH_METADATA_KEY)
-                .is_some()
-            {
-                self.member_auth_seen.fetch_add(1, Ordering::SeqCst);
-            }
             Ok(Response::new(proto::SignedStandardWithdrawalResponse {
                 data: Some(proto::StandardWithdrawalResponseData {
                     enclave_signatures: vec![vec![7u8; 64].into()],

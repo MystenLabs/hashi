@@ -11,8 +11,8 @@
 //!   by `wid` — an in-process LRU in front of the guardian's own S3 withdrawal
 //!   log ([`node::widlog`]) as the durable, read-only tier.
 //!   [`node::member_auth`] gates every route: node RPCs are served only to
-//!   current or pending committee members ([`node::members`]), proven by a
-//!   signature with their registered TLS key.
+//!   current or pending committee members ([`node::members`]), who present
+//!   their registered TLS key as a client certificate.
 //! - [`kp`]: [`kp::relay`] serves `GuardianRelayService`: key provisioners
 //!   submit one share each — authenticated against the ceremony's committed
 //!   roster read from the S3 share log ([`kp::roster`]) — and the relay batches
@@ -121,38 +121,79 @@ mod tests {
     use crate::metrics::ProxyMetrics;
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
+    use crate::tls::test_utils::test_cert;
+    use crate::tls::test_utils::TestCert;
     use axum::body::Body;
     use axum::http::Method;
     use axum::http::StatusCode;
-    use hashi_types::guardian::member_auth::MemberAuth;
-    use hashi_types::guardian::member_auth::MEMBER_AUTH_METADATA_KEY;
-    use hashi_types::guardian::now_timestamp_ms;
     use hashi_types::proto;
     use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
     use hashi_types::proto::guardian_service_client::GuardianServiceClient;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
     use sui_sdk_types::Address;
-    use tonic::metadata::MetadataValue;
+    use tonic::transport::Certificate;
     use tonic::transport::Channel;
+    use tonic::transport::ClientTlsConfig;
+    use tonic::transport::Endpoint;
+    use tonic::transport::Identity;
     use tonic::Code;
     use tonic_health::pb::health_check_response::ServingStatus;
     use tonic_health::pb::health_client::HealthClient;
     use tonic_health::pb::HealthCheckRequest;
     use tower::ServiceExt;
 
-    const WITHDRAWAL: &str = "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal";
-
     fn member_key() -> ed25519_dalek::SigningKey {
         ed25519_dalek::SigningKey::from_bytes(&[1; 32])
     }
 
-    fn hashi_id() -> Address {
-        Address::new([7; 32])
+    /// The self-signed certificate a node presents with its TLS key.
+    fn node_identity(key: &ed25519_dalek::SigningKey) -> Identity {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let pkcs8 = key.to_pkcs8_der().unwrap();
+        let key_pair = rcgen::KeyPair::from_der_and_sign_algo(
+            &rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8.as_bytes().to_vec().into()),
+            &rcgen::PKCS_ED25519,
+        )
+        .unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        Identity::from_pem(cert.pem(), key_pair.serialize_pem())
     }
 
-    /// The real router over a stub guardian, with `member_key` on the allowlist.
-    async fn spawn_proxy() -> (StubGuardian, axum::Router, Channel) {
+    struct Proxy {
+        stub: StubGuardian,
+        app: axum::Router,
+        server: sui_http::ServerHandle,
+        cert: TestCert,
+    }
+
+    impl Proxy {
+        fn channel(&self, identity: Option<Identity>) -> Channel {
+            let mut tls = ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(&self.cert.cert_pem))
+                .domain_name("localhost");
+            if let Some(identity) = identity {
+                tls = tls.identity(identity);
+            }
+            Endpoint::from_shared(format!("https://{}", self.server.local_addr()))
+                .unwrap()
+                .tls_config(tls)
+                .unwrap()
+                .connect_lazy()
+        }
+
+        fn guardian(&self, identity: Option<Identity>) -> GuardianServiceClient<Channel> {
+            GuardianServiceClient::new(self.channel(identity))
+        }
+    }
+
+    /// The real router over a stub guardian, served over TLS, with
+    /// `member_key` on the allowlist.
+    async fn spawn_proxy() -> Proxy {
         let (stub, backend) = spawn_stub().await;
         let metrics = Arc::new(ProxyMetrics::new());
         let roster = Arc::new(RosterCache::new(MemStore::default()));
@@ -172,74 +213,68 @@ mod tests {
             Duration::from_secs(1),
         );
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(hashi_id(), &[&member_key()]));
+        allowlist.store(snapshot(Address::new([7; 32]), &[&member_key()]));
         let app = router(
             guardian,
             relay,
             health,
             info,
-            Arc::new(MemberGate::new(allowlist, metrics)),
+            Arc::new(MemberGate::new(allowlist, metrics.clone())),
         );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn({
-            let app = app.clone();
-            async move { axum::serve(listener, app).await.unwrap() }
-        });
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
-            .unwrap()
-            .connect_lazy();
-        (stub, app, channel)
-    }
-
-    fn from_member<T>(message: T, path: &str) -> tonic::Request<T> {
-        let mut request = tonic::Request::new(message);
-        let auth = MemberAuth::sign(&member_key(), hashi_id(), path, now_timestamp_ms());
-        request.metadata_mut().insert_bin(
-            MEMBER_AUTH_METADATA_KEY,
-            MetadataValue::from_bytes(&auth.to_bytes()),
-        );
-        request
+        let cert = test_cert();
+        let served = tls::ServerCert::load(&cert.source, &metrics).await.unwrap();
+        let server = sui_http::Builder::new()
+            .tls_config(tls::server_config(served).unwrap())
+            .serve("127.0.0.1:0", app.clone())
+            .unwrap();
+        Proxy {
+            stub,
+            app,
+            server,
+            cert,
+        }
     }
 
     #[tokio::test]
-    async fn node_rpcs_need_a_member_even_for_a_cached_wid() {
-        let (stub, _, channel) = spawn_proxy().await;
-        let mut client = GuardianServiceClient::new(channel);
+    async fn node_rpcs_need_a_member_certificate_even_for_a_cached_wid() {
+        let proxy = spawn_proxy().await;
+        let mut anonymous = proxy.guardian(None);
 
-        let anonymous = client
+        let refused = anonymous
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
             .unwrap_err();
-        assert_eq!(anonymous.code(), Code::Unauthenticated);
-        assert_eq!(stub.standard_withdrawal_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(refused.code(), Code::Unauthenticated);
+        assert_eq!(
+            proxy.stub.standard_withdrawal_calls.load(Ordering::SeqCst),
+            0
+        );
 
-        // A member's call reaches the guardian without its token and fills
-        // the wid cache.
-        client
-            .standard_withdrawal(from_member(
-                mock_request([0x11; 32], 0).into_inner(),
-                WITHDRAWAL,
-            ))
+        // A member's call reaches the guardian and fills the wid cache.
+        proxy
+            .guardian(Some(node_identity(&member_key())))
+            .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
             .unwrap();
-        assert_eq!(stub.standard_withdrawal_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(stub.member_auth_seen.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            proxy.stub.standard_withdrawal_calls.load(Ordering::SeqCst),
+            1
+        );
 
         // The gate runs before the cache, so the cached wid is no way in.
-        let replay = client
+        let replay = anonymous
             .standard_withdrawal(mock_request([0x11; 32], 1))
             .await
             .unwrap_err();
         assert_eq!(replay.code(), Code::Unauthenticated);
 
-        let update = client
+        let update = anonymous
             .update_committee_chain(proto::UpdateCommitteeChainRequest::default())
             .await
             .unwrap_err();
         assert_eq!(update.code(), Code::Unauthenticated);
-        let update = client
+        let update = anonymous
             .update_committee(proto::SignedCommitteeTransition::default())
             .await
             .unwrap_err();
@@ -247,29 +282,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn members_still_hit_the_operator_denial() {
-        let (_, _, channel) = spawn_proxy().await;
-        let mut client = GuardianServiceClient::new(channel);
+    async fn refuses_certificates_outside_the_committee() {
+        let proxy = spawn_proxy().await;
 
-        let anonymous = client
+        let outsider = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let refused = proxy
+            .guardian(Some(node_identity(&outsider)))
+            .standard_withdrawal(mock_request([0x11; 32], 0))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::PermissionDenied);
+
+        // The proxy asks only for Ed25519 signatures, so a client holding
+        // another key type connects without a certificate.
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let refused = proxy
+            .guardian(Some(Identity::from_pem(cert.pem(), key.serialize_pem())))
+            .standard_withdrawal(mock_request([0x11; 32], 0))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), Code::Unauthenticated);
+        assert_eq!(
+            proxy.stub.standard_withdrawal_calls.load(Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn members_still_hit_the_operator_denial() {
+        let proxy = spawn_proxy().await;
+
+        let anonymous = proxy
+            .guardian(None)
             .operator_init(proto::OperatorInitRequest::default())
             .await
             .unwrap_err();
         assert_eq!(anonymous.code(), Code::Unauthenticated);
 
-        let member = client
-            .operator_init(from_member(
-                proto::OperatorInitRequest::default(),
-                "/sui.hashi.v1alpha.GuardianService/OperatorInit",
-            ))
+        let member = proxy
+            .guardian(Some(node_identity(&member_key())))
+            .operator_init(proto::OperatorInitRequest::default())
             .await
             .unwrap_err();
         assert_eq!(member.code(), Code::PermissionDenied);
     }
 
     #[tokio::test]
-    async fn public_grpc_needs_no_token() {
-        let (stub, _, channel) = spawn_proxy().await;
+    async fn public_routes_need_no_certificate() {
+        let proxy = spawn_proxy().await;
+        let channel = proxy.channel(None);
         let mut client = GuardianServiceClient::new(channel.clone());
 
         client
@@ -278,7 +343,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
 
         // Reaches the KP signature check, which rejects the empty request.
         let unsigned = client
@@ -291,7 +356,7 @@ mod tests {
             .get_provisioning_target_info(proto::GetProvisioningTargetInfoRequest {})
             .await
             .unwrap();
-        assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 2);
 
         let health = HealthClient::new(channel)
             .check(HealthCheckRequest {
@@ -301,11 +366,27 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(health.status(), ServingStatus::Serving);
+
+        // A browser's read of /info, over HTTP/1.1 and without a certificate.
+        let addr = *proxy.server.local_addr();
+        let info = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(proxy.cert.cert_pem.as_bytes()).unwrap(),
+            )
+            .resolve("localhost", addr)
+            .http1_only()
+            .build()
+            .unwrap()
+            .get(format!("https://localhost:{}/info", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(info.status(), reqwest::StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn http_status_routes_stay_public_and_the_rest_is_refused() {
-        let (_, app, _) = spawn_proxy().await;
+        let proxy = spawn_proxy().await;
         let status = |method: Method, uri: &str| {
             let request = axum::http::Request::builder()
                 .method(method)
@@ -314,7 +395,7 @@ mod tests {
                 .header("access-control-request-method", "GET")
                 .body(Body::empty())
                 .unwrap();
-            let app = app.clone();
+            let app = proxy.app.clone();
             async move { app.oneshot(request).await.unwrap().status() }
         };
 

@@ -44,7 +44,6 @@ non-enclave-dev = ["hashi-types/non-enclave-dev"]
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true
-ed25519-dalek.workspace = true
 hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream.workspace = true

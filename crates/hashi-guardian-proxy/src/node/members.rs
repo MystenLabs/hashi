@@ -44,7 +44,7 @@ const PAGE_SIZE: u32 = 1000;
 
 #[derive(Debug, PartialEq)]
 pub struct MemberSnapshot {
-    /// The deployment the guardian serves; member tokens are bound to it.
+    /// The deployment whose committees the allowlist follows.
     pub hashi_object_id: Address,
     /// The members' registered TLS public keys.
     pub members: HashSet<[u8; 32]>,

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The gate in front of every route: node RPCs are served only to members of
-//! the current or pending committee, proven by a [`MemberAuth`] signed with
-//! their registered TLS key. It mirrors the node's `require_known_validator`,
-//! with the proof in a header because TLS ends at the load balancer.
+//! the current or pending committee, identified by the TLS client certificate
+//! they present with their registered key ([`crate::tls`]). It mirrors the
+//! node's `require_known_validator`.
 
 use std::sync::Arc;
 
@@ -15,17 +15,14 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use hashi_types::guardian::member_auth::MemberAuth;
-use hashi_types::guardian::member_auth::MEMBER_AUTH_METADATA_KEY;
-use hashi_types::guardian::now_timestamp_ms;
 use hashi_types::proto::guardian_relay_service_server;
 use hashi_types::proto::guardian_service_server;
-use tonic::metadata::MetadataMap;
 use tonic::metadata::GRPC_CONTENT_TYPE;
 use tonic::Status;
 
 use crate::metrics::ProxyMetrics;
 use crate::node::members::MemberAllowlist;
+use crate::tls;
 
 pub struct MemberGate {
     allowlist: Arc<MemberAllowlist>,
@@ -37,30 +34,14 @@ impl MemberGate {
         Self { allowlist, metrics }
     }
 
-    /// The membership lookup runs before the signature check, so a token for
-    /// an unknown key costs a hash lookup rather than a verification.
-    fn admit(&self, request: &Request) -> Result<(), Refusal> {
-        let metadata = MetadataMap::from_headers(request.headers().clone());
-        let value = metadata
-            .get_bin(MEMBER_AUTH_METADATA_KEY)
-            .ok_or(Refusal::MissingAuth)?;
-        let auth = value
-            .to_bytes()
-            .ok()
-            .and_then(|bytes| MemberAuth::from_bytes(&bytes).ok())
-            .ok_or(Refusal::MalformedAuth)?;
-        if !auth.is_fresh(now_timestamp_ms()) {
-            return Err(Refusal::StaleAuth);
-        }
+    fn admit(&self, client_tls_key: Option<[u8; 32]>) -> Result<(), Refusal> {
+        let key = client_tls_key.ok_or(Refusal::NoClientCert)?;
         let snapshot = self
             .allowlist
             .current()
             .ok_or(Refusal::AllowlistUnavailable)?;
-        if !snapshot.members.contains(&auth.tls_public_key) {
+        if !snapshot.members.contains(&key) {
             return Err(Refusal::NotMember);
-        }
-        if !auth.verify_signature(snapshot.hashi_object_id, request.uri().path()) {
-            return Err(Refusal::BadSignature);
         }
         Ok(())
     }
@@ -68,17 +49,19 @@ impl MemberGate {
 
 pub async fn require_committee_member(
     State(gate): State<Arc<MemberGate>>,
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
     if is_public(request.uri().path()) {
         return next.run(request).await;
     }
-    match gate.admit(&request) {
-        Ok(()) => {
-            request.headers_mut().remove(MEMBER_AUTH_METADATA_KEY);
-            next.run(request).await
-        }
+    let client_tls_key = request
+        .extensions()
+        .get::<sui_http::PeerCertificates>()
+        .and_then(|certs| certs.peer_certs().first())
+        .and_then(tls::node_tls_key);
+    match gate.admit(client_tls_key) {
+        Ok(()) => next.run(request).await,
         Err(refusal) => {
             gate.metrics
                 .member_refused
@@ -112,36 +95,26 @@ fn is_public(path: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
-    MissingAuth,
-    MalformedAuth,
-    StaleAuth,
+    NoClientCert,
     AllowlistUnavailable,
     NotMember,
-    BadSignature,
 }
 
 impl Refusal {
     fn reason(self) -> &'static str {
         match self {
-            Self::MissingAuth => "missing_auth",
-            Self::MalformedAuth => "malformed_auth",
-            Self::StaleAuth => "stale_auth",
+            Self::NoClientCert => "no_client_cert",
             Self::AllowlistUnavailable => "allowlist_unavailable",
             Self::NotMember => "not_member",
-            Self::BadSignature => "bad_signature",
         }
     }
 
     fn status(self) -> Status {
         match self {
-            Self::MissingAuth => Status::unauthenticated(
-                "only committee members may call this RPC; member auth is missing",
+            Self::NoClientCert => Status::unauthenticated(
+                "only committee members may call this RPC; present the node's registered TLS \
+                 key as a client certificate",
             ),
-            Self::MalformedAuth => Status::unauthenticated("malformed member auth"),
-            Self::StaleAuth => {
-                Status::unauthenticated("member auth timestamp is outside the allowed clock skew")
-            }
-            Self::BadSignature => Status::unauthenticated("invalid member auth signature"),
             Self::NotMember => {
                 Status::permission_denied("caller is not in the current or pending committee")
             }
@@ -169,10 +142,7 @@ fn refuse(request: &Request, refusal: Refusal) -> Response {
 mod tests {
     use super::*;
     use crate::node::members::test_utils::snapshot;
-    use axum::body::Body;
-    use hashi_types::guardian::member_auth::MEMBER_AUTH_MAX_SKEW_MS;
     use sui_sdk_types::Address;
-    use tonic::metadata::MetadataValue;
 
     const WITHDRAWAL: &str = "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal";
 
@@ -180,126 +150,42 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[1; 32])
     }
 
-    fn hashi_id() -> Address {
-        Address::new([7; 32])
-    }
-
     fn gate_with_member() -> MemberGate {
         let metrics = Arc::new(ProxyMetrics::new());
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(hashi_id(), &[&member_key()]));
+        allowlist.store(snapshot(Address::new([7; 32]), &[&member_key()]));
         MemberGate::new(allowlist, metrics)
     }
 
-    fn request_with(path: &str, auth: Option<Vec<u8>>) -> Request {
-        let mut request = Request::builder()
-            .uri(path)
-            .header(CONTENT_TYPE, "application/grpc")
-            .body(Body::empty())
-            .unwrap();
-        if let Some(bytes) = auth {
-            let mut metadata = MetadataMap::new();
-            metadata.insert_bin(MEMBER_AUTH_METADATA_KEY, MetadataValue::from_bytes(&bytes));
-            request.headers_mut().extend(metadata.into_headers());
-        }
-        request
-    }
-
-    fn signed(key: &ed25519_dalek::SigningKey, hashi_id: Address, path: &str, at: u64) -> Vec<u8> {
-        MemberAuth::sign(key, hashi_id, path, at).to_bytes()
-    }
-
     #[test]
-    fn admits_a_member_token_for_this_method_and_deployment() {
-        let request = request_with(
-            WITHDRAWAL,
-            Some(signed(
-                &member_key(),
-                hashi_id(),
-                WITHDRAWAL,
-                now_timestamp_ms(),
-            )),
-        );
-        assert_eq!(gate_with_member().admit(&request), Ok(()));
-    }
-
-    #[test]
-    fn refuses_each_failure_with_its_reason() {
+    fn admits_a_member_and_refuses_everyone_else() {
         let gate = gate_with_member();
-        let now = now_timestamp_ms();
         let outsider = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
-        let cases = [
-            (None, Refusal::MissingAuth),
-            (Some(vec![1, 2, 3]), Refusal::MalformedAuth),
-            (
-                Some(signed(
-                    &member_key(),
-                    hashi_id(),
-                    WITHDRAWAL,
-                    now - MEMBER_AUTH_MAX_SKEW_MS - 1_000,
-                )),
-                Refusal::StaleAuth,
-            ),
-            (
-                Some(signed(&outsider, hashi_id(), WITHDRAWAL, now)),
-                Refusal::NotMember,
-            ),
-            (
-                Some(signed(
-                    &member_key(),
-                    hashi_id(),
-                    "/sui.hashi.v1alpha.GuardianService/UpdateCommitteeChain",
-                    now,
-                )),
-                Refusal::BadSignature,
-            ),
-            (
-                Some(signed(
-                    &member_key(),
-                    Address::new([8; 32]),
-                    WITHDRAWAL,
-                    now,
-                )),
-                Refusal::BadSignature,
-            ),
-        ];
-        for (auth, refusal) in cases {
-            assert_eq!(gate.admit(&request_with(WITHDRAWAL, auth)), Err(refusal));
-        }
+        assert_eq!(
+            gate.admit(Some(member_key().verifying_key().to_bytes())),
+            Ok(())
+        );
+        assert_eq!(
+            gate.admit(Some(outsider.verifying_key().to_bytes())),
+            Err(Refusal::NotMember)
+        );
+        assert_eq!(gate.admit(None), Err(Refusal::NoClientCert));
     }
 
     #[test]
     fn refuses_everyone_without_a_snapshot() {
         let metrics = Arc::new(ProxyMetrics::new());
         let gate = MemberGate::new(Arc::new(MemberAllowlist::new(metrics.clone())), metrics);
-        let request = request_with(
-            WITHDRAWAL,
-            Some(signed(
-                &member_key(),
-                hashi_id(),
-                WITHDRAWAL,
-                now_timestamp_ms(),
-            )),
+        assert_eq!(
+            gate.admit(Some(member_key().verifying_key().to_bytes())),
+            Err(Refusal::AllowlistUnavailable)
         );
-        assert_eq!(gate.admit(&request), Err(Refusal::AllowlistUnavailable));
     }
 
     #[test]
     fn each_refusal_has_its_status_code() {
         assert_eq!(
-            Refusal::MissingAuth.status().code(),
-            tonic::Code::Unauthenticated
-        );
-        assert_eq!(
-            Refusal::MalformedAuth.status().code(),
-            tonic::Code::Unauthenticated
-        );
-        assert_eq!(
-            Refusal::StaleAuth.status().code(),
-            tonic::Code::Unauthenticated
-        );
-        assert_eq!(
-            Refusal::BadSignature.status().code(),
+            Refusal::NoClientCert.status().code(),
             tonic::Code::Unauthenticated
         );
         assert_eq!(
