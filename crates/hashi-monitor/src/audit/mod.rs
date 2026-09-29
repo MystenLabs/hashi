@@ -264,10 +264,8 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// Fetches each overdue Hashi approval the Sui event scan never saw, such as
-    /// one made before the scan started. One inside the scanned range should
-    /// have come from the scan, so it is also a `SuiScanMissedEvent`. An
-    /// approval whose lookup fails stays missing, so it is still reported.
+    /// Fetches each overdue Hashi approval the Sui event scan never saw. One inside the
+    /// scanned range is also a `SuiScanMissedEvent`; one whose lookup fails stays missing.
     pub async fn fetch_missing_hashi_approvals(
         &mut self,
         window: &impl AuditWindow,

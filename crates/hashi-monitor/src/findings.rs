@@ -47,8 +47,8 @@ pub enum MonitorFinding {
         deadline: UnixSeconds,
         cursor: UnixSeconds,
     },
-    /// The Sui event scan covered `event` but never returned it, so events it
-    /// relies on for other findings may be missing too.
+    /// The Sui event scan covered `event` but never returned it, so other events the
+    /// scan should have returned may be missing too.
     SuiScanMissedEvent {
         event: MonitorEvent,
         cursor: UnixSeconds,
