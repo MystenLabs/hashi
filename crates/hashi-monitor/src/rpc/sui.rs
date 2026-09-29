@@ -49,6 +49,9 @@ const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 const MAX_RANGE_ATTEMPTS: u32 = 3;
 const MAX_LOOKUP_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Distance kept above a pruning node's reported oldest checkpoint: an hour at the probe's
+/// six checkpoints per second, since the backends behind one endpoint prune unevenly.
+const PRUNING_MARGIN_CHECKPOINTS: u64 = 6 * 60 * 60;
 
 struct TransactionScan {
     transactions: Vec<ExecutedTransaction>,
@@ -142,6 +145,8 @@ pub struct SuiEventsPoller {
     checkpoint_timestamps: BTreeMap<u64, UnixSeconds>,
     /// Most recently fetched chain head as `(sequence_number, timestamp_secs)`.
     observed_chain_head: Option<(u64, UnixSeconds)>,
+    /// Oldest checkpoint the node reported serving, 0 if it has not pruned.
+    lowest_available_checkpoint: u64,
 }
 
 impl SuiEventsPoller {
@@ -163,7 +168,12 @@ impl SuiEventsPoller {
             next_checkpoint_to_scan: None,
             checkpoint_timestamps: BTreeMap::new(),
             observed_chain_head: None,
+            lowest_available_checkpoint: 0,
         })
+    }
+
+    pub fn start_seconds(&self) -> UnixSeconds {
+        self.start_seconds
     }
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
@@ -193,11 +203,7 @@ impl SuiEventsPoller {
 
         let start_checkpoint = match self.next_checkpoint_to_scan {
             Some(checkpoint) => checkpoint,
-            None => self
-                .checkpoint_bracket(self.cursor_seconds)
-                .await?
-                .map(|(before, _)| before)
-                .context("Sui does not yet have a checkpoint at the poll start time")?,
+            None => self.first_checkpoint_to_scan().await?,
         };
         let (mut latest_sequence, mut latest_timestamp) = self
             .observed_chain_head
@@ -354,12 +360,36 @@ impl SuiEventsPoller {
         }
     }
 
+    /// The checkpoint before the cursor or, once the node has pruned that far, the oldest
+    /// one it serves, moving the scan's start past that checkpoint's second.
+    async fn first_checkpoint_to_scan(&mut self) -> anyhow::Result<u64> {
+        let (before, _) = self
+            .checkpoint_bracket(self.cursor_seconds)
+            .await?
+            .context("Sui does not yet have a checkpoint at the poll start time")?;
+        if before > 0 {
+            let before_timestamp = self.checkpoint_timestamp(before).await?;
+            if before_timestamp >= self.cursor_seconds {
+                // Transactions in unscanned earlier checkpoints are at most this second.
+                self.start_seconds = before_timestamp + 1;
+                tracing::warn!(
+                    requested_start = %utc_timestamp(self.cursor_seconds),
+                    scan_start = %utc_timestamp(self.start_seconds),
+                    checkpoint = before,
+                    "Sui node has pruned the requested start; scanning from its oldest checkpoint"
+                );
+            }
+        }
+        Ok(before)
+    }
+
     /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
     ///
     /// Exponential probing finds a lower bound, then binary search resolves the
     /// exact adjacent checkpoint boundary. When a predecessor checkpoint exists,
     /// the lower bound is before the timestamp and the upper bound is at or after
-    /// it. At or before genesis, both bounds are checkpoint zero.
+    /// it. At or before the oldest checkpoint the node serves, genesis unless it
+    /// prunes, both bounds are that checkpoint.
     async fn checkpoint_bracket(
         &mut self,
         timestamp_secs: UnixSeconds,
@@ -384,16 +414,22 @@ impl SuiEventsPoller {
             return Ok(None);
         }
 
+        let oldest = match self.lowest_available_checkpoint {
+            0 => 0,
+            lowest => lowest
+                .saturating_add(PRUNING_MARGIN_CHECKPOINTS)
+                .min(latest_sequence),
+        };
         let elapsed = latest_timestamp.saturating_sub(timestamp_secs);
         let mut distance = elapsed.saturating_mul(6).max(1);
         let mut low_sequence = loop {
-            let probe = latest_sequence.saturating_sub(distance);
+            let probe = latest_sequence.saturating_sub(distance).max(oldest);
             let timestamp = self.checkpoint_timestamp(probe).await?;
             if timestamp < timestamp_secs {
                 break probe;
             }
-            if probe == 0 {
-                return Ok(Some((0, 0)));
+            if probe == oldest {
+                return Ok(Some((oldest, oldest)));
             }
             distance = distance.saturating_mul(2);
         };
@@ -442,6 +478,7 @@ impl SuiEventsPoller {
         let latest = (sequence_number, timestamp_ms / 1_000);
         self.checkpoint_timestamps.insert(latest.0, latest.1);
         self.observed_chain_head = Some(latest);
+        self.lowest_available_checkpoint = service_info.lowest_available_checkpoint.unwrap_or(0);
         Ok(latest)
     }
 
@@ -645,9 +682,14 @@ pub(crate) mod tests {
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
     use sui_rpc::proto::sui::rpc::v2::Bcs;
+    use sui_rpc::proto::sui::rpc::v2::CheckpointSummary;
+    use sui_rpc::proto::sui::rpc::v2::GetCheckpointResponse;
     use sui_rpc::proto::sui::rpc::v2::GetObjectResponse;
+    use sui_rpc::proto::sui::rpc::v2::GetServiceInfoResponse;
+    use sui_rpc::proto::sui::rpc::v2::get_checkpoint_request::CheckpointId;
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerService;
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerServiceServer;
+    use sui_rpc::proto::timestamp_ms_to_proto;
 
     const PACKAGE_ID: Address = Address::new([0x11; 32]);
     const WID: Address = Address::new([0x3d; 32]);
@@ -716,6 +758,53 @@ pub(crate) mod tests {
                 Some(code) => Err(tonic::Status::new(code, "injected failure")),
                 None => self.ledger.get_object(request).await,
             }
+        }
+    }
+
+    /// Checkpoints `lowest..=head`, one a second from `GENESIS_SECS`. Like a pruning
+    /// fullnode, it reports `lowest` and answers older checkpoints with `NotFound`.
+    #[derive(Clone)]
+    struct PrunedLedger {
+        lowest: u64,
+        head: u64,
+    }
+
+    const GENESIS_SECS: UnixSeconds = 1_700_000_000;
+
+    #[tonic::async_trait]
+    impl LedgerService for PrunedLedger {
+        async fn get_service_info(
+            &self,
+            _: tonic::Request<GetServiceInfoRequest>,
+        ) -> Result<tonic::Response<GetServiceInfoResponse>, tonic::Status> {
+            let mut info = GetServiceInfoResponse::default();
+            info.checkpoint_height = Some(self.head);
+            info.timestamp = Some(timestamp_ms_to_proto((GENESIS_SECS + self.head) * 1_000));
+            info.lowest_available_checkpoint = Some(self.lowest);
+            Ok(tonic::Response::new(info))
+        }
+
+        async fn get_checkpoint(
+            &self,
+            request: tonic::Request<GetCheckpointRequest>,
+        ) -> Result<tonic::Response<GetCheckpointResponse>, tonic::Status> {
+            let Some(CheckpointId::SequenceNumber(sequence)) = request.into_inner().checkpoint_id
+            else {
+                return Err(tonic::Status::invalid_argument(
+                    "expected a sequence number",
+                ));
+            };
+            if !(self.lowest..=self.head).contains(&sequence) {
+                return Err(tonic::Status::not_found("pruned"));
+            }
+            let mut summary = CheckpointSummary::default();
+            summary.timestamp = Some(timestamp_ms_to_proto((GENESIS_SECS + sequence) * 1_000));
+            let mut checkpoint = Checkpoint::default();
+            checkpoint.sequence_number = Some(sequence);
+            checkpoint.summary = Some(summary);
+            let mut response = GetCheckpointResponse::default();
+            response.checkpoint = Some(checkpoint);
+            Ok(tonic::Response::new(response))
         }
     }
 
@@ -1026,5 +1115,47 @@ pub(crate) mod tests {
         assert!(poller.has_scanned(100));
         assert!(poller.has_scanned(199));
         assert!(!poller.has_scanned(200));
+    }
+
+    async fn pruned_poller_starting_at(sequence: u64) -> SuiEventsPoller {
+        let mut poller = poller_for(PrunedLedger {
+            lowest: 100_000,
+            head: 200_000,
+        })
+        .await;
+        poller.start_seconds = GENESIS_SECS + sequence;
+        poller.cursor_seconds = GENESIS_SECS + sequence;
+        poller
+    }
+
+    #[tokio::test]
+    async fn a_start_the_node_has_pruned_scans_from_its_oldest_checkpoint() {
+        let mut poller = pruned_poller_starting_at(50_000).await;
+        let oldest = 100_000 + PRUNING_MARGIN_CHECKPOINTS;
+
+        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), oldest);
+        assert_eq!(poller.start_seconds(), GENESIS_SECS + oldest + 1);
+    }
+
+    #[tokio::test]
+    async fn a_start_the_probe_would_overshoot_resolves_without_pruned_checkpoints() {
+        let mut poller = pruned_poller_starting_at(130_000).await;
+
+        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), 129_999);
+        assert_eq!(poller.start_seconds(), GENESIS_SECS + 130_000);
+    }
+
+    #[tokio::test]
+    async fn an_unpruned_node_scans_from_genesis_for_an_earlier_start() {
+        let mut poller = poller_for(PrunedLedger {
+            lowest: 0,
+            head: 1_000,
+        })
+        .await;
+        poller.start_seconds = GENESIS_SECS - 10;
+        poller.cursor_seconds = GENESIS_SECS - 10;
+
+        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), 0);
+        assert_eq!(poller.start_seconds(), GENESIS_SECS - 10);
     }
 }

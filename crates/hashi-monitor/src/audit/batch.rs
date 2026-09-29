@@ -51,6 +51,19 @@ impl BatchAuditWindow {
             guardian_end,
         }
     }
+
+    /// A batch audit claims its whole Sui range, so it fails if the Sui node pruned the
+    /// start and the scan had to begin later.
+    fn ensure_sui_history(&self, sui_scan_start: UnixSeconds) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            sui_scan_start <= self.sui_start,
+            "the Sui node no longer serves history before {}, but this audit needs it from {}; \
+             use a Sui RPC that keeps it, or a later start",
+            utc_timestamp(sui_scan_start),
+            utc_timestamp(self.sui_start),
+        );
+        Ok(())
+    }
 }
 
 impl AuditWindow for BatchAuditWindow {
@@ -200,6 +213,8 @@ impl BatchAuditor {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         self.violation_found = false;
         self.fetch_all_sui_guardian_events().await?;
+        self.audit_window
+            .ensure_sui_history(self.inner.get_sui_scan_start())?;
 
         tracing::info!(
             "finished batch polling:\n  start={}\n  end={}\n  sui_start={}\n  sui_target_end={}\n  sui_cursor={}\n  guardian_start={}\n  guardian_target_end={}\n  guardian_cursor={}",
@@ -256,5 +271,25 @@ impl BatchAuditor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_batch_fails_once_the_sui_node_has_pruned_the_start_of_its_range() {
+        let window = BatchAuditWindow {
+            user_start: 200,
+            user_end: 300,
+            sui_start: 100,
+            sui_end: 310,
+            guardian_start: 200,
+            guardian_end: 300,
+        };
+
+        assert!(window.ensure_sui_history(100).is_ok());
+        assert!(window.ensure_sui_history(101).is_err());
     }
 }

@@ -450,6 +450,10 @@ impl AuditorCore {
         self.sui_poller.cursor_seconds()
     }
 
+    fn get_sui_scan_start(&self) -> UnixSeconds {
+        self.sui_poller.start_seconds()
+    }
+
     fn get_guardian_cursor(&self) -> UnixSeconds {
         self.guardian_poller.cursor_seconds()
     }

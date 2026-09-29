@@ -32,8 +32,9 @@ deployment:
       git_revision: "0000000000000000000000000000000000000000"
       pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
-    # Older still-trusted builds accepted only for historical S3 logs during an
-    # upgrade window. Omit or leave empty outside an upgrade.
+    # Older still-trusted builds accepted only for historical S3 logs. Keep a
+    # replaced build until a restart no longer re-audits its records: a week plus
+    # the longest next-event delay.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

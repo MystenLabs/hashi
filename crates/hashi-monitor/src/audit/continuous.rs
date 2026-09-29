@@ -28,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// The frequency at which we do validation checks.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// The longest monitor outage that a restart without `--start` audits in full.
+/// The longest monitor outage a restart without `--start` re-audits.
 const DEFAULT_RESTART_LOOKBACK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A continuous audit only requires a start time
