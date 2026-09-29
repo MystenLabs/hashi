@@ -23,6 +23,26 @@ async fn main() -> Result<()> {
 
     abort_on_panic();
 
+    // Require the Nitro RNG to feed the kernel entropy pool before generating keys.
+    #[cfg(not(feature = "non-enclave-dev"))]
+    {
+        use anyhow::Context;
+
+        const RNG_AVAILABLE: &str = "/sys/class/misc/hw_random/rng_available";
+        const RNG_CURRENT: &str = "/sys/devices/virtual/misc/hw_random/rng_current";
+        let current = std::fs::read_to_string(RNG_CURRENT)
+            .with_context(|| format!("Failed to read {RNG_CURRENT}"))?;
+        tracing::debug!(
+            available_rngs = ?std::fs::read_to_string(RNG_AVAILABLE),
+            current_rng = current.trim(),
+            "Kernel hardware RNG configuration"
+        );
+        anyhow::ensure!(
+            current.trim() == "nsm-hwrng",
+            "Expected nsm-hwrng in {RNG_CURRENT}, got {current:?}"
+        );
+    }
+
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
