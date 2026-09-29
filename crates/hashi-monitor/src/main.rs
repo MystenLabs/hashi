@@ -44,9 +44,8 @@ enum Command {
         config: PathBuf,
 
         /// Start of guardian audit period as UTC, for example 2026-08-04T19:00:00Z.
-        /// Defaults to a week back, or further if a configured delay is longer, so a
-        /// restart also audits an outage of up to about a week and reports that
-        /// week's findings again.
+        /// Defaults to far enough back to audit a monitor outage of up to a week; a
+        /// restart reports findings from that period again.
         #[arg(long, value_parser = parse_utc_timestamp)]
         start: Option<u64>,
 
