@@ -566,7 +566,7 @@ impl TryFrom<pb::BuildPcrs> for BuildPcrs {
             .git_revision
             .ok_or_else(|| missing("git_revision"))?;
         let pcr0 = build_pb.pcr0.ok_or_else(|| missing("pcr0"))?.to_vec();
-        Ok(BuildPcrs::new(&git_revision, pcr0))
+        BuildPcrs::new(&git_revision, pcr0)
     }
 }
 

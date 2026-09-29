@@ -25,12 +25,12 @@ deployment:
   bitcoin_network: "regtest"
   pcr_allowlist:
     # Dev fidelity: the guardian runs `--features non-enclave-dev` (mock
-    # attestation), so PCR0 is not verified — a dummy build entry satisfies the
-    # config shape. The git_revision check still runs, so it must match the
+    # attestation), so PCR0 is not verified — a nonzero 48-byte dummy pin satisfies
+    # config validation. The git_revision check still runs, so it must match the
     # revision label supplied by the operator during initialization.
     current_build:
       git_revision: "${GUARDIAN_GIT_REVISION}"
-      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
     prev_builds: []
 
 s3_credentials:
