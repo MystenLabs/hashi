@@ -23,7 +23,10 @@
 //! distinguish "never signed" from "signed but unreadable", and forwarding the
 //! latter re-signs a withdrawal the guardian already durably signed, the
 //! double-debit the cache exists to prevent.
+//!
+//! `GetGuardianInfo` is answered from [`crate::guardian_info`].
 
+use crate::guardian_info::GuardianInfoCache;
 use crate::log_store::LogStore;
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
@@ -76,13 +79,16 @@ struct CacheEntry {
 }
 
 pub struct CachingGuardianGrpc<S, L> {
-    inner: S,
+    inner: Arc<S>,
     l1: Mutex<LruCache<WithdrawalID, CacheEntry>>,
     log: L,
     /// Network the guardian validates requests against; needed to recompute
     /// sighashes when verifying a log replay.
     network: Network,
     metrics: Arc<ProxyMetrics>,
+    /// Invalidated by every signed withdrawal: a leader reading after its finalize
+    /// must see the new seq.
+    info_cache: GuardianInfoCache<S>,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
@@ -103,12 +109,15 @@ impl<S, L> CachingGuardianGrpc<S, L> {
         metrics: Arc<ProxyMetrics>,
         capacity: NonZeroUsize,
     ) -> Self {
+        let inner = Arc::new(inner);
+        let info_cache = GuardianInfoCache::new(inner.clone());
         Self {
             inner,
             l1: Mutex::new(LruCache::new(capacity)),
             log,
             network,
             metrics,
+            info_cache,
         }
     }
 
@@ -217,6 +226,8 @@ where
         }
 
         let response = synthesize_response(&found);
+        // The forward that signed it may have failed or been dropped before invalidating.
+        self.info_cache.invalidate();
         self.store(*wid, found.consumed_seq, response.clone());
         self.metrics.outcome(metrics::OUTCOME_S3_HIT);
         info!(
@@ -315,7 +326,10 @@ where
         &self,
         request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        self.inner.get_guardian_info(request).await
+        self.info_cache
+            .get(request.into_inner().include_attestation)
+            .await
+            .map(Response::new)
     }
 
     async fn setup_new_key(
@@ -387,6 +401,7 @@ where
         self.metrics.outcome(metrics::OUTCOME_FORWARDED);
         let response_inner = self.inner.standard_withdrawal(request).await?.into_inner();
 
+        self.info_cache.invalidate();
         self.store(wid, seq, response_inner.clone());
         info!(%wid, seq, "Stored StandardWithdrawal response in cache");
 
@@ -433,6 +448,7 @@ mod tests {
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     type ResponseFn =
         dyn Fn() -> Result<proto::SignedStandardWithdrawalResponse, Status> + Send + Sync;
@@ -441,6 +457,8 @@ mod tests {
         call_count: Arc<AtomicUsize>,
         result: Arc<ResponseFn>,
         info: Option<proto::GetGuardianInfoResponse>,
+        info_calls: Arc<AtomicUsize>,
+        info_delay: Duration,
     }
 
     impl StubGuardian {
@@ -451,6 +469,8 @@ mod tests {
                     call_count: call_count.clone(),
                     result: Arc::new(|| Ok(mock_response())),
                     info: None,
+                    info_calls: Arc::default(),
+                    info_delay: Duration::ZERO,
                 },
                 call_count,
             )
@@ -463,6 +483,8 @@ mod tests {
                     call_count: call_count.clone(),
                     result: Arc::new(|| Err(Status::failed_precondition("simulated"))),
                     info: None,
+                    info_calls: Arc::default(),
+                    info_delay: Duration::ZERO,
                 },
                 call_count,
             )
@@ -470,6 +492,11 @@ mod tests {
 
         fn with_info(mut self, info: proto::GetGuardianInfoResponse) -> Self {
             self.info = Some(info);
+            self
+        }
+
+        fn with_info_delay(mut self, delay: Duration) -> Self {
+            self.info_delay = delay;
             self
         }
     }
@@ -481,6 +508,8 @@ mod tests {
             request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             assert!(!request.into_inner().include_attestation);
+            self.info_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.info_delay).await;
             match &self.info {
                 Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
@@ -539,7 +568,9 @@ mod tests {
             &self,
             _: Request<proto::UpdateCommitteeChainRequest>,
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
+            Ok(Response::new(proto::UpdateCommitteeResponse {
+                current_committee_epoch: Some(0),
+            }))
         }
         async fn rotate_kp_set(
             &self,
@@ -715,6 +746,80 @@ mod tests {
             "same wid at a bumped seq must hit the cache, not re-consume"
         );
         assert_eq!(r1, r2, "bumped-seq retry must replay the same response");
+    }
+
+    fn info_request() -> Request<proto::GetGuardianInfoRequest> {
+        Request::new(proto::GetGuardianInfoRequest {
+            include_attestation: false,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guardian_info_fetched_before_a_withdrawal_is_refetched() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub
+            .with_info(proto::GetGuardianInfoResponse::default())
+            .with_info_delay(Duration::from_millis(100));
+        let info_calls = stub.info_calls.clone();
+        let cache = Arc::new(cache_over(stub, MemStore::default()));
+
+        // A withdrawal is signed while the first fetch is in flight.
+        let in_flight = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get_guardian_info(info_request()).await }
+        });
+        while info_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        cache
+            .standard_withdrawal(mock_request([0x11; 32], 0))
+            .await
+            .unwrap();
+        in_flight.await.unwrap().unwrap();
+
+        cache.get_guardian_info(info_request()).await.unwrap();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guardian_info_is_refetched_after_a_log_replay() {
+        let fixture = replay_fixture(7);
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(stub_info_pb(
+            fixture.enclave_btc_pubkey,
+            fixture.master_g,
+            fixture.consumed_seq + 1,
+        ));
+        let info_calls = stub.info_calls.clone();
+        let store = MemStore::default();
+        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
+        let cache = cache_over(stub, store);
+
+        cache.get_guardian_info(info_request()).await.unwrap();
+        cache
+            .standard_withdrawal(Request::new(fixture.request.clone()))
+            .await
+            .unwrap();
+        cache.get_guardian_info(info_request()).await.unwrap();
+        // Filling the cache, the replay's live integrity read, then the refetch.
+        assert_eq!(info_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committee_updates_do_not_refetch_guardian_info() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
+        let info_calls = stub.info_calls.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        cache.get_guardian_info(info_request()).await.unwrap();
+        // The guardian answers an empty chain Ok, whoever sends it.
+        cache
+            .update_committee_chain(Request::new(proto::UpdateCommitteeChainRequest::default()))
+            .await
+            .unwrap();
+        cache.get_guardian_info(info_request()).await.unwrap();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
