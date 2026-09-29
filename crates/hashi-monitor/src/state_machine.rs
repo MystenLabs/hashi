@@ -133,10 +133,10 @@ impl WithdrawalStateMachine {
 
     /// Add an event and update expectations for its immediate neighbors.
     ///
-    /// A missing predecessor is expected by the event timestamp plus
-    /// `clock_skew`; a missing successor is expected by the configured
-    /// next-event deadline. A neighbor already seen is checked against the
-    /// pair's deadlines, so findings do not depend on ingestion order.
+    /// A missing predecessor is expected by the event timestamp plus the
+    /// predecessor's clock skew; a missing successor is expected by the
+    /// configured next-event deadline. A neighbor already seen is checked
+    /// against the pair's deadlines, so findings do not depend on ingestion order.
     ///
     /// Event retention is based on structural validity, not finding category.
     /// `MonitorFinding::InvalidEventAdded` denotes a contradictory, definite
@@ -272,8 +272,7 @@ impl WithdrawalStateMachine {
     }
 }
 
-/// Both timing bounds between consecutive events. A Bitcoin block time is set by
-/// its miner and can precede the guardian signature, so E3 bounds only its own lateness.
+/// Both timing bounds between consecutive events.
 fn neighbor_timing_findings(
     predecessor: &MonitorWithdrawalEvent,
     successor: &MonitorWithdrawalEvent,
@@ -290,9 +289,7 @@ fn neighbor_timing_findings(
         });
     }
     let deadline = cfg.predecessor_deadline(successor);
-    if successor.event_type != WithdrawalEventType::E3BtcConfirmed
-        && deadline < predecessor.timestamp_secs
-    {
+    if deadline < predecessor.timestamp_secs {
         findings.push(MonitorFinding::EventOccurredAfterDeadline {
             event: MonitorEvent::Withdrawal(predecessor.clone()),
             relation: EventRelation::Predecessor,
@@ -320,7 +317,7 @@ impl DepositStateMachine {
             panic!("unexpected event type");
         }
         // btc confirmation is a predecessor event => we set the deadline to now (+skew).
-        let t_btc_expected = event.timestamp_secs + cfg.clock_skew;
+        let t_btc_expected = event.timestamp_secs + cfg.deposit_clock_skew;
         Self {
             hashi_deposit_event: event,
             btc_event: None,
@@ -421,6 +418,7 @@ mod tests {
 
     use super::*;
     use crate::config::BtcConfig;
+    use crate::config::ClockSkews;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use crate::findings::FindingCategory;
@@ -446,7 +444,12 @@ mod tests {
                 (WithdrawalEventType::E2GuardianApproved, 200),
             ])
             .expect("valid intra-event delays"),
-            clock_skew: 10,
+            clock_skews: ClockSkews::new(vec![
+                (WithdrawalEventType::E1HashiApproved, 10),
+                (WithdrawalEventType::E2GuardianApproved, 30),
+            ])
+            .expect("valid clock skews"),
+            deposit_clock_skew: 10,
             withdrawal_predecessor_lookback: 60 * 60,
             deployment: DeploymentConfig {
                 bucket_info: hashi_types::guardian::S3BucketInfo {
@@ -637,7 +640,8 @@ mod tests {
             }
         };
 
-        // The last case has a block time before the guardian signature.
+        // The last two cases have a block time before the guardian signature,
+        // within and past E2's clock skew.
         for (approved_at, signed_at, confirmed_at) in [
             (100, 150, 300),
             (100, 200, 400),
@@ -645,7 +649,8 @@ mod tests {
             (100, 400_000, 400_100),
             (110, 100, 300),
             (111, 100, 301),
-            (100, 150, 130),
+            (100, 150, 120),
+            (100, 150, 119),
         ] {
             let events = [
                 event(WithdrawalEventType::E1HashiApproved, 5, approved_at, 5),
@@ -665,6 +670,13 @@ mod tests {
                     confirmation,
                     EventRelation::Successor,
                     signed_at + 200,
+                ));
+            }
+            if signed_at > confirmed_at + 30 {
+                expected.push(late(
+                    signature,
+                    EventRelation::Predecessor,
+                    confirmed_at + 30,
                 ));
             }
 
@@ -778,6 +790,30 @@ mod tests {
             sui: 110,
             guardian: 1_000,
         }));
+    }
+
+    #[test]
+    fn a_guardian_approval_past_its_skew_after_the_block_time_is_a_safety_finding() {
+        let cfg = cfg();
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E1HashiApproved, 6, 100, 6),
+            &cfg,
+        );
+        let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 6, 150, 6);
+        assert!(sm.add_event(guardian_approval.clone(), &cfg).is_empty());
+
+        let findings = sm.add_event(event(WithdrawalEventType::E3BtcConfirmed, 6, 119, 6), &cfg);
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::EventOccurredAfterDeadline {
+                event: MonitorEvent::Withdrawal(guardian_approval),
+                relation: EventRelation::Predecessor,
+                deadline: 149,
+                occurred_at: 150,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
