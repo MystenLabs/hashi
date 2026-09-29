@@ -7,7 +7,8 @@
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
 //! ceremony guardian, which is the relay's backend. Wrapped by
-//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
+//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal` and
+//! `GetGuardianInfo`.
 
 use std::sync::Arc;
 
