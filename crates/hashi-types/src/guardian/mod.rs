@@ -10,6 +10,7 @@ pub mod proto_conversions;
 pub mod s3;
 pub(crate) mod serde;
 mod session;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 pub mod time;
 
@@ -1104,7 +1105,7 @@ mod tests {
 
         assert_eq!(
             response
-                .verify_live(&BuildPcrs::new("approved", vec![1]))
+                .verify_live(&BuildPcrs::mock_for_testing("approved", 1))
                 .unwrap_err()
                 .to_string(),
             "missing guardian attestation",

@@ -52,7 +52,7 @@ rcgen = { workspace = true, optional = true }
 # certificates attested by a self-signed software device instead of a YubiKey.
 # Do not enable for prod builds. Mirrors hashi-guardian's `non-enclave-dev`.
 non-enclave-dev = []
-# Generated, cryptographically checked KP fixtures; never changes production trust.
+# Guardian test helpers and generated KP fixtures; never changes production trust.
 test-utils = ["dep:rcgen"]
 
 [dev-dependencies]

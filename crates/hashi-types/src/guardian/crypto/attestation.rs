@@ -21,7 +21,7 @@ pub type GitRevision = String;
 
 // Nitro Enclave PCR0 uses SHA-384 (384 bits / 8 = 48 bytes).
 // https://github.com/aws/aws-nitro-enclaves-image-format#eif-measurements
-const NITRO_PCR0_LEN: usize = 48;
+pub(crate) const NITRO_PCR0_LEN: usize = 48;
 
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,11 +163,6 @@ fn serialize_pcr0<S: serde::Serializer>(pcr0: &[u8], serializer: S) -> Result<S:
 }
 
 impl BuildPcrs {
-    /// Dummy PCR pins for tests; `pcr0_byte` must be nonzero.
-    pub fn mock_for_testing(git_revision: &str, pcr0_byte: u8) -> Self {
-        Self::new(git_revision, vec![pcr0_byte; NITRO_PCR0_LEN]).expect("valid mock PCR pins")
-    }
-
     pub fn new(git_revision: &str, pcr0: Vec<u8>) -> GuardianResult<Self> {
         if pcr0.len() != NITRO_PCR0_LEN {
             return Err(InvalidInputs(format!(
