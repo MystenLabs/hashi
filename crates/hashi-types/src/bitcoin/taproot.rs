@@ -221,6 +221,7 @@ mod bitcoin_tests {
     use bitcoin::taproot::ControlBlock;
     use bitcoin::taproot::Signature;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
+    use serde::Serialize;
 
     const TEST_ENCLAVE_BTC_SK: [u8; 32] = [1u8; 32];
     const TEST_HASHI_BTC_SK: [u8; 32] = [2u8; 32];
@@ -474,195 +475,82 @@ mod bitcoin_tests {
         );
     }
 
-    // Cross-language vectors shared with the hashi-ts-sdk (bitcoin.test.ts):
-    // both sides must derive the same (child, address, leaf script, tap-leaf
-    // hash) or deposit addresses silently diverge. Even-y master forced via
-    // `with_even_y_from_x_be_bytes`; odd-y is the companion test below.
-    #[test]
-    fn cross_lang_2of2_test_vectors() {
-        use bitcoin::hex::DisplayHex;
+    /// ts-sdks tests the SDK's derivation against a verbatim copy of this
+    /// fixture. Existing vectors must never change; only add new ones.
+    const DEPOSIT_ADDRESS_VECTORS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bitcoin/fixtures/deposit-address-vectors.json"
+    );
 
-        let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_BTC_SK), Regtest);
-        let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
-        let enclave_pk = enclave_keypair.x_only_public_key().0;
-        let hashi_master_pk = hashi_keypair.x_only_public_key().0;
-        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&hashi_master_pk.serialize())
-            .expect("valid x-only public key");
-
-        // Sanity check that the well-known SKs map to the x-only pubkeys
-        // the TS test hardcodes.
-        assert_eq!(
-            enclave_pk.serialize().as_hex().to_string(),
-            "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-        );
-        assert_eq!(
-            hashi_master_pk.serialize().as_hex().to_string(),
-            "4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
-        );
-
-        struct Case {
-            label: &'static str,
-            path: DerivationPath,
-            expected_derived: &'static str,
-            expected_addr_regtest: &'static str,
-            expected_addr_signet: &'static str,
-            expected_leaf_script: &'static str,
-            expected_tap_leaf_hash: &'static str,
-        }
-
-        let mut path_ab_cd = [0u8; 32];
-        path_ab_cd[0] = 0xab;
-        path_ab_cd[31] = 0xcd;
-
-        let cases = [
-            Case {
-                label: "zero path",
-                path: DerivationPath::ZERO,
-                expected_derived: "80583e4abd7e73b0868a44e24dd05379375f1c3a85c4c1329bb0572df8577985",
-                expected_addr_regtest: "bcrt1p674xfkudr0myzu3jpschmc4wx9xjllf5wyqt4x8y48jnd099dchs0ww4kp",
-                expected_addr_signet: "tb1p674xfkudr0myzu3jpschmc4wx9xjllf5wyqt4x8y48jnd099dchszhynrm",
-                expected_leaf_script: concat!(
-                    "20",
-                    "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-                    "ac",
-                    "20",
-                    "80583e4abd7e73b0868a44e24dd05379375f1c3a85c4c1329bb0572df8577985",
-                    "ba529c",
-                ),
-                expected_tap_leaf_hash: "011aae27d79836b512747c1dff9027feb3e6cfec89e1f94c1f04133e44c58af4",
-            },
-            Case {
-                label: "path = [1u8; 32]",
-                path: DerivationPath::from([1u8; 32]),
-                expected_derived: "1b79f716fb1f7beba697f012edcf7b81a96ceac2920b181bd217c9cc017ac7fb",
-                expected_addr_regtest: "bcrt1plf0jem4745f5yhu4x3q226q4f34jw6nxysyqvyxjxem0gugqrxnsn6mjae",
-                expected_addr_signet: "tb1plf0jem4745f5yhu4x3q226q4f34jw6nxysyqvyxjxem0gugqrxns7r35gr",
-                expected_leaf_script: concat!(
-                    "20",
-                    "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-                    "ac",
-                    "20",
-                    "1b79f716fb1f7beba697f012edcf7b81a96ceac2920b181bd217c9cc017ac7fb",
-                    "ba529c",
-                ),
-                expected_tap_leaf_hash: "8db999b8b0372687316ccc75a7d1e940e521009f87b4a580db22a7e221f32ac4",
-            },
-            Case {
-                label: "path = 0xab..00..cd",
-                path: DerivationPath::from(path_ab_cd),
-                expected_derived: "1403322badfd7823bebf81e9c5ff74f32f856348ac0f5abe33130cc4b6a14c84",
-                expected_addr_regtest: "bcrt1p2zdq5arv2k7cec0jwstrt3twsnvrze66q4eaqujr4aykuzzu7wwq893cha",
-                expected_addr_signet: "tb1p2zdq5arv2k7cec0jwstrt3twsnvrze66q4eaqujr4aykuzzu7wwq2um7z8",
-                expected_leaf_script: concat!(
-                    "20",
-                    "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-                    "ac",
-                    "20",
-                    "1403322badfd7823bebf81e9c5ff74f32f856348ac0f5abe33130cc4b6a14c84",
-                    "ba529c",
-                ),
-                expected_tap_leaf_hash: "733642c74741262b118e37d0fa2071a7b0159a27bea1d5675712ac3f56dea098",
-            },
-        ];
-
-        for c in &cases {
-            let derived = derive_hashi_child_pubkey(&master_g, &c.path);
-            assert_eq!(
-                derived.serialize().as_hex().to_string(),
-                c.expected_derived,
-                "derived child mismatch ({})",
-                c.label,
-            );
-
-            let addr_regtest = taproot_address(&enclave_pk, &master_g, &c.path, Regtest);
-            assert_eq!(
-                addr_regtest.to_string(),
-                c.expected_addr_regtest,
-                "regtest address mismatch ({})",
-                c.label,
-            );
-
-            let addr_signet = taproot_address(&enclave_pk, &master_g, &c.path, Network::Signet);
-            assert_eq!(
-                addr_signet.to_string(),
-                c.expected_addr_signet,
-                "signet address mismatch ({})",
-                c.label,
-            );
-
-            let (script, control_block, leaf_hash) =
-                taproot_2of2_witness_artifacts(&enclave_pk, &master_g, &c.path);
-            assert_eq!(control_block.serialize().len(), 65);
-            assert_eq!(script.as_bytes().len(), 70, "leaf script must be 70 bytes");
-            assert_eq!(
-                script.as_bytes().as_hex().to_string(),
-                c.expected_leaf_script,
-                "leaf script mismatch ({})",
-                c.label,
-            );
-            assert_eq!(
-                leaf_hash.to_string(),
-                c.expected_tap_leaf_hash,
-                "tap leaf hash mismatch ({})",
-                c.label,
-            );
-        }
+    #[derive(Serialize)]
+    struct DepositAddressVector {
+        mpc_public_key: String,
+        guardian_btc_public_key: String,
+        derivation_path: String,
+        child_pubkey: String,
+        address: DepositAddresses,
     }
 
-    // Odd-y companion to `cross_lang_2of2_test_vectors`: exercises the path
-    // #609 fixed, where `derive_hashi_child_pubkey` diverges from the legacy
-    // even-y-forcing flow. Seed [4u8;32] is the first scalar in 3..=255 whose
-    // `s·G` has odd y; Rust and the SDK both derive against the raw G.
-    #[test]
-    fn cross_lang_2of2_test_vectors_odd_y() {
-        use bitcoin::hex::DisplayHex;
+    #[derive(Serialize)]
+    struct DepositAddresses {
+        mainnet: String,
+        signet: String,
+        regtest: String,
+    }
+
+    fn deposit_address_vectors_json() -> String {
         use fastcrypto::groups::GroupElement;
         use fastcrypto_tbls::threshold_schnorr::S;
 
-        const TEST_HASHI_BTC_SK_ODD_Y: [u8; 32] = [4u8; 32];
+        let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &TEST_ENCLAVE_BTC_SK)
+            .expect("valid test secret key")
+            .x_only_public_key()
+            .0;
+        // ±k·G for these two k cover every combination of y parity (the SDK's
+        // SEC1 prefix) and arkworks sign flag (the on-chain key encoding).
+        let mpc_keys = [TEST_HASHI_BTC_SK, [4u8; 32]].into_iter().flat_map(|sk| {
+            let key = HashiMasterG::generator() * S::from_bytes_mod_order(&sk);
+            [key, -key]
+        });
+        let mut path_ab_cd = [0u8; 32];
+        path_ab_cd[0] = 0xab;
+        path_ab_cd[31] = 0xcd;
+        let paths = [[0u8; 32], [1u8; 32], path_ab_cd, [0xff; 32]].map(DerivationPath::from);
 
-        let sk = S::from_bytes_mod_order(&TEST_HASHI_BTC_SK_ODD_Y);
-        let master_g = HashiMasterG::generator() * sk;
+        let vectors: Vec<_> = mpc_keys
+            .flat_map(|mpc_key| {
+                paths.map(|path| {
+                    let address =
+                        |network| taproot_address(&guardian, &mpc_key, &path, network).to_string();
+                    DepositAddressVector {
+                        mpc_public_key: hex::encode(bcs::to_bytes(&mpc_key).unwrap()),
+                        guardian_btc_public_key: guardian.to_string(),
+                        derivation_path: path.to_string(),
+                        child_pubkey: derive_hashi_child_pubkey(&mpc_key, &path).to_string(),
+                        address: DepositAddresses {
+                            mainnet: address(Network::Bitcoin),
+                            signet: address(Network::Signet),
+                            regtest: address(Network::Regtest),
+                        },
+                    }
+                })
+            })
+            .collect();
+        serde_json::to_string_pretty(&vectors).unwrap() + "\n"
+    }
+
+    #[test]
+    #[ignore = "writes the fixture; run explicitly when adding vectors"]
+    fn regenerate_deposit_address_vectors() {
+        std::fs::write(DEPOSIT_ADDRESS_VECTORS, deposit_address_vectors_json()).unwrap();
+    }
+
+    #[test]
+    fn deposit_address_vectors_match_fixture() {
+        let fixture = std::fs::read_to_string(DEPOSIT_ADDRESS_VECTORS).unwrap();
         assert!(
-            !master_g.has_even_y().unwrap(),
-            "seed [4u8;32] must land on odd y — if this fires, the upstream curve impl changed",
+            deposit_address_vectors_json() == fixture,
+            "deposit address derivation no longer matches {DEPOSIT_ADDRESS_VECTORS}"
         );
-
-        let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_BTC_SK), Regtest);
-        let enclave_pk = enclave_keypair.x_only_public_key().0;
-
-        let path = DerivationPath::from([1u8; 32]);
-        const EXPECTED_DERIVED: &str =
-            "d6305db510d6cb87554c942aaaffa3ff277366c2a04b8e64f633cceebd05f937";
-        const EXPECTED_ADDR_REGTEST: &str =
-            "bcrt1p09kjf0dz6a4qmdvwqydp902zxz4tr0rp60pe4nl7y4y8vfakf7zsv6mzk8";
-        const EXPECTED_ADDR_SIGNET: &str =
-            "tb1p09kjf0dz6a4qmdvwqydp902zxz4tr0rp60pe4nl7y4y8vfakf7zspr3yra";
-        const EXPECTED_LEAF_SCRIPT: &str = concat!(
-            "20",
-            "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
-            "ac",
-            "20",
-            "d6305db510d6cb87554c942aaaffa3ff277366c2a04b8e64f633cceebd05f937",
-            "ba529c",
-        );
-        const EXPECTED_TAP_LEAF_HASH: &str =
-            "f53aeb1a6730788e60fd358254423f4f1d4b960cc9eefad6055e537c1c89ca52";
-
-        let derived = derive_hashi_child_pubkey(&master_g, &path);
-        assert_eq!(derived.serialize().as_hex().to_string(), EXPECTED_DERIVED);
-
-        let addr_regtest = taproot_address(&enclave_pk, &master_g, &path, Regtest);
-        assert_eq!(addr_regtest.to_string(), EXPECTED_ADDR_REGTEST);
-
-        let addr_signet = taproot_address(&enclave_pk, &master_g, &path, Network::Signet);
-        assert_eq!(addr_signet.to_string(), EXPECTED_ADDR_SIGNET);
-
-        let (script, control_block, leaf_hash) =
-            taproot_2of2_witness_artifacts(&enclave_pk, &master_g, &path);
-        assert_eq!(control_block.serialize().len(), 65);
-        assert_eq!(script.as_bytes().len(), 70);
-        assert_eq!(script.as_bytes().as_hex().to_string(), EXPECTED_LEAF_SCRIPT);
-        assert_eq!(leaf_hash.to_string(), EXPECTED_TAP_LEAF_HASH);
     }
 }
