@@ -140,16 +140,12 @@ async fn export_from_acm(
         .await
         .with_context(|| format!("export ACM certificate {arn}"))?;
 
-    let mut pem = exported
-        .certificate()
-        .context("ACM export returned no certificate")?
-        .to_string();
-    // The chain excludes the leaf, which has to come first.
-    pem.push('\n');
-    pem.push_str(exported.certificate_chain().unwrap_or_default());
-    let chain = CertificateDer::pem_slice_iter(pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .context("parse the exported ACM certificate chain")?;
+    let chain = exported_chain(
+        exported
+            .certificate()
+            .context("ACM export returned no certificate")?,
+        exported.certificate_chain(),
+    )?;
     let key = decrypt_private_key(
         exported
             .private_key()
@@ -157,6 +153,20 @@ async fn export_from_acm(
         passphrase.as_bytes(),
     )?;
     Ok((chain, key))
+}
+
+/// The leaf followed by the export's chain, which excludes it.
+fn exported_chain(leaf: &str, chain: Option<&str>) -> Result<Vec<CertificateDer<'static>>> {
+    let pem = format!("{leaf}\n{}", chain.unwrap_or_default());
+    let chain = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse the exported ACM certificate chain")?;
+    // Clients don't fetch missing intermediates, so a leaf alone fails every handshake.
+    anyhow::ensure!(
+        chain.len() > 1,
+        "ACM export returned no intermediate certificates"
+    );
+    Ok(chain)
 }
 
 fn decrypt_private_key(pem: &str, passphrase: &[u8]) -> Result<PrivateKeyDer<'static>> {
@@ -259,6 +269,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("does not match"), "{error:#}");
+    }
+
+    #[test]
+    fn an_acm_export_serves_its_leaf_first_and_needs_its_intermediates() {
+        let pem = |name: &str| {
+            let key = rcgen::KeyPair::generate().unwrap();
+            rcgen::CertificateParams::new(vec![name.to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .pem()
+        };
+        let (leaf, intermediate) = (pem("leaf"), pem("intermediate"));
+
+        let chain = exported_chain(&leaf, Some(&intermediate)).unwrap();
+        assert_eq!(
+            chain,
+            [
+                CertificateDer::from_pem_slice(leaf.as_bytes()).unwrap(),
+                CertificateDer::from_pem_slice(intermediate.as_bytes()).unwrap(),
+            ]
+        );
+        exported_chain(&leaf, None).unwrap_err();
+        exported_chain(&leaf, Some("")).unwrap_err();
     }
 
     #[test]

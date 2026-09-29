@@ -117,7 +117,11 @@ async fn main() -> Result<()> {
         .add_grpc_service(GuardianRelayServiceServer::new(relay_svc))
         .merge(info::router(info_state));
 
-    let mut server = sui_http::Builder::new();
+    // A TCP load balancer drops idle flows silently, so the proxy pings clients
+    // itself to find and close dead connections, as the node's server does.
+    let mut server = sui_http::Builder::new().config(
+        sui_http::Config::default().http2_keepalive_interval(Some(Duration::from_secs(30))),
+    );
     match config.tls.clone() {
         Some(source) => {
             let cert = ServerCert::load(&source, &metrics)
