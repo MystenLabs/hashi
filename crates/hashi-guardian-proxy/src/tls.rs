@@ -27,6 +27,9 @@ use crate::metrics::ProxyMetrics;
 /// ACM renews a certificate 45 days before it expires; the proxy picks the
 /// renewal up on its next reload.
 const RELOAD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// The AWS SDK sets no read timeout, so a stalled export would otherwise hold
+/// up startup or every later reload.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub enum CertSource {
@@ -98,7 +101,9 @@ pub fn server_config(cert: Arc<ServerCert>) -> Result<rustls::ServerConfig> {
 
 async fn load_certified_key(source: &CertSource) -> Result<CertifiedKey> {
     let (chain, key) = match source {
-        CertSource::Acm { arn } => export_from_acm(arn).await?,
+        CertSource::Acm { arn } => tokio::time::timeout(EXPORT_TIMEOUT, export_from_acm(arn))
+            .await
+            .context("the ACM certificate export timed out")??,
         CertSource::Files { cert, key } => {
             let chain = CertificateDer::pem_file_iter(cert)
                 .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
@@ -257,15 +262,24 @@ mod tests {
     }
 
     #[test]
-    fn decrypts_a_pbes2_encrypted_pkcs8_key() {
+    fn decrypts_a_key_encrypted_like_an_acm_export() {
         use pkcs8::der::Decode;
         use pkcs8::der::EncodePem;
+        use pkcs8::pkcs5::pbes2;
 
         let key = rcgen::KeyPair::generate().unwrap();
         let passphrase = b"export-passphrase";
-        let params =
-            pkcs8::pkcs5::pbes2::Parameters::pbkdf2_sha256_aes256cbc(2048, &[7; 16], &[9; 16])
-                .unwrap();
+        // The scheme of the sample export in ACM's user guide.
+        let params = pbes2::Parameters {
+            kdf: pbes2::Pbkdf2Params {
+                salt: &[7; 20],
+                iteration_count: 2048,
+                key_length: None,
+                prf: pbes2::Pbkdf2Prf::HmacWithSha1,
+            }
+            .into(),
+            encryption: pbes2::EncryptionScheme::Aes256Cbc { iv: &[9; 16] },
+        };
         let encrypted = pkcs8::PrivateKeyInfo::from_der(&key.serialize_der())
             .unwrap()
             .encrypt_with_params(params, passphrase)

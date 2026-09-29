@@ -62,8 +62,8 @@ rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
 ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
 x509-parser = { version = "0.17.0", features = ["verify"] }
 rcgen = "0.13"
-# `encryption` decrypts the PKCS#8 key an ACM certificate export returns.
-pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
+# An ACM certificate export encrypts its PKCS#8 key with PBKDF2-HMAC-SHA1 and AES-256-CBC.
+pkcs8 = { version = "0.10", features = ["encryption", "pem", "sha1-insecure"] }
 blst = { version = "0.3.13" }
 hpke = "0.12.0"
 k256 = "0.13"

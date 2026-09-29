@@ -4741,6 +4741,7 @@ dependencies = [
  "der 0.7.10",
  "pbkdf2",
  "scrypt",
+ "sha1",
  "sha2 0.10.9",
  "spki 0.7.3",
 ]
