@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         const RNG_CURRENT: &str = "/sys/devices/virtual/misc/hw_random/rng_current";
         let current = std::fs::read_to_string(RNG_CURRENT)
             .with_context(|| format!("Failed to read {RNG_CURRENT}"))?;
-        tracing::debug!(
+        info!(
             available_rngs = ?std::fs::read_to_string(RNG_AVAILABLE),
             current_rng = current.trim(),
             "Kernel hardware RNG configuration"
