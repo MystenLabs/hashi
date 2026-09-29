@@ -46,7 +46,7 @@ impl MonitorMetrics {
         let checked_through_timestamp_seconds = IntGaugeVec::new(
             Opts::new(
                 "hashi_monitor_checked_through_timestamp_seconds",
-                "Unix time through which each source has been checked; for btc, when the last lookup of every pending confirmation started",
+                "Unix time through which each source has been checked; for btc, the start of the last pass that looked up every pending confirmation",
             ),
             &["source"],
         )
