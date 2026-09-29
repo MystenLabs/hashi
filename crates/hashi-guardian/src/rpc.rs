@@ -8,6 +8,7 @@ use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetGuardianInfoRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -85,12 +86,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_guardian_info(
-            self.enclave.clone(),
-            request.into_inner().include_attestation,
-        )
-        .await
-        .map_err(to_status)?;
+        let domain_req: GetGuardianInfoRequest = request.into_inner().into();
+        let resp = task_spawner::get_guardian_info(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
 
         let resp_pb = proto_conversions::get_guardian_info_response_to_pb(resp);
 

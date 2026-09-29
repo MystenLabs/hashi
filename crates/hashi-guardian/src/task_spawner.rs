@@ -30,6 +30,7 @@ use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetGuardianInfoRequest;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -52,10 +53,10 @@ use std::sync::Arc;
 /// Withdrawals publish their limiter snapshot separately after durable logging.
 pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
-    include_attestation: bool,
+    request: GetGuardianInfoRequest,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(include_attestation, info::get_guardian_info)
+        .spawn_control_task(request, info::get_guardian_info)
         .await
 }
 

@@ -580,7 +580,9 @@ mod tests {
         // The request must wait while initialization holds the control lock.
         let mut response = std::pin::pin!(crate::task_spawner::get_guardian_info(
             enclave.clone(),
-            false
+            GetGuardianInfoRequest {
+                include_attestation: false
+            },
         ));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut response)

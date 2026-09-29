@@ -73,6 +73,11 @@ pub enum OperatorInitRequest {
     Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetGuardianInfoRequest {
+    pub include_attestation: bool,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation, present only when requested.

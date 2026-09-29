@@ -12,12 +12,15 @@ use tracing::info;
 /// Return signed guardian info, optionally attesting the enclave's signing public key.
 pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
-    include_attestation: bool,
+    request: GetGuardianInfoRequest,
 ) -> GuardianResult<GetGuardianInfoResponse> {
-    info!(include_attestation, "/get_guardian_info - Received request");
+    info!(
+        include_attestation = request.include_attestation,
+        "/get_guardian_info - Received request"
+    );
 
     let signing_pub_key = enclave.signing_pubkey();
-    let attestation = if include_attestation {
+    let attestation = if request.include_attestation {
         Some(get_attestation(&signing_pub_key)?)
     } else {
         None
