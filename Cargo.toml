@@ -62,6 +62,8 @@ rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
 ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
 x509-parser = { version = "0.17.0", features = ["verify"] }
 rcgen = "0.13"
+# `encryption` decrypts the PKCS#8 key an ACM certificate export returns.
+pkcs8 = { version = "0.10", features = ["encryption", "pem"] }
 blst = { version = "0.3.13" }
 hpke = "0.12.0"
 k256 = "0.13"
@@ -90,6 +92,7 @@ tar = "0.4"
 aws-config = "1.1.7"
 aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
+aws-sdk-acm = "1"
 
 # fastcrypto — pinned to a `main` rev.
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "7cb95be87bb0b4c745c82824b1adb8e4aaf38aa6" }

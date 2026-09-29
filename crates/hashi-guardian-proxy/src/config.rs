@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Environment-driven proxy configuration (matches the guardian's minimal,
-//! env-only config style). TLS for node traffic terminates at the fronting
-//! load balancer, so the proxy itself serves plaintext h2c.
+//! env-only config style).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -14,6 +13,7 @@ use bitcoin::Network;
 
 use crate::remote_write;
 use crate::remote_write::RemoteWriteConfig;
+use crate::tls::CertSource;
 
 pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
@@ -54,6 +54,10 @@ pub struct Config {
     /// default `incoming_metrics`, `MIMIR_PASSWORD`, `MIMIR_PUSH_INTERVAL_SECS`
     /// default 60, `MIMIR_EXTERNAL_LABELS` comma-separated `k=v`).
     pub remote_write: Option<RemoteWriteConfig>,
+    /// The certificate the proxy terminates TLS with: an exportable ACM
+    /// certificate (`TLS_CERT_ARN`), or PEM files (`TLS_CERT_FILE` +
+    /// `TLS_KEY_FILE`). With neither it serves plaintext, for local setups.
+    pub tls: Option<CertSource>,
 }
 
 impl Config {
@@ -114,6 +118,21 @@ impl Config {
                 })
             }
         };
+        let tls = match (
+            non_empty_env("TLS_CERT_ARN"),
+            non_empty_env("TLS_CERT_FILE"),
+            non_empty_env("TLS_KEY_FILE"),
+        ) {
+            (None, None, None) => None,
+            (Some(arn), None, None) => Some(CertSource::Acm { arn }),
+            (None, Some(cert), Some(key)) => Some(CertSource::Files {
+                cert: cert.into(),
+                key: key.into(),
+            }),
+            _ => anyhow::bail!(
+                "set either TLS_CERT_ARN or both TLS_CERT_FILE and TLS_KEY_FILE, not a mix"
+            ),
+        };
         Ok(Self {
             backend_url,
             standby_backend_url,
@@ -126,8 +145,13 @@ impl Config {
             log_region,
             btc_network,
             remote_write,
+            tls,
         })
     }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
 }
 
 fn parse_env_u64(key: &str, default: u64) -> Result<u64> {

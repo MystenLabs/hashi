@@ -10,6 +10,7 @@ use prometheus::Histogram;
 use prometheus::HistogramOpts;
 use prometheus::IntCounter;
 use prometheus::IntCounterVec;
+use prometheus::IntGauge;
 use prometheus::Opts;
 use prometheus::Registry;
 use prometheus::TextEncoder;
@@ -33,6 +34,10 @@ pub struct ProxyMetrics {
     pub scan_lists: Histogram,
     /// Wid-matching log records that failed to parse (schema skew or garbage).
     pub record_parse_failures: IntCounter,
+    /// When the served TLS certificate expires, in unix seconds.
+    pub tls_cert_not_after: IntGauge,
+    /// Failed TLS certificate reloads; the proxy keeps serving the old one.
+    pub tls_cert_reload_failures: IntCounter,
 }
 
 impl ProxyMetrics {
@@ -60,6 +65,16 @@ impl ProxyMetrics {
             "Wid-matching log records that failed to parse",
         )
         .expect("valid metric");
+        let tls_cert_not_after = IntGauge::new(
+            "guardian_proxy_tls_cert_not_after_seconds",
+            "Expiry of the served TLS certificate, in unix seconds",
+        )
+        .expect("valid metric");
+        let tls_cert_reload_failures = IntCounter::new(
+            "guardian_proxy_tls_cert_reload_failures_total",
+            "TLS certificate reloads that failed",
+        )
+        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -70,12 +85,20 @@ impl ProxyMetrics {
         registry
             .register(Box::new(record_parse_failures.clone()))
             .expect("register");
+        registry
+            .register(Box::new(tls_cert_not_after.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(tls_cert_reload_failures.clone()))
+            .expect("register");
 
         Self {
             registry,
             requests,
             scan_lists,
             record_parse_failures,
+            tls_cert_not_after,
+            tls_cert_reload_failures,
         }
     }
 

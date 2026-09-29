@@ -2,63 +2,106 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The proxy serves native gRPC and the plain-HTTP `/info` + `/health` on ONE
-//! port. This guards the crux of that merge: one `axum::serve` must dispatch
-//! both h2c gRPC and HTTP/1.1 on the same socket.
+//! port, over TLS or, locally, plaintext. This guards the crux of that merge:
+//! one server must dispatch both gRPC and HTTP/1.1 on the same socket.
 
 use axum::routing::get;
 use axum::Router;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
-use tonic::transport::Channel;
+use hashi_guardian_proxy::metrics::ProxyMetrics;
+use hashi_guardian_proxy::tls;
+use hashi_guardian_proxy::tls::CertSource;
+use hashi_guardian_proxy::tls::ServerCert;
+use tonic::transport::Certificate;
+use tonic::transport::ClientTlsConfig;
+use tonic::transport::Endpoint;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::HealthCheckRequest;
 
-#[tokio::test]
-async fn grpc_and_http_share_one_port() {
-    // Same shape as `main`: a tonic gRPC service mounted as an axum
-    // route-service, merged with a plain-HTTP GET route, under one router.
+/// Same shape as the proxy's router: a tonic gRPC service mounted as an axum
+/// route-service, merged with a plain-HTTP GET route.
+async fn router() -> Router {
     let (reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
-    let router = Router::new()
+    Router::new()
         .route_service("/grpc.health.v1.Health/{*rest}", health_service)
-        .merge(Router::new().route("/health", get(|| async { axum::http::StatusCode::OK })));
+        .merge(Router::new().route("/health", get(|| async { axum::http::StatusCode::OK })))
+}
 
-    // Bind first (the socket is listening before `serve` accepts), so a client
-    // can connect with no startup race.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-
-    // (1) Native gRPC over h2c on the port: the health check returns SERVING.
-    let channel = Channel::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
-    let status = HealthClient::new(channel)
+async fn grpc_health(endpoint: Endpoint) -> ServingStatus {
+    HealthClient::new(endpoint.connect().await.unwrap())
         .check(HealthCheckRequest {
             service: String::new(),
         })
         .await
         .unwrap()
         .into_inner()
-        .status();
-    assert_eq!(status, ServingStatus::Serving);
+        .status()
+}
 
-    // (2) Plain HTTP/1.1 GET on the SAME port: `/health` returns 200.
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+#[tokio::test]
+async fn grpc_and_http_share_one_tls_port() {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    let served = ServerCert::load(
+        &CertSource::Files {
+            cert: cert_path,
+            key: key_path,
+        },
+        &ProxyMetrics::new(),
+    )
+    .await
+    .unwrap();
+    let server = sui_http::Builder::new()
+        .tls_config(tls::server_config(served).unwrap())
+        .serve("127.0.0.1:0", router().await)
+        .unwrap();
+    let addr = *server.local_addr();
+
+    let endpoint = Endpoint::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(cert.pem()))
+                .domain_name("localhost"),
+        )
+        .unwrap();
+    assert_eq!(grpc_health(endpoint).await, ServingStatus::Serving);
+
+    let response = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap())
+        .resolve("localhost", addr)
+        .http1_only()
+        .build()
+        .unwrap()
+        .get(format!("https://localhost:{}/health", addr.port()))
+        .send()
         .await
         .unwrap();
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).await.unwrap();
-    assert!(
-        resp.starts_with("HTTP/1.1 200"),
-        "expected HTTP 200 on the shared port, got: {resp}"
-    );
+    assert_eq!(response.version(), reqwest::Version::HTTP_11);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn grpc_and_http_share_one_plaintext_port() {
+    let server = sui_http::Builder::new()
+        .serve("127.0.0.1:0", router().await)
+        .unwrap();
+    let addr = *server.local_addr();
+
+    let endpoint = Endpoint::from_shared(format!("http://{addr}")).unwrap();
+    assert_eq!(grpc_health(endpoint).await, ServingStatus::Serving);
+
+    let response = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    assert_eq!(response.version(), reqwest::Version::HTTP_11);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
 }
