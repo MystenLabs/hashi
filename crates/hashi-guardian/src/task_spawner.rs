@@ -50,9 +50,12 @@ use std::sync::Arc;
 /// lifecycle advances. Serialize status requests with those operations so signed
 /// responses cannot expose partially committed state, without per-stage masking.
 /// Withdrawals publish their limiter snapshot separately after durable logging.
-pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
+pub async fn get_guardian_info(
+    enclave: Arc<Enclave>,
+    include_attestation: bool,
+) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task((), |enclave, ()| info::get_guardian_info(enclave))
+        .spawn_control_task(include_attestation, info::get_guardian_info)
         .await
 }
 

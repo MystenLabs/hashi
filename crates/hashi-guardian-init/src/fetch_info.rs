@@ -45,7 +45,9 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.endpoint))?;
     let resp = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
+        .get_guardian_info(pb::GetGuardianInfoRequest {
+            include_attestation: false,
+        })
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();

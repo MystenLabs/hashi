@@ -364,7 +364,9 @@ mod tests {
 
         // A non-withdrawal node RPC passes through to the stub.
         proxy
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            }))
             .await
             .unwrap();
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);

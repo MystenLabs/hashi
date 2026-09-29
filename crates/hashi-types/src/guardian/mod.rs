@@ -75,8 +75,8 @@ pub enum OperatorInitRequest {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation
-    attestation: NitroAttestation,
+    /// AWS Nitro attestation, present only when requested.
+    attestation: Option<NitroAttestation>,
     /// Signing pub key of the guardian
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
@@ -868,7 +868,7 @@ impl StandardWithdrawalRequest {
 
 impl GetGuardianInfoResponse {
     pub fn new(
-        attestation: NitroAttestation,
+        attestation: Option<NitroAttestation>,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSignedResponse<GuardianInfo>,
     ) -> Self {
@@ -884,7 +884,7 @@ impl GetGuardianInfoResponse {
     /// Checks:
     /// - `signed_info` is signed by `signing_pub_key`;
     /// - initialized sessions report the expected deployment revision;
-    /// - the Nitro attestation has a valid signature;
+    /// - the Nitro attestation is present and has a valid signature;
     /// - the certificate chain is valid now;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
     ///
@@ -917,6 +917,8 @@ impl GetGuardianInfoResponse {
             ));
         }
         self.attestation
+            .as_ref()
+            .ok_or_else(|| CryptoVerificationError::new("missing guardian attestation"))?
             .verify_live(&self.signing_pub_key, expected_build)?;
         Ok(VerifiedGuardianInfo {
             info,
@@ -1058,7 +1060,8 @@ mod tests {
 
     #[test]
     fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
-        let resp = GetGuardianInfoResponse::mock_for_testing();
+        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+        resp.attestation = None;
         let expected_info = GuardianInfo::mock_for_testing();
         let expected_signing_pub_key = resp.signing_pub_key;
         let (info, signing_pub_key) = resp.into_info_unchecked();
@@ -1083,12 +1086,33 @@ mod tests {
     }
 
     #[test]
+    fn get_guardian_info_verify_live_requires_attestation() {
+        let key = GuardianSignKeyPair::from([7; 32]);
+        let mut info = GuardianInfo::mock_for_testing();
+        info.lifecycle = None;
+        info.deployment_info = None;
+        let response = GetGuardianInfoResponse::new(
+            None,
+            key.verification_key(),
+            GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
+        );
+
+        assert_eq!(
+            response
+                .verify_live(&BuildPcrs::new("approved", vec![1]))
+                .unwrap_err()
+                .to_string(),
+            "missing guardian attestation",
+        );
+    }
+
+    #[test]
     fn guardian_info_verification_distinguishes_boot_from_initialized_sessions() {
         let key = GuardianSignKeyPair::from([7; 32]);
         let build = BuildPcrs::new("approved", vec![1]);
         let response = |info| {
             GetGuardianInfoResponse::new(
-                NitroAttestation::new(vec![]),
+                Some(NitroAttestation::new(vec![])),
                 key.verification_key(),
                 GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
             )

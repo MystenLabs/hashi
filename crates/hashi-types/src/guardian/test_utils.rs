@@ -152,7 +152,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         GetGuardianInfoResponse::new(
-            NitroAttestation::new("abcd".as_bytes().to_vec()),
+            Some(NitroAttestation::new("abcd".as_bytes().to_vec())),
             signing_pub_key,
             GuardianSigned::sign(
                 GuardianResponse::new(GuardianInfo::mock_for_testing(), 1234),

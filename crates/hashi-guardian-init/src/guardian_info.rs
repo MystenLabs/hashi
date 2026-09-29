@@ -20,7 +20,9 @@ pub async fn verified_live_guardian_info(
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
     let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
+        .get_guardian_info(pb::GetGuardianInfoRequest {
+            include_attestation: true,
+        })
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();
@@ -86,7 +88,9 @@ async fn ceremony_guardian_info_pb(
         Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
         Err(status) if status.code() == Code::Unimplemented => Ok((
             GuardianServiceClient::new(channel)
-                .get_guardian_info(pb::GetGuardianInfoRequest {})
+                .get_guardian_info(pb::GetGuardianInfoRequest {
+                    include_attestation: true,
+                })
                 .await
                 .context("GetGuardianInfo RPC failed")?
                 .into_inner(),
@@ -136,8 +140,9 @@ mod tests {
     impl GuardianService for Guardian {
         async fn get_guardian_info(
             &self,
-            _: Request<pb::GetGuardianInfoRequest>,
+            request: Request<pb::GetGuardianInfoRequest>,
         ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+            assert!(request.into_inner().include_attestation);
             Ok(Response::new(tagged(self.0)))
         }
         async fn setup_new_key(

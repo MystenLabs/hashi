@@ -609,8 +609,6 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
     type Error = GuardianError;
 
     fn try_from(resp: pb::GetGuardianInfoResponse) -> Result<Self, Self::Error> {
-        let attestation = resp.attestation.ok_or_else(|| missing("attestation"))?;
-
         let signing_pub_key_bytes = resp
             .signing_pub_key
             .ok_or_else(|| missing("signing_pub_key"))?;
@@ -621,7 +619,8 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info = GuardianSignedResponse::<GuardianInfo>::try_from(signed_info_pb)?;
 
         Ok(GetGuardianInfoResponse::new(
-            NitroAttestation::new(attestation.to_vec()),
+            resp.attestation
+                .map(|bytes| NitroAttestation::new(bytes.to_vec())),
             signing_pub_key,
             signed_info,
         ))
@@ -1010,7 +1009,9 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
 
 pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
-        attestation: Some(r.attestation.into_bytes().into()),
+        attestation: r
+            .attestation
+            .map(|attestation| attestation.into_bytes().into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
     }
@@ -1847,10 +1848,16 @@ mod tests {
 
     #[test]
     fn get_guardian_info_response_round_trip() {
-        let resp = GetGuardianInfoResponse::mock_for_testing();
-        let pb = get_guardian_info_response_to_pb(resp.clone());
-        let back = GetGuardianInfoResponse::try_from(pb).unwrap();
-        assert_eq!(resp, back);
+        for include_attestation in [false, true] {
+            let mut resp = GetGuardianInfoResponse::mock_for_testing();
+            if !include_attestation {
+                resp.attestation = None;
+            }
+            let pb = get_guardian_info_response_to_pb(resp.clone());
+            assert_eq!(pb.attestation.is_some(), include_attestation);
+            let back = GetGuardianInfoResponse::try_from(pb).unwrap();
+            assert_eq!(resp, back);
+        }
     }
 
     #[test]

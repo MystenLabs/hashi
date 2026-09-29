@@ -578,7 +578,10 @@ mod tests {
         installed_rx.await.unwrap();
 
         // The request must wait while initialization holds the control lock.
-        let mut response = std::pin::pin!(crate::task_spawner::get_guardian_info(enclave.clone()));
+        let mut response = std::pin::pin!(crate::task_spawner::get_guardian_info(
+            enclave.clone(),
+            false
+        ));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut response)
                 .await

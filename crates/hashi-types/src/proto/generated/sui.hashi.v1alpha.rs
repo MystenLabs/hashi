@@ -1504,6 +1504,7 @@ pub mod guardian_relay_service_client {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
+        /// Always includes attestation for KP verification.
         pub async fn get_provisioning_target_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetProvisioningTargetInfoRequest>,
@@ -1559,6 +1560,7 @@ pub mod guardian_relay_service_server {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
+        /// Always includes attestation for KP verification.
         async fn get_provisioning_target_info(
             &self,
             request: tonic::Request<super::GetProvisioningTargetInfoRequest>,
@@ -1798,10 +1800,14 @@ pub mod guardian_relay_service_server {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetGuardianInfoRequest {}
+pub struct GetGuardianInfoRequest {
+    /// Generate a Nitro attestation document for callers that verify it (KPs and operators).
+    #[prost(bool, tag = "1")]
+    pub include_attestation: bool,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation document.
+    /// AWS Nitro attestation document; absent unless include_attestation is true.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
     /// Guardian signing public key (Ed25519, 32 bytes).

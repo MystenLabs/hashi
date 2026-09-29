@@ -231,7 +231,9 @@ where
     async fn guardian_info(&self) -> anyhow::Result<GuardianInfo> {
         let info_pb = self
             .inner
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest::default()))
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            }))
             .await
             .map_err(|s| anyhow::anyhow!("get_guardian_info: {s}"))?
             .into_inner();
@@ -427,7 +429,6 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -476,8 +477,9 @@ mod tests {
     impl GuardianService for StubGuardian {
         async fn get_guardian_info(
             &self,
-            _: Request<proto::GetGuardianInfoRequest>,
+            request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert!(!request.into_inner().include_attestation);
             match &self.info {
                 Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
@@ -607,11 +609,8 @@ mod tests {
             mpc_master_g: Some(master_g),
         };
         let signed_info = GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key);
-        let domain = GetGuardianInfoResponse::new(
-            NitroAttestation::new(vec![1, 2, 3]),
-            signing_key.verification_key(),
-            signed_info,
-        );
+        let domain =
+            GetGuardianInfoResponse::new(None, signing_key.verification_key(), signed_info);
         get_guardian_info_response_to_pb(domain)
     }
 
