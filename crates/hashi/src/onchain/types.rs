@@ -101,17 +101,11 @@ impl Tob {
     }
 }
 
-/// One mirrored `EpochCertsV1`/`StampedEpochCertsV1` bucket. The dealer
-/// submissions live in an on-chain `LinkedTable` whose insertion order
-/// is the TOB order, so the mirror keeps each node's links and walks
-/// them on read.
+/// One mirrored `EpochCertsV1` bucket. The dealer submissions live in
+/// an on-chain `LinkedTable` whose insertion order is the TOB order, so
+/// the mirror keeps each node's links and walks them on read.
 #[derive(Debug)]
 pub struct TobBucket {
-    /// The bucket's on-chain layout family (bare or stamped), fixed at
-    /// bucket creation. Nodes are stored uniformly in stamped form; a
-    /// bare bucket's submissions carry `timestamp_ms: 0`, which never
-    /// trips a nonce accumulation window's cutoff.
-    pub layout: super::TobCertLayout,
     /// UID of the bucket's `LinkedTable` — the parent of its dealer
     /// submission node Fields.
     pub certs_id: Address,
@@ -124,10 +118,8 @@ pub struct TobBucket {
     /// then look internally consistent while missing the tail — or the
     /// entire list.
     pub size: u64,
-    pub nodes: BTreeMap<
-        Address,
-        move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1>,
-    >,
+    pub nodes:
+        BTreeMap<Address, move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>>,
 }
 
 /// A mirror walk that did not cover the bucket's full on-chain census —
@@ -153,7 +145,7 @@ impl TobBucket {
     /// on-chain submission, and the replay brings the Field up to match.
     pub fn complete_certs_in_order(
         &self,
-    ) -> Result<Vec<(Address, &move_types::StampedDealerSubmissionV1)>, IncompleteTobWalk> {
+    ) -> Result<Vec<(Address, &move_types::DealerSubmissionV1)>, IncompleteTobWalk> {
         let certs = self.certs_in_order();
         if (certs.len() as u64) < self.size {
             return Err(IncompleteTobWalk {
@@ -168,7 +160,7 @@ impl TobBucket {
     /// the TOB guarantees. Bounded by the node count, so a link pointing
     /// at a missing node (a mirror gap) terminates the walk early rather
     /// than looping; callers get the longest consistent prefix.
-    pub fn certs_in_order(&self) -> Vec<(Address, &move_types::StampedDealerSubmissionV1)> {
+    pub fn certs_in_order(&self) -> Vec<(Address, &move_types::DealerSubmissionV1)> {
         let mut ordered = Vec::with_capacity(self.nodes.len());
         let mut current = self.head;
         while let Some(dealer) = current
@@ -693,7 +685,6 @@ pub enum ProposalType {
     DisableVersion,
     Upgrade,
     EmergencyPause,
-    UpdateGuardian,
     IgnoreMember,
     Unknown(String),
 }
@@ -722,7 +713,6 @@ impl ProposalType {
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
             ProposalType::EmergencyPause => "emergency_pause",
-            ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Unknown(_) => "unknown",
         }
@@ -737,7 +727,6 @@ impl ProposalType {
             "disable_version",
             "upgrade",
             "emergency_pause",
-            "update_guardian",
             "ignore_member",
             "unknown",
         ]

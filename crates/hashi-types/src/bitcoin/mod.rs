@@ -32,7 +32,6 @@ use bitcoin::ScriptBuf;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::secp256k1::SecretKey;
 use std::sync::LazyLock;
 
 pub static BTC_LIB: LazyLock<Secp256k1<bitcoin::secp256k1::All>> = LazyLock::new(Secp256k1::new);
@@ -96,18 +95,4 @@ pub fn output_weight_for_witness_program(bitcoin_address: &[u8]) -> anyhow::Resu
         20 => Ok(P2WPKH_OUTPUT_WEIGHT_WU),
         len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
     }
-}
-
-/// Deterministic Bitcoin keypair helper for tests.
-pub fn create_btc_keypair_for_test(sk: &[u8; 32]) -> BitcoinKeypair {
-    let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
-    BitcoinKeypair::from_secret_key(&BTC_LIB, &secret_key)
-}
-
-/// Convert a bitcoin-lib x-only key into the even-y `G` point for tests.
-///
-/// The bitcoin-lib `Keypair` always signs against the even-y projection of its
-/// master pubkey, so tests that derive from a keypair need the matching `G`.
-pub fn hashi_master_g_from_btc_xonly_for_test(pubkey: &BitcoinPubkey) -> HashiMasterG {
-    HashiMasterG::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
 }

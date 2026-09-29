@@ -260,7 +260,7 @@ pub enum CreateProposalCommands {
     ///   bitcoin_withdrawal_minimum (u64),
     ///   bitcoin_confirmation_threshold (u64),
     ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool),
-    ///   reconfig_hold (bool)
+    ///   reconfig_hold (bool), guardian_url (string)
     ///
     /// The MPC parameters live in the epoch config: see `update-epoch-config`
     /// and `update-mpc-config`.
@@ -268,7 +268,8 @@ pub enum CreateProposalCommands {
         /// The config key to update
         key: String,
 
-        /// The new value. Prefix with the type: u64:123, bool:true
+        /// The new value. Prefix with the type: `u64:123`, `bool:true`,
+        /// `string:https://guardian.example`
         value: String,
 
         #[clap(flatten)]
@@ -338,16 +339,6 @@ pub enum CreateProposalCommands {
     DisableVersion {
         /// The version to disable
         version: u64,
-
-        #[clap(flatten)]
-        metadata: MetadataArgs,
-    },
-
-    /// Propose updating the guardian URL
-    UpdateGuardian {
-        /// The guardian gRPC endpoint URL
-        #[clap(long)]
-        url: String,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -1196,15 +1187,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::proposal::create_disable_version_proposal(
                         &config,
                         version,
-                        parse_metadata(metadata.metadata),
-                        &tx_opts,
-                    )
-                    .await?;
-                }
-                CreateProposalCommands::UpdateGuardian { url, metadata } => {
-                    commands::proposal::create_update_guardian_proposal(
-                        &config,
-                        &url,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

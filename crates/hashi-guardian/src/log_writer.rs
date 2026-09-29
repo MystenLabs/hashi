@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn mock_s3(client: Client) -> GuardianS3Client {
-        GuardianS3Client::from_client_for_tests(
+        GuardianS3Client::from_client(
             S3BucketInfo::mock_for_testing(),
             S3RetentionEnvironment::Testnet,
             client,

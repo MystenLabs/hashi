@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn historical_sessions_use_the_readers_allowlist() {
         let mut expected = DeploymentConfig::mock_for_testing();
-        let previous = BuildPcrs::new("previous", vec![1]);
+        let previous = BuildPcrs::mock_for_testing("previous", 2);
         expected.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
             expected.pcr_allowlist.current_build().clone(),
             [previous.clone()],
@@ -321,7 +321,7 @@ mod tests {
             .require_current_build(&build)
             .is_err());
         reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
-            BuildPcrs::new("not-allowlisted", vec![9]),
+            BuildPcrs::mock_for_testing("not-allowlisted", 9),
             [],
         )
         .unwrap();
@@ -333,10 +333,7 @@ mod tests {
         let expected = DeploymentConfig::mock_for_testing();
         let mut reported = expected.clone();
         reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
-            BuildPcrs::new(
-                expected.pcr_allowlist.current_build().git_revision(),
-                vec![9],
-            ),
+            BuildPcrs::mock_for_testing(expected.pcr_allowlist.current_build().git_revision(), 9),
             [],
         )
         .unwrap();
@@ -347,7 +344,7 @@ mod tests {
     }
 
     fn build_pcrs() -> BuildPcrs {
-        BuildPcrs::new("current", vec![0])
+        BuildPcrs::mock_for_testing("current", 1)
     }
 
     fn session_info_ready_for_activation(signing_pubkey: GuardianPubKey) -> VerifiedSessionInfo {
@@ -416,9 +413,13 @@ mod tests {
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
                 share_ids: (1..=3).map(|id| ShareID::new(id).unwrap()).collect(),
-                enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
-                    .x_only_public_key()
-                    .0,
+                enclave_btc_pubkey: hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+                    &hashi_types::bitcoin::BTC_LIB,
+                    &[1; 32],
+                )
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0,
             })),
             &signing_key,
         );
@@ -452,7 +453,7 @@ mod tests {
             .output(move || locked_record(&oa_log, policy))
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
-        let s3 = GuardianS3Client::from_client_for_tests(
+        let s3 = GuardianS3Client::from_client(
             S3BucketInfo::mock_for_testing(),
             S3RetentionEnvironment::Testnet,
             client,

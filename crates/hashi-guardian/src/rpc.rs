@@ -8,6 +8,7 @@ use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetGuardianInfoRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -83,9 +84,10 @@ fn to_status(e: GuardianError) -> Status {
 impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn get_guardian_info(
         &self,
-        _request: Request<proto::GetGuardianInfoRequest>,
+        request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_guardian_info(self.enclave.clone())
+        let domain_req: GetGuardianInfoRequest = request.into_inner().into();
+        let resp = task_spawner::get_guardian_info(self.enclave.clone(), domain_req)
             .await
             .map_err(to_status)?;
 
@@ -307,6 +309,41 @@ mod tests {
             secrets,
             puts,
         )
+    }
+
+    #[tokio::test]
+    async fn guardian_info_only_includes_attestation_when_requested() {
+        let enclave = Enclave::create_with_random_keys();
+        let expected_info = enclave.info().await;
+        let rpc = GuardianGrpc {
+            enclave: enclave.clone(),
+        };
+
+        for include_attestation in [false, true] {
+            let response = rpc
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                    include_attestation,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.attestation.is_some(), include_attestation);
+            assert_eq!(
+                response.signing_pub_key.unwrap().as_ref(),
+                enclave.signing_pubkey().as_bytes()
+            );
+            let signed_info = hashi_types::guardian::GuardianSignedResponse::<
+                hashi_types::guardian::GuardianInfo,
+            >::try_from(response.signed_info.unwrap())
+            .unwrap();
+            assert_eq!(
+                signed_info
+                    .verify_signature(&enclave.signing_pubkey())
+                    .unwrap()
+                    .response,
+                expected_info
+            );
+        }
     }
 
     #[tokio::test]

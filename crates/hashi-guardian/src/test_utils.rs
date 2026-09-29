@@ -5,6 +5,7 @@
 
 use crate::enclave::Enclave;
 use crate::s3_client::GuardianS3Client;
+use crate::s3_reader::GuardianReader;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
@@ -38,11 +39,16 @@ pub fn mock_logger() -> GuardianS3Client {
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
     )
+}
+
+/// A reader over `mock_logger`, for tests that never read from it.
+pub fn mock_reader(expected_deployment: DeploymentConfig) -> GuardianReader {
+    GuardianReader::from_s3_client(mock_logger(), expected_deployment)
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -144,7 +150,7 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
         RuleMode::MatchAny,
         &[&put_ok, &list_v2, &list_versions]
     );
-    let logger = GuardianS3Client::from_client_for_tests(
+    let logger = GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,
@@ -271,7 +277,7 @@ pub fn mock_logger_with_deleted_layout(
         RuleMode::MatchAny,
         &[&list_dirs, &list_versions, &put_ok]
     );
-    GuardianS3Client::from_client_for_tests(
+    GuardianS3Client::from_client(
         S3BucketInfo::mock_for_testing(),
         S3RetentionEnvironment::Testnet,
         client,

@@ -1009,7 +1009,7 @@ impl Hashi {
     async fn fetch_guardian_info(&self) -> Option<hashi_types::proto::GetGuardianInfoResponse> {
         let client = self.guardian_client()?;
         let rpc_start = std::time::Instant::now();
-        let rpc_result = client.get_guardian_info().await;
+        let rpc_result = client.get_guardian_info(false).await;
         let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
         match rpc_result {
             Ok(info) => {
@@ -2162,7 +2162,11 @@ mod test {
     // --- guardian /info BTC pubkey verification ---
 
     fn random_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
-        let kp = hashi_types::bitcoin::create_btc_keypair_for_test(&[42u8; 32]);
+        let kp = hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+            &hashi_types::bitcoin::BTC_LIB,
+            &[42u8; 32],
+        )
+        .expect("valid test secret key");
         kp.x_only_public_key().0
     }
 

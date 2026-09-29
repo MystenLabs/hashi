@@ -87,8 +87,9 @@ mod tests {
     use crate::test_utils::create_fully_initialized_enclave;
     use crate::test_utils::FullyInitializedArgs;
     use bitcoin::Network;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::EncryptionPublicKey;
@@ -145,8 +146,11 @@ mod tests {
     }
 
     async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
-        let kp = create_btc_keypair_for_test(&[1u8; 32]);
-        let master_pubkey = hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1u8; 32]).expect("valid test secret key");
+        let master_pubkey =
+            HashiMasterG::with_even_y_from_x_be_bytes(&kp.x_only_public_key().0.serialize())
+                .expect("valid x-only public key");
         create_fully_initialized_enclave(FullyInitializedArgs {
             network: Network::Regtest,
             committee: committee_at(epoch),

@@ -23,6 +23,20 @@ fun test_certificate_threshold() {
 }
 
 #[test]
+fun test_certificate_threshold_above_u16_max() {
+    // Total weights past u16::MAX (65535) are in range.
+    // 6667 bps of 65536 -> ceil(436928512/10000) = 43693.
+    assert!(threshold::certificate_threshold(65536) == 43693);
+    // 6667 bps of 100000 = 66670, a threshold that itself exceeds u16::MAX.
+    assert!(threshold::certificate_threshold(100_000) == 66670);
+    // Agrees with the general form at the same basis points.
+    assert!(
+        threshold::certificate_threshold(1_000_000_000) ==
+        threshold::weight_threshold(1_000_000_000, 6667),
+    );
+}
+
+#[test]
 fun test_weight_threshold_basic() {
     // 66.67% of 3 -> 3*6667 = 20001 -> ceil(20001/10000) = 3.
     assert!(threshold::weight_threshold(3, 6667) == 3);

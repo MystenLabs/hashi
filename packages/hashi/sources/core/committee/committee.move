@@ -7,7 +7,6 @@
 /// time. `verify_certificate` checks an aggregate BLS12-381 min-pk signature
 /// against a signers bitmap, enforces the stake threshold, and wraps the
 /// payload in a `CertifiedMessage` as proof of committee approval.
-#[allow(unused_const)]
 module hashi::committee;
 
 use hashi::config::Config;
@@ -173,24 +172,6 @@ public(package) fun to_vec_map(self: &Committee): VecMap<address, u64> {
     result
 }
 
-#[allow(unused_function)]
-public(package) fun verify_proposal(
-    self: &Committee,
-    signers: sui::vec_set::VecSet<address>,
-    threshold: u64,
-): u64 {
-    // Compute the total signed weight
-    let mut aggregate_weight = 0;
-    signers.keys().do_ref!(|validator_address| {
-        aggregate_weight = aggregate_weight + self.get_member_weight(validator_address);
-    });
-
-    // Check if the aggregate weight is enough to satisfy the required weight.
-    assert!(aggregate_weight >= threshold, ENotEnoughStake);
-
-    aggregate_weight
-}
-
 /// Verify an aggregate BLS signature is a certificate in the epoch, and return
 /// the total stake of the signers.
 /// The `signers_bitmap` is a bitmap of the indices of the signers in the committee.
@@ -201,7 +182,7 @@ public(package) fun verify_certificate<T>(
     intent: u16,
     message: T,
     signature: CommitteeSignature,
-    threshold: u64, //XXX threshold could be lookedup by type in the config
+    threshold: u64,
 ): CertifiedMessage<T> {
     assert!(signature.epoch == self.epoch());
 

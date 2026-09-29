@@ -1031,9 +1031,8 @@ mod tests {
                  whether or not governance ever set it. Governance tuning of this key is \
                  not covered by any test — see the update_config insert gap."
             );
-            // On the squashed package every nonce bucket is stamped from
-            // genesis, so the window path is the only one that exists; no
-            // bare-only version guard is needed.
+            // Every nonce submission carries a chain timestamp, so the
+            // window path is the only one that exists.
         }
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;

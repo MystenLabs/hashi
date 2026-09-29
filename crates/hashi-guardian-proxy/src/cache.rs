@@ -231,7 +231,9 @@ where
     async fn guardian_info(&self) -> anyhow::Result<GuardianInfo> {
         let info_pb = self
             .inner
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest::default()))
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            }))
             .await
             .map_err(|s| anyhow::anyhow!("get_guardian_info: {s}"))?
             .into_inner();
@@ -418,16 +420,16 @@ mod tests {
     use super::*;
     use crate::widlog::test_store::withdrawal_record_json;
     use crate::widlog::test_store::MemStore;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::bitcoin::sign_btc_tx;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
     use hashi_types::guardian::GuardianResponse;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -476,8 +478,9 @@ mod tests {
     impl GuardianService for StubGuardian {
         async fn get_guardian_info(
             &self,
-            _: Request<proto::GetGuardianInfoRequest>,
+            request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert!(!request.into_inner().include_attestation);
             match &self.info {
                 Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
@@ -607,11 +610,8 @@ mod tests {
             mpc_master_g: Some(master_g),
         };
         let signed_info = GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key);
-        let domain = GetGuardianInfoResponse::new(
-            NitroAttestation::new(vec![1, 2, 3]),
-            signing_key.verification_key(),
-            signed_info,
-        );
+        let domain =
+            GetGuardianInfoResponse::new(None, signing_key.verification_key(), signed_info);
         get_guardian_info_response_to_pb(domain)
     }
 
@@ -632,13 +632,17 @@ mod tests {
         let signed_request =
             StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
 
-        let enclave_kp = create_btc_keypair_for_test(&[8u8; 32]);
+        let enclave_kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
         let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = hashi_master_g_from_btc_xonly_for_test(
-            &create_btc_keypair_for_test(&[6u8; 32])
+        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
+            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
+                .expect("valid test secret key")
                 .x_only_public_key()
-                .0,
-        );
+                .0
+                .serialize(),
+        )
+        .expect("valid x-only public key");
 
         let (messages, _txid) = signed_request
             .message()
@@ -909,7 +913,8 @@ mod tests {
         // recorded signatures no longer verify — poisoned record or version
         // skew — and the proxy must neither serve NOR forward.
         let fixture = replay_fixture(7);
-        let wrong_key = create_btc_keypair_for_test(&[42u8; 32])
+        let wrong_key = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[42u8; 32])
+            .expect("valid test secret key")
             .x_only_public_key()
             .0;
         let (stub, count) = StubGuardian::ok();
@@ -978,13 +983,17 @@ mod tests {
 
         let signed_request =
             StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
-        let enclave_kp = create_btc_keypair_for_test(&[8u8; 32]);
+        let enclave_kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
         let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = hashi_master_g_from_btc_xonly_for_test(
-            &create_btc_keypair_for_test(&[6u8; 32])
+        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
+            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
+                .expect("valid test secret key")
                 .x_only_public_key()
-                .0,
-        );
+                .0
+                .serialize(),
+        )
+        .expect("valid x-only public key");
         let (messages, _txid) = signed_request
             .message()
             .utxos()

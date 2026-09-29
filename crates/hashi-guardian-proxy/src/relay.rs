@@ -97,7 +97,7 @@ struct BackendArming {
 }
 
 /// `GetProvisioningTargetInfo` is public and unauthenticated, and the enclave
-/// mints a fresh Nitro attestation for every `GetGuardianInfo`, so a flood could
+/// mints a fresh Nitro attestation for every attested `GetGuardianInfo`, so a flood could
 /// crowd out provisioning. The request carries no nonce, so a seconds-old
 /// response is as good as a fresh one; cache it briefly to bound the backend's
 /// exposure. The only effect of staleness is that a KP may pin a session that
@@ -154,7 +154,9 @@ impl<L: LogStore> Relay<L> {
         let pb = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
             .await?
             .into_inner();
         let resp = GetGuardianInfoResponse::try_from(pb)
@@ -289,7 +291,9 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         let response = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: true,
+            })
             .await?
             .into_inner();
         *cached = Some(CachedTargetInfo {
@@ -610,8 +614,9 @@ mod tests {
     impl hashi_types::proto::guardian_service_server::GuardianService for TaggedGuardian {
         async fn get_guardian_info(
             &self,
-            _: Request<proto::GetGuardianInfoRequest>,
+            request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert!(request.into_inner().include_attestation);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Response::new(proto::GetGuardianInfoResponse {
                 signing_pub_key: Some(vec![self.tag; 32].into()),

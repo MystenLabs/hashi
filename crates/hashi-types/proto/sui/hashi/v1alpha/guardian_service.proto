@@ -45,13 +45,16 @@ service GuardianService {
   rpc UpdateCommitteeChain(UpdateCommitteeChainRequest) returns (UpdateCommitteeResponse);
 }
 
-message GetGuardianInfoRequest {}
+message GetGuardianInfoRequest {
+  // Generate a Nitro attestation document for callers that verify it (KPs and operators).
+  bool include_attestation = 1;
+}
 
 message GetGuardianInfoResponse {
   reserved 4;
   reserved "encrypted_shares";
 
-  // AWS Nitro attestation document.
+  // AWS Nitro attestation document; absent unless include_attestation is true.
   optional bytes attestation = 1;
 
   // Guardian signing public key (Ed25519, 32 bytes).

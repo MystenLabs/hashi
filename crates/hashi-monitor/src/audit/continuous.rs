@@ -69,7 +69,7 @@ impl ContinuousAuditWindow {
         let lookback = cfg
             .next_event_delays
             .max_delay()
-            .saturating_add(cfg.clock_skew)
+            .saturating_add(cfg.clock_skews.max_skew())
             .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
@@ -268,7 +268,6 @@ mod tests {
 next_event_delays:
   - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
-clock_skew: 300
 deployment:
   bucket_info:
     name: "bucket"
@@ -278,7 +277,7 @@ deployment:
   pcr_allowlist:
     current_build:
       git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
     prev_builds: []
 sui:
   rpc_url: "http://sui"
@@ -293,7 +292,7 @@ btc:
 
         assert_eq!(
             ContinuousAuditWindow::default_start(&cfg, 1_000_000),
-            1_000_000 - 86_400 - 300 - 4_200 - 600 - 300,
+            1_000_000 - 86_400 - 7_200 - 4_200 - 600 - 300,
         );
     }
 
