@@ -7,8 +7,10 @@ mod deployment;
 pub mod errors;
 pub mod lifecycle;
 pub mod proto_conversions;
+mod runtime_committee;
 pub mod s3;
 pub(crate) mod serde;
+pub use runtime_committee::RuntimeCommittee;
 mod session;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -178,7 +180,7 @@ pub struct ActivationState {
     /// Secret-sharing instance pinned during OI and retained through activation.
     secret_sharing_instance: SecretSharingInstance,
     /// Current Hashi committee
-    committee: HashiCommittee,
+    committee: RuntimeCommittee,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
 }
@@ -513,7 +515,7 @@ impl ActivationState {
     pub fn new(
         config_hash: [u8; 32],
         secret_sharing_instance: SecretSharingInstance,
-        committee: HashiCommittee,
+        committee: RuntimeCommittee,
         limiter_state: LimiterState,
     ) -> Self {
         Self {
@@ -529,7 +531,7 @@ impl ActivationState {
     ) -> (
         [u8; 32],
         SecretSharingInstance,
-        HashiCommittee,
+        RuntimeCommittee,
         LimiterState,
     ) {
         (
@@ -540,7 +542,7 @@ impl ActivationState {
         )
     }
 
-    pub fn committee(&self) -> &HashiCommittee {
+    pub fn committee(&self) -> &RuntimeCommittee {
         &self.committee
     }
 
@@ -967,7 +969,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct ActivationStateRepr {
     pub config_hash: [u8; 32],
     pub secret_sharing_instance: SecretSharingInstance,
-    pub committee: crate::move_types::Committee,
+    pub committee: runtime_committee::ActivationCommitteeRepr,
     pub limiter_state: LimiterState,
 }
 
@@ -1026,7 +1028,7 @@ impl From<&ActivationState> for ActivationStateRepr {
         Self {
             config_hash,
             secret_sharing_instance,
-            committee: (&committee).into(),
+            committee: committee.activation_digest_repr(),
             limiter_state,
         }
     }
