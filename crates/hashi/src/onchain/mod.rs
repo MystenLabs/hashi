@@ -609,6 +609,19 @@ impl OnchainState {
         Ok(Some(certs))
     }
 
+    pub fn presig_seals(&self, epoch: u64) -> BTreeMap<u32, move_types::PresigSealV1> {
+        self.state()
+            .hashi
+            .tob
+            .buckets
+            .iter()
+            .filter(|(key, _)| {
+                key.epoch == epoch && key.protocol_type == move_types::ProtocolType::NonceGeneration
+            })
+            .filter_map(|(key, bucket)| Some((key.batch_index?, bucket.seal.clone()?)))
+            .collect()
+    }
+
     /// Wait until the object mirror has applied every Hashi transaction
     /// through a checkpoint whose timestamp is past `cutoff_ms`: any TOB
     /// submission stamped at or before the cutoff is then either in the
@@ -1499,7 +1512,11 @@ async fn scrape_tob_entries(
     // interiors walked after the bag listing completes. At steady state
     // the bag holds a couple of epochs' worth of buckets, so the
     // collection stays small.
-    let mut to_scrape: Vec<(move_types::TobKey, move_types::LinkedTable<Address>)> = Vec::new();
+    let mut to_scrape: Vec<(
+        move_types::TobKey,
+        move_types::LinkedTable<Address>,
+        Option<move_types::PresigSealV1>,
+    )> = Vec::new();
     seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
             // The leader's TOB GC destroys dead buckets concurrently with this
@@ -1535,14 +1552,14 @@ async fn scrape_tob_entries(
             ));
             seed.interior.push((certs.certs.id, route::Slot::TobCerts));
             seed.tob_tables.push((certs.certs.id, key));
-            to_scrape.push((key, certs.certs));
+            to_scrape.push((key, certs.certs, certs.seal));
         }
         Ok(())
     })
     .await?;
 
     let mut buckets = BTreeMap::new();
-    for (key, certs) in to_scrape {
+    for (key, certs, seal) in to_scrape {
         let node_mask = FieldMask::from_paths([
             DynamicField::path_builder().name().finish(),
             DynamicField::path_builder().field_id(),
@@ -1596,6 +1613,7 @@ async fn scrape_tob_entries(
                 head: certs.head,
                 size: certs.size,
                 nodes,
+                seal,
             },
         );
     }

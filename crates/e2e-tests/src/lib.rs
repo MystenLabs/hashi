@@ -868,6 +868,8 @@ mod tests {
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
     const SIGNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const SEAL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+    const MOCK_DEALER_SET_DIGEST: [u8; 32] = [7; 32];
 
     fn get_mpc_key(nodes: &[HashiNodeHandle]) -> G {
         nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap()
@@ -1142,6 +1144,7 @@ mod tests {
                 vk,
                 share_owners.clone(),
                 presignatures,
+                MOCK_DEALER_SET_DIGEST,
                 0,
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
@@ -1176,6 +1179,7 @@ mod tests {
                 message.to_vec(),
                 derivation_address,
             )],
+            None,
         )
         .await;
         per_input.pop().expect("one input requested")
@@ -1188,6 +1192,7 @@ mod tests {
         nodes: &[HashiNodeHandle],
         epoch: u64,
         inputs: &[SignInputSpec],
+        seals: Option<&std::collections::BTreeMap<u32, hashi_types::move_types::PresigSealV1>>,
     ) -> Vec<
         Vec<
             hashi::mpc::types::SigningResult<
@@ -1195,7 +1200,7 @@ mod tests {
             >,
         >,
     > {
-        let beacon_value = {
+        let input_delta = {
             let mut hasher = fastcrypto::hash::Blake2b256::default();
             for (signing_id, _, _, _) in inputs {
                 hasher.update(signing_id.as_bytes());
@@ -1216,34 +1221,57 @@ mod tests {
                     hashi::metrics::MPC_LABEL_SIGNING,
                 )
                 .with_max_owned_shares(signing_manager.max_owned_count());
-                let beacon = beacon_value;
                 let metrics = node.hashi().metrics.clone();
-                let requests: Vec<hashi::mpc::SignInput> = inputs
-                    .iter()
-                    .map(|(sid, pidx, msg, deriv)| hashi::mpc::SignInput {
-                        signing_id: *sid,
-                        message: msg.clone(),
-                        global_presig_index: *pidx,
-                        derivation_address: *deriv,
-                    })
-                    .collect();
+                let requests = || -> Vec<hashi::mpc::SignInput> {
+                    inputs
+                        .iter()
+                        .map(|(sid, pidx, msg, deriv)| hashi::mpc::SignInput {
+                            signing_id: *sid,
+                            message: msg.clone(),
+                            global_presig_index: *pidx,
+                            derivation_address: *deriv,
+                            input_delta,
+                        })
+                        .collect()
+                };
                 let order = order.clone();
                 async move {
-                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                    signing_manager
-                        .sign(
-                            &p2p_channel,
-                            requests,
-                            &beacon,
-                            SIGNING_TIMEOUT,
-                            &metrics,
-                            tx,
-                        )
-                        .await;
-                    let mut by_id = std::collections::HashMap::new();
-                    while let Some((sid, res)) = rx.recv().await {
-                        by_id.insert(sid, res);
-                    }
+                    let seal_deadline = tokio::time::Instant::now() + SEAL_WAIT_TIMEOUT;
+                    let mut by_id = loop {
+                        let chain_seals;
+                        let seals = match seals {
+                            Some(seals) => seals,
+                            None => {
+                                chain_seals = node.hashi().onchain_state().presig_seals(epoch);
+                                &chain_seals
+                            }
+                        };
+                        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                        signing_manager
+                            .sign(
+                                &p2p_channel,
+                                requests(),
+                                seals,
+                                SIGNING_TIMEOUT,
+                                &metrics,
+                                tx,
+                            )
+                            .await;
+                        let mut by_id = std::collections::HashMap::new();
+                        while let Some((sid, res)) = rx.recv().await {
+                            by_id.insert(sid, res);
+                        }
+                        let unsealed = by_id.values().any(|res| {
+                            matches!(
+                                res,
+                                Err(hashi::mpc::types::SigningError::PresigBatchNotSealed { .. })
+                            )
+                        });
+                        if !unsealed || tokio::time::Instant::now() >= seal_deadline {
+                            break by_id;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    };
                     order
                         .into_iter()
                         .map(|sid| {
@@ -1338,7 +1366,16 @@ mod tests {
                 )
             })
             .collect();
-        let per_input = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+        let mock_seals = (!corrupt_node_indices.is_empty()).then(|| {
+            std::collections::BTreeMap::from([(
+                0,
+                hashi_types::move_types::PresigSealV1 {
+                    randomness: vec![9; 32],
+                    dealer_set_digest: MOCK_DEALER_SET_DIGEST.to_vec(),
+                },
+            )])
+        });
+        let per_input = sign_batch_on_all_nodes(nodes, epoch, &inputs, mock_seals.as_ref()).await;
         assert_eq!(per_input.len(), inputs.len());
         for input_results in per_input {
             assert_all_signatures_match(input_results);
@@ -3163,7 +3200,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let results = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+            let results = sign_batch_on_all_nodes(nodes, epoch, &inputs, None).await;
             for node_results in &results {
                 for result in node_results {
                     result.as_ref().expect("drain signing failed");
@@ -3198,7 +3235,7 @@ mod tests {
                 )
             })
             .collect();
-        let results = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+        let results = sign_batch_on_all_nodes(nodes, epoch, &inputs, None).await;
         for node_results in &results {
             for result in node_results {
                 result

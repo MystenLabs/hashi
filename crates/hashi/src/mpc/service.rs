@@ -36,6 +36,7 @@ use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
+use crate::mpc::presig_seal;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::signing::IdentityInputs;
 use crate::mpc::types::CertificateV1;
@@ -129,6 +130,7 @@ pub struct MpcService {
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
+    presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,6 +196,7 @@ impl MpcService {
             next_manager_restore: Mutex::new(None),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
+            presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -741,7 +744,7 @@ impl MpcService {
         &self,
         epoch: u64,
         batch_index: u32,
-    ) -> anyhow::Result<(Committee, Presignatures, u16, Parameters)> {
+    ) -> anyhow::Result<(Committee, Presignatures, u16, Parameters, [u8; 32])> {
         let onchain_state = self.inner.onchain_state().clone();
         let committee = onchain_state
             .state()
@@ -805,6 +808,14 @@ impl MpcService {
         if !admitted.floor_reached() {
             return Err(admitted.below_floor_error(batch_index, metrics).into());
         }
+        let dealer_set_digest = admitted.dealer_set_digest();
+        presig_seal::start(
+            &self.inner,
+            &self.presig_seal_tasks,
+            epoch,
+            batch_index,
+            dealer_set_digest,
+        );
         let nonce_result = MpcManager::run_avid_nonce_party_phase(
             &mpc_manager,
             batch_index,
@@ -859,11 +870,17 @@ impl MpcService {
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
         );
-        Ok((committee, presignatures, batch_size_per_weight, params))
+        Ok((
+            committee,
+            presignatures,
+            batch_size_per_weight,
+            params,
+            dealer_set_digest,
+        ))
     }
 
     async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
-        let (committee, presignatures, batch_size_per_weight, params) =
+        let (committee, presignatures, batch_size_per_weight, params, dealer_set_digest) =
             self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
         let share_owners = self.share_owners_for_epoch(epoch)?;
@@ -878,6 +895,7 @@ impl MpcService {
             output.public_key,
             share_owners,
             presignatures,
+            dealer_set_digest,
             0, // batch_index
             0, // batch_start_index
             PRESIG_REFILL_DIVISOR,
@@ -1023,11 +1041,11 @@ impl MpcService {
                 pending.iter().any(|&p| p >= start && p < end)
             })
             .unwrap_or_else(|| boundaries.len().saturating_sub(1));
-        let mut retained: Vec<(Presignatures, u32, u64)> = Vec::new();
+        let mut retained: Vec<(Presignatures, u32, u64, [u8; 32])> = Vec::new();
         // TODO(IOP-529): Avoid the double cert-fetch in presig recovery.
         for &(bidx, start, size) in boundaries.iter().skip(first_pending) {
             self.bail_if_reconfig_pending()?;
-            let presigs = self
+            let (presigs, dealer_set_digest) = self
                 .recover_presignatures_from_certs(
                     &mpc_manager,
                     epoch,
@@ -1041,7 +1059,7 @@ impl MpcService {
                 "batch {bidx} boundary size {size} (Phase 1) != reconstructed len {} (Phase 2)",
                 presigs.len(),
             );
-            retained.push((presigs, bidx, start));
+            retained.push((presigs, bidx, start, dealer_set_digest));
         }
         anyhow::ensure!(
             self.inner.onchain_state().epoch() == epoch,
@@ -1548,7 +1566,7 @@ impl MpcService {
             );
             return Ok(());
         }
-        let (_, presignatures, batch_size_per_weight, _) =
+        let (_, presignatures, batch_size_per_weight, _, dealer_set_digest) =
             self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
@@ -1556,6 +1574,7 @@ impl MpcService {
         signing_manager.set_next_batch(
             batch_index,
             presignatures,
+            dealer_set_digest,
             self.identity_inputs(epoch, batch_size_per_weight),
         );
         Ok(())
@@ -1696,7 +1715,7 @@ impl MpcService {
         batch_index: u32,
         batch_size_per_weight: u16,
         params: Parameters,
-    ) -> anyhow::Result<Presignatures> {
+    ) -> anyhow::Result<(Presignatures, [u8; 32])> {
         let onchain_state = self.inner.onchain_state().clone();
         let p2p_channel = RpcP2PChannel::new(
             self.inner.onchain_state().clone(),
@@ -1717,7 +1736,7 @@ impl MpcService {
                 "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
             ));
         }
-        let (outputs, served_weight) = {
+        let (outputs, served_weight, dealer_set_digest) = {
             let avid_certs = nonce_certificates(&certs, epoch, batch_index);
             let admitted = mpc_manager
                 .read()
@@ -1728,6 +1747,14 @@ impl MpcService {
                     .below_floor_error(batch_index, &self.inner.metrics)
                     .into());
             }
+            let dealer_set_digest = admitted.dealer_set_digest();
+            presig_seal::start(
+                &self.inner,
+                &self.presig_seal_tasks,
+                epoch,
+                batch_index,
+                dealer_set_digest,
+            );
             let outcome = MpcManager::run_avid_nonce_party_phase(
                 mpc_manager,
                 batch_index,
@@ -1746,7 +1773,7 @@ impl MpcService {
                     outcome.local_skips,
                 );
             }
-            (outcome.outputs, admitted.weight)
+            (outcome.outputs, admitted.weight, dealer_set_digest)
         };
         if outputs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1769,7 +1796,7 @@ impl MpcService {
         }
         metrics.mpc_nonce_batch_index.set(batch_index as i64);
         metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
-        Ok(presignatures)
+        Ok((presignatures, dealer_set_digest))
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {
@@ -2514,7 +2541,7 @@ pub(crate) async fn verify_fetched_certificates(
 
 /// Live, boundary sizing and replay admit the same dealers only if they
 /// convert the served certs identically.
-fn nonce_certificates(
+pub(crate) fn nonce_certificates(
     certs: &VerifiedNonceCerts<move_types::DealerSubmissionV1>,
     epoch: u64,
     batch_index: u32,

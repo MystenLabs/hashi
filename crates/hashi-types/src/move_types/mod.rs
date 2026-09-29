@@ -1051,11 +1051,32 @@ pub struct EpochCertsV1 {
     /// Dealer submissions indexed by dealer address (first-submission-wins).
     // LinkedTable<address, DealerSubmissionV1>
     pub certs: LinkedTable<Address>,
+    pub seal: Option<PresigSealV1>,
 }
 
 impl MoveType for EpochCertsV1 {
     const MODULE: &'static str = "tob";
     const NAME: &'static str = "EpochCertsV1";
+}
+
+/// Rust version of the Move hashi::tob::PresigSealV1 type.
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct PresigSealV1 {
+    pub randomness: Vec<u8>,
+    pub dealer_set_digest: Vec<u8>,
+}
+
+/// Rust version of the Move struct
+/// `hashi::cert_submission::PresigCompletedMessage`.
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct PresigCompletedMessage {
+    pub epoch: u64,
+    pub batch_index: u32,
+    pub dealer_set_digest: Vec<u8>,
+}
+
+impl crate::intent::IntentMessage for PresigCompletedMessage {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::PresigCompleted;
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.

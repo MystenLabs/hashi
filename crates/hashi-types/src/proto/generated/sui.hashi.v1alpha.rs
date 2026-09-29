@@ -3846,6 +3846,21 @@ pub struct GetReconfigCompletionSignatureResponse {
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPresigCompletedSignatureRequest {
+    /// The epoch of the presig batch.
+    #[prost(uint64, optional, tag = "1")]
+    pub epoch: ::core::option::Option<u64>,
+    /// The presig batch index within the epoch.
+    #[prost(uint32, optional, tag = "2")]
+    pub batch_index: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPresigCompletedSignatureResponse {
+    /// The validator's BLS signature on the presig batch's completion message.
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPartialSignaturesRequest {
     /// The epoch for this MPC instance.
@@ -4133,6 +4148,36 @@ pub mod mpc_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Get a validator's signature attesting that a presig batch's dealer set is final.
+        pub async fn get_presig_completed_signature(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPresigCompletedSignatureRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPresigCompletedSignatureResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.MpcService/GetPresigCompletedSignature",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.MpcService",
+                        "GetPresigCompletedSignature",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Pull partial signatures from another party.
         pub async fn get_partial_signatures(
             &mut self,
@@ -4216,6 +4261,14 @@ pub mod mpc_service_server {
             request: tonic::Request<super::GetReconfigCompletionSignatureRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetReconfigCompletionSignatureResponse>,
+            tonic::Status,
+        >;
+        /// Get a validator's signature attesting that a presig batch's dealer set is final.
+        async fn get_presig_completed_signature(
+            &self,
+            request: tonic::Request<super::GetPresigCompletedSignatureRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPresigCompletedSignatureResponse>,
             tonic::Status,
         >;
         /// Pull partial signatures from another party.
@@ -4521,6 +4574,58 @@ pub mod mpc_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetReconfigCompletionSignatureSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.MpcService/GetPresigCompletedSignature" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPresigCompletedSignatureSvc<T: MpcService>(pub Arc<T>);
+                    impl<
+                        T: MpcService,
+                    > tonic::server::UnaryService<
+                        super::GetPresigCompletedSignatureRequest,
+                    > for GetPresigCompletedSignatureSvc<T> {
+                        type Response = super::GetPresigCompletedSignatureResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetPresigCompletedSignatureRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MpcService>::get_presig_completed_signature(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetPresigCompletedSignatureSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

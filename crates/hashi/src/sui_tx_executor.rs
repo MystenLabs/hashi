@@ -39,6 +39,7 @@ use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequested;
+use hashi_types::move_types::PresigCompletedMessage;
 use hashi_types::move_types::WithdrawalRequested;
 
 /// Construct a `CommitteeSignature` via a Move call in the PTB.
@@ -1357,13 +1358,18 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let random_arg = builder.object(
+            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
         builder.move_call(
             Function::new(
                 self.active_call_package_id(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
-            vec![hashi_arg, withdrawal_id_arg],
+            vec![hashi_arg, withdrawal_id_arg, random_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
@@ -1670,6 +1676,57 @@ impl SuiTxExecutor {
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
                 "commit_withdrawal_tx failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(epoch = message.epoch, batch_index = message.batch_index),
+    )]
+    pub async fn execute_submit_presig_completed(
+        &mut self,
+        message: &PresigCompletedMessage,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let package_id = self.active_call_package_id();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let epoch_arg = builder.pure(&message.epoch);
+        let batch_index_arg = builder.pure(&message.batch_index);
+        let digest_arg = builder.pure(&message.dealer_set_digest);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
+        let random_arg = builder.object(
+            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+        builder.move_call(
+            Function::new(
+                package_id,
+                Identifier::from_static("cert_submission"),
+                Identifier::from_static("submit_presig_completed"),
+            ),
+            vec![
+                hashi_arg,
+                epoch_arg,
+                batch_index_arg,
+                digest_arg,
+                cert_arg,
+                random_arg,
+            ],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "submit_presig_completed failed: {:?}",
                 response.transaction().effects().status()
             );
         }

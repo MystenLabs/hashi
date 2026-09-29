@@ -202,6 +202,11 @@ impl HttpService {
     pub fn get_reconfig_signature(&self, epoch: u64) -> Option<Vec<u8>> {
         self.inner.get_reconfig_signature(epoch)
     }
+
+    pub fn get_presig_seal_signature(&self, epoch: u64, batch_index: u32) -> Option<Vec<u8>> {
+        self.inner
+            .get_presig_completed_signature(epoch, batch_index)
+    }
 }
 
 async fn health() -> impl axum::response::IntoResponse {

@@ -228,6 +228,24 @@ impl AdmittedNonceDealers {
     pub(crate) fn floor_reached(&self) -> bool {
         self.weight >= self.required_weight
     }
+
+    pub(crate) fn dealer_set_digest(&self) -> [u8; 32] {
+        let mut hasher = Blake2b256::default();
+        hasher.update(b"hashi/presig-dealer-set/v1");
+        for admitted in &self.dealers {
+            let messages_hash = match &admitted.cert {
+                CertificateV1::NonceGeneration { cert, .. } => cert.message().messages_hash,
+                CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
+                    cert.message().messages_hash
+                }
+            };
+            hasher.update(
+                bcs::to_bytes(&(admitted.dealer, messages_hash))
+                    .expect("serialization should always succeed"),
+            );
+        }
+        hasher.finalize().digest
+    }
 }
 
 pub(crate) struct AdmittedNonceDealer {
@@ -1124,6 +1142,22 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
+pub(crate) fn input_delta(randomness: &[u8], input_index: u32) -> S {
+    signing_delta_oracle("input").evaluate_to_group_element(&(randomness, input_index))
+}
+
+pub(crate) fn presig_delta(randomness: &[u8], global_presig_index: u64) -> S {
+    signing_delta_oracle("presig").evaluate_to_group_element(&(randomness, global_presig_index))
+}
+
+fn signing_delta_oracle(label: &str) -> RandomOracle {
+    RandomOracle::new("hashi_signing_delta").extend(label)
+}
+
+pub(crate) fn signing_beacon(input_delta: &S, presig_delta: &S) -> S {
+    *input_delta + *presig_delta
+}
+
 pub(crate) fn signing_request_digest(
     message: &[u8],
     derivation_address: Option<&DerivationAddress>,
@@ -1144,6 +1178,7 @@ pub(crate) fn signing_request_digest(
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
     public_nonce: G,
+    presig_delta: S,
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
     request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
@@ -1152,17 +1187,26 @@ pub struct PartialSigningOutput {
 impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
-        beacon: &S,
+        input_delta: &S,
+        presig_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            signing_nonce_bytes: signing_nonce_bytes(
+                &public_nonce,
+                &signing_beacon(input_delta, &presig_delta),
+            ),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
+            presig_delta,
             partial_sigs,
         }
+    }
+
+    pub fn presig_delta(&self) -> S {
+        self.presig_delta
     }
 
     pub fn public_nonce(&self) -> G {
@@ -1216,6 +1260,12 @@ pub enum SigningError {
          derivation address or beacon"
     )]
     RequestChanged { signing_id: Address },
+
+    #[error("Presig batch {batch_index} has no PresigCompleted seal yet")]
+    PresigBatchNotSealed { batch_index: u32 },
+
+    #[error("Presig batch {batch_index} was sealed over a dealer set this node did not build")]
+    SealDealerSetMismatch { batch_index: u32 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

@@ -13,7 +13,6 @@ use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
@@ -1321,11 +1320,10 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
-        let beacon = withdrawal_beacon(&txn.randomness);
+        let seals = self.onchain_state().presig_seals(epoch);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
-        let beacon_ref = &beacon;
         let metrics_ref = &*self.metrics;
         let txn_id = txn.id;
         // Per-input presig index is read off the on-chain signing batch slot, so
@@ -1357,6 +1355,7 @@ impl Hashi {
                 message: message.to_vec(),
                 global_presig_index,
                 derivation_address: Some(derivation_address),
+                input_delta: crate::mpc::types::input_delta(&txn.randomness, input_index as u32),
             });
         }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1364,7 +1363,7 @@ impl Hashi {
         let collect = signing_manager_ref.sign(
             p2p_channel_ref,
             requests,
-            beacon_ref,
+            &seals,
             WITHDRAWAL_SIGNING_TIMEOUT,
             metrics_ref,
             result_tx,
@@ -1909,10 +1908,6 @@ impl WithdrawalBroadcastError {
     }
 }
 
-pub(crate) fn withdrawal_beacon(randomness: &[u8]) -> S {
-    S::from_bytes_mod_order(randomness)
-}
-
 pub(crate) fn withdrawal_input_derivation_address(input: &Utxo) -> [u8; 32] {
     crate::deposits::normalized_derivation_path(input.derivation_path.as_ref()).into_inner()
 }
@@ -2185,6 +2180,10 @@ async fn forward_signing_results(
                     }
                     crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
                     crate::mpc::types::SigningError::RequestChanged { .. } => "request_changed",
+                    crate::mpc::types::SigningError::PresigBatchNotSealed { .. } => "not_sealed",
+                    crate::mpc::types::SigningError::SealDealerSetMismatch { .. } => {
+                        "seal_mismatch"
+                    }
                     _ => "other",
                 };
                 metrics

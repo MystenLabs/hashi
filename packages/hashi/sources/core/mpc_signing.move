@@ -98,8 +98,9 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
 /// any epoch (this is what lets signed slots survive a reconfig). Nonce safety
 /// is NOT enforced here — it lives in presig assignment (`new`/`reallocate`)
 /// and in the off-chain rule that each presig index signs exactly one sighash
-/// and a stale-epoch index is never signed with. Caller must cert-gate the
-/// write (the entry verifies a current-epoch committee cert over these bytes).
+/// under one beacon and a stale-epoch index is never signed with. Caller must
+/// cert-gate the write (the entry verifies a current-epoch committee cert over
+/// these bytes).
 public(package) fun record(
     self: &mut SigningBatch,
     indices: vector<u64>,

@@ -120,6 +120,7 @@ pub struct TobBucket {
     pub size: u64,
     pub nodes:
         BTreeMap<Address, move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>>,
+    pub seal: Option<move_types::PresigSealV1>,
 }
 
 /// A mirror walk that did not cover the bucket's full on-chain census —
