@@ -1,17 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(any(test, feature = "test-utils"))]
 pub use super::crypto::encryption::attested_test_utils::dev_kp_attestations;
-#[cfg(any(test, feature = "test-utils"))]
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_certs;
-#[cfg(any(test, feature = "test-utils"))]
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_keypair;
 
 use super::AttestedKpCert;
-#[cfg(any(test, feature = "test-utils"))]
 use super::BatchProvisionerInitRequest;
-#[cfg(any(test, feature = "test-utils"))]
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
@@ -26,11 +21,9 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-#[cfg(any(test, feature = "test-utils"))]
 use super::KpCertRoster;
 use super::KpEncryptedShare;
 use super::KpEncryptedShareRoster;
-#[cfg(any(test, feature = "test-utils"))]
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -39,14 +32,12 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
-#[cfg(any(test, feature = "test-utils"))]
 use super::ProvisionerRotateKpSetRequest;
 use super::RotateKpSetResponse;
 use super::S3BucketInfo;
 use super::S3Credentials;
 use super::SecretSharingInstance;
 use super::SessionID;
-#[cfg(any(test, feature = "test-utils"))]
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -55,6 +46,7 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawStage;
 use super::WithdrawalID;
+use super::crypto::attestation::NITRO_PCR0_LEN;
 
 use crate::bitcoin::BTC_LIB;
 use crate::bitcoin::BitcoinAddress;
@@ -161,14 +153,12 @@ impl GetGuardianInfoResponse {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
         SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
     KpCertRoster::new(mock_attested_kp_certs(n)).unwrap()
 }
@@ -296,7 +286,6 @@ impl ProvisionerInitRequest {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl BatchProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
@@ -309,7 +298,6 @@ impl BatchProvisionerInitRequest {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl BatchProvisionerRotateKpSetRequest {
     // NOTE: Incorrect encryption and signature are used. This is only for wire round trips.
     pub fn mock_for_testing() -> Self {
@@ -406,6 +394,13 @@ impl InitConfig {
             },
             super::Network::Regtest,
         )
+    }
+}
+
+impl BuildPcrs {
+    /// Dummy PCR pins for tests; `pcr0_byte` must be nonzero.
+    pub fn mock_for_testing(git_revision: &str, pcr0_byte: u8) -> Self {
+        Self::new(git_revision, vec![pcr0_byte; NITRO_PCR0_LEN]).expect("valid mock PCR pins")
     }
 }
 
