@@ -39,7 +39,7 @@ pub struct GuardianClient {
     endpoint: String,
     channel: Channel,
     metrics: Option<Arc<Metrics>>,
-    member_auth: Option<MemberAuthSigner>,
+    member_auth: MemberAuthSigner,
 }
 
 impl std::fmt::Debug for GuardianClient {
@@ -47,7 +47,6 @@ impl std::fmt::Debug for GuardianClient {
         f.debug_struct("GuardianClient")
             .field("endpoint", &self.endpoint)
             .field("metrics_enabled", &self.metrics.is_some())
-            .field("member_auth_enabled", &self.member_auth.is_some())
             .finish()
     }
 }
@@ -77,7 +76,13 @@ impl MemberAuthSigner {
 }
 
 impl GuardianClient {
-    pub fn new(endpoint: &str) -> Result<Self, tonic::Status> {
+    /// Every RPC carries a [`MemberAuth`] signed with this node's registered
+    /// TLS key, which the guardian proxy requires on node RPCs.
+    pub fn new(
+        endpoint: &str,
+        tls_private_key: ed25519_dalek::SigningKey,
+        hashi_object_id: Address,
+    ) -> Result<Self, tonic::Status> {
         let mut builder = Endpoint::from_shared(endpoint.to_string())
             .map_err(Into::<BoxError>::into)
             .map_err(tonic::Status::from_error)?
@@ -95,7 +100,10 @@ impl GuardianClient {
             endpoint: endpoint.to_string(),
             channel,
             metrics: None,
-            member_auth: None,
+            member_auth: MemberAuthSigner {
+                tls_private_key: Arc::new(tls_private_key),
+                hashi_object_id,
+            },
         })
     }
 
@@ -104,20 +112,6 @@ impl GuardianClient {
     /// layer. Without this, the client emits no RPC traffic metrics.
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         self.metrics = Some(metrics);
-        self
-    }
-
-    /// Sign every outbound RPC with this node's registered TLS key, which the
-    /// guardian proxy requires on node RPCs.
-    pub fn with_member_auth(
-        mut self,
-        tls_private_key: ed25519_dalek::SigningKey,
-        hashi_object_id: Address,
-    ) -> Self {
-        self.member_auth = Some(MemberAuthSigner {
-            tls_private_key: Arc::new(tls_private_key),
-            hashi_object_id,
-        });
         self
     }
 
@@ -133,10 +127,7 @@ impl GuardianClient {
     fn boxed_channel(&self) -> BoxedChannel {
         let channel = self.channel.clone();
         let member_auth = self.member_auth.clone();
-        let attach_member_auth = move |request: http::Request<Body>| match &member_auth {
-            Some(signer) => signer.attach(request),
-            None => request,
-        };
+        let attach_member_auth = move |request: http::Request<Body>| member_auth.attach(request);
         match &self.metrics {
             Some(metrics) => {
                 let svc = ServiceBuilder::new()
@@ -236,12 +227,13 @@ mod tests {
         (format!("http://{addr}"), seen)
     }
 
-    fn sent_member_auth(headers: &http::HeaderMap) -> Option<MemberAuth> {
+    fn sent_member_auth(headers: &http::HeaderMap) -> MemberAuth {
         let value = MetadataMap::from_headers(headers.clone())
-            .get_bin(MEMBER_AUTH_METADATA_KEY)?
+            .get_bin(MEMBER_AUTH_METADATA_KEY)
+            .expect("member auth header")
             .to_bytes()
             .unwrap();
-        Some(MemberAuth::from_bytes(&value).unwrap())
+        MemberAuth::from_bytes(&value).unwrap()
     }
 
     #[tokio::test]
@@ -251,35 +243,35 @@ mod tests {
         let hashi_object_id = Address::new([9; 32]);
 
         for with_metrics in [false, true] {
-            let mut client = GuardianClient::new(&endpoint)
-                .unwrap()
-                .with_member_auth(tls_private_key.clone(), hashi_object_id);
+            let mut client =
+                GuardianClient::new(&endpoint, tls_private_key.clone(), hashi_object_id).unwrap();
             if with_metrics {
                 client = client.with_metrics(Arc::new(Metrics::new_default()));
             }
-            let status = client.get_guardian_info().await.unwrap_err();
-            assert_eq!(status.code(), tonic::Code::Unimplemented);
+            client.get_guardian_info().await.unwrap_err();
+            client
+                .standard_withdrawal(Default::default())
+                .await
+                .unwrap_err();
 
-            let (path, headers) = seen.lock().unwrap().pop().unwrap();
-            assert_eq!(path, "/sui.hashi.v1alpha.GuardianService/GetGuardianInfo");
-            let auth = sent_member_auth(&headers).expect("member auth header");
+            let requests = std::mem::take(&mut *seen.lock().unwrap());
+            let paths: Vec<&str> = requests.iter().map(|(path, _)| path.as_str()).collect();
             assert_eq!(
-                auth.tls_public_key,
-                tls_private_key.verifying_key().to_bytes()
+                paths,
+                [
+                    "/sui.hashi.v1alpha.GuardianService/GetGuardianInfo",
+                    "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal",
+                ]
             );
-            assert!(auth.verify_signature(hashi_object_id, &path));
-            assert!(auth.is_fresh(now_timestamp_ms()));
+            for (path, headers) in &requests {
+                let auth = sent_member_auth(headers);
+                assert_eq!(
+                    auth.tls_public_key,
+                    tls_private_key.verifying_key().to_bytes()
+                );
+                assert!(auth.verify_signature(hashi_object_id, path));
+                assert!(auth.is_fresh(now_timestamp_ms()));
+            }
         }
-    }
-
-    #[tokio::test]
-    async fn sends_no_member_auth_without_a_key() {
-        let (endpoint, seen) = spawn_recording_stub().await;
-
-        let client = GuardianClient::new(&endpoint).unwrap();
-        client.get_guardian_info().await.unwrap_err();
-
-        let (_, headers) = seen.lock().unwrap().pop().unwrap();
-        assert!(sent_member_auth(&headers).is_none());
     }
 }

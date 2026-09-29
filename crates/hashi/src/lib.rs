@@ -288,7 +288,9 @@ impl Hashi {
                         self.metrics.guardian_enabled.set(1);
                         let _ = self.guardian_client.set(Some(guardian));
                     }
-                    Err(e) => tracing::warn!("{e:#}"),
+                    Err(e) => {
+                        tracing::warn!("Failed to configure guardian client for {endpoint}: {e:#}")
+                    }
                 }
             }
         }
@@ -299,14 +301,12 @@ impl Hashi {
         &self,
         endpoint: &str,
     ) -> anyhow::Result<grpc::guardian_client::GuardianClient> {
-        let guardian = grpc::guardian_client::GuardianClient::new(endpoint)
-            .map_err(|e| anyhow!("Failed to configure guardian client for {endpoint}: {e}"))?;
-        Ok(guardian
-            .with_metrics(self.metrics.clone())
-            .with_member_auth(
-                self.config.tls_private_key()?,
-                self.config.hashi_ids().hashi_object_id,
-            ))
+        let guardian = grpc::guardian_client::GuardianClient::new(
+            endpoint,
+            self.config.tls_private_key()?,
+            self.config.hashi_ids().hashi_object_id,
+        )?;
+        Ok(guardian.with_metrics(self.metrics.clone()))
     }
 
     pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::bitcoin::BitcoinPubkey> {
@@ -873,7 +873,9 @@ impl Hashi {
 
         match guardian_endpoint {
             Some(guardian_endpoint) => {
-                let guardian = self.new_guardian_client(&guardian_endpoint)?;
+                let guardian = self.new_guardian_client(&guardian_endpoint).map_err(|e| {
+                    anyhow!("Failed to configure guardian client for {guardian_endpoint}: {e:#}")
+                })?;
                 tracing::info!("Guardian client configured for {}", guardian.endpoint());
 
                 self.metrics.guardian_enabled.set(1);

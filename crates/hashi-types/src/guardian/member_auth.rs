@@ -16,7 +16,7 @@ use crate::intent::Intent;
 pub const MEMBER_AUTH_METADATA_KEY: &str = "x-hashi-member-auth-bin";
 
 /// How far a token's timestamp may be from the verifier's clock, either way:
-/// the skew the guardian already allows on withdrawal timestamps.
+/// room for node clock skew, and the bound on replaying a captured token.
 pub const MEMBER_AUTH_MAX_SKEW_MS: UnixMillis = 5 * 60 * 1000;
 
 #[derive(Serialize)]
@@ -170,6 +170,18 @@ mod tests {
             signature: signature.to_vec(),
         };
         assert!(!forged.verify_signature(hashi_id, METHOD));
+    }
+
+    #[test]
+    fn wire_format_is_key_then_timestamp_then_signature() {
+        let key = signing_key(0x42);
+        let auth = MemberAuth::sign(&key, Address::ZERO, METHOD, 7);
+
+        let mut expected = key.verifying_key().to_bytes().to_vec();
+        expected.extend(7u64.to_le_bytes());
+        expected.push(64);
+        expected.extend(&auth.signature);
+        assert_eq!(auth.to_bytes(), expected);
     }
 
     #[test]
