@@ -80,8 +80,8 @@ const GUARDIAN_INFO_TTL: Duration = Duration::from_secs(1);
 
 struct CachedInfo {
     at: Instant,
-    /// `writes` when the fetch started.
-    writes: u64,
+    /// `withdrawals` when the fetch started.
+    withdrawals: u64,
     response: proto::GetGuardianInfoResponse,
 }
 
@@ -102,9 +102,9 @@ pub struct CachingGuardianGrpc<S, L> {
     metrics: Arc<ProxyMetrics>,
     info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
     attested_info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
-    /// Writes that reached the guardian. Info fetched before the latest one is
-    /// never served: a leader reading after its finalize must see the new seq.
-    writes: AtomicU64,
+    /// Signed withdrawals this proxy has seen. Info fetched before the latest one
+    /// is never served: a leader reading after its finalize must see the new seq.
+    withdrawals: AtomicU64,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
@@ -133,15 +133,8 @@ impl<S, L> CachingGuardianGrpc<S, L> {
             metrics,
             info: Arc::new(tokio::sync::Mutex::new(None)),
             attested_info: Arc::new(tokio::sync::Mutex::new(None)),
-            writes: AtomicU64::new(0),
+            withdrawals: AtomicU64::new(0),
         }
-    }
-
-    fn wrote<T>(&self, result: Result<T, Status>) -> Result<T, Status> {
-        if result.is_ok() {
-            self.writes.fetch_add(1, Ordering::SeqCst);
-        }
-        result
     }
 
     // The critical section never spans an `.await`, so a sync `std::sync::Mutex`
@@ -249,6 +242,8 @@ where
         }
 
         let response = synthesize_response(&found);
+        // The forward that signed it may have failed or been dropped uncounted.
+        self.withdrawals.fetch_add(1, Ordering::SeqCst);
         self.store(*wid, found.consumed_seq, response.clone());
         self.metrics.outcome(metrics::OUTCOME_S3_HIT);
         info!(
@@ -357,11 +352,10 @@ where
             &self.info
         };
         let mut cached = slot.clone().lock_owned().await;
-        let writes = self.writes.load(Ordering::SeqCst);
-        if let Some(entry) = cached
-            .as_ref()
-            .filter(|entry| entry.writes == writes && entry.at.elapsed() < GUARDIAN_INFO_TTL)
-        {
+        let withdrawals = self.withdrawals.load(Ordering::SeqCst);
+        if let Some(entry) = cached.as_ref().filter(|entry| {
+            entry.withdrawals == withdrawals && entry.at.elapsed() < GUARDIAN_INFO_TTL
+        }) {
             return Ok(Response::new(entry.response.clone()));
         }
         let inner = self.inner.clone();
@@ -374,7 +368,7 @@ where
                 .into_inner();
             *cached = Some(CachedInfo {
                 at: Instant::now(),
-                writes,
+                withdrawals,
                 response: response.clone(),
             });
             Ok(Response::new(response))
@@ -394,7 +388,7 @@ where
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-        self.wrote(self.inner.confirm_ceremony(request).await)
+        self.inner.confirm_ceremony(request).await
     }
 
     async fn operator_init(
@@ -415,7 +409,7 @@ where
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        self.wrote(self.inner.provisioner_rotate_cert(request).await)
+        self.inner.provisioner_rotate_cert(request).await
     }
 
     async fn operator_activate(
@@ -431,7 +425,7 @@ where
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
         let Some((wid, seq)) = extract_wid_and_seq(request.get_ref()) else {
             // No wid to key on; let the enclave produce the precise rejection.
-            return self.wrote(self.inner.standard_withdrawal(request).await);
+            return self.inner.standard_withdrawal(request).await;
         };
 
         if let Some((consumed_seq, cached)) = self.try_hit(&wid) {
@@ -450,10 +444,9 @@ where
         }
 
         self.metrics.outcome(metrics::OUTCOME_FORWARDED);
-        let response_inner = self
-            .wrote(self.inner.standard_withdrawal(request).await)?
-            .into_inner();
+        let response_inner = self.inner.standard_withdrawal(request).await?.into_inner();
 
+        self.withdrawals.fetch_add(1, Ordering::SeqCst);
         self.store(wid, seq, response_inner.clone());
         info!(%wid, seq, "Stored StandardWithdrawal response in cache");
 
@@ -464,14 +457,14 @@ where
         &self,
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.wrote(self.inner.update_committee(request).await)
+        self.inner.update_committee(request).await
     }
 
     async fn update_committee_chain(
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.wrote(self.inner.update_committee_chain(request).await)
+        self.inner.update_committee_chain(request).await
     }
 
     async fn rotate_kp_set(
@@ -635,7 +628,9 @@ mod tests {
             &self,
             _: Request<proto::UpdateCommitteeChainRequest>,
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
+            Ok(Response::new(proto::UpdateCommitteeResponse {
+                current_committee_epoch: Some(0),
+            }))
         }
         async fn rotate_kp_set(
             &self,
@@ -888,7 +883,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn guardian_info_fetched_before_a_write_is_refetched() {
+    async fn guardian_info_fetched_before_a_withdrawal_is_refetched() {
         let (stub, _) = StubGuardian::ok();
         let stub = stub
             .with_info(proto::GetGuardianInfoResponse::default())
@@ -901,7 +896,9 @@ mod tests {
             let cache = cache.clone();
             async move { cache.get_guardian_info(info_request()).await }
         });
-        tokio::task::yield_now().await;
+        while info_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
         cache
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
@@ -910,6 +907,47 @@ mod tests {
 
         cache.get_guardian_info(info_request()).await.unwrap();
         assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guardian_info_is_refetched_after_a_log_replay() {
+        let fixture = replay_fixture(7);
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(stub_info_pb(
+            fixture.enclave_btc_pubkey,
+            fixture.master_g,
+            fixture.consumed_seq + 1,
+        ));
+        let info_calls = stub.info_calls.clone();
+        let store = MemStore::default();
+        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
+        let cache = cache_over(stub, store);
+
+        cache.get_guardian_info(info_request()).await.unwrap();
+        cache
+            .standard_withdrawal(Request::new(fixture.request.clone()))
+            .await
+            .unwrap();
+        cache.get_guardian_info(info_request()).await.unwrap();
+        // Filling the cache, the replay's live integrity read, then the refetch.
+        assert_eq!(info_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn committee_updates_do_not_refetch_guardian_info() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
+        let info_calls = stub.info_calls.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        cache.get_guardian_info(info_request()).await.unwrap();
+        // The guardian answers an empty chain Ok, whoever sends it.
+        cache
+            .update_committee_chain(Request::new(proto::UpdateCommitteeChainRequest::default()))
+            .await
+            .unwrap();
+        cache.get_guardian_info(info_request()).await.unwrap();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
