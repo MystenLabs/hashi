@@ -102,8 +102,8 @@ trait InfoSource: Send + Sync + 'static {
     async fn fetch(&self) -> Result<GuardianInfoView, InfoError>;
 }
 
-/// [`InfoSource`] backed by the enclave's gRPC `GetGuardianInfo`, verifying and
-/// projecting the signed response.
+/// [`InfoSource`] backed by the enclave's gRPC `GetGuardianInfo`, projecting
+/// its self-reported info without requesting attestation.
 struct GrpcInfoSource {
     client: GuardianServiceClient<Channel>,
 }
@@ -114,7 +114,9 @@ impl InfoSource for GrpcInfoSource {
         let raw = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
             .await
             .map_err(|status| InfoError::Unreachable(status.to_string()))?
             .into_inner();

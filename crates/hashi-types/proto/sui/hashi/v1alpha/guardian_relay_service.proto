@@ -21,6 +21,7 @@ service GuardianRelayService {
   // backend when one is configured, else the active guardian (first deploy).
   // KP tooling pins its session from this instead of the node-facing
   // GetGuardianInfo, which always answers for the ACTIVE guardian.
+  // Always includes attestation for KP verification.
   rpc GetProvisioningTargetInfo(GetProvisioningTargetInfoRequest) returns (GetGuardianInfoResponse);
 }
 
