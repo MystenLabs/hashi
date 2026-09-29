@@ -52,7 +52,7 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 #
 # Package stage: runtime image with debug tools
 #
-FROM library/debian@sha256:f18adf4e1d04b1d8ba48025b8e35003f4c748ddd3dd8e875fe4e7d9a9c0dec84
+FROM library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 RUN apt-get update && apt-get -y --no-install-recommends install \
     ca-certificates curl \
