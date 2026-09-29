@@ -273,7 +273,9 @@ mod tests {
         let mut client = GuardianServiceClient::new(channel.clone());
 
         client
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
             .await
             .unwrap();
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);

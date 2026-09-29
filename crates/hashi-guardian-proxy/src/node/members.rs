@@ -148,7 +148,9 @@ impl ChainMemberSource {
         let raw = self
             .guardian
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .get_guardian_info(proto::GetGuardianInfoRequest {
+                include_attestation: false,
+            })
             .await
             .context("GetGuardianInfo")?
             .into_inner();
@@ -302,7 +304,6 @@ mod tests {
     use hashi_types::guardian::GuardianResponse;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
-    use hashi_types::guardian::NitroAttestation;
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -449,7 +450,7 @@ mod tests {
         };
         *stub.info.lock().unwrap() = Some(get_guardian_info_response_to_pb(
             GetGuardianInfoResponse::new(
-                NitroAttestation::new(vec![1, 2, 3]),
+                None,
                 signing_key.verification_key(),
                 GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key),
             ),
