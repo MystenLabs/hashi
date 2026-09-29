@@ -74,8 +74,8 @@ fn unavailable() -> Status {
     Status::unavailable(WID_CACHE_UNAVAILABLE_MSG)
 }
 
-/// `GetGuardianInfo` is public and the enclave mints a fresh Nitro attestation
-/// for every call, so callers share one response for this long.
+/// `GetGuardianInfo` is public and each call takes the enclave's control lock (and
+/// mints an attestation if asked), so callers share one response for this long.
 const GUARDIAN_INFO_TTL: Duration = Duration::from_secs(1);
 
 struct CachedInfo {
@@ -101,6 +101,7 @@ pub struct CachingGuardianGrpc<S, L> {
     network: Network,
     metrics: Arc<ProxyMetrics>,
     info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
+    attested_info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
     /// Writes that reached the guardian. Info fetched before the latest one is
     /// never served: a leader reading after its finalize must see the new seq.
     writes: AtomicU64,
@@ -131,6 +132,7 @@ impl<S, L> CachingGuardianGrpc<S, L> {
             network,
             metrics,
             info: Arc::new(tokio::sync::Mutex::new(None)),
+            attested_info: Arc::new(tokio::sync::Mutex::new(None)),
             writes: AtomicU64::new(0),
         }
     }
@@ -346,9 +348,15 @@ where
     /// deadline on.
     async fn get_guardian_info(
         &self,
-        _request: Request<proto::GetGuardianInfoRequest>,
+        request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let mut cached = self.info.clone().lock_owned().await;
+        let include_attestation = request.into_inner().include_attestation;
+        let slot = if include_attestation {
+            &self.attested_info
+        } else {
+            &self.info
+        };
+        let mut cached = slot.clone().lock_owned().await;
         let writes = self.writes.load(Ordering::SeqCst);
         if let Some(entry) = cached
             .as_ref()
@@ -359,7 +367,9 @@ where
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let response = inner
-                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest::default()))
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                    include_attestation,
+                }))
                 .await?
                 .into_inner();
             *cached = Some(CachedInfo {
@@ -500,6 +510,7 @@ mod tests {
         result: Arc<ResponseFn>,
         info: Option<proto::GetGuardianInfoResponse>,
         info_calls: Arc<AtomicUsize>,
+        attested_info_calls: Arc<AtomicUsize>,
         info_delay: Duration,
         info_saw_deadline: Arc<AtomicBool>,
     }
@@ -513,6 +524,7 @@ mod tests {
                     result: Arc::new(|| Ok(mock_response())),
                     info: None,
                     info_calls: Arc::default(),
+                    attested_info_calls: Arc::default(),
                     info_delay: Duration::ZERO,
                     info_saw_deadline: Arc::default(),
                 },
@@ -528,6 +540,7 @@ mod tests {
                     result: Arc::new(|| Err(Status::failed_precondition("simulated"))),
                     info: None,
                     info_calls: Arc::default(),
+                    attested_info_calls: Arc::default(),
                     info_delay: Duration::ZERO,
                     info_saw_deadline: Arc::default(),
                 },
@@ -556,10 +569,16 @@ mod tests {
             if request.metadata().contains_key("grpc-timeout") {
                 self.info_saw_deadline.store(true, Ordering::SeqCst);
             }
-            assert!(!request.into_inner().include_attestation);
+            let include_attestation = request.into_inner().include_attestation;
+            if include_attestation {
+                self.attested_info_calls.fetch_add(1, Ordering::SeqCst);
+            }
             tokio::time::sleep(self.info_delay).await;
             match &self.info {
-                Some(info) => Ok(Response::new(info.clone())),
+                Some(info) => Ok(Response::new(proto::GetGuardianInfoResponse {
+                    attestation: include_attestation.then(|| vec![1, 2, 3].into()),
+                    ..info.clone()
+                })),
                 None => Err(Status::unavailable("no stub info configured")),
             }
         }
@@ -824,6 +843,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn guardian_info_is_cached_per_attestation_flag() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
+        let info_calls = stub.info_calls.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        for include_attestation in [false, true, false, true] {
+            let response = cache
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
+                    include_attestation,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.attestation.is_some(), include_attestation);
+        }
+        assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn guardian_info_fetch_outlives_callers_and_drops_their_deadline() {
         let (stub, _) = StubGuardian::ok();
         let stub = stub
@@ -1011,6 +1050,7 @@ mod tests {
             // next_seq is carried in guardian info but no longer gated on.
             fixture.consumed_seq + 1,
         ));
+        let attested_info_calls = stub.attested_info_calls.clone();
         let store = MemStore::default();
         store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
         let cache = cache_over(stub, store);
@@ -1022,6 +1062,7 @@ mod tests {
             .into_inner();
 
         assert_eq!(count.load(Ordering::SeqCst), 0, "served from the log");
+        assert_eq!(attested_info_calls.load(Ordering::SeqCst), 0);
         let sigs = &replayed.data.as_ref().unwrap().enclave_signatures;
         assert!(!sigs.is_empty());
         assert_eq!(replayed.signature.as_ref().unwrap().len(), 64);
