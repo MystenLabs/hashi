@@ -256,9 +256,14 @@ mod tests {
         assert!(config.s3_credentials.is_none());
     }
 
+    fn sample_config_yaml() -> String {
+        include_str!("../audit.sample.yaml")
+            .replace("<PCR0_HEX_FROM_VERIFIED_BUILD>", &"11".repeat(48))
+    }
+
     #[test]
     fn clock_skews_default_to_a_looser_bound_before_a_block_time() {
-        let config: Config = serde_yaml::from_str(include_str!("../audit.sample.yaml")).unwrap();
+        let config: Config = serde_yaml::from_str(&sample_config_yaml()).unwrap();
 
         let skew = |source| config.clock_skews.get_skew(source);
         assert_eq!(skew(WithdrawalEventType::E1HashiApproved), Some(300));
@@ -270,7 +275,7 @@ mod tests {
     fn clock_skews_need_an_entry_for_every_event_with_a_successor() {
         let yaml = format!(
             "{}\nclock_skews:\n  - [E2GuardianApproved, 3600]\n",
-            include_str!("../audit.sample.yaml")
+            sample_config_yaml()
         );
 
         let error = serde_yaml::from_str::<Config>(&yaml)
