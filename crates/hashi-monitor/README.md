@@ -84,8 +84,13 @@ next_event_delays:
   - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
   - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Optional: clock skew tolerance (default: 300s)
-# clock_skew: 300
+# Optional: how far each event's successor may occur before it (defaults shown)
+# clock_skews:
+#   - [E1HashiApproved, 300]
+#   - [E2GuardianApproved, 7200]
+
+# Optional: how far a deposit's block time may be after its Sui confirmation (default: 300s)
+# deposit_clock_skew: 300
 
 # Optional: Sui withdrawal history before the guardian window (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600

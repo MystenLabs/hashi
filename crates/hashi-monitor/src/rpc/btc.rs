@@ -483,6 +483,7 @@ mod tests {
     use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
     use crate::config::BtcConfig;
+    use crate::config::ClockSkews;
     use crate::config::Config;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
@@ -508,7 +509,12 @@ mod tests {
                 (WithdrawalEventType::E2GuardianApproved, 200),
             ])
             .expect("valid next event delays"),
-            clock_skew: 10,
+            clock_skews: ClockSkews::new(vec![
+                (WithdrawalEventType::E1HashiApproved, 10),
+                (WithdrawalEventType::E2GuardianApproved, 30),
+            ])
+            .expect("valid clock skews"),
+            deposit_clock_skew: 10,
             withdrawal_predecessor_lookback: 60 * 60,
             deployment: DeploymentConfig {
                 bucket_info: hashi_types::guardian::S3BucketInfo {
