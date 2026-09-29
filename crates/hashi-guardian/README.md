@@ -65,6 +65,9 @@ signed wall-clock timestamp. The fencing argument makes these assumptions:
 
 ## S3 log key format
 
+These keys assume one Hashi deployment and BTC-key lineage per bucket. Epochs
+and sequence numbers are scoped to that bucket, as is the singleton genesis record.
+
 Canonical key layout:
 
 - `init/{session_id}/01-oi-attestation-unsigned.json`
@@ -116,3 +119,7 @@ subsequent ceremonies must rotate the existing key. If an enclave dies after pub
 before the ceremony commit, its replacement chooses a higher sharing sequence.
 Recovery follows the latest completed ceremony and only reads shares under that
 sequence, leaving abandoned attempts unused.
+An abandoned sequence remains occupied while its directory appears in S3 version
+history, including delete markers. Permanently purging all of that history can
+make an uncommitted sequence reusable; completed ceremony records retain the
+committed sequence history.

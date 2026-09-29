@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::log_layout::S3_DIR_CEREMONY;
-use super::super::log_layout::S3_DIR_KP_SHARES;
+use super::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::KpEncryptedShareRoster;
 use crate::guardian::SecretSharingInstance;
@@ -91,9 +91,14 @@ impl CeremonyProposalLogMessage {
         }
     }
 
+    /// The slash-terminated prefix containing ceremony proposals.
+    pub fn object_key_dir() -> String {
+        format!("{}proposed/", KpShareStateLogMessage::root_dir())
+    }
+
     /// `kp-shares/proposed/{session_id}.json` — one proposal per ceremony
     /// enclave session.
     pub fn object_key(session_id: &str) -> String {
-        format!("{S3_DIR_KP_SHARES}/proposed/{session_id}.json")
+        format!("{}{session_id}.json", Self::object_key_dir())
     }
 }

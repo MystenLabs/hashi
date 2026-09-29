@@ -29,7 +29,6 @@ use tracing::info;
 
 mod heartbeat_checks;
 mod limiter_recovery;
-mod sharing_sequence;
 mod verified;
 
 pub use verified::VerifiedLogRecord;
@@ -169,6 +168,37 @@ impl GuardianReader {
         Ok(Some((*msg, session_id)))
     }
 
+    /// Choose a sequence above every completed ceremony and occupied share directory.
+    /// Shares are published before the ceremony commit, so an interrupted attempt
+    /// can occupy a sequence even though no ceremony record exists for it.
+    ///
+    /// This allocates under the single ceremony-writer assumption; it does not
+    /// reserve the sequence. Conditional writes still reject competing records.
+    pub(crate) async fn next_sharing_seq(&mut self) -> GuardianResult<u64> {
+        let mut highest = self
+            .read_latest_ceremony_log(false)
+            .await?
+            .map(|(ceremony, _)| ceremony.sharing_seq());
+        // Count occupied directories even if their records are unreadable or
+        // delete-marked: an interrupted ceremony may have left shares here.
+        let shares_dir = KpShareStateLogMessage::root_dir();
+        let proposals_dir = CeremonyProposalLogMessage::object_key_dir();
+        for directory in self.s3.list_common_prefixes(&shares_dir).await? {
+            if directory == proposals_dir {
+                continue;
+            }
+            let seq = KpShareStateLogMessage::sharing_seq_from_dir(&directory)
+                .map_err(|err| InvalidS3Log(err.to_string()))?;
+            highest = Some(highest.map_or(seq, |previous| previous.max(seq)));
+        }
+        match highest {
+            None => Ok(0),
+            Some(seq) => seq
+                .checked_add(1)
+                .ok_or_else(|| InvalidS3Log("sharing_seq exhausted".into())),
+        }
+    }
+
     /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
     ///
     /// Keys begin with a zero-padded `cert_seq`, so the lexicographically
@@ -185,7 +215,7 @@ impl GuardianReader {
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let (msg, _) = self
+        let msg = self
             .read_kp_share_state_log_at_key(&key, require_current)
             .await?;
         if msg.sharing_seq != sharing_seq {
@@ -200,23 +230,15 @@ impl GuardianReader {
     /// Read and verify an exact encrypted KP-share state written by the current
     /// build.
     ///
-    /// The signed record must match the expected writing session. This lets
-    /// callers verify the snapshot produced by one request even if a later
-    /// request has already advanced the latest state.
+    /// Read the requested sequence even if a later request has already advanced
+    /// the latest state.
     pub async fn read_kp_share_state_log_from_current_build(
         &mut self,
-        session_id: &SessionID,
         sharing_seq: u64,
         cert_seq: u64,
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(sharing_seq, cert_seq);
-        let (message, writing_session) = self.read_kp_share_state_log_at_key(&key, true).await?;
-        if &writing_session != session_id {
-            return Err(InvalidS3Log(format!(
-                "kp-shares writing session {writing_session} differs from expected {session_id}"
-            )));
-        }
-        Ok(message)
+        self.read_kp_share_state_log_at_key(&key, true).await
     }
 
     /// Read and verify the proposal written by one live ceremony session.
@@ -249,7 +271,7 @@ impl GuardianReader {
         &mut self,
         key: &str,
         require_current: bool,
-    ) -> GuardianResult<(KpShareStateLogMessage, SessionID)> {
+    ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are expected to expire, so authenticate the record
         // without claiming that S3 still makes it immutable.
         let record = self
@@ -269,7 +291,7 @@ impl GuardianReader {
             .into_kp_share_state()
             .ok_or_else(|| InvalidS3Log(format!("expected a kp-shares log at {key}")))?;
         log_verified_read(key, &session_id);
-        Ok((msg, session_id))
+        Ok(msg)
     }
 
     /// Read the latest ceremony together with the latest KP-share state for its
@@ -394,7 +416,7 @@ fn log_verified_read(key: &str, session_id: &SessionID) {
 }
 
 #[cfg(test)]
-pub(crate) fn genesis_reader_for_test(
+pub(crate) fn reader_with_record_for_test(
     record: Option<LogRecord>,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
@@ -403,6 +425,7 @@ pub(crate) fn genesis_reader_for_test(
     use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
     use aws_sdk_s3::primitives::ByteStream;
     use aws_sdk_s3::primitives::DateTime;
+    use aws_sdk_s3::types::CommonPrefix;
     use aws_sdk_s3::types::ObjectLockMode;
     use aws_sdk_s3::types::ObjectVersion;
     use aws_sdk_s3::Client;
@@ -418,15 +441,36 @@ pub(crate) fn genesis_reader_for_test(
     if let Some(record) = &record {
         keys.push(record.object_key().to_string());
     }
-    let prefix = Arc::new(Mutex::new(String::new()));
-    let request_prefix = prefix.clone();
+    let request = Arc::new(Mutex::new((String::new(), false)));
+    let captured_request = request.clone();
     let list = mock!(Client::list_object_versions)
         .match_requests(move |req| {
-            *request_prefix.lock().unwrap() = req.prefix().unwrap_or_default().to_string();
+            *captured_request.lock().unwrap() = (
+                req.prefix().unwrap_or_default().to_string(),
+                req.delimiter() == Some("/"),
+            );
             true
         })
         .then_output(move || {
-            let prefix = prefix.lock().unwrap();
+            let (prefix, directories) = &*request.lock().unwrap();
+            if *directories {
+                let prefixes: std::collections::BTreeSet<_> = keys
+                    .iter()
+                    .filter_map(|key| {
+                        let rest = key.strip_prefix(prefix)?;
+                        let slash = rest.find('/')?;
+                        Some(format!("{prefix}{}", &rest[..=slash]))
+                    })
+                    .collect();
+                return ListObjectVersionsOutput::builder()
+                    .set_common_prefixes(Some(
+                        prefixes
+                            .into_iter()
+                            .map(|prefix| CommonPrefix::builder().prefix(prefix).build())
+                            .collect(),
+                    ))
+                    .build();
+            }
             ListObjectVersionsOutput::builder()
                 .set_versions(Some(
                     keys.iter()
@@ -438,8 +482,11 @@ pub(crate) fn genesis_reader_for_test(
         });
     let config = InitConfig::mock_for_testing();
     let policy = S3ObjectLockPolicy::for_environment(config.deployment().retention_environment);
+    let record_key = record
+        .as_ref()
+        .map(|record| record.object_key().to_string());
     let get = mock!(Client::get_object)
-        .match_requests(|req| req.key() == Some(GenesisLogMessage::object_key().as_str()))
+        .match_requests(move |req| req.key() == record_key.as_deref())
         .then_output(move || {
             let record = record.as_ref().unwrap();
             GetObjectOutput::builder()
@@ -465,4 +512,109 @@ pub(crate) fn genesis_reader_for_test(
         ),
     );
     reader
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::mock_logger_with_layout;
+    use crate::test_utils::OperatorInitTestArgs;
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::SecretSharingInstance;
+
+    async fn next(keys: &[&str]) -> GuardianResult<u64> {
+        let s3 = mock_logger_with_layout(keys.iter().map(|key| key.to_string()));
+        GuardianReader::from_s3_client(s3, DeploymentConfig::mock_for_testing())
+            .next_sharing_seq()
+            .await
+    }
+
+    async fn next_after_ceremony(sharing_seq: u64, keys: &[&str]) -> GuardianResult<u64> {
+        let state = OperatorInitTestArgs::default().ceremony_state;
+        let old_instance = state.secret_sharing_instance;
+        let instance = SecretSharingInstance::new(
+            old_instance.commitments().clone(),
+            old_instance.num_shares(),
+            old_instance.threshold(),
+            sharing_seq,
+        )
+        .unwrap();
+        let signing_key = GuardianSignKeyPair::from([42; 32]);
+        let record = LogRecord::new(
+            SessionID::from_signing_pubkey(&signing_key.verification_key()),
+            LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+                instance,
+                btc_master_pubkey: state.btc_master_pubkey,
+            })),
+            &signing_key,
+        );
+        reader_with_record_for_test(
+            Some(record),
+            signing_key.verification_key(),
+            keys.iter().map(|key| key.to_string()).collect(),
+        )
+        .next_sharing_seq()
+        .await
+    }
+
+    #[tokio::test]
+    async fn empty_bucket_and_proposals_do_not_consume_sequences() {
+        assert_eq!(next(&[]).await.unwrap(), 0);
+        assert_eq!(next(&["kp-shares/proposed/session.json"]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn skips_initial_shares_from_abandoned_setup() {
+        assert_eq!(
+            next(&["kp-shares/00000000000000000000/00000000000000000000.json"])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_abandoned_rotations_without_reusing_gaps() {
+        assert_eq!(
+            next_after_ceremony(
+                6,
+                &[
+                    "kp-shares/00000000000000000006/00000000000000000099.json",
+                    "kp-shares/00000000000000000007/00000000000000000000.json",
+                    "kp-shares/00000000000000000009/00000000000000000000.json",
+                ]
+            )
+            .await
+            .unwrap(),
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_ceremony_consumes_sequence_even_after_shares_are_purged() {
+        assert_eq!(next_after_ceremony(6, &[]).await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn delete_marked_orphan_still_consumes_its_sequence() {
+        let s3 = crate::test_utils::mock_logger_with_deleted_layout(
+            std::iter::empty(),
+            ["kp-shares/00000000000000000007/00000000000000000000.json".to_string()],
+        );
+        let mut reader = GuardianReader::from_s3_client(s3, DeploymentConfig::mock_for_testing());
+        assert_eq!(reader.next_sharing_seq().await.unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_or_exhausted_sequences() {
+        assert!(next_after_ceremony(u64::MAX, &[]).await.is_err());
+        for key in [
+            "kp-shares/9/record.json",
+            "kp-shares/bad/record.json",
+            "kp-shares/18446744073709551615/record.json",
+        ] {
+            assert!(next(&[key]).await.is_err(), "{key}");
+        }
+    }
 }
