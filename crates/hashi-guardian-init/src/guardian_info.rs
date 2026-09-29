@@ -20,11 +20,9 @@ pub async fn verified_live_guardian_info(
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
     let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {
-            include_attestation: true,
-        })
+        .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {})
         .await
-        .context("GetGuardianInfo RPC failed")?
+        .context("GetAttestedGuardianInfo RPC failed")?
         .into_inner();
     verify_info_response(info_pb, current_build)
 }
@@ -67,7 +65,7 @@ pub async fn verified_ceremony_guardian_info(
     Ok(verified)
 }
 
-/// `GetProvisioningTargetInfo` from `endpoint`, or its `GetGuardianInfo` when
+/// `GetProvisioningTargetInfo` from `endpoint`, or its `GetAttestedGuardianInfo` when
 /// it serves no relay, with the RPC that answered. A bare guardian answers
 /// `Unimplemented`; so does an ingress that hides the relay service (tonic
 /// maps an HTTP 404 to it), which the caller's lifecycle check catches.
@@ -88,13 +86,11 @@ async fn ceremony_guardian_info_pb(
         Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
         Err(status) if status.code() == Code::Unimplemented => Ok((
             GuardianServiceClient::new(channel)
-                .get_guardian_info(pb::GetGuardianInfoRequest {
-                    include_attestation: true,
-                })
+                .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {})
                 .await
-                .context("GetGuardianInfo RPC failed")?
+                .context("GetAttestedGuardianInfo RPC failed")?
                 .into_inner(),
-            "GetGuardianInfo",
+            "GetAttestedGuardianInfo",
         )),
         Err(status) => Err(status).context("GetProvisioningTargetInfo RPC failed"),
     }
@@ -132,7 +128,7 @@ mod tests {
         }
     }
 
-    /// A guardian whose `GetGuardianInfo` carries `[tag; 32]`.
+    /// A guardian whose `GetAttestedGuardianInfo` carries `[tag; 32]`.
     #[derive(Clone)]
     struct Guardian(u8);
 
@@ -140,9 +136,14 @@ mod tests {
     impl GuardianService for Guardian {
         async fn get_guardian_info(
             &self,
-            request: Request<pb::GetGuardianInfoRequest>,
+            _: Request<pb::GetGuardianInfoRequest>,
         ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
-            assert!(request.into_inner().include_attestation);
+            panic!("verification must use the attested RPC")
+        }
+        async fn get_attested_guardian_info(
+            &self,
+            _: Request<pb::GetAttestedGuardianInfoRequest>,
+        ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
             Ok(Response::new(tagged(self.0)))
         }
         async fn setup_new_key(
@@ -257,6 +258,6 @@ mod tests {
 
         let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xA; 32]);
-        assert_eq!(rpc, "GetGuardianInfo");
+        assert_eq!(rpc, "GetAttestedGuardianInfo");
     }
 }

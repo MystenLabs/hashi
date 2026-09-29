@@ -6,8 +6,12 @@ import "sui/hashi/v1alpha/signature.proto";
 import "sui/hashi/v1alpha/utxo.proto";
 
 service GuardianService {
-  // Query the service for general information about its current state.
+  // Query signed guardian state without generating an attestation. May be cached.
   rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
+
+  // KP/operator query: generate a fresh attestation alongside signed guardian info.
+  // Never cached. Access can be restricted independently of GetGuardianInfo.
+  rpc GetAttestedGuardianInfo(GetAttestedGuardianInfoRequest) returns (GetGuardianInfoResponse);
 
   // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
@@ -46,15 +50,17 @@ service GuardianService {
 }
 
 message GetGuardianInfoRequest {
-  // Generate a Nitro attestation document for callers that verify it (KPs and operators).
-  bool include_attestation = 1;
+  reserved 1;
+  reserved "include_attestation";
 }
+
+message GetAttestedGuardianInfoRequest {}
 
 message GetGuardianInfoResponse {
   reserved 4;
   reserved "encrypted_shares";
 
-  // AWS Nitro attestation document; absent unless include_attestation is true.
+  // AWS Nitro attestation document; present only for attested info RPCs.
   optional bytes attestation = 1;
 
   // Guardian signing public key (Ed25519, 32 bytes).

@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The cache behind gRPC `GetGuardianInfo`, which anyone may call: nodes, KPs
-//! (`key-provisioner rotate-cert` asks for the attestation) and the public. Every
-//! call takes the enclave's control lock and an attested one mints a Nitro
-//! attestation, so callers share one response per attestation flag for a second.
+//! The single-flight cache for ordinary gRPC `GetGuardianInfo` requests.
+//! Attested queries bypass this cache and always reach the enclave.
 
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_server::GuardianService;
@@ -28,8 +26,7 @@ struct CachedInfo {
 
 pub struct GuardianInfoCache<S> {
     guardian: Arc<S>,
-    unattested: Arc<Mutex<Option<CachedInfo>>>,
-    attested: Arc<Mutex<Option<CachedInfo>>>,
+    cached: Arc<Mutex<Option<CachedInfo>>>,
     generation: AtomicU64,
 }
 
@@ -37,8 +34,7 @@ impl<S> GuardianInfoCache<S> {
     pub fn new(guardian: Arc<S>) -> Self {
         Self {
             guardian,
-            unattested: Arc::new(Mutex::new(None)),
-            attested: Arc::new(Mutex::new(None)),
+            cached: Arc::new(Mutex::new(None)),
             generation: AtomicU64::new(0),
         }
     }
@@ -54,16 +50,8 @@ impl<S: GuardianService> GuardianInfoCache<S> {
     /// The fetch holds the lock, so a burst shares one successful backend call. It
     /// runs detached with a fresh request: a caller can't cancel it or pass its
     /// deadline on.
-    pub async fn get(
-        &self,
-        include_attestation: bool,
-    ) -> Result<proto::GetGuardianInfoResponse, Status> {
-        let slot = if include_attestation {
-            &self.attested
-        } else {
-            &self.unattested
-        };
-        let mut cached = slot.clone().lock_owned().await;
+    pub async fn get(&self) -> Result<proto::GetGuardianInfoResponse, Status> {
+        let mut cached = self.cached.clone().lock_owned().await;
         let generation = self.generation.load(Ordering::SeqCst);
         if let Some(entry) = cached
             .as_ref()
@@ -74,9 +62,7 @@ impl<S: GuardianService> GuardianInfoCache<S> {
         let guardian = self.guardian.clone();
         tokio::spawn(async move {
             let response = guardian
-                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                    include_attestation,
-                }))
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
                 .await?
                 .into_inner();
             *cached = Some(CachedInfo {
@@ -116,18 +102,21 @@ mod tests {
 
     #[tonic::async_trait]
     impl GuardianService for StubGuardian {
+        async fn get_attested_guardian_info(
+            &self,
+            _: Request<proto::GetAttestedGuardianInfoRequest>,
+        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            unimplemented!("ordinary info must not request attestation")
+        }
+
         async fn get_guardian_info(
             &self,
-            request: Request<proto::GetGuardianInfoRequest>,
+            _request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let include_attestation = request.into_inner().include_attestation;
             tokio::time::sleep(self.delay).await;
             match &self.info {
-                Some(info) => Ok(Response::new(proto::GetGuardianInfoResponse {
-                    attestation: include_attestation.then(|| vec![1, 2, 3].into()),
-                    ..info.clone()
-                })),
+                Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
             }
         }
@@ -203,23 +192,12 @@ mod tests {
         // Slow enough that the burst overlaps the fetch.
         let (cache, calls) = cache_over(StubGuardian::answering_after(Duration::from_millis(100)));
 
-        let (a, b, c) = tokio::join!(cache.get(false), cache.get(false), cache.get(false));
+        let (a, b, c) = tokio::join!(cache.get(), cache.get(), cache.get());
         assert!(a.is_ok() && b.is_ok() && c.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         tokio::time::advance(TTL).await;
-        cache.get(false).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn each_attestation_flag_has_its_own_entry() {
-        let (cache, calls) = cache_over(StubGuardian::answering_after(Duration::ZERO));
-
-        for include_attestation in [false, true, false, true] {
-            let response = cache.get(include_attestation).await.unwrap();
-            assert_eq!(response.attestation.is_some(), include_attestation);
-        }
+        cache.get().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -227,14 +205,12 @@ mod tests {
     async fn the_fetch_outlives_a_caller_that_gives_up() {
         let (cache, calls) = cache_over(StubGuardian::answering_after(Duration::from_millis(100)));
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), cache.get(false))
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(Duration::from_millis(10), cache.get())
+            .await
+            .is_err());
 
         // The fetch still completes and fills the cache for the next caller.
-        cache.get(false).await.unwrap();
+        cache.get().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -244,7 +220,7 @@ mod tests {
 
         let in_flight = tokio::spawn({
             let cache = cache.clone();
-            async move { cache.get(false).await }
+            async move { cache.get().await }
         });
         while calls.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -252,7 +228,7 @@ mod tests {
         cache.invalidate();
         in_flight.await.unwrap().unwrap();
 
-        cache.get(false).await.unwrap();
+        cache.get().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -260,8 +236,8 @@ mod tests {
     async fn errors_are_not_cached() {
         let (cache, calls) = cache_over(StubGuardian::default());
 
-        cache.get(false).await.unwrap_err();
-        cache.get(false).await.unwrap_err();
+        cache.get().await.unwrap_err();
+        cache.get().await.unwrap_err();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

@@ -1504,7 +1504,8 @@ pub mod guardian_relay_service_client {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
-        /// Always includes attestation for KP verification.
+        /// Always includes a fresh attestation for KP verification; never cached.
+        /// Apply the same access policy as GuardianService/GetAttestedGuardianInfo.
         pub async fn get_provisioning_target_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetProvisioningTargetInfoRequest>,
@@ -1560,7 +1561,8 @@ pub mod guardian_relay_service_server {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
-        /// Always includes attestation for KP verification.
+        /// Always includes a fresh attestation for KP verification; never cached.
+        /// Apply the same access policy as GuardianService/GetAttestedGuardianInfo.
         async fn get_provisioning_target_info(
             &self,
             request: tonic::Request<super::GetProvisioningTargetInfoRequest>,
@@ -1800,14 +1802,12 @@ pub mod guardian_relay_service_server {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetGuardianInfoRequest {
-    /// Generate a Nitro attestation document for callers that verify it (KPs and operators).
-    #[prost(bool, tag = "1")]
-    pub include_attestation: bool,
-}
+pub struct GetGuardianInfoRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAttestedGuardianInfoRequest {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation document; absent unless include_attestation is true.
+    /// AWS Nitro attestation document; present only for attested info RPCs.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
     /// Guardian signing public key (Ed25519, 32 bytes).
@@ -2573,7 +2573,7 @@ pub mod guardian_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Query the service for general information about its current state.
+        /// Query signed guardian state without generating an attestation. May be cached.
         pub async fn get_guardian_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetGuardianInfoRequest>,
@@ -2599,6 +2599,37 @@ pub mod guardian_service_client {
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.GuardianService",
                         "GetGuardianInfo",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// KP/operator query: generate a fresh attestation alongside signed guardian info.
+        /// Never cached. Access can be restricted independently of GetGuardianInfo.
+        pub async fn get_attested_guardian_info(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAttestedGuardianInfoRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/GetAttestedGuardianInfo",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "GetAttestedGuardianInfo",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -2915,10 +2946,19 @@ pub mod guardian_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with GuardianServiceServer.
     #[async_trait]
     pub trait GuardianService: std::marker::Send + std::marker::Sync + 'static {
-        /// Query the service for general information about its current state.
+        /// Query signed guardian state without generating an attestation. May be cached.
         async fn get_guardian_info(
             &self,
             request: tonic::Request<super::GetGuardianInfoRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Status,
+        >;
+        /// KP/operator query: generate a fresh attestation alongside signed guardian info.
+        /// Never cached. Access can be restricted independently of GetGuardianInfo.
+        async fn get_attested_guardian_info(
+            &self,
+            request: tonic::Request<super::GetAttestedGuardianInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetGuardianInfoResponse>,
             tonic::Status,
@@ -3117,6 +3157,57 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetGuardianInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/GetAttestedGuardianInfo" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAttestedGuardianInfoSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::GetAttestedGuardianInfoRequest>
+                    for GetAttestedGuardianInfoSvc<T> {
+                        type Response = super::GetGuardianInfoResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetAttestedGuardianInfoRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::get_attested_guardian_info(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetAttestedGuardianInfoSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -19,7 +19,6 @@ use super::DeploymentConfig;
 use super::DeploymentConfigSummary;
 use super::EnclaveLifecycle;
 use super::GenesisState;
-use super::GetGuardianInfoRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -603,14 +602,6 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             .try_into()?;
 
         Ok(InitConfig::new(limiter_config, deployment))
-    }
-}
-
-impl From<pb::GetGuardianInfoRequest> for GetGuardianInfoRequest {
-    fn from(request: pb::GetGuardianInfoRequest) -> Self {
-        Self {
-            include_attestation: request.include_attestation,
-        }
     }
 }
 

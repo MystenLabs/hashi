@@ -114,9 +114,7 @@ impl InfoSource for GrpcInfoSource {
         let raw = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            })
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .map_err(|status| InfoError::Unreachable(status.to_string()))?
             .into_inner();

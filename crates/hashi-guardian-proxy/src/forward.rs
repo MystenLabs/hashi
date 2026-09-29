@@ -67,6 +67,16 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         self.client.clone().get_guardian_info(request).await
     }
 
+    async fn get_attested_guardian_info(
+        &self,
+        request: Request<proto::GetAttestedGuardianInfoRequest>,
+    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        self.client
+            .clone()
+            .get_attested_guardian_info(request)
+            .await
+    }
+
     async fn standard_withdrawal(
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
@@ -168,11 +178,29 @@ mod tests {
     struct StubGuardian {
         standard_withdrawal_calls: Arc<AtomicUsize>,
         get_guardian_info_calls: Arc<AtomicUsize>,
+        get_attested_guardian_info_calls: Arc<AtomicUsize>,
         confirm_ceremony_calls: Arc<AtomicUsize>,
     }
 
     #[tonic::async_trait]
     impl GuardianService for StubGuardian {
+        async fn get_attested_guardian_info(
+            &self,
+            request: Request<proto::GetAttestedGuardianInfoRequest>,
+        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert_eq!(
+                request.metadata().get("x-attestation-test").unwrap(),
+                "forwarded"
+            );
+            let call = self
+                .get_attested_guardian_info_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(proto::GetGuardianInfoResponse {
+                attestation: Some(vec![call as u8].into()),
+                ..Default::default()
+            }))
+        }
+
         async fn standard_withdrawal(
             &self,
             _: Request<proto::SignedStandardWithdrawalRequest>,
@@ -337,11 +365,35 @@ mod tests {
 
         // A non-withdrawal node RPC passes through to the stub.
         proxy
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            }))
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
             .await
             .unwrap();
+        assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn attested_info_bypasses_cache_and_preserves_metadata() {
+        let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
+        for expected in 0..3u8 {
+            proxy
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
+                .await
+                .unwrap();
+            let mut request = Request::new(proto::GetAttestedGuardianInfoRequest {});
+            request
+                .metadata_mut()
+                .insert("x-attestation-test", "forwarded".parse().unwrap());
+            let response = proxy
+                .get_attested_guardian_info(request)
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.attestation.unwrap().as_ref(), &[expected]);
+        }
+        assert_eq!(
+            stub.get_attested_guardian_info_calls.load(Ordering::SeqCst),
+            3
+        );
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
