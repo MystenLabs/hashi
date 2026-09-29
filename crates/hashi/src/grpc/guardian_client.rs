@@ -248,7 +248,7 @@ mod tests {
             if with_metrics {
                 client = client.with_metrics(Arc::new(Metrics::new_default()));
             }
-            client.get_guardian_info().await.unwrap_err();
+            client.get_guardian_info(false).await.unwrap_err();
             client
                 .standard_withdrawal(Default::default())
                 .await
