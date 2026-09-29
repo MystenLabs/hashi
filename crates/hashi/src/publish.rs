@@ -121,17 +121,33 @@ pub struct BitcoinConfigOverrides {
 }
 
 impl BitcoinConfigOverrides {
-    /// Overrides are a test-network convenience: a Sui mainnet launch keeps
-    /// Move's `init_defaults`, so fast devnet values can't reach mainnet.
+    // Move's `init_defaults`, the floor for a Sui mainnet launch.
+    const MAINNET_MIN_CONFIRMATION_THRESHOLD: u64 = 6;
+    const MAINNET_MIN_DEPOSIT_TIME_DELAY_MS: u64 = 10 * 60 * 1_000;
+
+    /// Refuse Sui mainnet overrides below the defaults: fewer confirmations let
+    /// a reorg mint against a deposit that no longer exists, and a shorter
+    /// delay shrinks the window to pause before a bad mint.
     pub fn check_for_sui_chain(&self, sui_chain_id: &str) -> Result<()> {
         if sui_chain_id != crate::constants::SUI_MAINNET_CHAIN_ID {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.confirmation_threshold.is_none() && self.deposit_time_delay_ms.is_none(),
-            "refusing Bitcoin config overrides on Sui mainnet: a mainnet launch keeps \
-             the Move defaults"
-        );
+        if let Some(threshold) = self.confirmation_threshold {
+            anyhow::ensure!(
+                threshold >= Self::MAINNET_MIN_CONFIRMATION_THRESHOLD,
+                "refusing bitcoin_confirmation_threshold {threshold} on Sui mainnet: \
+                 it must be at least {}",
+                Self::MAINNET_MIN_CONFIRMATION_THRESHOLD
+            );
+        }
+        if let Some(delay_ms) = self.deposit_time_delay_ms {
+            anyhow::ensure!(
+                delay_ms >= Self::MAINNET_MIN_DEPOSIT_TIME_DELAY_MS,
+                "refusing bitcoin_deposit_time_delay_ms {delay_ms} on Sui mainnet: \
+                 it must be at least {}",
+                Self::MAINNET_MIN_DEPOSIT_TIME_DELAY_MS
+            );
+        }
         Ok(())
     }
 }
@@ -413,14 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn only_sui_mainnet_refuses_overrides() {
-        overrides(None, None)
-            .check_for_sui_chain(SUI_MAINNET_CHAIN_ID)
-            .unwrap();
-        for (threshold, delay_ms) in [(Some(12), None), (None, Some(0))] {
-            overrides(threshold, delay_ms)
-                .check_for_sui_chain(SUI_TESTNET_CHAIN_ID)
-                .unwrap();
+    fn sui_mainnet_refuses_overrides_below_the_defaults() {
+        for (threshold, delay_ms) in [(Some(5), None), (None, Some(599_999)), (Some(2), Some(0))] {
             let err = overrides(threshold, delay_ms)
                 .check_for_sui_chain(SUI_MAINNET_CHAIN_ID)
                 .unwrap_err();
@@ -428,8 +438,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sui_mainnet_accepts_the_defaults_or_higher() {
+        for (threshold, delay_ms) in [
+            (None, None),
+            (Some(6), Some(600_000)),
+            (Some(12), Some(3_600_000)),
+        ] {
+            overrides(threshold, delay_ms)
+                .check_for_sui_chain(SUI_MAINNET_CHAIN_ID)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn other_sui_chains_accept_any_override() {
+        overrides(Some(0), Some(0))
+            .check_for_sui_chain(SUI_TESTNET_CHAIN_ID)
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn launch_tx_refuses_overrides_on_sui_mainnet() {
+    async fn launch_tx_refuses_a_zero_deposit_delay_on_sui_mainnet() {
         let mut client = Client::new("http://127.0.0.1:1").unwrap();
         let ids = HashiIds {
             package_id: Address::ZERO,
@@ -452,7 +482,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.to_string().contains("overrides on Sui mainnet"),
+            err.to_string().contains("bitcoin_deposit_time_delay_ms"),
             "{err}"
         );
     }
