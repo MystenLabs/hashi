@@ -7,14 +7,11 @@
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
 //! ceremony guardian, which is the relay's backend. Wrapped by
-//! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
+//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
 
 use hashi_types::guardian::CeremonyConfirmationRequest;
-use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::KpSigningIntent;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -24,8 +21,9 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
-use crate::roster::RosterCache;
-use crate::widlog::LogStore;
+use crate::kp;
+use crate::kp::roster::RosterCache;
+use crate::log_store::LogStore;
 
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
@@ -48,18 +46,6 @@ impl<L: LogStore> Forwarding<L> {
             roster,
         }
     }
-
-    /// Admission control only: the enclave repeats both checks. Signature
-    /// first because it needs no roster read.
-    async fn admit<T, P>(&self, request: &P) -> Result<(), Status>
-    where
-        T: KpSigningIntent,
-        P: Clone,
-        KpSigned<T>: TryFrom<P, Error = GuardianError>,
-    {
-        let signer = verify_kp_signature::<T, P>(request)?.signer_fingerprint();
-        self.roster.authorize(&signer).await
-    }
 }
 
 fn denied(rpc: &str) -> Status {
@@ -67,20 +53,6 @@ fn denied(rpc: &str) -> Status {
         "{rpc} is not served by the guardian proxy; operator calls reach the \
          guardian directly and KP shares use SingleProvisionerInit"
     ))
-}
-
-fn verify_kp_signature<T, P>(request: &P) -> Result<KpSigned<T>, Status>
-where
-    T: KpSigningIntent,
-    P: Clone,
-    KpSigned<T>: TryFrom<P, Error = GuardianError>,
-{
-    let signed_request = KpSigned::<T>::try_from(request.clone())
-        .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
-    signed_request
-        .verify_signature()
-        .map_err(|e| Status::unauthenticated(e.to_string()))?;
-    Ok(signed_request)
 }
 
 // Each method clones the cheap channel-backed client and forwards the whole
@@ -119,8 +91,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        self.admit::<ProvisionerRotateCertRequest, _>(request.get_ref())
-            .await?;
+        let signed = kp::parse::<ProvisionerRotateCertRequest, _>(request.get_ref())?;
+        kp::admit(&self.roster, &signed).await?;
         let response = self.client.clone().provisioner_rotate_cert(request).await?;
         // The enclave has committed the replacement cert to the share log, so
         // drop the cached roster: otherwise the new cert is rejected until the
@@ -135,8 +107,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-        self.admit::<CeremonyConfirmationRequest, _>(request.get_ref())
-            .await?;
+        let signed = kp::parse::<CeremonyConfirmationRequest, _>(request.get_ref())?;
+        kp::admit(&self.roster, &signed).await?;
         self.ceremony_client.clone().confirm_ceremony(request).await
     }
 
@@ -181,7 +153,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::CachingGuardianGrpc;
+    use crate::node::cache::CachingGuardianGrpc;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -296,7 +268,7 @@ mod tests {
         })
     }
 
-    type StubStore = crate::widlog::test_store::MemStore;
+    type StubStore = crate::log_store::test_store::MemStore;
 
     async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
         let stub = StubGuardian::default();

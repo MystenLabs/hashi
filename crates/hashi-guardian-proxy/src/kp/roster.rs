@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use tonic::Status;
 use tracing::warn;
 
-use crate::widlog::LogStore;
+use crate::log_store::LogStore;
 
 /// The committed roster only changes at a ceremony, a re-deal, or a cert
 /// rotation — and rotation invalidates explicitly — so a minute of staleness
@@ -136,7 +136,7 @@ impl<L: LogStore> RosterCache<L> {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
 
     /// Commit a one-cert-per-share roster at `sharing_seq`, in the layout the
     /// enclave writes today.
@@ -264,7 +264,7 @@ fn parse_recipient_fingerprint(label: &str) -> anyhow::Result<Fingerprint> {
 mod tests {
     use super::test_utils::seed_roster;
     use super::*;
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
     use std::sync::atomic::Ordering;
 
     const FP_A: &str = "AAAABBBBCCCCDDDDEEEE11112222333344445555";
