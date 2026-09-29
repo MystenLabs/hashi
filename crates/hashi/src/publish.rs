@@ -121,7 +121,7 @@ pub struct BitcoinConfigOverrides {
 }
 
 impl BitcoinConfigOverrides {
-    /// Move's `init_defaults`, the floor for a Sui mainnet launch.
+    // Move's `init_defaults`, the floor for a Sui mainnet launch.
     const MAINNET_MIN_CONFIRMATION_THRESHOLD: u64 = 6;
     const MAINNET_MIN_DEPOSIT_TIME_DELAY_MS: u64 = 10 * 60 * 1_000;
 

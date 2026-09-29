@@ -1838,9 +1838,9 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
 
     // The chain the launch lands on, from the fullnode itself (the RPC URL
     // defaults to mainnet). Refuse a Bitcoin chain the protocol never pairs
-    // with it, or overrides it doesn't allow, here, before the UpgradeCap
-    // lookup and the confirmation prompt; the builder's own checks only run
-    // after the operator answers.
+    // with it, and overrides it doesn't allow, before the UpgradeCap lookup
+    // and the confirmation prompt; the builder's own checks only run after
+    // the operator answers.
     let sui_chain_id = crate::sui_rpc_client::fetch_sui_chain_id(&mut client).await?;
     print_info(&format!("Sui chain ID: {sui_chain_id}"));
     crate::constants::check_sui_bitcoin_chain_pairing(&sui_chain_id, &bitcoin_chain_id)?;
