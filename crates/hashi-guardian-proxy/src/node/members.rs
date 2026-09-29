@@ -45,11 +45,9 @@ const PAGE_SIZE: u32 = 1000;
 
 #[derive(Debug)]
 pub struct MemberSnapshot {
-    /// The deployment whose committees the allowlist follows.
-    pub hashi_object_id: Address,
     /// The members' registered TLS public keys.
     pub members: HashSet<[u8; 32]>,
-    /// Checkpoint time of the Hashi object read.
+    /// Checkpoint time of the stalest read it was built from.
     pub checkpoint_timestamp_ms: u64,
 }
 
@@ -123,12 +121,11 @@ impl MemberAllowlist {
         self.metrics
             .member_snapshot_timestamp_seconds
             .set(unix_millis_to_seconds(snapshot.checkpoint_timestamp_ms) as i64);
-        if latest.as_ref().is_none_or(|previous| {
-            previous.hashi_object_id != snapshot.hashi_object_id
-                || previous.members != snapshot.members
-        }) {
+        if latest
+            .as_ref()
+            .is_none_or(|previous| previous.members != snapshot.members)
+        {
             info!(
-                hashi_object_id = %snapshot.hashi_object_id,
                 members = snapshot.members.len(),
                 "Committee member allowlist changed."
             );
@@ -175,7 +172,10 @@ impl ChainMemberSource {
         let id = info
             .hashi_object_id
             .context("the guardian has no Hashi object id yet")?;
-        Ok(*self.hashi_object_id.get_or_init(|| id))
+        Ok(*self.hashi_object_id.get_or_init(|| {
+            info!(hashi_object_id = %id, "Following this Hashi object's committees.");
+            id
+        }))
     }
 }
 
@@ -197,7 +197,7 @@ pub async fn read_snapshot(
         .get_object(contents_request(&hashi_object_id))
         .await
         .with_context(|| format!("get Hashi object {hashi_object_id}"))?;
-    let checkpoint_timestamp_ms = response
+    let root_timestamp_ms = response
         .timestamp_ms()
         .context("the Hashi object read has no checkpoint timestamp")?;
     let root: move_types::Hashi = response
@@ -224,27 +224,49 @@ pub async fn read_snapshot(
         }
     }
 
+    let (members, members_timestamp_ms) =
+        read_member_keys(&mut sui, committee_set.members.id, &committee).await?;
+    Ok(MemberSnapshot {
+        members,
+        // Each read can reach a different fullnode behind a load balancer.
+        checkpoint_timestamp_ms: root_timestamp_ms.min(members_timestamp_ms),
+    })
+}
+
+/// The registered TLS keys of `committee`'s members, and the checkpoint time of
+/// the stalest page they were read from.
+async fn read_member_keys(
+    sui: &mut sui_rpc::Client,
+    members_bag: Address,
+    committee: &HashSet<Address>,
+) -> anyhow::Result<(HashSet<[u8; 32]>, u64)> {
     // The fullnode returns empty entries for a mask of `value` alone.
     let mask = FieldMask::from_paths([
         DynamicField::path_builder().name().finish(),
         DynamicField::path_builder().value().finish(),
     ]);
     let mut members = HashSet::new();
+    let mut checkpoint_timestamp_ms = u64::MAX;
     let mut page_token = None;
     loop {
         let mut request = ListDynamicFieldsRequest::default()
-            .with_parent(committee_set.members.id)
+            .with_parent(members_bag)
             .with_page_size(PAGE_SIZE)
             .with_read_mask(mask.clone());
         if let Some(token) = page_token.take() {
             request = request.with_page_token(token);
         }
-        let page = sui
+        let response = sui
             .state_client()
             .list_dynamic_fields(request)
             .await
-            .context("list committee members")?
-            .into_inner();
+            .context("list committee members")?;
+        checkpoint_timestamp_ms = checkpoint_timestamp_ms.min(
+            response
+                .timestamp_ms()
+                .context("a committee member page has no checkpoint timestamp")?,
+        );
+        let page = response.into_inner();
         for field in &page.dynamic_fields {
             let info: move_types::MemberInfo =
                 field.value().deserialize().context("decode MemberInfo")?;
@@ -260,11 +282,7 @@ pub async fn read_snapshot(
             None => break,
         }
     }
-    Ok(MemberSnapshot {
-        hashi_object_id,
-        members,
-        checkpoint_timestamp_ms,
-    })
+    Ok((members, checkpoint_timestamp_ms))
 }
 
 async fn get_committee(
@@ -308,12 +326,8 @@ pub(crate) mod test_utils {
     use super::*;
 
     /// A snapshot of current chain state.
-    pub(crate) fn snapshot(
-        hashi_object_id: Address,
-        members: &[&ed25519_dalek::SigningKey],
-    ) -> MemberSnapshot {
+    pub(crate) fn snapshot(members: &[&ed25519_dalek::SigningKey]) -> MemberSnapshot {
         MemberSnapshot {
-            hashi_object_id,
             members: members
                 .iter()
                 .map(|key| key.verifying_key().to_bytes())
@@ -336,6 +350,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateService;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateServiceServer;
+    use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsResponse;
 
     /// Serves scripted results in order, then errors.
     #[derive(Clone, Default)]
@@ -385,7 +402,7 @@ mod tests {
 
     fn one_member() -> MemberSnapshot {
         let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
-        snapshot(Address::new([7; 32]), &[&key])
+        snapshot(&[&key])
     }
 
     /// Let the spawned refresher run up to its next sleep.
@@ -468,7 +485,7 @@ mod tests {
         let rotated = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         let older = MemberSnapshot {
             checkpoint_timestamp_ms: current.checkpoint_timestamp_ms - 1,
-            ..snapshot(Address::new([7; 32]), &[&rotated])
+            ..snapshot(&[&rotated])
         };
         let members = current.members.clone();
 
@@ -484,7 +501,7 @@ mod tests {
         let rotated = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         let next = MemberSnapshot {
             checkpoint_timestamp_ms: first.checkpoint_timestamp_ms + 1,
-            ..snapshot(Address::new([7; 32]), &[&rotated])
+            ..snapshot(&[&rotated])
         };
         let first_members = first.members.clone();
         let source = ScriptedSource::new(vec![Ok(first), Ok(next)]);
@@ -522,5 +539,56 @@ mod tests {
         source.fetch().await.unwrap_err();
         source.fetch().await.unwrap_err();
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Answers each member page from a fullnode at the given checkpoint time, or
+    /// without one when `None`. The pages hold no members.
+    struct StampedPages(Vec<Option<u64>>);
+
+    #[tonic::async_trait]
+    impl StateService for StampedPages {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let index = request
+                .into_inner()
+                .page_token
+                .map_or(0, |token| usize::from(token[0]));
+            let mut page = ListDynamicFieldsResponse::default();
+            if index + 1 < self.0.len() {
+                page.next_page_token = Some(vec![index as u8 + 1].into());
+            }
+            let mut response = tonic::Response::new(page);
+            if let Some(timestamp_ms) = self.0[index] {
+                response.metadata_mut().insert(
+                    sui_rpc::headers::X_SUI_TIMESTAMP_MS,
+                    timestamp_ms.to_string().parse().unwrap(),
+                );
+            }
+            Ok(response)
+        }
+    }
+
+    async fn read_stamped_pages(pages: Vec<Option<u64>>) -> anyhow::Result<u64> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(StateServiceServer::new(StampedPages(pages)))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let mut sui = sui_rpc::Client::new(format!("http://{addr}").as_str()).unwrap();
+        let (members, timestamp_ms) =
+            read_member_keys(&mut sui, Address::ZERO, &HashSet::new()).await?;
+        assert!(members.is_empty());
+        Ok(timestamp_ms)
+    }
+
+    #[tokio::test]
+    async fn member_keys_are_as_old_as_their_stalest_page() {
+        let pages = vec![Some(300), Some(100), Some(200)];
+        assert_eq!(read_stamped_pages(pages).await.unwrap(), 100);
+        read_stamped_pages(vec![Some(300), None]).await.unwrap_err();
     }
 }

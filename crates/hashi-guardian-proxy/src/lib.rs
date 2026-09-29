@@ -133,7 +133,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
-    use sui_sdk_types::Address;
     use tonic::transport::Certificate;
     use tonic::transport::Channel;
     use tonic::transport::ClientTlsConfig;
@@ -202,7 +201,7 @@ mod tests {
             Duration::from_secs(1),
         );
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(Address::new([7; 32]), &[&member_key()]));
+        allowlist.store(snapshot(&[&member_key()]));
         let app = router(
             guardian,
             relay,
@@ -314,12 +313,19 @@ mod tests {
             .unwrap_err();
         assert_eq!(anonymous.code(), Code::Unauthenticated);
 
+        // The forwarder's refusal, not the gate's, which uses the same code.
         let member = proxy
             .node(&member_key())
             .operator_init(proto::OperatorInitRequest::default())
             .await
             .unwrap_err();
         assert_eq!(member.code(), Code::PermissionDenied);
+        assert!(
+            member
+                .message()
+                .contains("not served by the guardian proxy"),
+            "{member:?}"
+        );
     }
 
     #[tokio::test]

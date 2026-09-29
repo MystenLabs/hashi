@@ -142,7 +142,6 @@ fn refuse(request: &Request, refusal: Refusal) -> Response {
 mod tests {
     use super::*;
     use crate::node::members::test_utils::snapshot;
-    use sui_sdk_types::Address;
 
     const WITHDRAWAL: &str = "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal";
 
@@ -153,7 +152,7 @@ mod tests {
     fn gate_with_member() -> MemberGate {
         let metrics = Arc::new(ProxyMetrics::new());
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(Address::new([7; 32]), &[&member_key()]));
+        allowlist.store(snapshot(&[&member_key()]));
         MemberGate::new(allowlist, metrics)
     }
 

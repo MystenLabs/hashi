@@ -2201,6 +2201,27 @@ mod tests {
 
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
+
+        // Mid-rotation the new member is only in the pending committee, which
+        // the proxy admits too.
+        let node = &test_networks.hashi_network().nodes()[0];
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            while node
+                .hashi()
+                .onchain_state()
+                .pending_epoch_change()
+                .is_none()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("no reconfig started")?;
+        assert_eq!(
+            proxy_allowlist().await?.members,
+            tls_keys(test_networks.hashi_network().nodes())?
+        );
+
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
