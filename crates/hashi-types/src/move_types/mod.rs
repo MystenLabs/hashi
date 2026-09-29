@@ -93,9 +93,13 @@ impl PackageVersions {
 ///    address included — must match the mirror, so a same-name type from a
 ///    foreign package is rejected rather than trusted.
 /// 4. If the new type replaces what a dynamic-field slot holds (a v2 type
-///    in the same bucket), extend the reader's type check in
-///    `hashi::onchain::versioned_decode` to accept it. Readers fail loudly
-///    on types they do not implement; they never guess a layout.
+///    in the same bucket), the type check in
+///    `hashi::onchain::versioned_decode` has to report which type it found,
+///    and both readers need a decode path for it: the bootstrap scrape and
+///    the live apply path in `hashi::onchain`. Accepting the new tag alone
+///    is not enough, because the readers would decode its bytes as the old
+///    layout. Readers fail loudly on types they do not implement; they
+///    never guess a layout.
 ///
 /// The package-wide version the *tree* ships as is a separate axis: see the
 /// `PACKAGE_VERSION` doc in `packages/hashi/sources/core/versioning.move`
