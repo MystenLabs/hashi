@@ -111,6 +111,20 @@ fun test_set_guardian_url_stores_url() {
 }
 
 #[test]
+fun test_set_guardian_node_url_stores_url() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    let url = string::utf8(b"https://node.guardian.example");
+    config::set_guardian_node_url(hashi.config_mut(), url);
+
+    assert!(config::guardian_node_url(hashi.config()).borrow() == url);
+    assert!(config::guardian_url(hashi.config()).is_none());
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 fun test_set_guardian_btc_public_key_stores_value() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);

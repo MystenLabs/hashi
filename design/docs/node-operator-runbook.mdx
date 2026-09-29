@@ -668,7 +668,8 @@ Genesis is gated on an explicit launch step. Once every expected validator has r
 ```bash
 hashi launch \
   --bitcoin-chain-id <genesis block hash> \
-  --guardian-url <guardian gRPC URL> \
+  --guardian-url <guardian public URL> \
+  --guardian-node-url <guardian node URL> \
   --guardian-btc-public-key <x-only hex> \
   --keypair /path/to/publisher.pem   # reads ./hashi_ids.json from publish
 ```

@@ -107,7 +107,10 @@ stderr: {}",
 /// every deposit address is a 2-of-2 (mpc, guardian) taproot leaf, so a
 /// guardian-less deploy can't produce spendable deposits.
 pub struct GuardianConfig {
+    /// Public endpoint: `/info`, the key-provisioner relay.
     pub url: String,
+    /// Endpoint nodes call, presenting their registered TLS key.
+    pub node_url: String,
     /// X-only BTC pubkey of the enclave (32 bytes).
     pub btc_public_key: Vec<u8>,
 }
@@ -288,6 +291,7 @@ pub async fn build_finish_publish_tx(
     let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.url.as_str());
+    let guardian_node_url_arg = builder.pure(&guardian.node_url.as_str());
     let guardian_btc_public_key_arg = builder.pure(&guardian.btc_public_key.as_slice());
     let confirmation_threshold_arg = builder.pure(&bitcoin_overrides.confirmation_threshold);
     let deposit_time_delay_ms_arg = builder.pure(&bitcoin_overrides.deposit_time_delay_ms);
@@ -308,6 +312,7 @@ pub async fn build_finish_publish_tx(
             upgrade_cap_arg,
             bitcoin_chain_id_arg,
             guardian_url_arg,
+            guardian_node_url_arg,
             guardian_btc_public_key_arg,
             confirmation_threshold_arg,
             deposit_time_delay_ms_arg,

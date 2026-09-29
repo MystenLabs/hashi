@@ -110,6 +110,7 @@ async fn try_build_launch_tx(bitcoin_chain_id: &str, sui_chain_id: &str) -> anyh
     };
     let guardian = GuardianConfig {
         url: "http://guardian.invalid".to_owned(),
+        node_url: "http://node.guardian.invalid".to_owned(),
         btc_public_key: vec![0; 32],
     };
     build_finish_publish_tx(

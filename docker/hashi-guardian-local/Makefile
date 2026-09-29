@@ -61,6 +61,7 @@ localnet-cmd: ## Print the `hashi-localnet start` command wired to this guardian
 	echo "  cargo run -p e2e-tests --bin hashi-localnet -- start \\"; \
 	echo "    --data-dir $(LOCALNET_DIR) \\"; \
 	echo "    --guardian-url http://localhost:3000 \\"; \
+	echo "    --guardian-node-url http://localhost:3000 \\"; \
 	echo "    --guardian-btc-pubkey $$pubkey"
 
 provision: ## operator provision + KP provision + activation (needs the native localnet running)

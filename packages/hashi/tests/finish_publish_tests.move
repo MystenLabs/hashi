@@ -31,12 +31,38 @@ fun test_finish_publish_stores_upgrade_cap() {
         cap,
         @0xb17c,
         b"http://guardian.example:3000".to_string(),
+        b"https://node.guardian.example".to_string(),
         guardian_btc_public_key(),
         &mut registry,
         ctx,
     );
 
     assert!(hashi.versioning().has_upgrade_cap());
+    std::unit_test::destroy(hashi);
+    std::unit_test::destroy(registry);
+}
+
+#[test]
+fun test_finish_publish_stores_both_guardian_urls() {
+    let ctx = &mut test_utils::new_tx_context(PUBLISHER, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[PUBLISHER], ctx);
+    let mut registry = registry_for_testing();
+    let this_package_id = std::type_name::original_id<Hashi>().to_id();
+
+    hashi.finish_publish_for_testing(
+        sui::package::test_publish(this_package_id, ctx),
+        @0xb17c,
+        b"https://guardian.example".to_string(),
+        b"https://node.guardian.example".to_string(),
+        guardian_btc_public_key(),
+        &mut registry,
+        ctx,
+    );
+
+    assert!(hashi.config().guardian_url() == option::some(b"https://guardian.example".to_string()));
+    assert!(
+        hashi.config().guardian_node_url() == option::some(b"https://node.guardian.example".to_string()),
+    );
     std::unit_test::destroy(hashi);
     std::unit_test::destroy(registry);
 }
@@ -53,6 +79,7 @@ fun test_finish_publish_rejects_wrong_cap() {
         cap,
         @0xb17c,
         b"http://guardian.example:3000".to_string(),
+        b"https://node.guardian.example".to_string(),
         guardian_btc_public_key(),
         &mut registry,
         ctx,
@@ -76,6 +103,7 @@ fun test_finish_publish_twice_aborts() {
         sui::package::test_publish(this_package_id, ctx),
         @0xb17c,
         b"http://guardian.example:3000".to_string(),
+        b"https://node.guardian.example".to_string(),
         guardian_btc_public_key(),
         &mut registry,
         ctx,
@@ -84,6 +112,7 @@ fun test_finish_publish_twice_aborts() {
         sui::package::test_publish(this_package_id, ctx),
         @0xb17c,
         b"http://guardian.example:3000".to_string(),
+        b"https://node.guardian.example".to_string(),
         guardian_btc_public_key(),
         &mut registry,
         ctx,

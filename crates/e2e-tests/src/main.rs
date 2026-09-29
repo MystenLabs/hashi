@@ -86,10 +86,16 @@ enum Commands {
         manual: bool,
 
         /// Point the localnet at an externally-run guardian (the dockerized replica)
-        /// instead of the in-process one: publishes this URL + `--guardian-btc-pubkey`
-        /// on-chain. Provision it out-of-band once DKG completes.
-        #[clap(long, requires = "guardian_btc_pubkey")]
+        /// instead of the in-process one: publishes this URL, `--guardian-node-url`
+        /// and `--guardian-btc-pubkey` on-chain. Provision it out-of-band once DKG
+        /// completes.
+        #[clap(long, requires_all = ["guardian_node_url", "guardian_btc_pubkey"])]
         guardian_url: Option<String>,
+
+        /// The URL the nodes call the external guardian on. Required with
+        /// --guardian-url.
+        #[clap(long, requires = "guardian_url")]
+        guardian_node_url: Option<String>,
 
         /// The external guardian's x-only BTC master pubkey (hex), as printed by
         /// `hashi-guardian-init operator ceremony`. Required with --guardian-url.
@@ -252,16 +258,21 @@ async fn main() -> Result<()> {
             btc_rpc_port,
             manual,
             guardian_url,
+            guardian_node_url,
             guardian_btc_pubkey,
             opts,
         } => {
-            let external_guardian = match (guardian_url, guardian_btc_pubkey) {
-                (Some(url), Some(pubkey_hex)) => {
+            let external_guardian = match (guardian_url, guardian_node_url, guardian_btc_pubkey) {
+                (Some(url), Some(node_url), Some(pubkey_hex)) => {
                     let btc_pubkey = pubkey_hex
                         .trim()
                         .parse::<hashi_types::bitcoin::BitcoinPubkey>()
                         .context("--guardian-btc-pubkey must be a 32-byte x-only pubkey (hex)")?;
-                    Some(e2e_tests::ExternalGuardian { url, btc_pubkey })
+                    Some(e2e_tests::ExternalGuardian {
+                        url,
+                        node_url,
+                        btc_pubkey,
+                    })
                 }
                 _ => None,
             };
@@ -466,12 +477,13 @@ async fn cmd_start(
         println!();
         print_info("Unlock genesis with the launch switch once every validator is ready:");
         println!(
-            "      hashi launch --sui-rpc-url {} \\\n          --package-id {} --hashi-object-id {} \\\n          --bitcoin-chain-id {} \\\n          --guardian-url {} \\\n          --guardian-btc-public-key {} \\\n          --keypair {} -y",
+            "      hashi launch --sui-rpc-url {} \\\n          --package-id {} --hashi-object-id {} \\\n          --bitcoin-chain-id {} \\\n          --guardian-url {} \\\n          --guardian-node-url {} \\\n          --guardian-btc-public-key {} \\\n          --keypair {} -y",
             state.sui_rpc_url,
             state.package_id,
             state.hashi_object_id,
             hashi::constants::BITCOIN_REGTEST_CHAIN_ID,
             guardian.url,
+            guardian.node_url,
             guardian_btc_public_key,
             funded_key_path.display(),
         );
