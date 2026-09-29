@@ -1041,12 +1041,15 @@ mod tests {
     fn guardian_info_json_encodes_binary_fields_as_strings() {
         let mut info = GuardianInfo::mock_for_testing();
         info.config_hash = Some([0xab; 32]);
-        let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
-            .x_only_public_key()
-            .0;
-        info.mpc_master_g = Some(crate::bitcoin::hashi_master_g_from_btc_xonly_for_test(
-            &btc_pubkey,
-        ));
+        let btc_pubkey =
+            crate::bitcoin::BitcoinKeypair::from_seckey_slice(&crate::bitcoin::BTC_LIB, &[3u8; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0;
+        info.mpc_master_g = Some(
+            crate::bitcoin::HashiMasterG::with_even_y_from_x_be_bytes(&btc_pubkey.serialize())
+                .expect("valid x-only public key"),
+        );
 
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["lifecycle"]["withdraw"], "operator_initialized");

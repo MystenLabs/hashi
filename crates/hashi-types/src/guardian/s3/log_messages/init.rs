@@ -329,14 +329,18 @@ impl InitLogMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitcoin::create_btc_keypair_for_test;
+    use crate::bitcoin::BTC_LIB;
+    use crate::bitcoin::BitcoinKeypair;
     use crate::guardian::ShareID;
 
     fn pi_message_with_ids(sharing_seq: u64, share_ids: Vec<ShareID>) -> InitLogMessage {
         InitLogMessage::PIEnclaveFullyInitialized {
             sharing_seq,
             share_ids,
-            enclave_btc_pubkey: create_btc_keypair_for_test(&[1; 32]).x_only_public_key().0,
+            enclave_btc_pubkey: BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1; 32])
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0,
         }
     }
 
@@ -494,9 +498,13 @@ mod tests {
                 |info| info.genesis_state_hash = Some([9; 32]),
                 |info| {
                     info.enclave_btc_pubkey = Some(
-                        crate::bitcoin::create_btc_keypair_for_test(&[1; 32])
-                            .x_only_public_key()
-                            .0,
+                        crate::bitcoin::BitcoinKeypair::from_seckey_slice(
+                            &crate::bitcoin::BTC_LIB,
+                            &[1; 32],
+                        )
+                        .expect("valid test secret key")
+                        .x_only_public_key()
+                        .0,
                     )
                 },
                 |info| {

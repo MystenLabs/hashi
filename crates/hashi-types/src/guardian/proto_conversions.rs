@@ -1871,8 +1871,10 @@ mod tests {
 
     #[test]
     fn guardian_info_data_with_enclave_btc_pubkey_round_trip() {
-        use crate::bitcoin::create_btc_keypair_for_test;
-        let kp = create_btc_keypair_for_test(&[7u8; 32]);
+        use crate::bitcoin::BTC_LIB;
+        use crate::bitcoin::BitcoinKeypair;
+        let kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32]).expect("valid test secret key");
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {

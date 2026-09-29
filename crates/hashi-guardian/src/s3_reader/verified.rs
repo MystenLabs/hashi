@@ -413,9 +413,13 @@ mod tests {
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
                 share_ids: (1..=3).map(|id| ShareID::new(id).unwrap()).collect(),
-                enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
-                    .x_only_public_key()
-                    .0,
+                enclave_btc_pubkey: hashi_types::bitcoin::BitcoinKeypair::from_seckey_slice(
+                    &hashi_types::bitcoin::BTC_LIB,
+                    &[1; 32],
+                )
+                .expect("valid test secret key")
+                .x_only_public_key()
+                .0,
             })),
             &signing_key,
         );
@@ -449,7 +453,7 @@ mod tests {
             .output(move || locked_record(&oa_log, policy))
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
-        let s3 = GuardianS3Client::from_client_for_tests(
+        let s3 = GuardianS3Client::from_client(
             S3BucketInfo::mock_for_testing(),
             S3RetentionEnvironment::Testnet,
             client,

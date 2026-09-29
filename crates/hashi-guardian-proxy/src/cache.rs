@@ -420,9 +420,10 @@ mod tests {
     use super::*;
     use crate::widlog::test_store::withdrawal_record_json;
     use crate::widlog::test_store::MemStore;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::bitcoin::sign_btc_tx;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
     use hashi_types::guardian::GuardianResponse;
@@ -631,13 +632,17 @@ mod tests {
         let signed_request =
             StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
 
-        let enclave_kp = create_btc_keypair_for_test(&[8u8; 32]);
+        let enclave_kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
         let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = hashi_master_g_from_btc_xonly_for_test(
-            &create_btc_keypair_for_test(&[6u8; 32])
+        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
+            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
+                .expect("valid test secret key")
                 .x_only_public_key()
-                .0,
-        );
+                .0
+                .serialize(),
+        )
+        .expect("valid x-only public key");
 
         let (messages, _txid) = signed_request
             .message()
@@ -908,7 +913,8 @@ mod tests {
         // recorded signatures no longer verify — poisoned record or version
         // skew — and the proxy must neither serve NOR forward.
         let fixture = replay_fixture(7);
-        let wrong_key = create_btc_keypair_for_test(&[42u8; 32])
+        let wrong_key = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[42u8; 32])
+            .expect("valid test secret key")
             .x_only_public_key()
             .0;
         let (stub, count) = StubGuardian::ok();
@@ -977,13 +983,17 @@ mod tests {
 
         let signed_request =
             StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
-        let enclave_kp = create_btc_keypair_for_test(&[8u8; 32]);
+        let enclave_kp =
+            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
         let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = hashi_master_g_from_btc_xonly_for_test(
-            &create_btc_keypair_for_test(&[6u8; 32])
+        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
+            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
+                .expect("valid test secret key")
                 .x_only_public_key()
-                .0,
-        );
+                .0
+                .serialize(),
+        )
+        .expect("valid x-only public key");
         let (messages, _txid) = signed_request
             .message()
             .utxos()
