@@ -465,7 +465,6 @@ mod tests {
 next_event_delays:
   - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
-clock_skew: 300
 deployment:
   bucket_info:
     name: "bucket"
