@@ -1680,30 +1680,6 @@ mod tests {
         Ok(())
     }
 
-    /// The guardian proxy's own chain reader admits exactly the committee's
-    /// registered TLS keys.
-    #[tokio::test]
-    async fn test_guardian_proxy_allowlist_is_the_committee() -> Result<()> {
-        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
-
-        let members = hashi_guardian_proxy::node::members::committee_member_keys(
-            sui_rpc::Client::new(&test_networks.sui_network().rpc_url)?,
-            test_networks.hashi_network().ids().hashi_object_id,
-        )
-        .await?;
-
-        let mut expected = std::collections::HashMap::new();
-        for node in test_networks.hashi_network().nodes() {
-            let config = &node.hashi().config;
-            expected.insert(
-                config.tls_private_key()?.verifying_key().to_bytes(),
-                config.validator_address()?,
-            );
-        }
-        assert_eq!(members, expected);
-        Ok(())
-    }
-
     /// Verify that the bootstrap scrape correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
@@ -2212,12 +2188,43 @@ mod tests {
             .register_and_start_pending_node(client)
             .await?;
 
+        // The guardian proxy admits the committee, not every registered
+        // member: the new member only once the rotation seats it.
+        let sui = test_networks.sui_network.client.clone();
+        let hashi_object_id = test_networks.hashi_network().ids().hashi_object_id;
+        let proxy_allowlist = || {
+            hashi_guardian_proxy::node::members::committee_member_keys(sui.clone(), hashi_object_id)
+        };
+        assert_eq!(
+            proxy_allowlist().await?,
+            tls_keys(&test_networks.hashi_network().nodes()[..INITIAL_NODES])?
+        );
+
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
+        assert_eq!(
+            proxy_allowlist().await?,
+            tls_keys(test_networks.hashi_network().nodes())?
+        );
+
         Ok(())
+    }
+
+    fn tls_keys(nodes: &[HashiNodeHandle]) -> Result<std::collections::HashSet<[u8; 32]>> {
+        nodes
+            .iter()
+            .map(|node| {
+                Ok(node
+                    .hashi()
+                    .config
+                    .tls_private_key()?
+                    .verifying_key()
+                    .to_bytes())
+            })
+            .collect()
     }
 
     #[tokio::test(flavor = "multi_thread")]

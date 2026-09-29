@@ -172,10 +172,7 @@ mod tests {
             Duration::from_secs(1),
         );
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(
-            hashi_id(),
-            &[(&member_key(), Address::new([2; 32]))],
-        ));
+        allowlist.store(snapshot(hashi_id(), &[&member_key()]));
         let app = router(
             guardian,
             relay,

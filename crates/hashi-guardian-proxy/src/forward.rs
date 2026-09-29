@@ -182,6 +182,8 @@ pub(crate) mod test_utils {
         pub(crate) confirm_ceremony_calls: Arc<AtomicUsize>,
         /// `StandardWithdrawal` calls that still carried a member auth token.
         pub(crate) member_auth_seen: Arc<AtomicUsize>,
+        /// Served by `GetGuardianInfo`; the default response when unset.
+        pub(crate) info: Arc<std::sync::Mutex<Option<proto::GetGuardianInfoResponse>>>,
     }
 
     #[tonic::async_trait]
@@ -230,7 +232,8 @@ pub(crate) mod test_utils {
             _: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             self.get_guardian_info_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(proto::GetGuardianInfoResponse::default()))
+            let info = self.info.lock().unwrap().clone();
+            Ok(Response::new(info.unwrap_or_default()))
         }
 
         async fn setup_new_key(

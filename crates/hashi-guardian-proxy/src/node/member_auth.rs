@@ -20,7 +20,6 @@ use hashi_types::guardian::member_auth::MEMBER_AUTH_METADATA_KEY;
 use hashi_types::guardian::now_timestamp_ms;
 use hashi_types::proto::guardian_relay_service_server;
 use hashi_types::proto::guardian_service_server;
-use sui_sdk_types::Address;
 use tonic::metadata::MetadataMap;
 use tonic::metadata::GRPC_CONTENT_TYPE;
 use tonic::Status;
@@ -40,7 +39,7 @@ impl MemberGate {
 
     /// The membership lookup runs before the signature check, so a token for
     /// an unknown key costs a hash lookup rather than a verification.
-    fn admit(&self, request: &Request) -> Result<Address, Refusal> {
+    fn admit(&self, request: &Request) -> Result<(), Refusal> {
         let metadata = MetadataMap::from_headers(request.headers().clone());
         let value = metadata
             .get_bin(MEMBER_AUTH_METADATA_KEY)
@@ -57,14 +56,13 @@ impl MemberGate {
             .allowlist
             .current()
             .ok_or(Refusal::AllowlistUnavailable)?;
-        let member = *snapshot
-            .members
-            .get(&auth.tls_public_key)
-            .ok_or(Refusal::NotMember)?;
+        if !snapshot.members.contains(&auth.tls_public_key) {
+            return Err(Refusal::NotMember);
+        }
         if !auth.verify_signature(snapshot.hashi_object_id, request.uri().path()) {
             return Err(Refusal::BadSignature);
         }
-        Ok(member)
+        Ok(())
     }
 }
 
@@ -77,9 +75,8 @@ pub async fn require_committee_member(
         return next.run(request).await;
     }
     match gate.admit(&request) {
-        Ok(member) => {
+        Ok(()) => {
             request.headers_mut().remove(MEMBER_AUTH_METADATA_KEY);
-            request.extensions_mut().insert(member);
             next.run(request).await
         }
         Err(refusal) => {
@@ -174,6 +171,7 @@ mod tests {
     use crate::node::members::test_utils::snapshot;
     use axum::body::Body;
     use hashi_types::guardian::member_auth::MEMBER_AUTH_MAX_SKEW_MS;
+    use sui_sdk_types::Address;
     use tonic::metadata::MetadataValue;
 
     const WITHDRAWAL: &str = "/sui.hashi.v1alpha.GuardianService/StandardWithdrawal";
@@ -186,14 +184,10 @@ mod tests {
         Address::new([7; 32])
     }
 
-    fn validator() -> Address {
-        Address::new([2; 32])
-    }
-
     fn gate_with_member() -> MemberGate {
         let metrics = Arc::new(ProxyMetrics::new());
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(hashi_id(), &[(&member_key(), validator())]));
+        allowlist.store(snapshot(hashi_id(), &[&member_key()]));
         MemberGate::new(allowlist, metrics)
     }
 
@@ -226,7 +220,7 @@ mod tests {
                 now_timestamp_ms(),
             )),
         );
-        assert_eq!(gate_with_member().admit(&request), Ok(validator()));
+        assert_eq!(gate_with_member().admit(&request), Ok(()));
     }
 
     #[test]
@@ -291,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_codes_match_the_kp_gate() {
+    fn each_refusal_has_its_status_code() {
         assert_eq!(
             Refusal::MissingAuth.status().code(),
             tonic::Code::Unauthenticated

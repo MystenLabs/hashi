@@ -6,9 +6,9 @@
 //! ([`crate::node::member_auth`]) only reads the latest snapshot, so no request, and
 //! no unknown key, ever waits on or triggers a Sui read.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -35,19 +35,19 @@ use tracing::warn;
 use crate::metrics::ProxyMetrics;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const FIRST_SNAPSHOT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Past this age a snapshot admits no one, so a long Sui RPC outage fails
 /// closed instead of trusting a committee that may have changed.
 const MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(10 * 60);
-const SUI_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const PAGE_SIZE: u32 = 1000;
 
 #[derive(Debug, PartialEq)]
 pub struct MemberSnapshot {
     /// The deployment the guardian serves; member tokens are bound to it.
     pub hashi_object_id: Address,
-    /// Registered TLS public key to validator address.
-    pub members: HashMap<[u8; 32], Address>,
+    /// The members' registered TLS public keys.
+    pub members: HashSet<[u8; 32]>,
 }
 
 #[tonic::async_trait]
@@ -82,7 +82,10 @@ impl MemberAllowlist {
     /// until it ages out.
     pub async fn refresh_forever(self: Arc<Self>, source: impl MemberSource) {
         loop {
-            let delay = match source.fetch().await {
+            let fetched = tokio::time::timeout(FETCH_TIMEOUT, source.fetch())
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {FETCH_TIMEOUT:?}")));
+            let delay = match fetched {
                 Ok(snapshot) => {
                     self.store(snapshot);
                     REFRESH_INTERVAL
@@ -90,16 +93,7 @@ impl MemberAllowlist {
                 Err(e) => {
                     self.metrics.member_refresh_failures.inc();
                     warn!(error = %format!("{e:#}"), "Committee member refresh failed.");
-                    if self
-                        .latest
-                        .read()
-                        .expect("allowlist lock poisoned")
-                        .is_some()
-                    {
-                        REFRESH_INTERVAL
-                    } else {
-                        FIRST_SNAPSHOT_RETRY_INTERVAL
-                    }
+                    RETRY_INTERVAL
                 }
             };
             tokio::time::sleep(delay).await;
@@ -133,23 +127,24 @@ impl MemberAllowlist {
 pub struct ChainMemberSource {
     guardian: GuardianServiceClient<Channel>,
     sui: sui_rpc::Client,
+    /// Read once: it can't change under a running proxy, and later refreshes
+    /// then never queue on the enclave's control lock.
+    hashi_object_id: OnceLock<Address>,
 }
 
 impl ChainMemberSource {
     pub fn new(guardian: Channel, sui_rpc_url: &str) -> anyhow::Result<Self> {
-        let sui = sui_rpc::Client::new(sui_rpc_url)
-            .context("SUI_RPC_URL")?
-            .request_layer(tower::timeout::TimeoutLayer::new(SUI_RPC_TIMEOUT));
         Ok(Self {
             guardian: GuardianServiceClient::new(guardian),
-            sui,
+            sui: sui_rpc::Client::new(sui_rpc_url).context("SUI_RPC_URL")?,
+            hashi_object_id: OnceLock::new(),
         })
     }
-}
 
-#[tonic::async_trait]
-impl MemberSource for ChainMemberSource {
-    async fn fetch(&self) -> anyhow::Result<MemberSnapshot> {
+    async fn hashi_object_id(&self) -> anyhow::Result<Address> {
+        if let Some(id) = self.hashi_object_id.get() {
+            return Ok(*id);
+        }
         let raw = self
             .guardian
             .clone()
@@ -160,9 +155,17 @@ impl MemberSource for ChainMemberSource {
         let (info, _) = GetGuardianInfoResponse::try_from(raw)
             .map_err(|e| anyhow::anyhow!("decode GetGuardianInfo: {e:?}"))?
             .into_info_unchecked();
-        let hashi_object_id = info
+        let id = info
             .hashi_object_id
             .context("the guardian has no Hashi object id yet")?;
+        Ok(*self.hashi_object_id.get_or_init(|| id))
+    }
+}
+
+#[tonic::async_trait]
+impl MemberSource for ChainMemberSource {
+    async fn fetch(&self) -> anyhow::Result<MemberSnapshot> {
+        let hashi_object_id = self.hashi_object_id().await?;
         let members = committee_member_keys(self.sui.clone(), hashi_object_id).await?;
         Ok(MemberSnapshot {
             hashi_object_id,
@@ -176,7 +179,7 @@ impl MemberSource for ChainMemberSource {
 pub async fn committee_member_keys(
     mut sui: sui_rpc::Client,
     hashi_object_id: Address,
-) -> anyhow::Result<HashMap<[u8; 32], Address>> {
+) -> anyhow::Result<HashSet<[u8; 32]>> {
     let root: move_types::Hashi = get_object(&mut sui, hashi_object_id)
         .await?
         .with_context(|| format!("Hashi object {hashi_object_id} not found"))?;
@@ -203,7 +206,7 @@ pub async fn committee_member_keys(
         DynamicField::path_builder().name().finish(),
         DynamicField::path_builder().value().finish(),
     ]);
-    let mut members = HashMap::new();
+    let mut members = HashSet::new();
     let mut page_token = None;
     loop {
         let mut request = ListDynamicFieldsRequest::default()
@@ -226,7 +229,7 @@ pub async fn committee_member_keys(
                 continue;
             }
             if let Ok(tls_public_key) = <[u8; 32]>::try_from(info.tls_public_key.as_slice()) {
-                members.insert(tls_public_key, info.validator_address);
+                members.insert(tls_public_key);
             }
         }
         match page.next_page_token {
@@ -277,13 +280,13 @@ pub(crate) mod test_utils {
 
     pub(crate) fn snapshot(
         hashi_object_id: Address,
-        members: &[(&ed25519_dalek::SigningKey, Address)],
+        members: &[&ed25519_dalek::SigningKey],
     ) -> MemberSnapshot {
         MemberSnapshot {
             hashi_object_id,
             members: members
                 .iter()
-                .map(|(key, address)| (key.verifying_key().to_bytes(), *address))
+                .map(|key| key.verifying_key().to_bytes())
                 .collect(),
         }
     }
@@ -293,7 +296,15 @@ pub(crate) mod test_utils {
 mod tests {
     use super::test_utils::snapshot;
     use super::*;
+    use crate::forward::test_utils::spawn_stub;
+    use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
+    use hashi_types::guardian::GuardianInfo;
+    use hashi_types::guardian::GuardianResponse;
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::GuardianSigned;
+    use hashi_types::guardian::NitroAttestation;
     use std::collections::VecDeque;
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     /// Serves scripted results in order, then errors.
@@ -328,9 +339,23 @@ mod tests {
         }
     }
 
+    /// Never answers.
+    #[derive(Clone, Default)]
+    struct StuckSource {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[tonic::async_trait]
+    impl MemberSource for StuckSource {
+        async fn fetch(&self) -> anyhow::Result<MemberSnapshot> {
+            *self.calls.lock().unwrap() += 1;
+            std::future::pending().await
+        }
+    }
+
     fn one_member() -> MemberSnapshot {
         let key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
-        snapshot(Address::new([7; 32]), &[(&key, Address::new([2; 32]))])
+        snapshot(Address::new([7; 32]), &[&key])
     }
 
     /// Let the spawned refresher run up to its next sleep.
@@ -341,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn retries_quickly_until_the_first_snapshot() {
+    async fn retries_a_failed_read_quickly() {
         let allowlist = Arc::new(MemberAllowlist::new(Arc::new(ProxyMetrics::new())));
         let source = ScriptedSource::new(vec![Err(anyhow::anyhow!("down")), Ok(one_member())]);
         tokio::spawn(allowlist.clone().refresh_forever(source.clone()));
@@ -350,10 +375,25 @@ mod tests {
         assert_eq!(source.calls(), 1);
         assert!(allowlist.current().is_none());
 
-        tokio::time::advance(FIRST_SNAPSHOT_RETRY_INTERVAL).await;
+        tokio::time::advance(RETRY_INTERVAL).await;
         settle().await;
         assert_eq!(source.calls(), 2);
         assert_eq!(*allowlist.current().unwrap(), one_member());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stuck_read_times_out_and_is_retried() {
+        let allowlist = Arc::new(MemberAllowlist::new(Arc::new(ProxyMetrics::new())));
+        let source = StuckSource::default();
+        tokio::spawn(allowlist.clone().refresh_forever(source.clone()));
+        settle().await;
+        assert_eq!(*source.calls.lock().unwrap(), 1);
+
+        tokio::time::advance(FETCH_TIMEOUT).await;
+        settle().await;
+        tokio::time::advance(RETRY_INTERVAL).await;
+        settle().await;
+        assert_eq!(*source.calls.lock().unwrap(), 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -366,13 +406,15 @@ mod tests {
 
         // Every later refresh fails; the snapshot keeps admitting until it is
         // older than the limit, and never after.
-        let failed_refreshes = MAX_SNAPSHOT_AGE.as_secs() / REFRESH_INTERVAL.as_secs();
-        for _ in 0..failed_refreshes {
-            tokio::time::advance(REFRESH_INTERVAL).await;
+        tokio::time::advance(REFRESH_INTERVAL).await;
+        settle().await;
+        let retries = (MAX_SNAPSHOT_AGE - REFRESH_INTERVAL).as_secs() / RETRY_INTERVAL.as_secs();
+        for _ in 0..retries {
+            tokio::time::advance(RETRY_INTERVAL).await;
             settle().await;
             assert_eq!(*allowlist.current().unwrap(), one_member());
         }
-        assert_eq!(source.calls() as u64, 1 + failed_refreshes);
+        assert_eq!(source.calls() as u64, 2 + retries);
 
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(allowlist.current().is_none());
@@ -382,7 +424,7 @@ mod tests {
     async fn a_successful_refresh_replaces_the_snapshot() {
         let allowlist = Arc::new(MemberAllowlist::new(Arc::new(ProxyMetrics::new())));
         let rotated = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
-        let next = snapshot(Address::new([7; 32]), &[(&rotated, Address::new([2; 32]))]);
+        let next = snapshot(Address::new([7; 32]), &[&rotated]);
         let source = ScriptedSource::new(vec![Ok(one_member()), Ok(next)]);
         tokio::spawn(allowlist.clone().refresh_forever(source));
         settle().await;
@@ -393,7 +435,30 @@ mod tests {
         let current = allowlist.current().unwrap();
         assert!(current
             .members
-            .contains_key(&rotated.verifying_key().to_bytes()));
+            .contains(&rotated.verifying_key().to_bytes()));
         assert_eq!(current.members.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reads_the_hashi_object_id_from_the_guardian_once() {
+        let (stub, channel) = spawn_stub().await;
+        let signing_key = GuardianSignKeyPair::from([1; 32]);
+        let info = GuardianInfo {
+            hashi_object_id: Some(Address::new([7; 32])),
+            ..GuardianInfo::mock_for_testing()
+        };
+        *stub.info.lock().unwrap() = Some(get_guardian_info_response_to_pb(
+            GetGuardianInfoResponse::new(
+                NitroAttestation::new(vec![1, 2, 3]),
+                signing_key.verification_key(),
+                GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key),
+            ),
+        ));
+        // Nothing listens on port 1, so every Sui read fails.
+        let source = ChainMemberSource::new(channel, "http://127.0.0.1:1").unwrap();
+
+        source.fetch().await.unwrap_err();
+        source.fetch().await.unwrap_err();
+        assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 }
