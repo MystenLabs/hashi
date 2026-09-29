@@ -38,7 +38,7 @@ pub async fn update_committee(
         .message()
         .new_committee
         .clone()
-        .try_into()
+        .try_into_with_encryption_key_fallback()
         .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
 
     if new_committee.epoch() != proposed_epoch {
@@ -180,6 +180,7 @@ mod tests {
         let outgoing = committee_at(5);
         let mut new_committee = hashi_types::move_types::Committee::from(&committee_at(6));
         new_committee.members[0].encryption_public_key = vec![0xff; 32];
+        assert!(HashiCommittee::try_from(new_committee.clone()).is_err());
         let transition = CommitteeTransitionRequest { new_committee };
         let hashi_id = hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID;
         let sig = mock_bls_sk().sign(hashi_id, 5, mock_signer_address(), &transition);

@@ -4,7 +4,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
@@ -38,7 +37,6 @@ use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::SignedMessage;
-use hashi_types::committee::fallback_encryption_public_key;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
 
@@ -1764,7 +1762,10 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
     types::MemberInfo {
         validator_address,
         operator_address,
-        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
+        next_epoch_public_key: move_types::bls_public_key_from_uncompressed_g1_bytes(
+            &next_epoch_public_key,
+        )
+        .expect("valid on-chain BLS public key"),
         endpoint_url: endpoint_url.try_into().ok(),
         tls_public_key: tls_public_key.as_slice().try_into().ok(),
         next_epoch_encryption_public_key: parse_encryption_public_key(
@@ -1955,24 +1956,10 @@ async fn scrape_committees(
     Ok((seed, (committees, move_committees, handoffs)))
 }
 
-fn convert_move_committee_member(
-    move_types::CommitteeMember {
-        validator_address,
-        public_key,
-        encryption_public_key,
-        weight,
-    }: move_types::CommitteeMember,
-) -> CommitteeMember {
-    CommitteeMember::new(
-        validator_address,
-        convert_move_uncompressed_g1_pubkey(&public_key),
-        // Use fallback key for nodes without valid encryption key.
-        // These nodes cannot decrypt shares but still count toward thresholds.
-        parse_encryption_public_key(encryption_public_key.as_slice())
-            .map(Into::into)
-            .unwrap_or_else(fallback_encryption_public_key),
-        weight,
-    )
+fn convert_move_committee_member(member: move_types::CommitteeMember) -> CommitteeMember {
+    member
+        .try_into_with_encryption_key_fallback()
+        .expect("valid on-chain committee member")
 }
 
 fn convert_move_committee(c: move_types::Committee) -> Committee {
@@ -1998,13 +1985,6 @@ fn convert_move_committee_handoff(
         &handoff.cert.signers_bitmap,
     )
     .map_err(|e| anyhow!("invalid committee handoff cert: {e}"))
-}
-
-fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {
-    use fastcrypto::traits::ToFromBytes;
-    let pubkey = blst::min_pk::PublicKey::deserialize(uncompressed_g1)
-        .expect("onchain value is uncompressed G1");
-    BLS12381PublicKey::from_bytes(pubkey.to_bytes().as_slice()).unwrap()
 }
 
 /// Scrape an `ObjectBag` whose children all BCS-decode as `T`, seeding
@@ -2547,14 +2527,14 @@ mod tests {
 
         assert_eq!(
             *committee_member.encryption_public_key(),
-            fallback_encryption_public_key()
+            hashi_types::committee::fallback_encryption_public_key()
         )
     }
 
     // The Move contract stores the BLS12-381 G1 identity element as a member's
     // default `next_epoch_public_key` until a real key is registered (see
     // `new_member` in committee_set.move), and the scrapers run
-    // `convert_move_uncompressed_g1_pubkey` on every member without filtering.
+    // `bls_public_key_from_uncompressed_g1_bytes` on every member without filtering.
     // The conversion must therefore accept the identity element without
     // panicking: `blst` only rejects the point at infinity in
     // `validate`/`key_validate`, neither of which this path calls. This test
@@ -2578,7 +2558,8 @@ mod tests {
 
         // The conversion succeeds and yields the compressed encoding of the
         // point at infinity (0xc0 followed by zeros).
-        let pubkey = convert_move_uncompressed_g1_pubkey(&onchain_bytes);
+        let pubkey = move_types::bls_public_key_from_uncompressed_g1_bytes(&onchain_bytes)
+            .expect("valid on-chain BLS public key");
         let mut expected = [0u8; 48];
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());

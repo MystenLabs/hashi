@@ -51,7 +51,7 @@ impl OAInstall {
             .read_latest_committee()
             .await?
             .ok_or_else(|| InvalidInputs("no committee-update or genesis record found".into()))?
-            .try_into()
+            .try_into_with_encryption_key_fallback()
             .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
         let limiter_state = reader.recover_limiter_state(&limiter_config).await?;

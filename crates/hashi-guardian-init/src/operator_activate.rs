@@ -142,7 +142,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("no committee-update or genesis record found")?;
     let committee_epoch = move_committee.epoch;
     let committee: HashiCommittee = move_committee
-        .try_into()
+        .try_into_with_encryption_key_fallback()
         .context("invalid serving committee")?;
     let limiter_state = reader
         .recover_limiter_state(standby.init_config.limiter_config())
