@@ -88,14 +88,14 @@ struct CacheEntry {
 }
 
 pub struct CachingGuardianGrpc<S, L> {
-    inner: S,
+    inner: Arc<S>,
     l1: Mutex<LruCache<WithdrawalID, CacheEntry>>,
     log: L,
     /// Network the guardian validates requests against; needed to recompute
     /// sighashes when verifying a log replay.
     network: Network,
     metrics: Arc<ProxyMetrics>,
-    info: tokio::sync::Mutex<Option<CachedInfo>>,
+    info: Arc<tokio::sync::Mutex<Option<CachedInfo>>>,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
@@ -117,12 +117,12 @@ impl<S, L> CachingGuardianGrpc<S, L> {
         capacity: NonZeroUsize,
     ) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             l1: Mutex::new(LruCache::new(capacity)),
             log,
             network,
             metrics,
-            info: tokio::sync::Mutex::new(None),
+            info: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -325,25 +325,33 @@ where
     S: GuardianService,
     L: LogStore,
 {
-    /// The lock is held across the fetch, so a burst collapses into one
-    /// backend call.
+    /// The fetch holds the lock, so a burst collapses into one backend call. It runs
+    /// detached with a fresh request: a caller can't cancel it or pass its deadline on.
     async fn get_guardian_info(
         &self,
-        request: Request<proto::GetGuardianInfoRequest>,
+        _request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let mut cached = self.info.lock().await;
+        let mut cached = self.info.clone().lock_owned().await;
         if let Some(entry) = cached
             .as_ref()
             .filter(|entry| entry.at.elapsed() < GUARDIAN_INFO_TTL)
         {
             return Ok(Response::new(entry.response.clone()));
         }
-        let response = self.inner.get_guardian_info(request).await?.into_inner();
-        *cached = Some(CachedInfo {
-            at: Instant::now(),
-            response: response.clone(),
-        });
-        Ok(Response::new(response))
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let response = inner
+                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest::default()))
+                .await?
+                .into_inner();
+            *cached = Some(CachedInfo {
+                at: Instant::now(),
+                response: response.clone(),
+            });
+            Ok(Response::new(response))
+        })
+        .await
+        .expect("guardian info fetch task failed")
     }
 
     async fn setup_new_key(
@@ -459,6 +467,7 @@ mod tests {
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalResponse;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -470,6 +479,8 @@ mod tests {
         result: Arc<ResponseFn>,
         info: Option<proto::GetGuardianInfoResponse>,
         info_calls: Arc<AtomicUsize>,
+        info_delay: Duration,
+        info_saw_deadline: Arc<AtomicBool>,
     }
 
     impl StubGuardian {
@@ -481,6 +492,8 @@ mod tests {
                     result: Arc::new(|| Ok(mock_response())),
                     info: None,
                     info_calls: Arc::default(),
+                    info_delay: Duration::ZERO,
+                    info_saw_deadline: Arc::default(),
                 },
                 call_count,
             )
@@ -494,6 +507,8 @@ mod tests {
                     result: Arc::new(|| Err(Status::failed_precondition("simulated"))),
                     info: None,
                     info_calls: Arc::default(),
+                    info_delay: Duration::ZERO,
+                    info_saw_deadline: Arc::default(),
                 },
                 call_count,
             )
@@ -501,6 +516,11 @@ mod tests {
 
         fn with_info(mut self, info: proto::GetGuardianInfoResponse) -> Self {
             self.info = Some(info);
+            self
+        }
+
+        fn with_info_delay(mut self, delay: Duration) -> Self {
+            self.info_delay = delay;
             self
         }
     }
@@ -512,7 +532,11 @@ mod tests {
             request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             self.info_calls.fetch_add(1, Ordering::SeqCst);
+            if request.metadata().contains_key("grpc-timeout") {
+                self.info_saw_deadline.store(true, Ordering::SeqCst);
+            }
             assert!(!request.into_inner().include_attestation);
+            tokio::time::sleep(self.info_delay).await;
             match &self.info {
                 Some(info) => Ok(Response::new(info.clone())),
                 None => Err(Status::unavailable("no stub info configured")),
@@ -773,6 +797,31 @@ mod tests {
         tokio::time::advance(GUARDIAN_INFO_TTL).await;
         cache.get_guardian_info(info_request()).await.unwrap();
         assert_eq!(info_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guardian_info_fetch_outlives_callers_and_drops_their_deadline() {
+        let (stub, _) = StubGuardian::ok();
+        let stub = stub
+            .with_info(proto::GetGuardianInfoResponse::default())
+            .with_info_delay(Duration::from_millis(100));
+        let info_calls = stub.info_calls.clone();
+        let saw_deadline = stub.info_saw_deadline.clone();
+        let cache = cache_over(stub, MemStore::default());
+
+        // The caller gives up while the fetch is in flight.
+        let mut request = info_request();
+        request.set_timeout(Duration::from_millis(1));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), cache.get_guardian_info(request))
+                .await
+                .is_err()
+        );
+
+        // The fetch still completes and fills the cache for the next caller.
+        cache.get_guardian_info(info_request()).await.unwrap();
+        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
+        assert!(!saw_deadline.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
