@@ -121,33 +121,33 @@ impl GuardianS3Client {
     }
 
     /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
-    /// Tests and `non-enclave-dev` use normal networking, as do readers using `new`.
+    /// Tests and `non-enclave-dev` builds outside an enclave use normal networking,
+    /// as do readers using `new`.
     pub(crate) async fn new_with_custom_resolver(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
+        // Set by docker/hashi-guardian/run.sh: mock-attestation EIFs run in Nitro
+        // too, where the VSOCK forwarders are the only route to S3.
         #[cfg(any(test, feature = "non-enclave-dev"))]
-        {
-            Self::new(bucket_info, retention_environment, credentials).await
+        if std::env::var_os("HASHI_GUARDIAN_ENCLAVE_S3_ROUTES").is_none() {
+            return Self::new(bucket_info, retention_environment, credentials).await;
         }
-        #[cfg(not(any(test, feature = "non-enclave-dev")))]
-        {
-            use aws_smithy_http_client::tls;
-            use aws_smithy_http_client::Builder;
-            let http_client = Builder::new()
-                .tls_provider(tls::Provider::Rustls(
-                    tls::rustls_provider::CryptoMode::AwsLc,
-                ))
-                .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
-            Self::with_http_client(
-                bucket_info,
-                retention_environment,
-                credentials,
-                Some(http_client),
-            )
-            .await
-        }
+        use aws_smithy_http_client::tls;
+        use aws_smithy_http_client::Builder;
+        let http_client = Builder::new()
+            .tls_provider(tls::Provider::Rustls(
+                tls::rustls_provider::CryptoMode::AwsLc,
+            ))
+            .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
+        Self::with_http_client(
+            bucket_info,
+            retention_environment,
+            credentials,
+            Some(http_client),
+        )
+        .await
     }
 
     /// Wrap an already-configured S3 client without making network requests.
