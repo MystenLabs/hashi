@@ -301,11 +301,8 @@ impl Hashi {
         &self,
         endpoint: &str,
     ) -> anyhow::Result<grpc::guardian_client::GuardianClient> {
-        let guardian = grpc::guardian_client::GuardianClient::new(
-            endpoint,
-            self.config.tls_private_key()?,
-            self.config.hashi_ids().hashi_object_id,
-        )?;
+        let guardian =
+            grpc::guardian_client::GuardianClient::new(endpoint, &self.config.tls_private_key()?)?;
         Ok(guardian.with_metrics(self.metrics.clone()))
     }
 

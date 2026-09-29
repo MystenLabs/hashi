@@ -48,8 +48,6 @@ pub enum Intent {
     AvidVoteMessagesHash = 0x0005,
     /// Proof of possession of a member TLS key (address, public key).
     TlsProofOfPossession = 0x0006,
-    /// A member's TLS-key authentication of a guardian proxy request.
-    GuardianProxyAuth = 0x0007,
 
     // ==== Bitcoin (0x0100..=0x01FF) ====
     /// Deposit confirmation over (request_id, utxo).
@@ -108,7 +106,6 @@ mod tests {
         assert_eq!(Intent::AvssVoteMessagesHash as u16, 0x0004);
         assert_eq!(Intent::AvidVoteMessagesHash as u16, 0x0005);
         assert_eq!(Intent::TlsProofOfPossession as u16, 0x0006);
-        assert_eq!(Intent::GuardianProxyAuth as u16, 0x0007);
         assert_eq!(Intent::DepositConfirmation as u16, 0x0100);
         assert_eq!(Intent::WithdrawalRequestApproval as u16, 0x0101);
         assert_eq!(Intent::WithdrawalCommitment as u16, 0x0102);

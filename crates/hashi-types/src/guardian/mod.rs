@@ -6,7 +6,6 @@ pub mod crypto;
 mod deployment;
 pub mod errors;
 pub mod lifecycle;
-pub mod member_auth;
 pub mod proto_conversions;
 mod runtime_committee;
 pub mod s3;
