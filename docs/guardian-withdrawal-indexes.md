@@ -11,7 +11,10 @@ in [PR #1285](https://github.com/MystenLabs/hashi/pull/1285), not a dependency o
 
 Use one authoritative sequence record and two derived indexes per withdrawal.
 All three must be durable before a successful RPC response or the next withdrawal.
-The exact prefix names and schema version below are provisional.
+Breaking changes are allowed: use one new format and update Guardian, proxy,
+and monitor together. No backward-compatible readers, dual writes to the old
+layout, or gradual migration are required. The exact prefix names and schema
+version below are provisional.
 
 | Role | Proposed key | Contents |
 | --- | --- | --- |
@@ -48,9 +51,10 @@ are rejected.
 All three withdrawal logs are long-lived. In particular, retain a durable,
 non-reusable `wid` binding and its original signing result for the full lifetime
 in which that ID can be submitted; do not expire them while the ID remains valid.
-A migration must preserve these bindings and results. Retention is an explicit
-design assumption, but does not alone prove that an untrusted operator cannot
-hide a record from readers.
+At cutover, any previously signed IDs that remain valid must retain their
+bindings and results. This is a uniqueness requirement, not a requirement to
+support the old storage format. Retention is an explicit design assumption, but
+does not alone prove that an untrusted operator cannot hide a record from readers.
 
 Here, "once" means one committed/released signing result. A crash after computing
 a signature but before any durable write cannot prove that the cryptographic
@@ -122,8 +126,8 @@ before serving. This must hold across concurrently live sessions, not merely
 inside one process. Prove this invariant with the sequence-commit rules before
 relying on a one-record repair bound.
 
-If indexes can lag multiple commits, if a migration starts with incomplete
-indexes, or if older indexes can be removed after completion, latest-only repair
+If indexes can lag multiple commits, if the initial index set is incomplete,
+or if older indexes can be removed after completion, latest-only repair
 is insufficient. Recovery then needs a verified checkpoint and replay range, or
 a full rebuild. Index retention must therefore match the promised recovery and
 lookup window. Restart repair does not prove that every historical index is
@@ -178,9 +182,10 @@ refill, or prove every aspect of lifecycle fencing safe.
 3. Implement serialized commits and restart repair, then update Guardian,
    proxy, and monitor readers together. Decide how index completeness is exposed
    to live readers before allowing them to infer absence.
-4. Add deterministic Rust-generated fixtures covering every new record variant.
-   Preserve supported existing fixtures; define a versioned migration/cutover
-   rather than silently changing their key/signature semantics.
+4. Update deterministic Rust-generated fixtures to cover every new record
+   variant, following the fixture policy. Use a coordinated breaking cutover
+   to the new format; preserve the binding/result of any previously signed
+   `wid` that remains valid, without requiring runtime support for the old format.
 5. Exercise crashes before and after each write, lost acknowledgments, identical
    retries, conflicting `wid`/sequence records, and two competing enclave sessions.
    Test missing older indexes, delete markers, overwrites, retention expiry,
@@ -188,7 +193,8 @@ refill, or prove every aspect of lifecycle fencing safe.
    refunded and indexes never cause a different transaction to be replayed.
 
 Accepted requirements: one signing result per `wid`, replay of the original
-signatures, and long-lived retention of all three withdrawal logs.
+signatures, long-lived retention of all three withdrawal logs, and a coordinated
+breaking change without backward compatibility.
 
 Remaining decisions for review: choose reference indexes versus full record
 copies; settle non-reusable sequence and `wid` storage and reader completeness;
