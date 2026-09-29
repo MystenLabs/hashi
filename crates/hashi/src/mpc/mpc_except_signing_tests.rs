@@ -4818,7 +4818,10 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     // Create empty mock P2P channel
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
-    let signers = cert.signers(&party_manager.committee).unwrap();
+    let signers = party_manager
+        .committee
+        .signers(cert.committee_signature())
+        .unwrap();
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because no complaint exists
@@ -6462,7 +6465,8 @@ impl RotationTestSetup {
                 target_epoch,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            ),
+            )
+            .into(),
         );
         self.setup.committee_set.set_epoch(target_epoch);
         target_epoch
@@ -17217,7 +17221,7 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     );
 
     let (nodes, threshold, max_faulty) =
-        build_reduced_nodes(&weighted, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+        build_reduced_nodes(&weighted.clone().into(), TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
 
     let weights: Vec<u16> = nodes.iter().map(|n| n.weight).collect();
     assert_eq!(
@@ -17379,7 +17383,7 @@ fn golden_reduction(
     chain_id: &'static str,
 ) -> ReductionGolden {
     let committee = golden_committee(weights, (max_faulty_bps, allowed_delta_bps));
-    let outcome = match build_reduced_nodes(&committee, divisor, chain_id) {
+    let outcome = match build_reduced_nodes(&committee.clone().into(), divisor, chain_id) {
         Ok((nodes, threshold, max_faulty)) => {
             let share_ids: Vec<Vec<u16>> = (0..nodes.num_nodes())
                 .map(|party| {
@@ -17632,7 +17636,12 @@ fn derived_thresholds_are_accepted_by_the_reducer() {
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 f_bps,
             );
-            build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+            build_reduced_nodes(
+                &committee.clone().into(),
+                TEST_WEIGHT_DIVISOR,
+                TEST_CHAIN_ID,
+            )
+            .unwrap();
         }
     }
 }
@@ -17675,13 +17684,15 @@ fn a_legacy_pinned_committee_keeps_its_original_parameters() {
         ),
     ]);
     let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    let (nodes, t, f) =
+        build_reduced_nodes(&legacy.clone().into(), TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!(nodes.total_weight(), 101);
     assert_eq!((t, f), (34, 34));
 
     let fresh = Committee::new(members.clone(), setup.epoch(), 0, 3333);
     assert!(fresh.config().legacy_pinned_mpc_threshold().is_none());
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    let (nodes, t, f) =
+        build_reduced_nodes(&fresh.clone().into(), TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!(nodes.total_weight(), 100);
     assert_eq!((t, f), (26, 25));
 }
@@ -17748,11 +17759,13 @@ fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
         ),
     ]);
     let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    let (nodes, t, f) =
+        build_reduced_nodes(&legacy.clone().into(), TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!((nodes.total_weight(), t, f), (100, 35, 34));
 
     let fresh = Committee::new(members, setup.epoch(), 100, 3333);
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    let (nodes, t, f) =
+        build_reduced_nodes(&fresh.clone().into(), TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!((nodes.total_weight(), t, f), (100, 26, 25));
 }
 
@@ -17774,7 +17787,7 @@ fn a_committee_below_the_reduction_floor_is_rejected_not_panicked_on() {
         .collect();
     let committee = Committee::new(members, setup.epoch(), 0, 3333);
     let err = build_reduced_nodes(
-        &committee,
+        &committee.clone().into(),
         TEST_WEIGHT_DIVISOR,
         crate::constants::SUI_TESTNET_CHAIN_ID,
     )
@@ -17808,7 +17821,12 @@ fn derived_threshold_rejects_max_faulty_at_or_above_a_third() {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             f_bps,
         );
-        let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
+        let err = build_reduced_nodes(
+            &committee.clone().into(),
+            TEST_WEIGHT_DIVISOR,
+            TEST_CHAIN_ID,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, MpcError::InvalidThreshold(ref m) if m.contains("must exceed max_faulty")),
             "unexpected error for f_bps={f_bps}: {err:?}"
