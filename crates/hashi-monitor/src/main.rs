@@ -70,6 +70,10 @@ async fn main() -> anyhow::Result<()> {
             let end = end.unwrap_or_else(now_timestamp_secs);
             let mut auditor = hashi_monitor::audit::BatchAuditor::new(&cfg, start, end).await?;
             auditor.run().await?;
+            anyhow::ensure!(
+                !auditor.violation_found,
+                "audit produced findings: see logs"
+            );
         }
         Command::Continuous {
             config,
