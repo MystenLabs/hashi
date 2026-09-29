@@ -188,6 +188,7 @@ mod tests {
     /// A TLS server built like a node's, recording each caller's certificate key
     /// and answering `Unimplemented`.
     fn spawn_tls_stub() -> (sui_http::ServerHandle, Certificate, SeenKeys) {
+        crate::init_crypto_provider();
         let server_key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         let seen = SeenKeys::default();
         let recorder = seen.clone();
