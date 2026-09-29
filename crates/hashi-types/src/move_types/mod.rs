@@ -1926,8 +1926,8 @@ impl From<&crate::committee::Committee> for Committee {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
             total_weight: c.total_weight(),
-            // Carry the pinned config verbatim — no reconstruction, so the
-            // serialized bytes match the on-chain committee exactly.
+            // Preserve the pinned config. This round trip can still change key
+            // bytes if the local committee used an encryption-key fallback.
             config: c.config().clone(),
         }
     }

@@ -1968,8 +1968,8 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
         .into_iter()
         .map(convert_move_committee_member)
         .collect();
-    // Carry the pinned config verbatim so the rich committee re-serializes to
-    // the exact on-chain bytes (used to verify the signed handoff cert).
+    // Preserve the pinned config. Handoff signatures use the separately stored
+    // raw Move committee: fallback encryption keys can change this view's bytes.
     Committee::with_config(members, c.epoch, c.config)
 }
 
