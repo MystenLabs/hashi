@@ -440,7 +440,7 @@ async fn cmd_start(
     if let Some(url) = &external_guardian_url {
         println!();
         print_info(&format!(
-            "External guardian {url}: BTC pubkey + URL are published on-chain and the \
+            "External guardian {url}: BTC pubkey + URLs are published on-chain and the \
              committee will form via DKG. Provision it out-of-band once DKG completes:"
         ));
         println!("      hashi-guardian-init operator provision --config <guardian-init.yaml>");

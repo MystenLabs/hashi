@@ -82,9 +82,10 @@ The guardian's URLs are changed through this proposal as well, with entries
 that set `guardian_url` (the public endpoint) or `guardian_node_url` (the
 endpoint nodes call) to a new string value. The URLs are the only guardian
 settings governance can change: the guardian's BTC public key is immutable
-once set, because rotating it would invalidate derived deposit addresses. Executing the proposal changes the onchain value, but a running
-node keeps the guardian client it already resolved, so each node must be
-restarted before it uses the new endpoint.
+once set, because rotating it would invalidate derived deposit addresses.
+Executing the proposal changes the onchain value, but a running node keeps the
+guardian client it already resolved, so each node must be restarted before it
+uses the new endpoint.
 
 ## `UpdateEpochConfig`
 
