@@ -372,7 +372,7 @@ impl EnclaveState {
 
     /// Acquire exclusive access to the limiter, bounded by
     /// `LIMITER_LOCK_TIMEOUT`.
-    async fn lock_limiter(&self) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
+    pub(crate) async fn lock_limiter(&self) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
         let rate_limiter = self
             .rate_limiter
             .get()
@@ -383,20 +383,6 @@ impl EnclaveState {
         )
         .await
         .map_err(|_| Unavailable("timed out waiting for rate limiter lock".into()))
-    }
-
-    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
-    /// The guard is held through signing and durable logging so no other withdrawal
-    /// can start until this one is durably logged or the enclave aborts.
-    pub async fn consume_from_limiter(
-        &self,
-        seq: u64,
-        timestamp: u64,
-        amount_sats: u64,
-    ) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let mut guard = self.lock_limiter().await?;
-        guard.consume(seq, timestamp, amount_sats)?;
-        Ok(guard)
     }
 
     /// Record the consumption a withdrawal has just made durable, then release

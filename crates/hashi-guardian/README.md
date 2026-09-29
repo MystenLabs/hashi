@@ -73,6 +73,23 @@ signed wall-clock timestamp. The fencing argument makes these assumptions:
   - **Where we make it:** `complete_before_attempt_deadline` drops the S3 future
     when its timer wins.
 
+## Pre-withdrawal limiter consistency check
+
+Before consuming allowance or signing, each standard withdrawal holds the local
+limiter mutex and reads the latest verified limiter state from S3. The recovered
+state (next sequence, remaining tokens capped to this enclave's configuration,
+and last-refill timestamp) must equal the local state. Missing history resolves
+to genesis, so it is accepted only while local state is also genesis. Read or
+verification failures and mismatches reject the request without changing state.
+
+This is defense in depth against already-visible divergence after a faulty
+handover. It is not a distributed lock: two enclaves can read matching state
+before either writes. The lookup still selects the highest sequence from the
+newest nonempty hourly directory and the preceding hour, retaining its bounded
+clock-skew assumption. This does not prevent clock-driven premature refill.
+Each request now incurs S3 listing, read, and verification work under the limiter
+lock; failures reduce availability, and slower reads increase withdrawal latency.
+
 ## S3 log key format
 
 Canonical key layout:

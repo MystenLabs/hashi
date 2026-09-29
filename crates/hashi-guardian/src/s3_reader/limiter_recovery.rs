@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recovers a standby enclave's activation limiter state from guardian S3
-//! withdrawal logs.
+//! Reads limiter state from verified Guardian S3 withdrawal logs for activation
+//! and pre-withdrawal consistency checks.
 //!
 //! Each withdrawal log carries the limiter `post_state` after that
 //! consume. The withdrawal seq is strictly monotonic across rotations, so the
@@ -41,10 +41,11 @@ impl GuardianReader {
     /// global max-seq withdrawal post-state when present, otherwise genesis, and
     /// caps tokens to the supplied config in case capacity was lowered.
     ///
-    /// Precondition: the caller must have already verified that every
-    /// non-standby session is quiet (`ensure_session_live_and_others_quiet`).
-    /// This read deliberately skips the `write_completion_time` gate, so it is
-    /// only sound once the prior session's final writes are guaranteed visible.
+    /// Activation callers must first verify that every other session is quiet
+    /// (`ensure_session_live_and_others_quiet`) so its final writes are visible.
+    /// A live withdrawal may use this for a best-effort consistency check, but
+    /// the result is not a snapshot or a fence against concurrent remote writes.
+    /// Both uses retain the hour-partition layout's bounded-clock-skew assumption.
     pub async fn recover_limiter_state(
         &mut self,
         limiter_config: &LimiterConfig,

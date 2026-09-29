@@ -10,8 +10,9 @@ use anyhow::Result;
 use bitcoin::Network;
 use hashi_guardian::Enclave;
 use hashi_guardian::OperatorInitTestArgs;
-use hashi_guardian::activate_enclave_for_testing;
 use hashi_guardian::rpc::GuardianGrpc;
+use hashi_guardian::test_utils::activate_enclave_with_logs_for_testing;
+use hashi_guardian::test_utils::mock_storage;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::committee::Committee as HashiCommittee;
@@ -89,13 +90,20 @@ impl GuardianHarness {
         let config = InitConfig::from_parts_for_testing(limiter_config, self.network);
         self.enclave.install_operator_init_for_testing(
             OperatorInitTestArgs::default()
+                .with_s3_logger(mock_storage())
                 .with_config(config)
                 .with_genesis_bindings(hashi_object_id, master_pubkey),
         );
         hashi_guardian::test_utils::finalize_enclave(&self.enclave)
             .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
-        activate_enclave_for_testing(&self.enclave, committee, limiter_config, limiter_state)
-            .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
+        Box::pin(activate_enclave_with_logs_for_testing(
+            &self.enclave,
+            committee,
+            limiter_config,
+            limiter_state,
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
             self.enclave.require_fully_initialized().is_ok(),

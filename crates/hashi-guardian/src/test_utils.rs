@@ -3,6 +3,10 @@
 
 //! Helpers for constructing enclaves at various init stages.
 
+mod storage;
+pub use storage::activate_enclave_with_logs_for_testing;
+pub use storage::mock_storage;
+
 use crate::enclave::Enclave;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;

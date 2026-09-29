@@ -5,13 +5,16 @@ use super::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
+use std::future::Future;
 use std::sync::Arc;
 use tracing::info;
 
@@ -22,6 +25,20 @@ const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
+) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
+    let read_state = async {
+        let mut reader = enclave.new_guardian_reader()?;
+        Box::pin(reader.recover_limiter_state(&enclave.limiter_config()?)).await
+    };
+    standard_withdrawal_with_state_read(&enclave, signed_request, read_state).await
+}
+
+// Keep the read lazy: it must execute under the limiter lock, after certificate
+// verification. Tests can supply a read result without requiring Nitro attestation.
+async fn standard_withdrawal_with_state_read(
+    enclave: &Enclave,
+    signed_request: HashiSigned<StandardWithdrawalRequest>,
+    read_state: impl Future<Output = GuardianResult<LimiterState>>,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
@@ -38,7 +55,7 @@ pub async fn standard_withdrawal(
 
     let (request_sign, request) = signed_request.into_parts();
 
-    // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
+    // 2) Hold the limiter lock across the S3 state check and token consumption.
     //    The returned guard holds the mutex — no other withdrawal can proceed
     //    until this one is durably logged or the enclave aborts.
     //
@@ -49,14 +66,22 @@ pub async fn standard_withdrawal(
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-    let limiter_guard = enclave
-        .state
-        .consume_from_limiter(
-            request.seq(),
-            request.timestamp_secs(),
-            consumed_amount_sats,
-        )
-        .await?;
+    let mut limiter_guard = enclave.state.lock_limiter().await?;
+    let persisted_state = read_state.await?;
+    if limiter_guard.state() != &persisted_state {
+        return Err(InvalidS3Log(format!(
+            "persisted limiter state differs from local state: persisted {persisted_state:?}, local {:?}",
+            limiter_guard.state(),
+        )));
+    }
+    // This catches already-visible divergence, not simultaneous withdrawals in
+    // different enclaves: another session can write after our read completes.
+    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
+    limiter_guard.consume(
+        request.seq(),
+        request.timestamp_secs(),
+        consumed_amount_sats,
+    )?;
     info!("Rate limit check passed.");
 
     // 3) Sign tx (while holding limiter lock)
@@ -240,11 +265,8 @@ mod tests {
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
         // A withdrawal holds the limiter across its durable log write.
-        let guard = enclave
-            .state
-            .consume_from_limiter(0, now_timestamp_secs(), amount_sats)
-            .await
-            .expect("limiter accepts the first withdrawal");
+        let mut guard = enclave.state.lock_limiter().await.unwrap();
+        guard.consume(0, now_timestamp_secs(), amount_sats).unwrap();
 
         // Readable rather than timing out into `None`, and still reporting the
         // durable state: this consumption is not logged yet.
@@ -319,7 +341,15 @@ mod tests {
             timestamp_secs + 1,
             1,
         );
-        let second = standard_withdrawal(enclave, req2).await;
+        // This logger captures writes but does not serve them back. Supply the
+        // first withdrawal's durable state for this rate-limit test.
+        let persisted_state = enclave.state.limiter_snapshot().unwrap();
+        let second = standard_withdrawal_with_state_read(
+            &enclave,
+            req2,
+            std::future::ready(Ok(persisted_state)),
+        )
+        .await;
         assert!(matches!(
             second.unwrap_err(),
             GuardianError::RateLimitExceeded
@@ -344,6 +374,82 @@ mod tests {
         assert_eq!(request_data.seq, 0);
         assert_eq!(post_state.next_seq, 1);
         assert_eq!(post_state.num_tokens_available, 0);
+    }
+
+    #[tokio::test]
+    async fn persisted_state_mismatch_or_read_error_does_not_consume_or_log() {
+        for mismatch in 0..4 {
+            let (request, committee) =
+                StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                    Network::Regtest,
+                    WithdrawalID::new([0xab; 32]),
+                    now_timestamp_secs(),
+                    0,
+                );
+            let amount = request.message().utxos().gross_outflow_amount().to_sat();
+            let (enclave, captures) =
+                setup_fully_initialized_enclave(Network::Regtest, committee, amount).await;
+            let before = enclave.state.limiter_snapshot().unwrap();
+            let mut persisted = before;
+            let read_result = match mismatch {
+                0 => {
+                    persisted.next_seq += 1;
+                    Ok(persisted)
+                }
+                1 => {
+                    persisted.num_tokens_available -= 1;
+                    Ok(persisted)
+                }
+                2 => {
+                    persisted.last_updated_at += 1;
+                    Ok(persisted)
+                }
+                _ => Err(GuardianError::S3Error("read failed".into())),
+            };
+            let result = standard_withdrawal_with_state_read(&enclave, request, async {
+                // The local withdrawal lock must already be held during I/O.
+                let lock = enclave.state.lock_limiter();
+                assert!(tokio::time::timeout(std::time::Duration::ZERO, lock)
+                    .await
+                    .is_err());
+                read_result
+            })
+            .await;
+            if mismatch == 3 {
+                assert!(matches!(result, Err(GuardianError::S3Error(_))));
+            } else {
+                assert!(matches!(result, Err(GuardianError::InvalidS3Log(_))));
+            }
+            assert!(captures.lock().unwrap().is_empty());
+            assert_eq!(enclave.state.limiter_snapshot().unwrap(), before);
+            assert_eq!(*enclave.state.lock_limiter().await.unwrap().state(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_history_after_a_withdrawal_is_rejected() {
+        let (request, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            WithdrawalID::new([0xab; 32]),
+            now_timestamp_secs(),
+            0,
+        );
+        let amount = request.message().utxos().gross_outflow_amount().to_sat();
+        let (enclave, captures) =
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount * 2).await;
+        standard_withdrawal(enclave.clone(), request).await.unwrap();
+        let before = enclave.state.limiter_snapshot().unwrap();
+        let (request, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+            Network::Regtest,
+            WithdrawalID::new([0xee; 32]),
+            now_timestamp_secs(),
+            1,
+        );
+        // The capturing mock lists an empty history, despite the successful write.
+        let result = standard_withdrawal(enclave.clone(), request).await;
+        assert!(matches!(result, Err(GuardianError::InvalidS3Log(_))));
+        assert_eq!(captures.lock().unwrap().len(), 1);
+        assert_eq!(*enclave.state.lock_limiter().await.unwrap().state(), before);
     }
 
     #[test]
