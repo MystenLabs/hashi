@@ -135,8 +135,7 @@ public(package) fun verify<T>(
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
-    let threshold =
-        threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
+    let threshold = threshold::certificate_threshold(self.current_committee().total_weight());
     self
         .current_committee()
         .verify_certificate(self.id.uid_to_address(), intent, message, sig, threshold)
@@ -151,7 +150,7 @@ public(package) fun verify_with_committee<T>(
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
-    let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
+    let threshold = threshold::certificate_threshold(committee.total_weight());
     committee.verify_certificate(self.id.uid_to_address(), intent, message, sig, threshold)
 }
 

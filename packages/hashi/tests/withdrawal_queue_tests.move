@@ -869,6 +869,50 @@ fun test_miner_fee_output_below_dust_aborts() {
 }
 
 #[test]
+#[expected_failure(abort_code = EOutputBelowDust)]
+fun test_miner_fee_above_request_amount_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+    let mut config = config::create();
+    hashi::btc_config::init_defaults(&mut config);
+
+    // The request is smaller than its share of the miner fee, which is what a
+    // request admitted under a lower withdrawal minimum looks like once the
+    // minimum (and with it the fee cap) has been raised. No output amount can
+    // satisfy it, so the named dust error must fire rather than the
+    // subtraction underflowing.
+    let btc_amount = 1_000u64;
+    let miner_fee = 2_000u64;
+    let user_output = hashi::btc_config::dust_relay_min_value();
+    let change = 1_000u64;
+    let input_amount = user_output + change + miner_fee;
+
+    let id = setup_request(&mut queue, &clock, btc_amount, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let infos = queue.extract_request_infos(&vector[id]);
+
+    let pending = withdrawal_queue::new_withdrawal_txn(
+        ctx,
+        vector[id],
+        &infos,
+        vector[utxo::utxo(utxo::utxo_id(@0xDD04, 0), input_amount, option::none())],
+        vector[make_test_output(user_output), make_test_output(change)],
+        @0xDD04,
+        0,
+        0,
+        &config,
+        &clock,
+        vector[],
+    );
+
+    queue.insert_withdrawal_txn(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+    std::unit_test::destroy(config);
+}
+
+#[test]
 #[expected_failure(abort_code = EOutputAmountMismatch)]
 fun test_miner_fee_wrong_output_amount_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);

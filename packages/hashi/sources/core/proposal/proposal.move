@@ -36,6 +36,9 @@ const EProposalExpired: vector<u8> = b"Proposal expired";
 const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
 #[error(code = 7)]
 const ENotCommitteeMember: vector<u8> = b"Validator is not a member of the current committee";
+#[error(code = 8)]
+const ENoCommittee: vector<u8> =
+    b"No committee exists for the current epoch; votes cannot be cast before genesis";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -95,6 +98,10 @@ entry fun vote<T: store>(
 ) {
     hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
+    // Before genesis no committee exists yet, so there is nothing to weigh a
+    // vote against. Refuse by name rather than letting the committee lookup
+    // below abort inside the bag.
+    assert!(hashi.committee_set().has_committee(hashi.committee_set().epoch()), ENoCommittee);
     // Registration authorizes the key; only current-committee membership
     // carries weight. A registered validator outside the committee (rotated
     // out, or not yet seated) must not record a weightless vote.

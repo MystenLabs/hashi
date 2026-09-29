@@ -72,6 +72,9 @@ const EPendingEpochStillCurrent: vector<u8> =
 #[error(code = 15)]
 const EInvalidMpcPublicKey: vector<u8> =
     b"MPC public key must be a 33-byte compressed secp256k1 point";
+#[error(code = 16)]
+const EMemberAlreadyRegistered: vector<u8> =
+    b"A member is already registered under this validator address";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -186,12 +189,23 @@ public(package) fun new_member(
     ctx: &TxContext,
 ) {
     let validator_address = ctx.sender();
-
-    // Only allow Sui Validators to register as Hashi members
-    assert!(
+    committee_set.register_member(
+        validator_address,
         sui_system.active_validator_addresses_ref().contains(&validator_address),
-        ENotAnActiveSuiValidator,
     );
+}
+
+/// The registration itself, given whether `validator_address` is in Sui's
+/// active validator set. Split from `new_member` because unit tests cannot
+/// construct a `SuiSystemState`.
+fun register_member(
+    committee_set: &mut CommitteeSet,
+    validator_address: address,
+    is_active_sui_validator: bool,
+) {
+    // Only allow Sui Validators to register as Hashi members
+    assert!(is_active_sui_validator, ENotAnActiveSuiValidator);
+    assert!(!committee_set.has_member(validator_address), EMemberAlreadyRegistered);
 
     let member = MemberInfo {
         validator_address: validator_address,
@@ -910,6 +924,17 @@ public fun tls_key_holder_for_testing(
 #[test_only]
 public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
     self.has_committee_handoff(from_epoch)
+}
+
+#[test_only]
+/// Exercise `new_member` (checks and insertion) without a SuiSystemState by
+/// supplying the validator-set answer directly.
+public fun register_member_for_testing(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    is_active_sui_validator: bool,
+) {
+    self.register_member(validator_address, is_active_sui_validator)
 }
 
 #[test_only]

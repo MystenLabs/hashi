@@ -1016,6 +1016,54 @@ fun test_vote_by_registered_non_member_fails() {
 }
 
 #[test]
+#[expected_failure(abort_code = proposal::ENoCommittee)]
+/// Before genesis a proposal can be created but not voted on: there is no
+/// committee to weigh the vote against, and the refusal must be the named
+/// error rather than the committee lookup aborting inside the bag.
+fun test_vote_before_genesis_fails() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+    let sk = test_utils::bls_sk_for_testing();
+    let pub_key = bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk));
+    let committee_set = hashi::committee_set::create_pre_genesis_for_testing(
+        vector[VOTER1, VOTER2],
+        *pub_key.bytes(),
+        sk,
+        ctx1,
+    );
+    let mut config = hashi::config::create();
+    hashi::btc_config::init_defaults(&mut config);
+    let mut epoch_config = hashi::config::empty();
+    hashi::mpc_config::init_defaults(&mut epoch_config);
+    let mut hashi = hashi::hashi::create_for_testing(
+        committee_set,
+        config,
+        epoch_config,
+        hashi::versioning::create(),
+        hashi::treasury::create(ctx1),
+        hashi::proposals::create(ctx1),
+        sui::bag::new(ctx1),
+        ctx1,
+    );
+    let clock = clock::create_for_testing(ctx1);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx1,
+    );
+
+    // Registered and authorized by its own key, but no committee exists yet.
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<UpdateConfig>(&mut hashi, VOTER2, proposal_id, &clock, ctx2);
+
+    // Won't reach here
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 /// A registered validator outside the committee can still retract a vote it
 /// cast while seated: `remove_vote` stays registration-gated so a rotated-out
 /// member can withdraw support from a proposal it no longer backs.
