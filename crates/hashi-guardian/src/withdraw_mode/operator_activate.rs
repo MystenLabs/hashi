@@ -6,10 +6,10 @@
 //! operator-pinned `ActivationState` hash.
 
 use crate::Enclave;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
@@ -24,7 +24,7 @@ use GuardianError::InvalidInputs;
 /// mutating the enclave. Once built, the commit must either complete or abort
 /// the enclave process.
 struct OAInstall {
-    committee: HashiCommittee,
+    committee: RuntimeCommittee,
     rate_limiter: RateLimiter,
     completion_log: InitLogMessage,
 }
@@ -47,12 +47,12 @@ impl OAInstall {
             .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
             .await?;
 
-        let committee: HashiCommittee = reader
-            .read_latest_committee()
-            .await?
-            .ok_or_else(|| InvalidInputs("no committee-update or genesis record found".into()))?
-            .try_into_with_encryption_key_fallback()
-            .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
+        let committee = RuntimeCommittee::from_move_with_encryption_key_fallback(
+            reader.read_latest_committee().await?.ok_or_else(|| {
+                InvalidInputs("no committee-update or genesis record found".into())
+            })?,
+        )
+        .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
         let limiter_state = reader.recover_limiter_state(&limiter_config).await?;
         let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;

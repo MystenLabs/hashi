@@ -5,7 +5,6 @@ use super::LeaderService;
 use super::parse_member_signature;
 use crate::Hashi;
 use crate::onchain::types::WithdrawalTransaction;
-use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
@@ -190,11 +189,8 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(
-            inner.config.hashi_ids().hashi_object_id,
-            &committee,
-            guardian_request,
-        );
+        let mut aggregator = (committee)
+            .signature_aggregator(inner.config.hashi_ids().hashi_object_id, guardian_request);
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
@@ -375,11 +371,8 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(
-            inner.config.hashi_ids().hashi_object_id,
-            &from_committee,
-            transition,
-        );
+        let mut aggregator = (from_committee)
+            .signature_aggregator(inner.config.hashi_ids().hashi_object_id, transition);
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

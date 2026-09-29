@@ -10,12 +10,12 @@ use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::OTHER_SESSION_QUIET_PERIOD;
 use hashi_guardian::S3_WRITE_ATTEMPT_TIMEOUT;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::EnclaveLifecycle;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitInfo;
@@ -141,8 +141,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .await?
         .context("no committee-update or genesis record found")?;
     let committee_epoch = move_committee.epoch;
-    let committee: HashiCommittee = move_committee
-        .try_into_with_encryption_key_fallback()
+    let committee = RuntimeCommittee::from_move_with_encryption_key_fallback(move_committee)
         .context("invalid serving committee")?;
     let limiter_state = reader
         .recover_limiter_state(standby.init_config.limiter_config())

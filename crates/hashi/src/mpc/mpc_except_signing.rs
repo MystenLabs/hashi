@@ -97,10 +97,10 @@ use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
+use hashi_types::committee::RuntimeCommittee as Committee;
 use hashi_types::committee::SignedMessage;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
@@ -1510,13 +1510,13 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_reduced(
-            dealer_data.hashi_id,
-            &dealer_data.committee,
-            dealer_data.messages_hash.clone(),
-            &dealer_data.nodes,
-        )
-        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
+        let mut aggregator = (dealer_data.committee)
+            .reduced_signature_aggregator(
+                dealer_data.hashi_id,
+                dealer_data.messages_hash.clone(),
+                &dealer_data.nodes,
+            )
+            .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(
                 dealer_data.my_signature.ok_or_else(|| {
@@ -1708,9 +1708,12 @@ impl MpcManager {
                     .start_timer();
                 let (signers, epoch, message) = {
                     let mgr = mpc_manager.read().unwrap();
-                    let signers = dkg_cert.signers(&mgr.committee).map_err(|e| {
-                        MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
-                    })?;
+                    let signers = mgr
+                        .committee
+                        .signers(dkg_cert.committee_signature())
+                        .map_err(|e| {
+                            MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
+                        })?;
                     let message = mgr
                         .current_dkg_messages
                         .get(&dealer)
@@ -1810,15 +1813,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_reduced(
-            dealer_data.hashi_id,
-            &dealer_data.committee,
-            dealer_data.messages_hash.clone(),
-            &dealer_data.nodes,
-        )
-        // Not a crypto failure: the local `nodes` do not match the committee
-        // they are being aggregated against.
-        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
+        let mut aggregator = (dealer_data.committee)
+            .reduced_signature_aggregator(
+                dealer_data.hashi_id,
+                dealer_data.messages_hash.clone(),
+                &dealer_data.nodes,
+            )
+            // Not a crypto failure: the local `nodes` do not match the committee
+            // they are being aggregated against.
+            .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         if let Some(my_signature) = dealer_data.my_signature {
             aggregator
                 .add_signature(my_signature)
@@ -2015,9 +2018,12 @@ impl MpcManager {
             }
             let (signers, epoch, rotation_msgs) = {
                 let mgr = mpc_manager.read().unwrap();
-                let signers = rotation_cert.signers(&mgr.committee).map_err(|e| {
-                    MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
-                })?;
+                let signers = mgr
+                    .committee
+                    .signers(rotation_cert.committee_signature())
+                    .map_err(|e| {
+                        MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
+                    })?;
                 let msgs = mgr
                     .current_rotation_messages
                     .get(&dealer)
@@ -2897,13 +2903,13 @@ impl MpcManager {
         let confirm_cert = match dealer_data.stored_confirm_cert.take() {
             Some(cert) => cert,
             None => {
-                let mut aggregator = BlsSignatureAggregator::new_reduced(
-                    dealer_data.hashi_id,
-                    &dealer_data.committee,
-                    dealer_data.confirm_target.clone(),
-                    &dealer_data.nodes,
-                )
-                .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
+                let mut aggregator = (dealer_data.committee)
+                    .reduced_signature_aggregator(
+                        dealer_data.hashi_id,
+                        dealer_data.confirm_target.clone(),
+                        &dealer_data.nodes,
+                    )
+                    .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
                 aggregator
                     .add_signature(dealer_data.my_signature.clone())
                     .expect("own signature must always verify");
@@ -3007,15 +3013,11 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut vote_aggregator = BlsSignatureAggregator::new_reduced(
-            dealer_data.hashi_id,
-            &dealer_data.committee,
-            vote_target,
-            &dealer_data.nodes,
-        )
-        // Not a crypto failure: the local `nodes` do not match the committee
-        // they are being aggregated against.
-        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
+        let mut vote_aggregator = (dealer_data.committee)
+            .reduced_signature_aggregator(dealer_data.hashi_id, vote_target, &dealer_data.nodes)
+            // Not a crypto failure: the local `nodes` do not match the committee
+            // they are being aggregated against.
+            .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         vote_aggregator
             .add_signature(my_vote)
             .expect("own signature must always verify");
@@ -3069,8 +3071,8 @@ impl MpcManager {
     }
 
     fn reduced_weight_of_cert(&self, cert: &DealerCertificate) -> MpcResult<u32> {
-        cert.committee_signature()
-            .reduced_weight(&self.committee, &self.mpc_config.nodes)
+        self.committee
+            .reduced_signed_weight(cert.committee_signature(), &self.mpc_config.nodes)
             .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
     }
 
@@ -3265,10 +3267,8 @@ impl MpcManager {
         cert: &UnclassifiedNonceCert,
     ) -> MpcResult<(Option<CertKind>, u32)> {
         let (committee, nodes, params) = self.cert_verification_context(cert.epoch())?;
-        let weight = cert
-            .as_avss_vote()?
-            .committee_signature()
-            .reduced_weight(committee, nodes)
+        let weight = committee
+            .reduced_signed_weight(cert.as_avss_vote()?.committee_signature(), nodes)
             .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
         let kind = Self::avid_cert_kind(self.hashi_object_id, committee, cert)?;
         let required = Self::required_cert_weight(nodes, params.f, kind);
@@ -3350,7 +3350,7 @@ impl MpcManager {
             Err(MpcError::InvalidConfig(_)) => return "config",
             Err(_) => return "epoch",
         };
-        match cert.committee_signature().reduced_weight(committee, nodes) {
+        match committee.reduced_signed_weight(cert.committee_signature(), nodes) {
             Err(_) => "provenance",
             Ok(weight) if weight < required => "weight",
             Ok(_) => "signature",
@@ -3465,8 +3465,9 @@ impl MpcManager {
                 epoch: mgr.mpc_config.epoch,
                 batch_index: Some(batch_index),
             };
-            let signers: Vec<Address> = nonce_cert
-                .signers(&mgr.committee)
+            let signers: Vec<Address> = mgr
+                .committee
+                .signers(nonce_cert.committee_signature())
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?
                 .into_iter()
                 .filter(|addr| *addr != mgr.address)
@@ -4241,8 +4242,9 @@ impl MpcManager {
     ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
-            if certificate
-                .is_signer(&mgr.address, &mgr.committee)
+            if mgr
+                .committee
+                .is_signer(certificate.committee_signature(), &mgr.address)
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::warn!(
@@ -4257,8 +4259,9 @@ impl MpcManager {
                 epoch: mgr.mpc_config.epoch,
                 batch_index: None,
             };
-            let signers = certificate
-                .signers(&mgr.committee)
+            let signers = mgr
+                .committee
+                .signers(certificate.committee_signature())
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
@@ -4383,8 +4386,9 @@ impl MpcManager {
     ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
-            if certificate
-                .is_signer(&mgr.address, &mgr.committee)
+            if mgr
+                .committee
+                .is_signer(certificate.committee_signature(), &mgr.address)
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::warn!(
@@ -4399,11 +4403,14 @@ impl MpcManager {
                 epoch: mgr.mpc_config.epoch,
                 batch_index: None,
             };
-            let signers = certificate.signers(&mgr.committee).map_err(|_| {
-                MpcError::ProtocolFailed(
-                    "Certificate does not match the current epoch or committee".to_string(),
-                )
-            })?;
+            let signers = mgr
+                .committee
+                .signers(certificate.committee_signature())
+                .map_err(|_| {
+                    MpcError::ProtocolFailed(
+                        "Certificate does not match the current epoch or committee".to_string(),
+                    )
+                })?;
             (request, signers)
         };
         let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
@@ -5904,11 +5911,13 @@ impl MpcManager {
                 epoch: mgr.previous_epoch,
                 batch_index: None,
             };
-            let signers = certificate.signers(previous_committee).map_err(|_| {
-                MpcError::ProtocolFailed(
-                    "Certificate does not match the previous committee".to_string(),
-                )
-            })?;
+            let signers = previous_committee
+                .signers(certificate.committee_signature())
+                .map_err(|_| {
+                    MpcError::ProtocolFailed(
+                        "Certificate does not match the previous committee".to_string(),
+                    )
+                })?;
             (request, signers)
         };
         let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)

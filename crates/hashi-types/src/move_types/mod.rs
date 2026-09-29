@@ -1844,36 +1844,17 @@ impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
     type Error = anyhow::Error;
 
     fn try_from(m: CommitteeMember) -> Result<Self, Self::Error> {
+        let public_key = bls_public_key_from_uncompressed_g1_bytes(&m.public_key)?;
+
         let encryption_public_key =
             crate::committee::EncryptionPublicKey::from_bcs(&m.encryption_public_key)
-                .map_err(|e| anyhow::anyhow!("invalid encryption public key {e}"))?;
-        m.try_into_with_encryption_key(encryption_public_key)
-    }
-}
+                .map_err(|e| anyhow::anyhow!("invalid encryption public key {}", e))?;
 
-impl CommitteeMember {
-    /// Build a local member view, substituting the node fallback for an invalid
-    /// encryption key. BLS parsing remains fallible. Preserve the original Move
-    /// value for signed payloads and logs; this conversion can change key bytes.
-    pub fn try_into_with_encryption_key_fallback(
-        self,
-    ) -> anyhow::Result<crate::committee::CommitteeMember> {
-        let encryption_public_key =
-            crate::committee::EncryptionPublicKey::from_bcs(&self.encryption_public_key)
-                .unwrap_or_else(|_| crate::committee::fallback_encryption_public_key());
-        self.try_into_with_encryption_key(encryption_public_key)
-    }
-
-    fn try_into_with_encryption_key(
-        self,
-        encryption_public_key: crate::committee::EncryptionPublicKey,
-    ) -> anyhow::Result<crate::committee::CommitteeMember> {
-        let public_key = bls_public_key_from_uncompressed_g1_bytes(&self.public_key)?;
         Ok(crate::committee::CommitteeMember::new(
-            self.validator_address,
+            m.validator_address,
             public_key,
             encryption_public_key,
-            self.weight,
+            m.weight,
         ))
     }
 }
@@ -1887,8 +1868,7 @@ fn bls_public_key_to_uncompressed_g1_bytes(
         .to_vec()
 }
 
-/// Decode a Move BLS key without adding point validation (identity keys are allowed).
-pub fn bls_public_key_from_uncompressed_g1_bytes(
+fn bls_public_key_from_uncompressed_g1_bytes(
     public_key: &[u8],
 ) -> Result<crate::committee::BLS12381PublicKey, anyhow::Error> {
     let public_key = blst::min_pk::PublicKey::deserialize(public_key)
@@ -1903,30 +1883,10 @@ impl From<&crate::committee::Committee> for Committee {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
             total_weight: c.total_weight(),
-            // Preserve the pinned config. This round trip can still change key
-            // bytes if the local committee used an encryption-key fallback.
+            // Carry the pinned config verbatim — no reconstruction, so the
+            // serialized bytes match the on-chain committee exactly.
             config: c.config().clone(),
         }
-    }
-}
-
-impl Committee {
-    /// Build a local committee view with the same encryption-key fallback as nodes.
-    /// Verify signatures against the original Move value before converting, and
-    /// retain that original value for signed payloads and logs.
-    pub fn try_into_with_encryption_key_fallback(
-        self,
-    ) -> anyhow::Result<crate::committee::Committee> {
-        let members = self
-            .members
-            .into_iter()
-            .map(CommitteeMember::try_into_with_encryption_key_fallback)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::committee::Committee::with_config(
-            members,
-            self.epoch,
-            self.config,
-        ))
     }
 }
 

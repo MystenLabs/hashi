@@ -16,8 +16,8 @@ use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
 
 use crate::grpc::Client;
-use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::committee::RuntimeCommittee as Committee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
@@ -490,18 +490,32 @@ impl CommitteeSet {
         self
     }
 
-    /// Install committees, deriving the raw view by round-tripping the
-    /// enriched one — exact when every member's encryption key is a
-    /// valid group element, which holds for the synthetic committees
-    /// tests build. The chain-fed paths (scrape and apply) install the
-    /// decoded on-chain committees via [`Self::set_raw_committees`] or
-    /// [`Self::raw_committees_mut`] instead of relying on this.
-    pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
+    /// Install strictly constructed committees, preserving their wire encoding
+    /// before wrapping them for runtime use. Chain-fed paths retain the original
+    /// Move values instead, using `set_runtime_committees` or the map accessors.
+    pub fn set_committees(
+        &mut self,
+        committees: BTreeMap<u64, hashi_types::committee::Committee>,
+    ) -> &mut Self {
         self.raw_committees = committees
             .iter()
             .map(|(epoch, committee)| (*epoch, move_types::Committee::from(committee)))
             .collect();
+        self.committees = committees
+            .into_iter()
+            .map(|(epoch, c)| (epoch, c.into()))
+            .collect();
+        self
+    }
+
+    /// Install runtime views together with their original signed representation.
+    pub fn set_runtime_committees(
+        &mut self,
+        committees: BTreeMap<u64, Committee>,
+        raw_committees: BTreeMap<u64, move_types::Committee>,
+    ) -> &mut Self {
         self.committees = committees;
+        self.raw_committees = raw_committees;
         self
     }
 
@@ -1042,6 +1056,7 @@ impl Coin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::committee::Committee;
 
     fn config_with(entries: &[(&str, ConfigValue)]) -> Config {
         Config {

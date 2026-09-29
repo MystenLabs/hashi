@@ -34,7 +34,7 @@ use tracing::info;
 use crate::log_writer::LogWriter;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;
-use hashi_types::committee::Committee as HashiCommittee;
+use hashi_types::committee::RuntimeCommittee;
 
 /// Enclave's config & state
 pub struct Enclave {
@@ -83,7 +83,7 @@ pub struct EnclaveState {
     /// Authoritative mode-specific lifecycle, absent until operator init commits.
     lifecycle: RwLock<Option<EnclaveLifecycle>>,
     /// Current Hashi committee.
-    committee: RwLock<Option<Arc<HashiCommittee>>>,
+    committee: RwLock<Option<Arc<RuntimeCommittee>>>,
     /// Rate limiter. Set once during operator_activate.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
@@ -276,7 +276,11 @@ impl EnclaveState {
     // ========================================================================
 
     /// Install the activation-derived committee + rate limiter. Called from operator_activate.
-    pub fn init(&self, committee: HashiCommittee, rate_limiter: RateLimiter) -> GuardianResult<()> {
+    pub fn init(
+        &self,
+        committee: RuntimeCommittee,
+        rate_limiter: RateLimiter,
+    ) -> GuardianResult<()> {
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
         Ok(())
@@ -287,7 +291,7 @@ impl EnclaveState {
     // ========================================================================
 
     /// Get the current committee.
-    pub fn get_committee(&self) -> GuardianResult<Arc<HashiCommittee>> {
+    pub fn get_committee(&self) -> GuardianResult<Arc<RuntimeCommittee>> {
         let guard = self
             .committee
             .read()
@@ -307,7 +311,7 @@ impl EnclaveState {
     }
 
     /// Set committee. Called only from `init` during operator activation.
-    fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
+    fn set_committee(&self, committee: RuntimeCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
 
         let mut guard = self
@@ -325,7 +329,7 @@ impl EnclaveState {
     /// the in-memory epoch matches `expected_current_epoch`.
     pub fn replace_committee(
         &self,
-        committee: HashiCommittee,
+        committee: RuntimeCommittee,
         expected_current_epoch: u64,
     ) -> GuardianResult<()> {
         info!("Replacing committee for epoch {}.", committee.epoch());

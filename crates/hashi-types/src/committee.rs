@@ -1,16 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+mod runtime;
+pub(crate) use runtime::ActivationCommitteeRepr;
+pub use runtime::RuntimeCommittee;
+pub use runtime::fallback_encryption_public_key;
+
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::LazyLock;
 
 use fastcrypto::bls12381::BLS_PRIVATE_KEY_LENGTH;
 use fastcrypto::bls12381::min_pk;
 pub use fastcrypto::bls12381::min_pk::BLS12381AggregateSignature;
 pub use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 pub use fastcrypto::bls12381::min_pk::BLS12381Signature;
-use fastcrypto::groups::HashToGroupElement;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::AggregateAuthenticator;
 use fastcrypto::traits::AllowedRng;
@@ -81,15 +84,6 @@ impl From<fastcrypto::groups::ristretto255::RistrettoScalar> for EncryptionPriva
     }
 }
 pub type EncryptionPublicKey = fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>;
-
-/// Nodes with invalid encryption keys cannot decrypt shares but still count
-/// toward committee thresholds.
-pub fn fallback_encryption_public_key() -> EncryptionPublicKey {
-    static FALLBACK_ENCRYPTION_PK: LazyLock<EncryptionPublicKey> = LazyLock::new(|| {
-        EncryptionPublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi"))
-    });
-    FALLBACK_ENCRYPTION_PK.clone()
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);

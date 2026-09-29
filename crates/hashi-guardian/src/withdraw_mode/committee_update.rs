@@ -3,11 +3,11 @@
 
 use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
 use std::sync::Arc;
 use tracing::info;
@@ -34,12 +34,10 @@ pub async fn update_committee(
 
     verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed)?;
 
-    let new_committee: HashiCommittee = signed
-        .message()
-        .new_committee
-        .clone()
-        .try_into_with_encryption_key_fallback()
-        .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
+    let new_committee = RuntimeCommittee::from_move_with_encryption_key_fallback(
+        signed.message().new_committee.clone(),
+    )
+    .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
 
     if new_committee.epoch() != proposed_epoch {
         return Err(InvalidInputs(format!(
@@ -96,6 +94,7 @@ mod tests {
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::guardian::GuardianError;
+    use hashi_types::guardian::HashiCommittee;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
@@ -288,7 +287,7 @@ mod tests {
 
         let err = enclave
             .state
-            .replace_committee(committee_at(6), 4)
+            .replace_committee(committee_at(6).into(), 4)
             .expect_err("stale expected_current_epoch must error");
         assert!(
             matches!(err, GuardianError::InvalidInputs(_)),

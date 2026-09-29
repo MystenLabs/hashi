@@ -16,7 +16,6 @@ use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::StreamExt;
-use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
@@ -529,9 +528,8 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(
+        let mut aggregator = (committee).signature_aggregator(
             inner.config.hashi_ids().hashi_object_id,
-            &committee,
             signed_message.clone(),
         );
         while let Some(result) = sig_tasks.join_next().await {
@@ -779,9 +777,8 @@ impl LeaderService {
                 Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
             });
         }
-        let mut aggregator = BlsSignatureAggregator::new(
+        let mut aggregator = (committee).signature_aggregator(
             inner.config.hashi_ids().hashi_object_id,
-            &committee,
             signed_message.clone(),
         );
         while let Some(result) = sig_tasks.join_next().await {
@@ -1510,11 +1507,8 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(
-            inner.config.hashi_ids().hashi_object_id,
-            &committee,
-            confirmation,
-        );
+        let mut aggregator = (committee)
+            .signature_aggregator(inner.config.hashi_ids().hashi_object_id, confirmation);
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

@@ -4,6 +4,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
@@ -34,8 +35,8 @@ use tokio::sync::watch;
 
 use crate::config::HashiIds;
 use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
-use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::RuntimeCommittee as Committee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
@@ -773,6 +774,13 @@ impl OnchainState {
         self.state().hashi.committees.current_committee().cloned()
     }
 
+    /// Original on-chain committee for signed payloads, without runtime key substitution.
+    pub fn current_raw_committee(&self) -> Option<move_types::Committee> {
+        let state = self.state();
+        let committees = &state.hashi.committees;
+        committees.raw_committee(committees.epoch()).cloned()
+    }
+
     /// The next epoch a reconfiguration is currently transitioning to, if
     /// one is in flight.
     pub fn pending_epoch_change(&self) -> Option<u64> {
@@ -953,7 +961,7 @@ impl OnchainState {
 
     /// The governed MPC parameters from the epoch config: what the NEXT
     /// committee will be formed with. The active committee reads its own
-    /// pinned copy via [`Committee::config`](hashi_types::committee::Committee::config).
+    /// pinned copy via [`Committee::config`](hashi_types::committee::RuntimeCommittee::config).
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
         self.state()
             .hashi()
@@ -1436,8 +1444,7 @@ async fn scrape_hashi(
         .set_pending_epoch_change(committees.pending_epoch_change.map(|pending| pending.epoch))
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
-        .set_committees(committees_per_epoch)
-        .set_raw_committees(raw_committees_per_epoch)
+        .set_runtime_committees(committees_per_epoch, raw_committees_per_epoch)
         .set_committee_handoffs(committee_handoffs);
 
     if let Some(metrics) = metrics {
@@ -1736,10 +1743,7 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
     types::MemberInfo {
         validator_address,
         operator_address,
-        next_epoch_public_key: move_types::bls_public_key_from_uncompressed_g1_bytes(
-            &next_epoch_public_key,
-        )
-        .expect("valid on-chain BLS public key"),
+        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
         endpoint_url: endpoint_url.try_into().ok(),
         tls_public_key: tls_public_key.as_slice().try_into().ok(),
         next_epoch_encryption_public_key: parse_encryption_public_key(
@@ -1930,21 +1934,8 @@ async fn scrape_committees(
     Ok((seed, (committees, move_committees, handoffs)))
 }
 
-fn convert_move_committee_member(member: move_types::CommitteeMember) -> CommitteeMember {
-    member
-        .try_into_with_encryption_key_fallback()
-        .expect("valid on-chain committee member")
-}
-
 fn convert_move_committee(c: move_types::Committee) -> Committee {
-    let members = c
-        .members
-        .into_iter()
-        .map(convert_move_committee_member)
-        .collect();
-    // Preserve the pinned config. Handoff signatures use the separately stored
-    // raw Move committee: fallback encryption keys can change this view's bytes.
-    Committee::with_config(members, c.epoch, c.config)
+    Committee::from_move_with_encryption_key_fallback(c).expect("valid on-chain committee")
 }
 
 fn convert_move_committee_handoff(
@@ -1959,6 +1950,13 @@ fn convert_move_committee_handoff(
         &handoff.cert.signers_bitmap,
     )
     .map_err(|e| anyhow!("invalid committee handoff cert: {e}"))
+}
+
+fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {
+    use fastcrypto::traits::ToFromBytes;
+    let pubkey = blst::min_pk::PublicKey::deserialize(uncompressed_g1)
+        .expect("onchain value is uncompressed G1");
+    BLS12381PublicKey::from_bytes(pubkey.to_bytes().as_slice()).unwrap()
 }
 
 /// Scrape an `ObjectBag` whose children all BCS-decode as `T`, seeding
@@ -2351,6 +2349,7 @@ mod upgrade_proposal_tests {
 
 #[cfg(test)]
 mod tests {
+    use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::KeyPair;
     use fastcrypto::traits::ToFromBytes;
@@ -2469,7 +2468,13 @@ mod tests {
             encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
             weight: 1,
         };
-        let committee_member = convert_move_committee_member(move_committee_member);
+        let committee = convert_move_committee(move_types::Committee {
+            epoch: 0,
+            total_weight: move_committee_member.weight,
+            members: vec![move_committee_member],
+            config: move_types::Config::from_mpc_params(0, 3333, 0),
+        });
+        let committee_member = &committee.members()[0];
 
         assert_eq!(committee_member.validator_address(), validator_address);
         assert_eq!(committee_member.public_key(), signing_keypair.public());
@@ -2495,7 +2500,13 @@ mod tests {
             encryption_public_key: encryption_key_vec,
             weight: 1,
         };
-        let committee_member = convert_move_committee_member(move_committee_member);
+        let committee = convert_move_committee(move_types::Committee {
+            epoch: 0,
+            total_weight: move_committee_member.weight,
+            members: vec![move_committee_member],
+            config: move_types::Config::from_mpc_params(0, 3333, 0),
+        });
+        let committee_member = &committee.members()[0];
 
         assert_eq!(
             *committee_member.encryption_public_key(),
@@ -2506,7 +2517,7 @@ mod tests {
     // The Move contract stores the BLS12-381 G1 identity element as a member's
     // default `next_epoch_public_key` until a real key is registered (see
     // `new_member` in committee_set.move), and the scrapers run
-    // `bls_public_key_from_uncompressed_g1_bytes` on every member without filtering.
+    // `convert_move_uncompressed_g1_pubkey` on every member without filtering.
     // The conversion must therefore accept the identity element without
     // panicking: `blst` only rejects the point at infinity in
     // `validate`/`key_validate`, neither of which this path calls. This test
@@ -2530,8 +2541,7 @@ mod tests {
 
         // The conversion succeeds and yields the compressed encoding of the
         // point at infinity (0xc0 followed by zeros).
-        let pubkey = move_types::bls_public_key_from_uncompressed_g1_bytes(&onchain_bytes)
-            .expect("valid on-chain BLS public key");
+        let pubkey = convert_move_uncompressed_g1_pubkey(&onchain_bytes);
         let mut expected = [0u8; 48];
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
