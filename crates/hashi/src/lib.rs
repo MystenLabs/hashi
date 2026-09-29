@@ -272,11 +272,15 @@ impl Hashi {
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         if self.guardian_client.get().is_none() {
             // Pre-launch boot: no guardian endpoint existed at startup.
-            // `guardian_url` lands on-chain with the launch tx
+            // `guardian_node_url` lands on-chain with the launch tx
             // (finish_publish); resolve the client on first use afterwards.
             let endpoint = self.onchain_state_opt().and_then(|onchain| {
                 let state = onchain.state();
-                state.hashi().config.guardian_url().map(|s| s.to_string())
+                state
+                    .hashi()
+                    .config
+                    .guardian_node_url()
+                    .map(|s| s.to_string())
             });
             if let Some(endpoint) = endpoint {
                 match self.new_guardian_client(&endpoint) {
@@ -864,7 +868,11 @@ impl Hashi {
         // the launch lands.
         let guardian_endpoint = {
             let state = self.onchain_state().state();
-            state.hashi().config.guardian_url().map(|s| s.to_string())
+            state
+                .hashi()
+                .config
+                .guardian_node_url()
+                .map(|s| s.to_string())
         }
         .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()));
 
@@ -881,7 +889,7 @@ impl Hashi {
                     .map_err(|_| anyhow!("Guardian client already initialized"))?;
             }
             None => tracing::warn!(
-                "Guardian endpoint not available yet (pre-launch: `guardian_url` lands \
+                "Guardian endpoint not available yet (pre-launch: `guardian_node_url` lands \
                  on-chain with finish_publish and no local `guardian_endpoint` is set); \
                  will configure the guardian client once it appears on-chain"
             ),
@@ -1391,7 +1399,7 @@ impl Hashi {
         const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
         Service::new().spawn_aborting(async move {
             // The guardian may be set up after this node boots: on a
-            // pre-launch boot the on-chain guardian_url only lands with
+            // pre-launch boot the on-chain guardian_node_url only lands with
             // finish_publish, and an external guardian can be provisioned
             // later still. `guardian_client()` re-resolves from on-chain
             // config on every call, so wait for it rather than giving up —

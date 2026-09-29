@@ -833,7 +833,7 @@ mod tests {
 
         for node in networks.hashi_network.nodes() {
             // The harness injects no local guardian_endpoint, so a resolved
-            // client proves the lazy on-chain path (guardian_url set by the
+            // client proves the lazy on-chain path (guardian_node_url set by the
             // launch tx after these nodes booted) — guardian set up last.
             assert!(node.hashi().config.guardian_endpoint().is_none());
             assert!(node.hashi().guardian_client().is_some());

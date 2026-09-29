@@ -350,7 +350,9 @@ impl TestNetworksBuilder {
                     guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
                 let guardian_btc_pubkey = harness.ensure_btc_pubkey()?;
                 let guardian_config = hashi::publish::GuardianConfig {
-                    url: harness.endpoint().to_string(),
+                    // The harness has no public endpoint, and an unroutable one
+                    // proves the nodes dial `node_url`.
+                    url: "http://guardian.invalid".to_string(),
                     node_url: harness.endpoint().to_string(),
                     btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
                 };
@@ -398,7 +400,7 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
-        // The launch tx writes guardian_url with no event; nodes booted
+        // The launch tx writes guardian_node_url with no event; nodes booted
         // pre-launch learn it from the object mirror applying the root
         // write. Gate BEFORE the override proposals so a broken mirror
         // path can't hide behind their config-refreshing writes.
