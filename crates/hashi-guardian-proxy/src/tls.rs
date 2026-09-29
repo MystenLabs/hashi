@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_only_ed25519_certificate_keys() {
+    fn accepts_only_ed25519_certificate_keys() {
         let ed25519 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let ecdsa = rcgen::KeyPair::generate().unwrap();
         let self_signed = |key: &rcgen::KeyPair| {
@@ -454,6 +454,16 @@ mod tests {
         let expected: [u8; 32] = ed25519.public_key_raw().try_into().unwrap();
         assert_eq!(node_tls_key(&self_signed(&ed25519)), Some(expected));
         assert_eq!(node_tls_key(&self_signed(&ecdsa)), None);
+
+        // The handshake test's ECDSA client never sends its certificate, so this
+        // checks the verifier directly.
+        let verifier = NodeCertVerifier::new();
+        verifier
+            .verify_client_cert(&self_signed(&ed25519), &[], UnixTime::now())
+            .unwrap();
+        verifier
+            .verify_client_cert(&self_signed(&ecdsa), &[], UnixTime::now())
+            .unwrap_err();
     }
 
     #[test]

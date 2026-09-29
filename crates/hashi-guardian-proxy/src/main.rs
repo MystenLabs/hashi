@@ -123,13 +123,15 @@ async fn main() -> Result<()> {
                 .await
                 .context("load the TLS certificate")?;
             tokio::spawn(cert.clone().reload_forever(source, metrics.clone()));
-            // A TCP load balancer drops idle flows silently, so the proxy pings
-            // nodes itself to find and close dead connections, as the node's
-            // server does.
+            // As the node's server does: pings find the connections a TCP load
+            // balancer dropped silently, and the age limit closes ones that never
+            // send a request, which nothing else times out.
             let server = sui_http::Builder::new()
                 .config(
                     sui_http::Config::default()
-                        .http2_keepalive_interval(Some(Duration::from_secs(30))),
+                        .http2_keepalive_interval(Some(Duration::from_secs(30)))
+                        .max_connection_age(Duration::from_secs(120))
+                        .max_connection_age_grace(Duration::from_secs(120)),
                 )
                 .tls_config(tls::server_config(cert)?)
                 .serve(config.node_listen_addr, router.clone())
