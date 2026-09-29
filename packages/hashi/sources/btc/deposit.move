@@ -119,7 +119,8 @@ entry fun deposit(
 
 /// First phase of deposit confirmation. Records a committee certificate
 /// over `(request_id, utxo)` on the request, alongside the approval
-/// timestamp, and re-inserts the request into the queue.
+/// timestamp. The request is updated in place: it never leaves the active
+/// requests bag.
 ///
 /// The approval is not yet final — `confirm_deposit` must be called after
 /// the configured `bitcoin_deposit_time_delay_ms` has elapsed. The delay
@@ -141,8 +142,10 @@ entry fun approve_deposit(
     // delays the approval to be done by the next epoch's committee.
     hashi.assert_not_reconfiguring();
 
-    // Remove from active requests and copy the UTXO.
-    let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
+    // Borrow the active request and copy the UTXO. The borrow is read-only
+    // and ends with the checks below; the approval is recorded through a
+    // separate mutable borrow once the certificate has been verified.
+    let request = hashi.bitcoin().deposit_queue().borrow_request(request_id);
     let utxo = request.utxo();
 
     hashi.bitcoin().utxo_pool().assert_not_spent_or_active(utxo.id());
@@ -167,10 +170,8 @@ entry fun approve_deposit(
     );
 
     // Record the cert and the approval timestamp for the time-delay check
-    // in `confirm_deposit`.
-    request.approve(cert, clock);
-
-    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+    // in `confirm_deposit`, in place.
+    hashi.bitcoin_mut().deposit_queue_mut().borrow_request_mut(request_id).approve(cert, clock);
 
     sui::event::emit(DepositApproved {
         request_id,
@@ -190,6 +191,9 @@ entry fun approve_deposit(
 /// the current committee. Aborts if the request was never approved
 /// (no stored cert), the cert no longer verifies (committee rotated),
 /// or the time-delay window has not yet elapsed.
+///
+/// A request whose UTXO is already in the pool, active or spent, aborts up
+/// front, before any state change and before anything is minted.
 entry fun confirm_deposit(
     hashi: &mut Hashi,
     request_id: address,
@@ -202,10 +206,16 @@ entry fun confirm_deposit(
     // delays the confirmation to be done by the next epoch's committee.
     hashi.assert_not_reconfiguring();
 
-    // Remove from active requests and copy the UTXO. Aborts if the request
-    // was never approved (no stored cert or timestamp).
+    // Several requests can name the same UTXO, and only the first to be
+    // confirmed may enter the pool. Refuse the others here, before any state
+    // change and before minting, instead of relying on `insert_active`
+    // rejecting the duplicate record at the end.
+    let utxo = hashi.bitcoin().deposit_queue().borrow_request(request_id).utxo();
+    hashi.bitcoin().utxo_pool().assert_not_spent_or_active(utxo.id());
+
+    // Remove from active requests. Aborts if the request was never approved
+    // (no stored cert or timestamp).
     let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
-    let utxo = request.utxo();
     let cert = request.approval_cert().destroy_some();
     let approved_timestamp_ms = request.approved_timestamp_ms().destroy_some();
 

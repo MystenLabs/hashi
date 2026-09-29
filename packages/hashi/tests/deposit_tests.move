@@ -201,6 +201,62 @@ fun test_confirm_deposit_rejects_utxo_active_after_request() {
     std::unit_test::destroy(hashi);
 }
 
+/// A second request for a UTXO the pool already holds must abort on the pool
+/// check, before anything is minted. The second request names a recipient, so
+/// confirming it would mint. This setup registers no BTC treasury cap, which
+/// means that reaching the mint would abort there, with a different code.
+#[test]
+#[expected_failure(abort_code = utxo_pool::EUtxoAlreadyUsed)]
+fun test_confirm_deposit_rejects_pooled_utxo_before_minting() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    // The first request names no recipient, so confirming it mints nothing.
+    let utxo1 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
+    let request1 = deposit_queue::create_deposit(utxo1, &clock, ctx);
+    let request1_id = request1.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request1);
+
+    // The second request names the same outpoint and a recipient to mint to.
+    let utxo2 = hashi::utxo::utxo(utxo_id, 30_000, option::some(@0x200));
+    let request2 = deposit_queue::create_deposit(utxo2, &clock, ctx);
+    let request2_id = request2.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request2);
+
+    let message1 = deposit::new_deposit_confirmation_message(request1_id, utxo1);
+    let message1_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message1,
+    );
+    let cert1 = test_utils::sign_certificate(epoch, &message1_bytes, 3);
+    deposit::approve_deposit(&mut hashi, request1_id, cert1, &clock, ctx);
+
+    let message2 = deposit::new_deposit_confirmation_message(request2_id, utxo2);
+    let message2_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message2,
+    );
+    let cert2 = test_utils::sign_certificate(epoch, &message2_bytes, 3);
+    deposit::approve_deposit(&mut hashi, request2_id, cert2, &clock, ctx);
+
+    clock.increment_for_testing(hashi::btc_config::bitcoin_deposit_time_delay_ms(hashi.config()));
+    deposit::confirm_deposit(&mut hashi, request1_id, &clock, ctx);
+    assert!(hashi.bitcoin().utxo_pool().has_active_record(utxo_id));
+
+    deposit::confirm_deposit(&mut hashi, request2_id, &clock, ctx);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
 #[test]
 #[expected_failure(abort_code = utxo_pool::EUtxoAlreadyUsed)]
 fun test_confirm_deposit_rejects_utxo_spent_after_request() {
@@ -246,6 +302,71 @@ fun test_confirm_deposit_rejects_utxo_spent_after_request() {
 
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, epoch);
     hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
+
+    deposit::confirm_deposit(&mut hashi, request2_id, &clock, ctx);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+/// A second request for a UTXO that has already been spent must abort on the
+/// pool check too, before anything is minted. Once the spent record has been
+/// cleaned up, only the spent tombstone still names the outpoint, so this
+/// pins the spent half of the check. The second request names a recipient,
+/// so confirming it would mint. This setup registers no BTC treasury cap,
+/// which means that reaching the mint would abort there, with a different
+/// code.
+#[test]
+#[expected_failure(abort_code = utxo_pool::EUtxoAlreadyUsed)]
+fun test_confirm_deposit_rejects_spent_utxo_before_minting() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    // The first request names no recipient, so confirming it mints nothing.
+    let utxo1 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
+    let request1 = deposit_queue::create_deposit(utxo1, &clock, ctx);
+    let request1_id = request1.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request1);
+
+    // The second request names the same outpoint and a recipient to mint to.
+    let utxo2 = hashi::utxo::utxo(utxo_id, 30_000, option::some(@0x200));
+    let request2 = deposit_queue::create_deposit(utxo2, &clock, ctx);
+    let request2_id = request2.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request2);
+
+    let message1 = deposit::new_deposit_confirmation_message(request1_id, utxo1);
+    let message1_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message1,
+    );
+    let cert1 = test_utils::sign_certificate(epoch, &message1_bytes, 3);
+    deposit::approve_deposit(&mut hashi, request1_id, cert1, &clock, ctx);
+
+    let message2 = deposit::new_deposit_confirmation_message(request2_id, utxo2);
+    let message2_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message2,
+    );
+    let cert2 = test_utils::sign_certificate(epoch, &message2_bytes, 3);
+    deposit::approve_deposit(&mut hashi, request2_id, cert2, &clock, ctx);
+
+    clock.increment_for_testing(hashi::btc_config::bitcoin_deposit_time_delay_ms(hashi.config()));
+    deposit::confirm_deposit(&mut hashi, request1_id, &clock, ctx);
+
+    // Spend the UTXO and clean up its record: the active record is gone and
+    // only the spent tombstone is left.
+    hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, epoch);
+    hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
+    assert!(!hashi.bitcoin().utxo_pool().has_active_record(utxo_id));
+    assert!(hashi.bitcoin().utxo_pool().has_spent_record(utxo_id));
 
     deposit::confirm_deposit(&mut hashi, request2_id, &clock, ctx);
 
@@ -383,6 +504,137 @@ fun test_approve_deposit_fails_when_already_approved_this_epoch() {
 
     // Second approval by the same committee should abort.
     deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+/// `approve_deposit` updates the request in place: it stays in the active
+/// requests bag and carries the certificate and the approval timestamp.
+#[test]
+fun test_approve_deposit_records_approval_in_place() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+    clock.set_for_testing(1_000);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo = hashi::utxo::utxo(utxo_id, 10_000, option::none());
+    let request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+
+    let message = deposit::new_deposit_confirmation_message(request_id, utxo);
+    let message_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message,
+    );
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+
+    clock.set_for_testing(4_000);
+    deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    assert!(hashi.bitcoin().deposit_queue().contains(request_id));
+    let request = hashi.bitcoin().deposit_queue().borrow_request(request_id);
+    assert!(request.approval_cert() == option::some(cert));
+    assert!(request.approved_timestamp_ms() == option::some(4_000));
+    // Nothing else on the request changed.
+    assert!(request.request_id().to_address() == request_id);
+    assert!(request.utxo() == utxo);
+    assert!(request.request_created_timestamp_ms() == 1_000);
+    assert!(request.confirmed_timestamp_ms().is_none());
+    // Approval alone does not put the UTXO in the pool.
+    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(utxo_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+/// Rotate `hashi` to `next_epoch` under a committee of `voters` that all hold
+/// the standard test BLS key, so a certificate signed for `next_epoch` with
+/// `test_utils::sign_certificate` verifies against it.
+fun rotate_committee(
+    hashi: &mut hashi::hashi::Hashi,
+    next_epoch: u64,
+    voters: vector<address>,
+    ctx: &TxContext,
+) {
+    let sk = test_utils::bls_sk_for_testing();
+    let public_key = sui::bls12381::g1_to_uncompressed_g1(
+        &sui::bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk)),
+    );
+    let members = voters.map!(
+        |voter| hashi::committee::new_committee_member(voter, public_key, sk, 1),
+    );
+    let next_committee = hashi::committee::new_committee(
+        next_epoch,
+        members,
+        hashi::mpc_config::new_for_testing(800, 3333, 0),
+    );
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
+    let (_, _) = hashi
+        .committee_set_mut()
+        .end_reconfig(test_utils::mpc_public_key_for_testing(), ctx);
+}
+
+/// Once the committee has rotated, the new committee refreshes a stale
+/// approval in place: the request stays in the active requests bag, carries
+/// the new certificate and a fresh approval timestamp, and confirms once the
+/// delay has elapsed since the re-approval.
+#[test]
+fun test_approve_deposit_reapproves_in_place_in_later_epoch() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+    clock.set_for_testing(1_000);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo = hashi::utxo::utxo(utxo_id, 10_000, option::none());
+    let request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+
+    let message = deposit::new_deposit_confirmation_message(request_id, utxo);
+    let message_bytes = build_cert_message(
+        object::id_address(&hashi),
+        epoch,
+        hashi::intent::deposit_confirmation(),
+        &message,
+    );
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+    deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    let next_epoch = epoch + 1;
+    rotate_committee(&mut hashi, next_epoch, voters, ctx);
+
+    let next_message_bytes = build_cert_message(
+        object::id_address(&hashi),
+        next_epoch,
+        hashi::intent::deposit_confirmation(),
+        &message,
+    );
+    let next_cert = test_utils::sign_certificate(next_epoch, &next_message_bytes, 3);
+    clock.set_for_testing(5_000);
+    deposit::approve_deposit(&mut hashi, request_id, next_cert, &clock, ctx);
+
+    assert!(hashi.bitcoin().deposit_queue().contains(request_id));
+    let request = hashi.bitcoin().deposit_queue().borrow_request(request_id);
+    assert!(request.approval_cert() == option::some(next_cert));
+    assert!(request.approval_cert().destroy_some().signature_epoch() == next_epoch);
+    assert!(request.approved_timestamp_ms() == option::some(5_000));
+    assert!(request.request_created_timestamp_ms() == 1_000);
+
+    clock.increment_for_testing(hashi::btc_config::bitcoin_deposit_time_delay_ms(hashi.config()));
+    deposit::confirm_deposit(&mut hashi, request_id, &clock, ctx);
+
+    assert!(!hashi.bitcoin().deposit_queue().contains(request_id));
+    assert!(hashi.bitcoin().utxo_pool().has_active_record(utxo_id));
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
