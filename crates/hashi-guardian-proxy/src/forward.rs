@@ -91,7 +91,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        kp::admit::<ProvisionerRotateCertRequest, _, _>(&self.roster, request.get_ref()).await?;
+        let signed = kp::parse::<ProvisionerRotateCertRequest, _>(request.get_ref())?;
+        kp::admit(&self.roster, &signed).await?;
         let response = self.client.clone().provisioner_rotate_cert(request).await?;
         // The enclave has committed the replacement cert to the share log, so
         // drop the cached roster: otherwise the new cert is rejected until the
@@ -106,7 +107,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-        kp::admit::<CeremonyConfirmationRequest, _, _>(&self.roster, request.get_ref()).await?;
+        let signed = kp::parse::<CeremonyConfirmationRequest, _>(request.get_ref())?;
+        kp::admit(&self.roster, &signed).await?;
         self.ceremony_client.clone().confirm_ceremony(request).await
     }
 

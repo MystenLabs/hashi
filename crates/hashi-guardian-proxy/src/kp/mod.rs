@@ -16,29 +16,29 @@ use tonic::Status;
 use crate::kp::roster::RosterCache;
 use crate::log_store::LogStore;
 
-/// Admission control only: the enclave repeats both checks. Signature first
-/// because it needs no roster read.
-pub async fn admit<T, P, L>(roster: &RosterCache<L>, request: &P) -> Result<(), Status>
+pub fn parse<T, P>(request: &P) -> Result<KpSigned<T>, Status>
 where
     T: KpSigningIntent,
     P: Clone,
     KpSigned<T>: TryFrom<P, Error = GuardianError>,
-    L: LogStore,
 {
-    let signer = verify_kp_signature::<T, P>(request)?.signer_fingerprint();
-    roster.authorize(&signer).await
+    KpSigned::<T>::try_from(request.clone())
+        .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))
 }
 
-fn verify_kp_signature<T, P>(request: &P) -> Result<KpSigned<T>, Status>
+/// Admission control only: the enclave repeats both checks. Signature first
+/// because it needs no roster read.
+pub async fn admit<'a, T, L>(
+    roster: &RosterCache<L>,
+    signed: &'a KpSigned<T>,
+) -> Result<&'a T, Status>
 where
     T: KpSigningIntent,
-    P: Clone,
-    KpSigned<T>: TryFrom<P, Error = GuardianError>,
+    L: LogStore,
 {
-    let signed_request = KpSigned::<T>::try_from(request.clone())
-        .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
-    signed_request
+    let payload = signed
         .verify_signature()
         .map_err(|e| Status::unauthenticated(e.to_string()))?;
-    Ok(signed_request)
+    roster.authorize(&signed.signer_fingerprint()).await?;
+    Ok(payload)
 }
