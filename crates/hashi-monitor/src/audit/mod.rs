@@ -264,7 +264,7 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// Fetches each overdue Hashi approval the Sui event scan never saw. One inside the
+    /// Fetches each overdue Hashi approval from Sui. One for the guardian's txid inside the
     /// scanned range is also a `SuiScanMissedEvent`; one whose lookup fails stays missing.
     pub async fn fetch_missing_hashi_approvals(
         &mut self,
@@ -281,10 +281,11 @@ impl AuditorCore {
         let mut approvals = Vec::new();
         for (wid, btc_txid) in missing {
             match self.sui_poller.fetch_withdrawal_approval(wid).await {
-                // The state machine rejects an approval for another txid, even one the scan
-                // returned, so ingesting it reports the contradiction rather than a scan miss.
+                // A contradiction, not a scan miss: the state machine rejects even a scanned one.
                 Ok(Some(approval)) if approval.btc_txid != btc_txid => {
-                    approvals.push(MonitorEvent::Withdrawal(approval));
+                    findings.push(MonitorFinding::InvalidEventAdded(
+                        "invalid btc_txid".to_string(),
+                    ));
                 }
                 Ok(Some(approval)) => {
                     if self.sui_poller.has_scanned(approval.timestamp_secs) {
