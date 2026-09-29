@@ -1,10 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! TLS for the proxy's port, terminated in the proxy behind a TCP-passthrough
-//! load balancer. The certificate is publicly trusted, since browsers read
-//! `/info` on the same port: an exportable ACM certificate, re-exported as ACM
-//! renews it, or PEM files.
+//! TLS for the node listener, which a TCP-passthrough load balancer fronts:
+//! nodes present their registered TLS key as a client certificate, and an
+//! ALB can't verify Ed25519 keys. The listener serves a certificate for the
+//! node hostname: an exportable ACM certificate, re-exported as ACM renews it,
+//! or PEM files.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,12 +14,22 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::UnixTime;
+use rustls::server::danger::ClientCertVerified;
+use rustls::server::danger::ClientCertVerifier;
 use rustls::server::ClientHello;
 use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
+use rustls::CertificateError;
+use rustls::DigitallySignedStruct;
+use rustls::DistinguishedName;
+use rustls::PeerIncompatible;
+use rustls::SignatureScheme;
 use tracing::info;
 use tracing::warn;
 
@@ -94,9 +105,86 @@ pub fn server_config(cert: Arc<ServerCert>) -> Result<rustls::ServerConfig> {
     Ok(rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
-    .with_safe_default_protocol_versions()?
-    .with_no_client_auth()
+    .with_protocol_versions(&[&rustls::version::TLS13])?
+    .with_client_cert_verifier(Arc::new(NodeCertVerifier::new()))
     .with_cert_resolver(cert))
+}
+
+/// The Ed25519 key of a node's self-signed TLS certificate.
+pub fn node_tls_key(cert: &CertificateDer<'_>) -> Option<[u8; 32]> {
+    use ed25519_dalek::pkcs8::DecodePublicKey;
+    use x509_parser::prelude::FromDer;
+
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(cert).ok()?;
+    let key = ed25519_dalek::VerifyingKey::from_public_key_der(cert.public_key().raw).ok()?;
+    Some(key.to_bytes())
+}
+
+/// Requires a client certificate with an Ed25519 key, proven by the client's
+/// TLS 1.3 signature. Nodes present self-signed certificates, so there is no
+/// chain to check; which keys may call node RPCs is decided per request.
+#[derive(Debug)]
+struct NodeCertVerifier {
+    supported_algs: WebPkiSupportedAlgorithms,
+}
+
+impl NodeCertVerifier {
+    fn new() -> Self {
+        Self {
+            supported_algs: rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms,
+        }
+    }
+}
+
+impl ClientCertVerifier for NodeCertVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        node_tls_key(end_entity).ok_or(rustls::Error::InvalidCertificate(
+            CertificateError::BadEncoding,
+        ))?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported_algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
 }
 
 async fn load_certified_key(source: &CertSource) -> Result<CertifiedKey> {
@@ -205,6 +293,7 @@ pub(crate) mod test_utils {
 
     /// A self-signed `localhost` certificate and its key, as PEM files.
     pub(crate) struct TestCert {
+        pub(crate) cert_pem: String,
         pub(crate) source: CertSource,
         _dir: tempfile::TempDir,
     }
@@ -220,12 +309,30 @@ pub(crate) mod test_utils {
         std::fs::write(&cert_path, cert.pem()).unwrap();
         std::fs::write(&key_path, key.serialize_pem()).unwrap();
         TestCert {
+            cert_pem: cert.pem(),
             source: CertSource::Files {
                 cert: cert_path,
                 key: key_path,
             },
             _dir: dir,
         }
+    }
+
+    /// The self-signed certificate a node presents with its TLS key.
+    pub(crate) fn node_identity(key: &ed25519_dalek::SigningKey) -> tonic::transport::Identity {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let pkcs8 = key.to_pkcs8_der().unwrap();
+        let key_pair = rcgen::KeyPair::from_der_and_sign_algo(
+            &PrivateKeyDer::Pkcs8(pkcs8.as_bytes().to_vec().into()),
+            &rcgen::PKCS_ED25519,
+        )
+        .unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        tonic::transport::Identity::from_pem(cert.pem(), key_pair.serialize_pem())
     }
 }
 
@@ -269,6 +376,84 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("does not match"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn requires_an_ed25519_client_certificate() {
+        use tonic::transport::Certificate;
+        use tonic::transport::ClientTlsConfig;
+        use tonic::transport::Endpoint;
+        use tonic::transport::Identity;
+        use tonic_health::pb::health_client::HealthClient;
+        use tonic_health::pb::HealthCheckRequest;
+
+        let served = test_cert();
+        let (reporter, health) = tonic_health::server::health_reporter();
+        reporter
+            .set_service_status("", tonic_health::ServingStatus::Serving)
+            .await;
+        let app = axum::Router::new().route_service("/grpc.health.v1.Health/{*rest}", health);
+        let cert = ServerCert::load(&served.source, &ProxyMetrics::new())
+            .await
+            .unwrap();
+        let server = sui_http::Builder::new()
+            .tls_config(server_config(cert).unwrap())
+            .serve("127.0.0.1:0", app)
+            .unwrap();
+        let check = |identity: Option<Identity>| {
+            let mut tls = ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(&served.cert_pem))
+                .domain_name("localhost");
+            if let Some(identity) = identity {
+                tls = tls.identity(identity);
+            }
+            let channel = Endpoint::from_shared(format!("https://{}", server.local_addr()))
+                .unwrap()
+                .tls_config(tls)
+                .unwrap()
+                .connect_lazy();
+            async move {
+                HealthClient::new(channel)
+                    .check(HealthCheckRequest {
+                        service: String::new(),
+                    })
+                    .await
+            }
+        };
+
+        let node = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        check(Some(test_utils::node_identity(&node))).await.unwrap();
+        check(None).await.unwrap_err();
+        // The listener asks only for Ed25519 signatures, so this client can't
+        // send its certificate at all.
+        let ecdsa = rcgen::KeyPair::generate().unwrap();
+        let ecdsa_cert = rcgen::CertificateParams::new(vec!["hashi".to_string()])
+            .unwrap()
+            .self_signed(&ecdsa)
+            .unwrap();
+        check(Some(Identity::from_pem(
+            ecdsa_cert.pem(),
+            ecdsa.serialize_pem(),
+        )))
+        .await
+        .unwrap_err();
+    }
+
+    #[test]
+    fn reads_only_ed25519_certificate_keys() {
+        let ed25519 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let ecdsa = rcgen::KeyPair::generate().unwrap();
+        let self_signed = |key: &rcgen::KeyPair| {
+            rcgen::CertificateParams::new(vec!["hashi".to_string()])
+                .unwrap()
+                .self_signed(key)
+                .unwrap()
+                .der()
+                .clone()
+        };
+        let expected: [u8; 32] = ed25519.public_key_raw().try_into().unwrap();
+        assert_eq!(node_tls_key(&self_signed(&ed25519)), Some(expected));
+        assert_eq!(node_tls_key(&self_signed(&ecdsa)), None);
     }
 
     #[test]

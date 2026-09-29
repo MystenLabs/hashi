@@ -110,38 +110,62 @@ async fn main() -> Result<()> {
 
     // Serve gRPC (forwarder + relay + health) and the HTTP `/info` + `/health` on
     // ONE port: each tonic service is mounted as an axum route-service, the plain
-    // routes merged in, one server. Mirrors crates/hashi/src/grpc/mod.rs.
+    // routes merged in, one `axum::serve`. Mirrors crates/hashi/src/grpc/mod.rs.
     let router = axum::Router::new()
         .add_grpc_service(health_service)
         .add_grpc_service(GuardianServiceServer::new(guardian_svc))
         .add_grpc_service(GuardianRelayServiceServer::new(relay_svc))
         .merge(info::router(info_state));
 
-    // A TCP load balancer drops idle flows silently, so the proxy pings clients
-    // itself to find and close dead connections, as the node's server does.
-    let mut server = sui_http::Builder::new().config(
-        sui_http::Config::default().http2_keepalive_interval(Some(Duration::from_secs(30))),
-    );
-    match config.tls.clone() {
+    let node_server = match config.node_tls.clone() {
         Some(source) => {
             let cert = ServerCert::load(&source, &metrics)
                 .await
                 .context("load the TLS certificate")?;
             tokio::spawn(cert.clone().reload_forever(source, metrics.clone()));
-            server = server.tls_config(tls::server_config(cert)?);
+            // A TCP load balancer drops idle flows silently, so the proxy pings
+            // nodes itself to find and close dead connections, as the node's
+            // server does.
+            let server = sui_http::Builder::new()
+                .config(
+                    sui_http::Config::default()
+                        .http2_keepalive_interval(Some(Duration::from_secs(30))),
+                )
+                .tls_config(tls::server_config(cert)?)
+                .serve(config.node_listen_addr, router.clone())
+                .map_err(|e| {
+                    anyhow::anyhow!("bind node listener to {}: {e}", config.node_listen_addr)
+                })?;
+            info!("Node listener on {} (TLS).", config.node_listen_addr);
+            Some(server)
         }
-        None => warn!("No TLS certificate is configured: serving plaintext."),
-    }
-    let server = server
-        .serve(config.listen_addr, router)
-        .map_err(|e| anyhow::anyhow!("bind proxy server to {}: {e}", config.listen_addr))?;
+        None => {
+            warn!("No TLS certificate is configured, so there is no node listener.");
+            None
+        }
+    };
+
+    let listener = tokio::net::TcpListener::bind(config.listen_addr)
+        .await
+        .with_context(|| format!("bind proxy server to {}", config.listen_addr))?;
     info!(
-        tls = config.tls.is_some(),
-        "Proxy listening on {} (gRPC + HTTP /info + /health).", config.listen_addr
+        "Proxy listening on {} (gRPC + HTTP /info + /health).",
+        config.listen_addr
     );
-    // If the server stops, exit so the supervisor restarts a clean task rather
-    // than leaving the surface silently dead.
-    server.wait_for_shutdown().await;
+    // If either listener stops, exit so the supervisor restarts a clean task
+    // rather than leaving the surface silently dead.
+    let node_stopped = async {
+        match &node_server {
+            Some(server) => server.wait_for_shutdown().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        served = axum::serve(listener, router) => {
+            served.map_err(|e| anyhow::anyhow!("proxy server error: {e}"))?;
+        }
+        () = node_stopped => {}
+    }
     anyhow::bail!("proxy server stopped")
 }
 

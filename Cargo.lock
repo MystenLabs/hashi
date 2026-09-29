@@ -3127,6 +3127,7 @@ dependencies = [
  "base64ct",
  "bitcoin",
  "bytes",
+ "ed25519-dalek",
  "hashi-types",
  "hex",
  "lru 0.16.3",
