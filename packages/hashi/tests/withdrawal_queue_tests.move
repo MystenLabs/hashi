@@ -294,12 +294,11 @@ fun test_reallocate_writes_the_new_epoch_and_randomness() {
     let redrawn = sui::random::new_generator_from_seed_for_testing(seed).generate_bytes(32);
     assert!(queue.withdrawal_txn_randomness(pending_id) != redrawn);
 
-    let mut rng = sui::random::new_generator_from_seed_for_testing(seed);
     queue.reallocate_presigs_for_withdrawal_txn(
         pending_id,
         hashi::mpc_signing::presigs_for_testing(100, 1),
         1,
-        &mut rng,
+        redrawn,
     );
 
     assert!(queue.withdrawal_txn_signing_epoch(pending_id) == 1);
