@@ -211,16 +211,32 @@ jobs:
           echo "Timed out waiting for the Docker image"
           exit 1
 
-      - name: Verify image binary
+      - name: Verify Docker image
+        env:
+          EXPECTED_CONFIG: '{"Entrypoint":["/opt/hashi/bin/hashi"],"Env":["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]}'
         run: |
           set -euo pipefail
-          docker pull --quiet --platform linux/amd64 "$IMAGE@$image_digest"
-          CONTAINER=$(docker create --platform linux/amd64 "$IMAGE@$image_digest")
+          IMAGE_REF="$IMAGE@$image_digest"
+          # An index could carry unverified images for other platforms.
+          MANIFEST=$(docker buildx imagetools inspect --raw "$IMAGE_REF")
+          if ! jq -e 'has("config")' <<< "$MANIFEST" > /dev/null; then
+            echo "$IMAGE_REF is not a single image manifest"
+            exit 1
+          fi
+          docker pull --quiet --platform linux/amd64 "$IMAGE_REF"
+          # Docker versions differ in which empty config fields they print.
+          CONFIG=$(docker image inspect --format '{{json .Config}}' "$IMAGE_REF" |
+            jq -c 'with_entries(select(.value | IN(null, "", false, [], {}) | not))')
+          if ! jq -e --argjson expected "$EXPECTED_CONFIG" '. == $expected' <<< "$CONFIG" > /dev/null; then
+            echo "Unexpected config in $IMAGE_REF: $CONFIG"
+            exit 1
+          fi
+          CONTAINER=$(docker create --platform linux/amd64 "$IMAGE_REF")
           docker cp -L "$CONTAINER:/opt/hashi/bin/hashi" release/docker-hashi
           docker rm "$CONTAINER" > /dev/null
           DOCKER_BINARY_HASH=$(sha256sum release/docker-hashi | awk '{print $1}')
           if [ "$DOCKER_BINARY_HASH" != "$binary_hash" ]; then
-            echo "Binary in $IMAGE@$image_digest does not match the release binary"
+            echo "Binary in $IMAGE_REF does not match the release binary"
             exit 1
           fi
 
