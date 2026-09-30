@@ -58,8 +58,9 @@ The guardian integration has four distinct flows:
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
-- **Normal operation** is a data-plane flow. MPC nodes call the public guardian
-  proxy for guardian info, withdrawal signatures, and committee handoff updates.
+- **Normal operation** is a data-plane flow. MPC nodes call the guardian proxy's
+  node endpoint for guardian info, withdrawal signatures, and committee handoff
+  updates.
 
 The main components are:
 
@@ -68,10 +69,10 @@ The main components are:
   Bitcoin signature.
 - **Guardian proxy**: the guardian's gRPC endpoints. The public one
   (`guardian_url`) serves `/info` and relays key-provisioner shares. Nodes
-  call a separate one (`guardian_node_url`), where the proxy terminates TLS
-  itself and forwards node-facing guardian RPCs only for current or pending
-  committee members, who present their registered TLS key as a client
-  certificate.
+  call a separate one (`guardian_node_url`), which serves only
+  `GetGuardianInfo` and node RPCs: the proxy terminates TLS itself and forwards
+  node RPCs only for current or pending committee members, who present their
+  registered TLS key as a client certificate.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
