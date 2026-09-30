@@ -301,6 +301,7 @@ impl CommitteeSet {
         &mut self.committee_handoffs
     }
 
+    #[cfg(test)]
     pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, RuntimeCommittee> {
         &mut self.committees
     }
@@ -311,8 +312,15 @@ impl CommitteeSet {
         self.raw_committees.get(&epoch)
     }
 
-    pub fn raw_committees_mut(&mut self) -> &mut BTreeMap<u64, move_types::Committee> {
-        &mut self.raw_committees
+    pub fn insert_onchain_committee(&mut self, epoch: u64, committee: move_types::Committee) {
+        self.committees
+            .insert(epoch, super::convert_move_committee(committee.clone()));
+        self.raw_committees.insert(epoch, committee);
+    }
+
+    pub fn remove_committee(&mut self, epoch: u64) {
+        self.committees.remove(&epoch);
+        self.raw_committees.remove(&epoch);
     }
 
     pub fn current_committee(&self) -> Option<&RuntimeCommittee> {
@@ -507,15 +515,16 @@ impl CommitteeSet {
         self
     }
 
-    /// Install runtime views together with the on-chain committees they were
-    /// decoded from.
-    pub fn set_runtime_committees(
+    /// Install the decoded on-chain committees and derive the runtime views from them.
+    pub fn set_onchain_committees(
         &mut self,
-        committees: BTreeMap<u64, RuntimeCommittee>,
-        raw_committees: BTreeMap<u64, move_types::Committee>,
+        committees: BTreeMap<u64, move_types::Committee>,
     ) -> &mut Self {
-        self.committees = committees;
-        self.raw_committees = raw_committees;
+        self.committees = committees
+            .iter()
+            .map(|(epoch, committee)| (*epoch, super::convert_move_committee(committee.clone())))
+            .collect();
+        self.raw_committees = committees;
         self
     }
 

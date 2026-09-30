@@ -593,15 +593,7 @@ fn apply_write(
                         let epoch = field.name;
                         hashi
                             .committees
-                            .committees_mut()
-                            .insert(epoch, super::convert_move_committee(field.value.clone()));
-                        // Keep the verbatim on-chain committee too: it is
-                        // the only form a `CommitteeTransitionRequest`
-                        // may embed (see `CommitteeSet::raw_committees`).
-                        hashi
-                            .committees
-                            .raw_committees_mut()
-                            .insert(epoch, field.value);
+                            .insert_onchain_committee(epoch, field.value);
                         TrackedKind::Committee(epoch)
                     },
                 )
@@ -844,8 +836,7 @@ fn retire(
             hashi.committees.remove_validator(validator);
         }
         TrackedKind::Committee(epoch) => {
-            hashi.committees.committees_mut().remove(epoch);
-            hashi.committees.raw_committees_mut().remove(epoch);
+            hashi.committees.remove_committee(*epoch);
         }
         TrackedKind::CommitteeHandoff(epoch) => {
             hashi.committees.committee_handoffs_mut().remove(epoch);

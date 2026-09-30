@@ -1402,7 +1402,7 @@ async fn scrape_hashi(
 
     let (
         (member_seed, member_info),
-        (committee_seed, (committees_per_epoch, raw_committees_per_epoch, committee_handoffs)),
+        (committee_seed, (committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
         (proposal_seed, proposals),
         (tob_seed, tob_buckets),
@@ -1444,7 +1444,7 @@ async fn scrape_hashi(
         .set_pending_epoch_change(committees.pending_epoch_change.map(|pending| pending.epoch))
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
-        .set_runtime_committees(committees_per_epoch, raw_committees_per_epoch)
+        .set_onchain_committees(committees_per_epoch)
         .set_committee_handoffs(committee_handoffs);
 
     if let Some(metrics) = metrics {
@@ -1836,7 +1836,6 @@ async fn scrape_committees(
 ) -> Result<(
     route::ContainerSeed,
     (
-        BTreeMap<u64, RuntimeCommittee>,
         BTreeMap<u64, move_types::Committee>,
         BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
     ),
@@ -1926,12 +1925,8 @@ async fn scrape_committees(
             Ok((from_epoch, signed))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    let committees = move_committees
-        .iter()
-        .map(|(epoch, committee)| (*epoch, convert_move_committee(committee.clone())))
-        .collect();
 
-    Ok((seed, (committees, move_committees, handoffs)))
+    Ok((seed, (move_committees, handoffs)))
 }
 
 fn convert_move_committee(c: move_types::Committee) -> RuntimeCommittee {
