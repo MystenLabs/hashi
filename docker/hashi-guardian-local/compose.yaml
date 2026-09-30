@@ -60,8 +60,8 @@ services:
         fi
 
   # The EC2 parent host: bridges inbound (proxy -> withdraw enclave) and outbound
-  # (both guardians -> S3), standing in for expose_enclave.sh + the nitro
-  # vsock-proxy daemons (scripts/user-data.sh).
+  # (both guardians -> S3), standing in for the host's gRPC bridge and nitro
+  # vsock-proxy daemons.
   host:
     <<: *build
     command:

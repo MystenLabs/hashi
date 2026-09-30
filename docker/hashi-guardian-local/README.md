@@ -35,7 +35,7 @@ flowchart LR
 | Replica service | Stands in for | Production source |
 | --- | --- | --- |
 | `proxy` | the out-of-enclave proxy + relay | `crates/hashi-guardian-proxy` |
-| `host` | the EC2 parent host's bridges | `docker/hashi-guardian/scripts/{expose_enclave,user-data}.sh` |
+| `host` | the EC2 parent host's bridges | sui-operations `pulumi/services/hashi-guardian-enclave/scripts/user-data.sh` |
 | `enclave` + `run.local.sh` | the withdraw-mode Nitro enclave | `docker/hashi-guardian/run.sh` |
 | `ceremony` | the one-time ceremony-mode guardian | a runner-local ceremony container (deploy) |
 | `minio` + `bucket-init` | the S3 Object-Lock audit bucket | the guardian's real S3 bucket |
