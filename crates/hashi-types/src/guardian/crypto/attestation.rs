@@ -25,7 +25,7 @@ pub type GitRevision = String;
 pub(crate) const NITRO_PCR0_LEN: usize = 48;
 
 /// Caller-chosen challenge for one live guardian-info query.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttestationNonce(pub [u8; 32]);
 
 impl AttestationNonce {

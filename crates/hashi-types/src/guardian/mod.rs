@@ -76,6 +76,12 @@ pub enum OperatorInitRequest {
     Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
+/// Request a live attestation bound to the caller's challenge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GetAttestedGuardianInfoRequest {
+    pub nonce: AttestationNonce,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation, present only when requested.

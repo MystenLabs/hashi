@@ -23,7 +23,7 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
 /// Bind signed guardian info and the caller's nonce into a fresh attestation.
 pub async fn get_attested_guardian_info(
     enclave: Arc<Enclave>,
-    nonce: AttestationNonce,
+    request: GetAttestedGuardianInfoRequest,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     info!("/get_attested_guardian_info - Received request");
 
@@ -32,7 +32,7 @@ pub async fn get_attested_guardian_info(
     let info = enclave.info().await;
     let attestation = get_attestation(
         &signing_pub_key,
-        Some(&AttestationBindings::new(&info, nonce)),
+        Some(&AttestationBindings::new(&info, request.nonce)),
     )?;
     Ok(GetGuardianInfoResponse::new(
         Some(attestation),

@@ -7,8 +7,10 @@ use anyhow::ensure;
 use hashi_types::guardian::AttestationNonce;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EnclaveLifecycle;
+use hashi_types::guardian::GetAttestedGuardianInfoRequest;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::proto_conversions::get_attested_guardian_info_request_to_pb;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -22,9 +24,9 @@ pub async fn verified_live_guardian_info(
 ) -> anyhow::Result<VerifiedGuardianInfo> {
     let nonce = AttestationNonce::random();
     let info_pb = client
-        .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {
-            nonce: nonce.0.to_vec().into(),
-        })
+        .get_attested_guardian_info(get_attested_guardian_info_request_to_pb(
+            GetAttestedGuardianInfoRequest { nonce },
+        ))
         .await
         .context("GetAttestedGuardianInfo RPC failed")?
         .into_inner();
@@ -97,9 +99,9 @@ async fn ceremony_guardian_info_pb(
         Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
         Err(status) if status.code() == Code::Unimplemented => Ok((
             GuardianServiceClient::new(channel)
-                .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {
-                    nonce: nonce.0.to_vec().into(),
-                })
+                .get_attested_guardian_info(get_attested_guardian_info_request_to_pb(
+                    GetAttestedGuardianInfoRequest { nonce: *nonce },
+                ))
                 .await
                 .context("GetAttestedGuardianInfo RPC failed")?
                 .into_inner(),

@@ -5,6 +5,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::AttestationNonce;
 use super::AttestedKpCert;
 use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
@@ -19,6 +20,7 @@ use super::DeploymentConfig;
 use super::DeploymentConfigSummary;
 use super::EnclaveLifecycle;
 use super::GenesisState;
+use super::GetAttestedGuardianInfoRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -88,6 +90,21 @@ use crate::move_types::Config;
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
+
+impl TryFrom<pb::GetAttestedGuardianInfoRequest> for GetAttestedGuardianInfoRequest {
+    type Error = GuardianError;
+
+    fn try_from(pb: pb::GetAttestedGuardianInfoRequest) -> GuardianResult<Self> {
+        let nonce = pb
+            .nonce
+            .as_ref()
+            .try_into()
+            .map_err(|_| InvalidInputs("attestation nonce must be exactly 32 bytes".into()))?;
+        Ok(Self {
+            nonce: AttestationNonce(nonce),
+        })
+    }
+}
 
 impl TryFrom<pb::KpEncryptedShare> for KpEncryptedShare {
     type Error = GuardianError;
@@ -1004,6 +1021,14 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
             signer_cert: Some(signer_cert.into()),
             kp_signature: signature,
         }
+    }
+}
+
+pub fn get_attested_guardian_info_request_to_pb(
+    request: GetAttestedGuardianInfoRequest,
+) -> pb::GetAttestedGuardianInfoRequest {
+    pb::GetAttestedGuardianInfoRequest {
+        nonce: request.nonce.0.to_vec().into(),
     }
 }
 

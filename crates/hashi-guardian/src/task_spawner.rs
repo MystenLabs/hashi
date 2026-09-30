@@ -25,12 +25,12 @@ use crate::withdraw_mode::provisioner_init as provisioner_init_domain;
 use crate::withdraw_mode::provisioner_rotate_cert as provisioner_rotate_cert_domain;
 use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
-use hashi_types::guardian::AttestationNonce;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetAttestedGuardianInfoRequest;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -60,10 +60,10 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
 /// Generate a fresh attestation under the same control lock as ordinary info reads.
 pub async fn get_attested_guardian_info(
     enclave: Arc<Enclave>,
-    nonce: AttestationNonce,
+    request: GetAttestedGuardianInfoRequest,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(nonce, info::get_attested_guardian_info)
+        .spawn_control_task(request, info::get_attested_guardian_info)
         .await
 }
 

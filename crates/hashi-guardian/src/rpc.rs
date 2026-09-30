@@ -5,10 +5,10 @@ use crate::task_spawner;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::AddressValidation;
-use hashi_types::guardian::AttestationNonce;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::GetAttestedGuardianInfoRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -99,16 +99,11 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::GetAttestedGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let nonce = request
-            .into_inner()
-            .nonce
-            .as_ref()
-            .try_into()
-            .map_err(|_| Status::invalid_argument("attestation nonce must be exactly 32 bytes"))?;
-        let resp =
-            task_spawner::get_attested_guardian_info(self.enclave.clone(), AttestationNonce(nonce))
-                .await
-                .map_err(to_status)?;
+        let domain_req: GetAttestedGuardianInfoRequest =
+            request.into_inner().try_into().map_err(to_status)?;
+        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
         Ok(Response::new(
             proto_conversions::get_guardian_info_response_to_pb(resp),
         ))
