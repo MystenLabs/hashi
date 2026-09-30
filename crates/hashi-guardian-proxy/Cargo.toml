@@ -14,6 +14,7 @@ lru.workspace = true
 hashi-types = { path = "../hashi-types" }
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+aws-sdk-acm.workspace = true
 axum.workspace = true
 bitcoin.workspace = true
 prometheus.workspace = true
@@ -27,12 +28,20 @@ bytes.workspace = true
 prost.workspace = true
 reqwest.workspace = true
 snap.workspace = true
+sui-http.workspace = true
+rustls.workspace = true
+pkcs8.workspace = true
+x509-parser.workspace = true
+rand.workspace = true
+ed25519-dalek.workspace = true
 
 [features]
 # Dev deploys: admit the KP attestations a non-enclave-dev guardian accepts.
 non-enclave-dev = ["hashi-types/non-enclave-dev"]
 
 [dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true
 hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream.workspace = true

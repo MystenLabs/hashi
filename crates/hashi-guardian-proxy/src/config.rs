@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Environment-driven proxy configuration (matches the guardian's minimal,
-//! env-only config style). TLS for node traffic terminates at the fronting
-//! load balancer, so the proxy itself serves plaintext h2c.
+//! env-only config style). The public listener serves plaintext behind a
+//! TLS-terminating load balancer; the node listener terminates TLS itself.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -14,6 +14,7 @@ use bitcoin::Network;
 
 use crate::remote_write;
 use crate::remote_write::RemoteWriteConfig;
+use crate::tls::CertSource;
 
 pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
@@ -25,9 +26,12 @@ pub struct Config {
     /// stays on the active backend; unset, the relay provisions the active
     /// backend (first deploy).
     pub standby_backend_url: Option<String>,
-    /// Address the proxy serves everything on — gRPC (forwarder + relay + health)
+    /// Address the public listener serves on — gRPC (forwarder + relay + health)
     /// and the HTTP `/info` + `/health` (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).
     pub listen_addr: SocketAddr,
+    /// Address the node listener serves on (`NODE_LISTEN_ADDR`, default
+    /// `0.0.0.0:3443`).
+    pub node_listen_addr: SocketAddr,
     /// Address the prometheus `/metrics` endpoint listens on
     /// (`METRICS_LISTEN_ADDR`, default `0.0.0.0:9184`).
     pub metrics_listen_addr: SocketAddr,
@@ -54,6 +58,10 @@ pub struct Config {
     /// default `incoming_metrics`, `MIMIR_PASSWORD`, `MIMIR_PUSH_INTERVAL_SECS`
     /// default 60, `MIMIR_EXTERNAL_LABELS` comma-separated `k=v`).
     pub remote_write: Option<RemoteWriteConfig>,
+    /// The certificate the node listener serves: an exportable ACM certificate
+    /// (`TLS_CERT_ARN`), or PEM files (`TLS_CERT_FILE` + `TLS_KEY_FILE`). With
+    /// neither there is no node listener, for local setups.
+    pub node_tls: Option<CertSource>,
 }
 
 impl Config {
@@ -67,6 +75,10 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
             .parse()
             .context("PROXY_LISTEN_ADDR must be a valid socket address")?;
+        let node_listen_addr = std::env::var("NODE_LISTEN_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:3443".to_string())
+            .parse()
+            .context("NODE_LISTEN_ADDR must be a valid socket address")?;
         let metrics_listen_addr = std::env::var("METRICS_LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:9184".to_string())
             .parse()
@@ -114,10 +126,26 @@ impl Config {
                 })
             }
         };
+        let node_tls = match (
+            non_empty_env("TLS_CERT_ARN"),
+            non_empty_env("TLS_CERT_FILE"),
+            non_empty_env("TLS_KEY_FILE"),
+        ) {
+            (None, None, None) => None,
+            (Some(arn), None, None) => Some(CertSource::Acm { arn }),
+            (None, Some(cert), Some(key)) => Some(CertSource::Files {
+                cert: cert.into(),
+                key: key.into(),
+            }),
+            _ => anyhow::bail!(
+                "set either TLS_CERT_ARN or both TLS_CERT_FILE and TLS_KEY_FILE, not a mix"
+            ),
+        };
         Ok(Self {
             backend_url,
             standby_backend_url,
             listen_addr,
+            node_listen_addr,
             metrics_listen_addr,
             info_cache_ttl,
             connect_timeout,
@@ -126,8 +154,13 @@ impl Config {
             log_region,
             btc_network,
             remote_write,
+            node_tls,
         })
     }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|value| !value.is_empty())
 }
 
 fn parse_env_u64(key: &str, default: u64) -> Result<u64> {

@@ -19,6 +19,9 @@
 //!   `fetch` clients can read limiter status the gRPC surface only exposes to
 //!   nodes — on the same port as gRPC, so the guardian exposes one interface.
 //!
+//! Nodes call it on a second listener, where the proxy terminates TLS itself and
+//! requires their registered TLS key as a client certificate ([`tls`]).
+//!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
 
@@ -31,6 +34,7 @@ pub mod metrics;
 pub mod node;
 pub mod public;
 pub mod remote_write;
+pub mod tls;
 
 pub use config::Config;
 pub use forward::Forwarding;

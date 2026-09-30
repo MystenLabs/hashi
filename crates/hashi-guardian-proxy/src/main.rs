@@ -12,6 +12,8 @@ use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::node::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::public::info;
 use hashi_guardian_proxy::remote_write;
+use hashi_guardian_proxy::tls;
+use hashi_guardian_proxy::tls::ServerCert;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -115,6 +117,36 @@ async fn main() -> Result<()> {
         .add_grpc_service(GuardianRelayServiceServer::new(relay_svc))
         .merge(info::router(info_state));
 
+    let node_server = match config.node_tls.clone() {
+        Some(source) => {
+            let cert = ServerCert::load(&source, &metrics)
+                .await
+                .context("load the TLS certificate")?;
+            tokio::spawn(cert.clone().reload_forever(source, metrics.clone()));
+            // As the node's server does: pings find the connections a TCP load
+            // balancer dropped silently, and the age limit closes ones that never
+            // send a request, which nothing else times out.
+            let server = sui_http::Builder::new()
+                .config(
+                    sui_http::Config::default()
+                        .http2_keepalive_interval(Some(Duration::from_secs(30)))
+                        .max_connection_age(Duration::from_secs(120))
+                        .max_connection_age_grace(Duration::from_secs(120)),
+                )
+                .tls_config(tls::server_config(cert)?)
+                .serve(config.node_listen_addr, router.clone())
+                .map_err(|e| {
+                    anyhow::anyhow!("bind node listener to {}: {e}", config.node_listen_addr)
+                })?;
+            info!("Node listener on {} (TLS).", config.node_listen_addr);
+            Some(server)
+        }
+        None => {
+            warn!("No TLS certificate is configured, so there is no node listener.");
+            None
+        }
+    };
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .with_context(|| format!("bind proxy server to {}", config.listen_addr))?;
@@ -122,12 +154,21 @@ async fn main() -> Result<()> {
         "Proxy listening on {} (gRPC + HTTP /info + /health).",
         config.listen_addr
     );
-    // If the accept loop dies, return so the supervisor restarts a clean task
+    // If either listener stops, exit so the supervisor restarts a clean task
     // rather than leaving the surface silently dead.
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| anyhow::anyhow!("proxy server error: {e}"))?;
-    Ok(())
+    let node_stopped = async {
+        match &node_server {
+            Some(server) => server.wait_for_shutdown().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        served = axum::serve(listener, router) => {
+            served.map_err(|e| anyhow::anyhow!("proxy server error: {e}"))?;
+        }
+        () = node_stopped => {}
+    }
+    anyhow::bail!("proxy server stopped")
 }
 
 /// Mount a tonic gRPC service as an axum route-service at `/{ServiceName}/*`, so
