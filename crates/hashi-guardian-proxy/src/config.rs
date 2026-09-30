@@ -53,6 +53,9 @@ pub struct Config {
     /// bitcoin|testnet|signet|regtest). Must match the guardian's config; used
     /// to recompute sighashes when verifying a log replay.
     pub btc_network: Network,
+    /// Sui fullnode gRPC endpoint the committee member allowlist is read from
+    /// (`SUI_RPC_URL`, required), on the chain of the guardian's Hashi object.
+    pub sui_rpc_url: String,
     /// Push metrics to a Prometheus remote-write endpoint; `None` leaves them
     /// on `/metrics`, which nothing can scrape (`MIMIR_URL`, `MIMIR_USERNAME`
     /// default `incoming_metrics`, `MIMIR_PASSWORD`, `MIMIR_PUSH_INTERVAL_SECS`
@@ -95,6 +98,8 @@ impl Config {
             .context("BTC_NETWORK must be set (bitcoin|testnet|signet|regtest)")?
             .parse()
             .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
+        let sui_rpc_url = std::env::var("SUI_RPC_URL")
+            .context("SUI_RPC_URL must be set (Sui fullnode for the committee allowlist)")?;
         let remote_write = match std::env::var("MIMIR_URL").ok().filter(|u| !u.is_empty()) {
             None => None,
             Some(url) => {
@@ -153,6 +158,7 @@ impl Config {
             log_bucket,
             log_region,
             btc_network,
+            sui_rpc_url,
             remote_write,
             node_tls,
         })

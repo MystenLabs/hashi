@@ -10,6 +10,9 @@ use hashi_guardian_proxy::kp::roster::RosterCache;
 use hashi_guardian_proxy::log_store::S3LogStore;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::node::cache::CachingGuardianGrpc;
+use hashi_guardian_proxy::node::member_auth::MemberGate;
+use hashi_guardian_proxy::node::members::ChainMemberSource;
+use hashi_guardian_proxy::node::members::MemberAllowlist;
 use hashi_guardian_proxy::public::info;
 use hashi_guardian_proxy::remote_write;
 use hashi_guardian_proxy::tls;
@@ -41,6 +44,7 @@ async fn main() -> Result<()> {
         listen = %config.listen_addr,
         log_bucket = %config.log_bucket,
         network = %config.btc_network,
+        sui_rpc = %config.sui_rpc_url,
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
 
@@ -76,6 +80,15 @@ async fn main() -> Result<()> {
         None => channel.clone(),
     };
 
+    // The member gate's allowlist follows the committee of the Hashi object the
+    // active guardian serves.
+    let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
+    tokio::spawn(allowlist.clone().refresh_forever(ChainMemberSource::new(
+        channel.clone(),
+        &config.sui_rpc_url,
+    )?));
+    let gate = Arc::new(MemberGate::new(allowlist, metrics.clone()));
+
     // One roster cache, shared: the relay authorizes submissions against it and
     // a cert rotation through the forwarder invalidates it.
     let roster = Arc::new(RosterCache::new(log_store.clone()));
@@ -108,14 +121,8 @@ async fn main() -> Result<()> {
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
 
-    // Serve gRPC (forwarder + relay + health) and the HTTP `/info` + `/health` on
-    // ONE port: each tonic service is mounted as an axum route-service, the plain
-    // routes merged in, one `axum::serve`. Mirrors crates/hashi/src/grpc/mod.rs.
-    let router = axum::Router::new()
-        .add_grpc_service(health_service)
-        .add_grpc_service(GuardianServiceServer::new(guardian_svc))
-        .add_grpc_service(GuardianRelayServiceServer::new(relay_svc))
-        .merge(info::router(info_state));
+    let router =
+        hashi_guardian_proxy::router(guardian_svc, relay_svc, health_service, info_state, gate);
 
     let node_server = match config.node_tls.clone() {
         Some(source) => {
@@ -169,41 +176,6 @@ async fn main() -> Result<()> {
         () = node_stopped => {}
     }
     anyhow::bail!("proxy server stopped")
-}
-
-/// Mount a tonic gRPC service as an axum route-service at `/{ServiceName}/*`, so
-/// gRPC and plain-HTTP routes share one router. Mirrors `crates/hashi/src/grpc/mod.rs`.
-trait RouterExt {
-    fn add_grpc_service<S>(self, svc: S) -> Self
-    where
-        S: tower::Service<
-                axum::extract::Request,
-                Response: axum::response::IntoResponse,
-                Error = std::convert::Infallible,
-            > + tonic::server::NamedService
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static;
-}
-
-impl RouterExt for axum::Router {
-    fn add_grpc_service<S>(self, svc: S) -> Self
-    where
-        S: tower::Service<
-                axum::extract::Request,
-                Response: axum::response::IntoResponse,
-                Error = std::convert::Infallible,
-            > + tonic::server::NamedService
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        self.route_service(&format!("/{}/{{*rest}}", S::NAME), svc)
-    }
 }
 
 fn lazy_channel(url: &str, config: &Config) -> Result<tonic::transport::Channel> {

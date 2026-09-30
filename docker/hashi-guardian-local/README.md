@@ -26,7 +26,7 @@ flowchart LR
 
     localnet["hashi-localnet, native<br/>sui + bitcoind + committee"]
 
-    node -->|withdrawal| proxy
+    node -->|withdrawal| host
     cli -->|share via relay| proxy
     cli -->|ceremony, direct| ceremony
     cli -->|on-chain state| localnet

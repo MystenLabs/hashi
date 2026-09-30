@@ -61,9 +61,13 @@ services:
 
   # The EC2 parent host: bridges inbound (proxy -> withdraw enclave) and outbound
   # (both guardians -> S3), standing in for the host's gRPC bridge and nitro
-  # vsock-proxy daemons.
+  # vsock-proxy daemons. Published on :3001 as the localnet nodes'
+  # guardian_node_url: the local proxy has no certificate, so no node listener,
+  # and its public listener refuses node RPCs.
   host:
     <<: *build
+    ports:
+      - "3001:3000"
     command:
       - /bin/sh
       - -c
@@ -117,7 +121,7 @@ services:
       retries: 20
       start_period: 3s
 
-  # The out-of-enclave proxy: the only port published to the host. Holds the wid
+  # The out-of-enclave proxy, published on :3000. Holds the wid
   # cache + serves the SingleProvisionerInit relay. Forwards to the withdraw
   # guardian via the host bridge; reads the wid log straight from MinIO (it sits
   # outside the enclave's S3 forwarder chain).
@@ -132,10 +136,13 @@ services:
       GUARDIAN_LOG_BUCKET: hashi-guardian-dev
       GUARDIAN_LOG_REGION: us-east-1
       BTC_NETWORK: regtest
+      SUI_RPC_URL: http://host.docker.internal:9000
       AWS_ENDPOINT_URL_S3: http://minio:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: ${RUST_LOG:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       enclave:
         condition: service_healthy

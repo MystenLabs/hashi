@@ -34,6 +34,8 @@ pkcs8.workspace = true
 x509-parser.workspace = true
 rand.workspace = true
 ed25519-dalek.workspace = true
+sui-rpc.workspace = true
+sui-sdk-types.workspace = true
 
 [features]
 # Dev deploys: admit the KP attestations a non-enclave-dev guardian accepts.

@@ -38,6 +38,14 @@ pub struct ProxyMetrics {
     pub tls_cert_not_after: IntGauge,
     /// Failed TLS certificate reloads; the proxy keeps serving the old one.
     pub tls_cert_reload_failures: IntCounter,
+    /// Requests the committee member gate refused, by reason.
+    pub member_refused: IntCounterVec,
+    /// Members on the current allowlist snapshot.
+    pub member_allowlist_size: IntGauge,
+    /// Checkpoint time of the chain state on the allowlist; its age is what to alert on.
+    pub member_snapshot_timestamp_seconds: IntGauge,
+    /// Failed allowlist reads.
+    pub member_refresh_failures: IntCounter,
 }
 
 impl ProxyMetrics {
@@ -75,6 +83,29 @@ impl ProxyMetrics {
             "TLS certificate reloads that failed",
         )
         .expect("valid metric");
+        let member_refused = IntCounterVec::new(
+            Opts::new(
+                "guardian_proxy_member_refused_total",
+                "Requests refused by the committee member gate, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric");
+        let member_allowlist_size = IntGauge::new(
+            "guardian_proxy_member_allowlist_size",
+            "Committee members on the current allowlist snapshot",
+        )
+        .expect("valid metric");
+        let member_snapshot_timestamp_seconds = IntGauge::new(
+            "guardian_proxy_member_snapshot_timestamp_seconds",
+            "Checkpoint time, in unix seconds, of the chain state on the committee member allowlist",
+        )
+        .expect("valid metric");
+        let member_refresh_failures = IntCounter::new(
+            "guardian_proxy_member_refresh_failures_total",
+            "Failed committee member allowlist reads",
+        )
+        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -91,6 +122,18 @@ impl ProxyMetrics {
         registry
             .register(Box::new(tls_cert_reload_failures.clone()))
             .expect("register");
+        registry
+            .register(Box::new(member_refused.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(member_allowlist_size.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(member_snapshot_timestamp_seconds.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(member_refresh_failures.clone()))
+            .expect("register");
 
         Self {
             registry,
@@ -99,6 +142,10 @@ impl ProxyMetrics {
             record_parse_failures,
             tls_cert_not_after,
             tls_cert_reload_failures,
+            member_refused,
+            member_allowlist_size,
+            member_snapshot_timestamp_seconds,
+            member_refresh_failures,
         }
     }
 

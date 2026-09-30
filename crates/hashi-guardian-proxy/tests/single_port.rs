@@ -17,8 +17,9 @@ use tonic_health::pb::HealthCheckRequest;
 
 #[tokio::test]
 async fn grpc_and_http_share_one_port() {
-    // Same shape as `main`: a tonic gRPC service mounted as an axum
-    // route-service, merged with a plain-HTTP GET route, under one router.
+    // Same shape as `hashi_guardian_proxy::router`, minus the member gate: a
+    // tonic gRPC service mounted as an axum route-service, merged with a
+    // plain-HTTP GET route, under one router.
     let (reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)

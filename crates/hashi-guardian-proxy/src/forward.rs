@@ -162,9 +162,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_utils {
     use super::*;
-    use crate::node::cache::CachingGuardianGrpc;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -175,11 +174,13 @@ mod tests {
     use tonic::transport::Server;
 
     #[derive(Clone, Default)]
-    struct StubGuardian {
-        standard_withdrawal_calls: Arc<AtomicUsize>,
-        get_guardian_info_calls: Arc<AtomicUsize>,
-        get_attested_guardian_info_calls: Arc<AtomicUsize>,
-        confirm_ceremony_calls: Arc<AtomicUsize>,
+    pub(crate) struct StubGuardian {
+        pub(crate) standard_withdrawal_calls: Arc<AtomicUsize>,
+        pub(crate) get_guardian_info_calls: Arc<AtomicUsize>,
+        pub(crate) get_attested_guardian_info_calls: Arc<AtomicUsize>,
+        pub(crate) confirm_ceremony_calls: Arc<AtomicUsize>,
+        /// Served by `GetGuardianInfo`; the default response when unset.
+        pub(crate) info: Arc<std::sync::Mutex<Option<proto::GetGuardianInfoResponse>>>,
     }
 
     #[tonic::async_trait]
@@ -221,7 +222,8 @@ mod tests {
             _: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             self.get_guardian_info_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(proto::GetGuardianInfoResponse::default()))
+            let info = self.info.lock().unwrap().clone();
+            Ok(Response::new(info.unwrap_or_default()))
         }
 
         async fn setup_new_key(
@@ -285,21 +287,7 @@ mod tests {
         }
     }
 
-    fn mock_request(wid: [u8; 32], seq: u64) -> Request<proto::SignedStandardWithdrawalRequest> {
-        Request::new(proto::SignedStandardWithdrawalRequest {
-            data: Some(proto::StandardWithdrawalRequestData {
-                wid: Some(wid.to_vec().into()),
-                utxos: None,
-                timestamp_secs: Some(100),
-                seq: Some(seq),
-            }),
-            committee_signature: None,
-        })
-    }
-
-    type StubStore = crate::log_store::test_store::MemStore;
-
-    async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
+    pub(crate) async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
         let stub = StubGuardian::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -319,6 +307,32 @@ mod tests {
             .connect_lazy();
         (stub, channel)
     }
+
+    pub(crate) fn mock_request(
+        wid: [u8; 32],
+        seq: u64,
+    ) -> Request<proto::SignedStandardWithdrawalRequest> {
+        Request::new(proto::SignedStandardWithdrawalRequest {
+            data: Some(proto::StandardWithdrawalRequestData {
+                wid: Some(wid.to_vec().into()),
+                utxos: None,
+                timestamp_secs: Some(100),
+                seq: Some(seq),
+            }),
+            committee_signature: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_utils::*;
+    use super::*;
+    use crate::node::cache::CachingGuardianGrpc;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    type StubStore = crate::log_store::test_store::MemStore;
 
     fn proxy_over(
         active: tonic::transport::Channel,
