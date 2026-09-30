@@ -179,6 +179,12 @@ pub async fn operator_init(
             )
         }
     };
+    // No separate nonce is needed for this local key/PCR check: the signing key
+    // is fresh at enclave startup, and verification below requires that exact key,
+    // so an attestation from a previous instance cannot pass. An earlier document
+    // for this same key and PCR establishes the same binding. The archived document
+    // is historical evidence; remote callers establish freshness via nonce-bound
+    // GetAttestedGuardianInfo queries.
     let attestation = get_attestation(&enclave.signing_pubkey(), None)?;
     attestation
         .verify_live(
