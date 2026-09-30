@@ -222,7 +222,7 @@ mod tests {
         )
         .unwrap();
 
-        let status = client.get_guardian_info(false).await.unwrap_err();
+        let status = client.get_guardian_info().await.unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unimplemented);
         let status = client
             .standard_withdrawal(Default::default())
