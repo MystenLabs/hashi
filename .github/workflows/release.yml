@@ -211,12 +211,29 @@ jobs:
           echo "Timed out waiting for the Docker image"
           exit 1
 
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # pin@v3.0.0
+        with:
+          workload_identity_provider: projects/984139309829/locations/global/workloadIdentityPools/github-actions/providers/github
+
       - name: Verify Docker image
         env:
           EXPECTED_CONFIG: '{"Entrypoint":["/opt/hashi/bin/hashi"],"Env":["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]}'
         run: |
           set -euo pipefail
           IMAGE_REF="$IMAGE@$image_digest"
+          # MP3 pushes the same manifest to Artifact Registry, which Docker Hub credentials can't write.
+          GCP_TOKEN=$(gcloud auth print-access-token)
+          echo "::add-mask::$GCP_TOKEN"
+          MP3_DIGEST=sha256:$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GCP_TOKEN" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" \
+            "https://us-central1-docker.pkg.dev/v2/cryptic-bolt-398315/hashi/hashi/manifests/$SOURCE_SHA" |
+            sha256sum | awk '{print $1}')
+          if [ "$image_digest" != "$MP3_DIGEST" ]; then
+            echo "$IMAGE:$RELEASE_TAG is $image_digest, but MP3 built $MP3_DIGEST"
+            exit 1
+          fi
           # An index could carry unverified images for other platforms.
           MANIFEST=$(docker buildx imagetools inspect --raw "$IMAGE_REF")
           if ! jq -e 'has("config")' <<< "$MANIFEST" > /dev/null; then
