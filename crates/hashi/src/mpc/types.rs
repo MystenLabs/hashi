@@ -22,9 +22,9 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
-use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
 use serde::Deserialize;
@@ -402,7 +402,7 @@ pub enum MpcOutputRecoveryOutcome {
 }
 
 pub(crate) struct DkgReconstructionContext<'a> {
-    pub committee: &'a Committee,
+    pub committee: &'a RuntimeCommittee,
     pub nodes: &'a Nodes<EncryptionGroupElement>,
     pub party_id: PartyId,
     pub encryption_key: &'a EncryptionPrivateKey,
@@ -761,31 +761,41 @@ impl CertificateV1 {
 
     pub fn signers(
         &self,
-        committee: &Committee,
+        committee: &RuntimeCommittee,
     ) -> Result<Vec<Address>, sui_crypto::SignatureError> {
         match self {
-            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.signers(committee),
-            CertificateV1::NonceGeneration { cert, .. } => cert.signers(committee),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
+                committee.signers(cert.committee_signature())
+            }
+            CertificateV1::NonceGeneration { cert, .. } => {
+                committee.signers(cert.committee_signature())
+            }
         }
     }
 
-    pub fn weight(&self, committee: &Committee) -> Result<u64, sui_crypto::SignatureError> {
+    pub fn weight(&self, committee: &RuntimeCommittee) -> Result<u64, sui_crypto::SignatureError> {
         match self {
-            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => cert.weight(committee),
-            CertificateV1::NonceGeneration { cert, .. } => cert.weight(committee),
+            CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
+                committee.signed_weight(cert.committee_signature())
+            }
+            CertificateV1::NonceGeneration { cert, .. } => {
+                committee.signed_weight(cert.committee_signature())
+            }
         }
     }
 
     pub fn is_signer(
         &self,
         address: &Address,
-        committee: &Committee,
+        committee: &RuntimeCommittee,
     ) -> Result<bool, sui_crypto::SignatureError> {
         match self {
             CertificateV1::Dkg(cert) | CertificateV1::Rotation(cert) => {
-                cert.is_signer(address, committee)
+                committee.is_signer(cert.committee_signature(), address)
             }
-            CertificateV1::NonceGeneration { cert, .. } => cert.is_signer(address, committee),
+            CertificateV1::NonceGeneration { cert, .. } => {
+                committee.is_signer(cert.committee_signature(), address)
+            }
         }
     }
 
@@ -841,7 +851,7 @@ impl AvidLeg for batch_avss_avid::AvidVote {
 pub struct AvidCertificate<P: AvidLeg> {
     dealer_cert: SignedMessage<P::Domain>,
     payload: P,
-    committee: Arc<Committee>,
+    committee: Arc<RuntimeCommittee>,
     /// The Hashi deployment the dealer cert's preimage is bound to.
     hashi_id: Address,
     signers: BTreeSet<PartyId>,
@@ -874,7 +884,7 @@ impl AvidCertificate<batch_avss_avid::AvssVote> {
     pub fn confirm(
         hashi_id: Address,
         dealer_cert: SignedMessage<AvssVoteMessagesHash>,
-        committee: Arc<Committee>,
+        committee: Arc<RuntimeCommittee>,
     ) -> MpcResult<Self> {
         let payload = batch_avss_avid::AvssVote {
             common_message_hash: to_fastcrypto_digest(&dealer_cert.message().messages_hash),
@@ -895,7 +905,7 @@ impl AvidCertificate<batch_avss_avid::AvidVote> {
         hashi_id: Address,
         dealer_cert: SignedMessage<AvidVoteMessagesHash>,
         vote: batch_avss_avid::AvidVote,
-        committee: Arc<Committee>,
+        committee: Arc<RuntimeCommittee>,
     ) -> MpcResult<Self> {
         if hash_avid_vote(&vote) != dealer_cert.message().messages_hash {
             return Err(MpcError::InvalidCertificate(
@@ -919,10 +929,10 @@ fn to_fastcrypto_digest(h: &MessagesHash) -> fastcrypto::hash::Digest<32> {
 
 pub(crate) fn resolve_signers<T: hashi_types::intent::IntentMessage>(
     dealer_cert: &SignedMessage<T>,
-    committee: &Committee,
+    committee: &RuntimeCommittee,
 ) -> MpcResult<BTreeSet<PartyId>> {
-    dealer_cert
-        .signers(committee)
+    committee
+        .signers(dealer_cert.committee_signature())
         .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?
         .iter()
         .map(|addr| {
@@ -1046,7 +1056,7 @@ pub struct DealerFlowData {
     pub messages_hash: DealerMessagesHash,
     pub my_signature: Option<MemberSignature>,
     pub required_reduced_weight: u32,
-    pub committee: Committee,
+    pub committee: RuntimeCommittee,
     /// The Hashi deployment every collected signature must be bound to.
     pub hashi_id: Address,
     pub nodes: Nodes<EncryptionGroupElement>,
@@ -1058,7 +1068,7 @@ pub(crate) struct AvidDealerFlowData {
     pub(crate) my_signature: MemberSignature,
     /// Per-recipient optimistic messages, excluding the dealer's own.
     pub(crate) recipient_messages: Vec<(Address, Messages)>,
-    pub(crate) committee: Committee,
+    pub(crate) committee: RuntimeCommittee,
     /// The Hashi deployment every collected signature must be bound to.
     pub(crate) hashi_id: Address,
     pub(crate) nodes: Nodes<EncryptionGroupElement>,
@@ -1242,7 +1252,7 @@ mod tests {
 
     use fastcrypto_tbls::nodes::Node;
     use hashi_types::committee::Bls12381PrivateKey;
-    use hashi_types::committee::BlsSignatureAggregator;
+    use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
@@ -1298,7 +1308,7 @@ mod tests {
         }
     }
 
-    fn test_committee(n: usize, epoch: u64) -> (Committee, Vec<Bls12381PrivateKey>) {
+    fn test_committee(n: usize, epoch: u64) -> (RuntimeCommittee, Vec<Bls12381PrivateKey>) {
         let mut rng = rand::thread_rng();
         let signing_keys: Vec<_> = (0..n)
             .map(|_| Bls12381PrivateKey::generate(&mut rng))
@@ -1315,11 +1325,11 @@ mod tests {
             })
             .collect();
         let committee = Committee::new(members, epoch, 0u16, 3333u16);
-        (committee, signing_keys)
+        (committee.into(), signing_keys)
     }
 
     fn confirm_cert_over(
-        committee: &Committee,
+        committee: &RuntimeCommittee,
         keys: &[Bls12381PrivateKey],
         signer_indices: &[usize],
         epoch: u64,
@@ -1339,7 +1349,7 @@ mod tests {
     }
 
     fn vote_cert_over(
-        committee: &Committee,
+        committee: &RuntimeCommittee,
         keys: &[Bls12381PrivateKey],
         signer_indices: &[usize],
         epoch: u64,
@@ -1359,13 +1369,13 @@ mod tests {
     }
 
     fn cert_over<T: hashi_types::intent::IntentMessage + Clone>(
-        committee: &Committee,
+        committee: &RuntimeCommittee,
         keys: &[Bls12381PrivateKey],
         signer_indices: &[usize],
         epoch: u64,
         message: T,
     ) -> SignedMessage<T> {
-        let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, message.clone());
+        let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, message.clone());
         for &i in signer_indices {
             let sig = keys[i].sign(TEST_HASHI_ID, epoch, Address::new([i as u8; 32]), &message);
             aggregator.add_signature(sig).unwrap();
@@ -1683,7 +1693,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 0u16, 3333u16);
+        let committee: RuntimeCommittee = Committee::new(members, epoch, 0u16, 3333u16).into();
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
@@ -1694,8 +1704,7 @@ mod tests {
         };
 
         // Sign with committee members to create a valid certificate
-        let mut aggregator =
-            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, dkg_message.clone());
+        let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, dkg_message.clone());
         for (i, key) in signing_keys.iter().enumerate() {
             let addr = Address::new([i as u8; 32]);
             let sig = key.sign(TEST_HASHI_ID, epoch, addr, &dkg_message);

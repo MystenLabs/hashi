@@ -73,14 +73,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
             let onchain_state = cfg.hashi.onchain_state().await?;
             let master_g = onchain_state.onchain_verifying_key_g()?;
             let committee = onchain_state
-                .current_committee()
+                .current_raw_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
             info!(
                 phase = "committee",
-                epoch = committee.epoch(),
+                epoch = committee.epoch,
                 "no committee-update/genesis record; pinning on-chain committee for KP authorization during provisioner_init",
             );
-            Some(GenesisState::new(
+            Some(GenesisState::from_parts(
                 committee,
                 cfg.hashi.hashi_ids.hashi_object_id,
                 master_g,

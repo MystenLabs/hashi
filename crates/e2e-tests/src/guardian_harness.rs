@@ -14,7 +14,7 @@ use hashi_guardian::activate_enclave_for_testing;
 use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::committee::Committee as HashiCommittee;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
@@ -80,7 +80,7 @@ impl GuardianHarness {
     /// node-signed guardian request will fail verification.
     pub async fn finalize(
         &self,
-        committee: HashiCommittee,
+        committee: RuntimeCommittee,
         master_pubkey: HashiMasterG,
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,

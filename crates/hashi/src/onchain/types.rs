@@ -18,6 +18,7 @@ use sui_sdk_types::TypeTag;
 use crate::grpc::Client;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
@@ -195,7 +196,7 @@ pub struct CommitteeSet {
 
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
-    committees: BTreeMap<u64, Committee>,
+    committees: BTreeMap<u64, RuntimeCommittee>,
     /// The verbatim on-chain committees, kept alongside the enriched
     /// view. Move's `submit_committee_handoff` verifies the handoff
     /// cert over a `CommitteeTransitionRequest` built from the stored
@@ -287,7 +288,7 @@ impl CommitteeSet {
         self.committees_id
     }
 
-    pub fn committees(&self) -> &BTreeMap<u64, Committee> {
+    pub fn committees(&self) -> &BTreeMap<u64, RuntimeCommittee> {
         &self.committees
     }
 
@@ -301,7 +302,7 @@ impl CommitteeSet {
         &mut self.committee_handoffs
     }
 
-    pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, Committee> {
+    pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, RuntimeCommittee> {
         &mut self.committees
     }
 
@@ -315,7 +316,7 @@ impl CommitteeSet {
         &mut self.raw_committees
     }
 
-    pub fn current_committee(&self) -> Option<&Committee> {
+    pub fn current_committee(&self) -> Option<&RuntimeCommittee> {
         self.committees().get(&self.epoch())
     }
 
@@ -331,7 +332,7 @@ impl CommitteeSet {
         self.pending_epoch_change
     }
 
-    pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &Committee)> {
+    pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &RuntimeCommittee)> {
         if self.pending_epoch_change().is_some() {
             let prev_ep = self.epoch();
             self.committees().get(&prev_ep).map(|c| (prev_ep, c))
@@ -490,25 +491,28 @@ impl CommitteeSet {
         self
     }
 
-    /// Install committees, deriving the raw view by round-tripping the
-    /// enriched one — exact when every member's encryption key is a
-    /// valid group element, which holds for the synthetic committees
-    /// tests build. The chain-fed paths (scrape and apply) install the
-    /// decoded on-chain committees via [`Self::set_raw_committees`] or
-    /// [`Self::raw_committees_mut`] instead of relying on this.
+    /// Install strictly parsed committees, deriving the raw view by an exact
+    /// round trip. Chain-fed paths install the decoded on-chain committees instead.
     pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
         self.raw_committees = committees
             .iter()
             .map(|(epoch, committee)| (*epoch, move_types::Committee::from(committee)))
             .collect();
-        self.committees = committees;
+        self.committees = committees
+            .into_iter()
+            .map(|(epoch, committee)| (epoch, committee.into()))
+            .collect();
         self
     }
 
-    pub fn set_raw_committees(
+    /// Install runtime views together with the on-chain committees they were
+    /// decoded from.
+    pub fn set_runtime_committees(
         &mut self,
+        committees: BTreeMap<u64, RuntimeCommittee>,
         raw_committees: BTreeMap<u64, move_types::Committee>,
     ) -> &mut Self {
+        self.committees = committees;
         self.raw_committees = raw_committees;
         self
     }

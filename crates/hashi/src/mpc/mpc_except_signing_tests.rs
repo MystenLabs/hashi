@@ -308,7 +308,7 @@ impl TestSetup {
         )
     }
 
-    fn committee(&self) -> &Committee {
+    fn committee(&self) -> &RuntimeCommittee {
         self.committee_set.current_committee().unwrap()
     }
 
@@ -339,7 +339,7 @@ impl TestSetup {
 }
 
 fn create_test_certificate(
-    committee: &Committee,
+    committee: &RuntimeCommittee,
     dealer_messages: &Messages,
     dealer_address: Address,
     signatures: Vec<MemberSignature>,
@@ -349,7 +349,7 @@ fn create_test_certificate(
         dealer_address,
         messages_hash,
     };
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, dkg_message);
     for signature in signatures {
         aggregator
             .add_signature(signature)
@@ -400,7 +400,7 @@ fn rotation_peer_signatures(
 }
 
 fn create_rotation_test_certificate(
-    committee: &Committee,
+    committee: &RuntimeCommittee,
     rotation_messages: &Messages,
     dealer_address: Address,
     signatures: Vec<MemberSignature>,
@@ -410,7 +410,7 @@ fn create_rotation_test_certificate(
         dealer_address,
         messages_hash,
     };
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, rotation_message);
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, rotation_message);
     for signature in signatures {
         aggregator
             .add_signature(signature)
@@ -3300,7 +3300,7 @@ fn create_weight_based_test_certificate(
 
     let config = setup.dkg_config();
     let committee = setup.committee();
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message.clone());
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, dkg_message.clone());
 
     let dkg_required = config.threshold as u32 + config.max_faulty as u32;
     let mut weight_sum = 0u32;
@@ -4818,7 +4818,10 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     // Create empty mock P2P channel
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
-    let signers = cert.signers(&party_manager.committee).unwrap();
+    let signers = party_manager
+        .committee
+        .signers(cert.committee_signature())
+        .unwrap();
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because no complaint exists
@@ -5372,7 +5375,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     );
 }
 fn create_certificate_with_signers(
-    committee: &Committee,
+    committee: &RuntimeCommittee,
     dealer_address: Address,
     messages: &Messages,
     signatures: Vec<MemberSignature>,
@@ -5383,7 +5386,7 @@ fn create_certificate_with_signers(
         messages_hash,
     };
 
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, dkg_message);
 
     for signature in signatures {
         aggregator
@@ -5898,7 +5901,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
         messages_hash,
     };
     let committee = setup.committee();
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, dkg_message);
     for (_, _, sig) in &signers {
         aggregator.add_signature(sig.clone()).unwrap();
     }
@@ -6462,7 +6465,8 @@ impl RotationTestSetup {
                 target_epoch,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            ),
+            )
+            .into(),
         );
         self.setup.committee_set.set_epoch(target_epoch);
         target_epoch
@@ -8047,13 +8051,14 @@ async fn test_prepare_previous_output_for_new_member() {
 
     let mut committees = BTreeMap::new();
     committees.insert(epoch - 1, previous_committee);
-    committees.insert(epoch, new_current_committee);
+    committees.insert(epoch, new_current_committee.into());
 
     let mut new_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     new_committee_set
         .set_epoch(epoch - 1)
         .set_pending_epoch_change(Some(epoch))
-        .set_committees(committees);
+        .committees_mut()
+        .extend(committees);
 
     // Create new member's MpcManager
     let new_member_manager = MpcManager::new(
@@ -11975,7 +11980,7 @@ fn valid_dealer_submission_signed_by(
     };
     let committee = setup.committee();
     let epoch = committee.epoch();
-    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, target.clone());
+    let mut aggregator = committee.signature_aggregator(TEST_HASHI_ID, target.clone());
     for &i in signer_indices {
         aggregator
             .add_signature(setup.signing_keys[i].sign(
@@ -12229,8 +12234,9 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
         batch_index,
     };
     let member_sig = MemberSignature::new(receiver.mpc_config.epoch, receiver.address, sig);
-    let mut aggregator =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
+    let mut aggregator = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm_target);
     aggregator
         .add_signature(member_sig)
         .expect("Confirm signature must verify over AvssVoteMessagesHash{dealer, H(v), batch}");
@@ -12392,7 +12398,9 @@ fn avid_pessimistic_fixture(
         messages_hash: MessagesHash::from(common.hash().digest),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm_target);
     for s in sigs {
         agg.add_signature(s).unwrap();
     }
@@ -12518,7 +12526,9 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
         batch_index,
     };
     let member_sig = MemberSignature::new(voter.mpc_config.epoch, voter.address, vote);
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     agg.add_signature(member_sig)
         .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
 
@@ -12653,7 +12663,9 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
@@ -12729,7 +12741,9 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
         receiver.address,
         response.signature.clone(),
     );
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm_target);
     agg.add_signature(member_sig)
         .expect("Confirm sig verifies over DealerMessagesHash{dealer, H(v)}");
     assert!(
@@ -12838,7 +12852,9 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
         receiver.address,
         response.signature.clone(),
     );
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     agg.add_signature(member_sig)
         .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
     assert!(!echoes.is_empty());
@@ -12942,8 +12958,9 @@ fn test_handle_avid_dispersal_refuses_a_confirm_cert_for_another_batch() {
         messages_hash: fx.confirm_cert.message().messages_hash,
         batch_index: batch_index + 1,
     };
-    let mut agg =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), other_batch.clone());
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, other_batch.clone());
     for i in 0..5usize {
         agg.add_signature(setup.signing_keys[i].sign(
             TEST_HASHI_ID,
@@ -13089,7 +13106,9 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         messages_hash: MessagesHash::from(fx.common.hash().digest),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm_target);
     for s in sigs {
         agg.add_signature(s).unwrap();
     }
@@ -13824,7 +13843,9 @@ async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
 
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], take: usize| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs.iter().take(take) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -13888,7 +13909,9 @@ async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase()
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -13971,7 +13994,9 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -14037,7 +14062,9 @@ fn two_full_certs_fixture(
     let (second_sigs, second_target) =
         avid_confirm_signatures(setup, &mut managers, 2, batch_index, rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -14068,11 +14095,9 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
         messages_hash: MessagesHash::from([9u8; 32]),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(
-        TEST_HASHI_ID,
-        setup.committee(),
-        unresolvable_target.clone(),
-    );
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, unresolvable_target.clone());
     for i in 0..6 {
         agg.add_signature(setup.signing_keys[i].sign(
             TEST_HASHI_ID,
@@ -14242,8 +14267,9 @@ fn cut_off_confirmer_fixture(setup: &TestSetup, batch_index: u32) -> CutOffConfi
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target.clone());
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target.clone());
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
@@ -14379,8 +14405,9 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
         messages_hash: MessagesHash::from([9u8; 32]),
         batch_index,
     };
-    let mut agg =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), other_target.clone());
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, other_target.clone());
     for i in 0..6 {
         agg.add_signature(setup.signing_keys[i].sign(
             TEST_HASHI_ID,
@@ -14640,7 +14667,9 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -14788,7 +14817,9 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -14861,8 +14892,9 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
                 dealer_address,
                 messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
             };
-            let mut aggregator =
-                BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+            let mut aggregator = setup
+                .committee()
+                .signature_aggregator(TEST_HASHI_ID, message.clone());
             for &s in signers {
                 let sig = setup.signing_keys[s].sign(
                     TEST_HASHI_ID,
@@ -15045,7 +15077,9 @@ async fn test_classification_survives_the_carrier_into_sizing() {
         messages_hash,
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm.clone());
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm.clone());
     for i in 0..4usize {
         agg.add_signature(setup.signing_keys[i].sign(
             TEST_HASHI_ID,
@@ -15138,7 +15172,9 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
         messages_hash,
         batch_index: 3,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), confirm.clone());
+    let mut agg = avid
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm.clone());
     for s in 0..4usize {
         agg.add_signature(avid.signing_keys[s].sign(
             TEST_HASHI_ID,
@@ -15166,7 +15202,9 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
         messages_hash,
         batch_index: 3,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), vote.clone());
+    let mut agg = avid
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote.clone());
     for s in 0..4usize {
         agg.add_signature(avid.signing_keys[s].sign(
             TEST_HASHI_ID,
@@ -15195,7 +15233,9 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
         lone_weight < vote_quorum,
         "one signer must sit under the vote bar or this proves nothing"
     );
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), vote.clone());
+    let mut agg = avid
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote.clone());
     agg.add_signature(avid.signing_keys[0].sign(
         TEST_HASHI_ID,
         avid.epoch(),
@@ -15227,7 +15267,9 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
         three_weight >= vote_quorum && three_weight < total,
         "three signers must clear the vote bar but not the confirm bar, or this proves nothing"
     );
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), confirm.clone());
+    let mut agg = avid
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, confirm.clone());
     for s in 0..3usize {
         agg.add_signature(avid.signing_keys[s].sign(
             TEST_HASHI_ID,
@@ -15258,7 +15300,9 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
         messages_hash,
     };
     let unclassified = {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), legacy.clone());
+        let mut agg = avid
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, legacy.clone());
         for s in 0..4usize {
             agg.add_signature(avid.signing_keys[s].sign(
                 TEST_HASHI_ID,
@@ -15295,7 +15339,9 @@ fn test_nonce_cert_does_not_verify_under_another_batch_index() {
         messages_hash,
         batch_index: 0,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), target.clone());
+    let mut agg = avid
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, target.clone());
     for s in 0..4usize {
         agg.add_signature(avid.signing_keys[s].sign(
             TEST_HASHI_ID,
@@ -15338,8 +15384,9 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
                 dealer_address,
                 messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
             };
-            let mut aggregator =
-                BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+            let mut aggregator = setup
+                .committee()
+                .signature_aggregator(TEST_HASHI_ID, message.clone());
             for &s in signers {
                 let sig = setup.signing_keys[s].sign(
                     TEST_HASHI_ID,
@@ -15400,8 +15447,9 @@ async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip(
         dealer_address,
         messages_hash: MessagesHash::from([7u8; 32]),
     };
-    let mut aggregator =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+    let mut aggregator = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, message.clone());
     for s in 0..4 {
         let sig =
             setup.signing_keys[s].sign(TEST_HASHI_ID, setup.epoch(), setup.address(s), &message);
@@ -15459,8 +15507,9 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
             dealer_address,
             messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
         };
-        let mut aggregator =
-            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+        let mut aggregator = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, message.clone());
         for &s in &all {
             let sig = setup.signing_keys[s].sign(
                 TEST_HASHI_ID,
@@ -15512,8 +15561,9 @@ fn test_avid_sizing_counts_past_the_floor() {
             dealer_address,
             messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
         };
-        let mut aggregator =
-            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+        let mut aggregator = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, message.clone());
         for s in 0..4 {
             let sig = setup.signing_keys[s].sign(
                 TEST_HASHI_ID,
@@ -15713,7 +15763,9 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -15802,7 +15854,9 @@ fn test_decoded_shares_match_optimistic_shares() {
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
@@ -15912,7 +15966,9 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -16072,11 +16128,9 @@ fn test_avid_voter_state_survives_restart() {
         ));
     }
     let cert = |sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(
-            TEST_HASHI_ID,
-            setup.committee(),
-            flow.confirm_target.clone(),
-        );
+        let mut agg = setup
+            .committee()
+            .signature_aggregator(TEST_HASHI_ID, flow.confirm_target.clone());
         for sig in sigs {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -16135,7 +16189,9 @@ fn test_avid_voter_state_survives_restart() {
         messages_hash: hash_avid_vote(&held_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     for sig in vote_sigs {
         agg.add_signature(sig).unwrap();
     }
@@ -16282,11 +16338,9 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         ));
         confirmers.push(mgr);
     }
-    let mut agg = BlsSignatureAggregator::new(
-        TEST_HASHI_ID,
-        setup.committee(),
-        flow.confirm_target.clone(),
-    );
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, flow.confirm_target.clone());
     for sig in &sigs {
         agg.add_signature(sig.clone()).unwrap();
     }
@@ -16350,7 +16404,9 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         messages_hash: hash_avid_vote(&held_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
+    let mut agg = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target);
     for sig in vote_sigs {
         agg.add_signature(sig).unwrap();
     }
@@ -16428,8 +16484,9 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         messages_hash: hash_avid_vote(&blame_vote),
         batch_index,
     };
-    let mut thin =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), blame_target.clone());
+    let mut thin = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, blame_target.clone());
     thin.add_signature(setup.signing_keys[0].sign(
         TEST_HASHI_ID,
         setup.epoch(),
@@ -16457,8 +16514,9 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
     );
 
-    let mut full =
-        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), blame_target.clone());
+    let mut full = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, blame_target.clone());
     for i in 0..6usize {
         full.add_signature(setup.signing_keys[i].sign(
             TEST_HASHI_ID,
@@ -16624,20 +16682,17 @@ fn make_jumped_committee_set(setup: &mut TestSetup, prev_epoch: u64) {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
-    let current_committee = setup.committee_set.current_committee().unwrap().clone();
-
-    let mut committees = BTreeMap::new();
-    committees.insert(prev_epoch, prev_committee);
-    committees.insert(current_epoch, current_committee);
-    setup.committee_set.set_committees(committees);
+    let committees = setup.committee_set.committees_mut();
+    committees.retain(|&epoch, _| epoch == current_epoch);
+    committees.insert(prev_epoch, prev_committee.into());
 }
 
 fn make_single_committee_set(setup: &mut TestSetup) {
     let current_epoch = setup.committee_set.epoch();
-    let current_committee = setup.committee_set.current_committee().unwrap().clone();
-    let mut committees = BTreeMap::new();
-    committees.insert(current_epoch, current_committee);
-    setup.committee_set.set_committees(committees);
+    setup
+        .committee_set
+        .committees_mut()
+        .retain(|&epoch, _| epoch == current_epoch);
 }
 
 #[test]
@@ -17225,12 +17280,13 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
             )
         })
         .collect();
-    let weighted = Committee::new(
+    let weighted: RuntimeCommittee = Committee::new(
         members,
         setup.epoch(),
         ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
-    );
+    )
+    .into();
 
     let (nodes, threshold, max_faulty) =
         build_reduced_nodes(&weighted, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
@@ -17366,7 +17422,10 @@ fn golden_error_kind(error: &MpcError) -> &'static str {
     }
 }
 
-fn golden_committee(weights: &[u64], (max_faulty_bps, allowed_delta_bps): (u16, u16)) -> Committee {
+fn golden_committee(
+    weights: &[u64],
+    (max_faulty_bps, allowed_delta_bps): (u16, u16),
+) -> RuntimeCommittee {
     let mut rng = rand::thread_rng();
     let signing_public_key = Bls12381PrivateKey::generate(&mut rng).public_key();
     let encryption_public_key = EncryptionPrivateKey::new(&mut rng).public_key();
@@ -17384,7 +17443,7 @@ fn golden_committee(weights: &[u64], (max_faulty_bps, allowed_delta_bps): (u16, 
             )
         })
         .collect();
-    Committee::new(members, 1, allowed_delta_bps, max_faulty_bps)
+    Committee::new(members, 1, allowed_delta_bps, max_faulty_bps).into()
 }
 
 fn golden_reduction(
@@ -17642,12 +17701,13 @@ fn derived_thresholds_are_accepted_by_the_reducer() {
                     )
                 })
                 .collect();
-            let committee = Committee::new(
+            let committee: RuntimeCommittee = Committee::new(
                 members,
                 setup.epoch(),
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 f_bps,
-            );
+            )
+            .into();
             build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
         }
     }
@@ -17690,12 +17750,13 @@ fn a_legacy_pinned_committee_keeps_its_original_parameters() {
             hashi_types::move_types::ConfigValue::U64(0),
         ),
     ]);
-    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
+    let legacy: RuntimeCommittee =
+        Committee::with_config(members.clone(), setup.epoch(), legacy_config).into();
     let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!(nodes.total_weight(), 101);
     assert_eq!((t, f), (34, 34));
 
-    let fresh = Committee::new(members.clone(), setup.epoch(), 0, 3333);
+    let fresh: RuntimeCommittee = Committee::new(members.clone(), setup.epoch(), 0, 3333).into();
     assert!(fresh.config().legacy_pinned_mpc_threshold().is_none());
     let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!(nodes.total_weight(), 100);
@@ -17715,9 +17776,10 @@ fn an_underivable_previous_committee_does_not_block_startup() {
             hashi_types::move_types::ConfigValue::Bool(true),
         )]),
     );
-    let mut committees = setup.committee_set.committees().clone();
-    committees.insert(epoch - 1, broken);
-    setup.committee_set.set_committees(committees);
+    setup
+        .committee_set
+        .committees_mut()
+        .insert(epoch - 1, broken.into());
 
     let manager = setup.create_manager(0);
     assert!(manager.previous_committee.is_none());
@@ -17763,11 +17825,12 @@ fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
             hashi_types::move_types::ConfigValue::U64(0),
         ),
     ]);
-    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
+    let legacy: RuntimeCommittee =
+        Committee::with_config(members.clone(), setup.epoch(), legacy_config).into();
     let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!((nodes.total_weight(), t, f), (100, 35, 34));
 
-    let fresh = Committee::new(members, setup.epoch(), 100, 3333);
+    let fresh: RuntimeCommittee = Committee::new(members, setup.epoch(), 100, 3333).into();
     let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!((nodes.total_weight(), t, f), (100, 26, 25));
 }
@@ -17788,7 +17851,7 @@ fn a_committee_below_the_reduction_floor_is_rejected_not_panicked_on() {
             )
         })
         .collect();
-    let committee = Committee::new(members, setup.epoch(), 0, 3333);
+    let committee: RuntimeCommittee = Committee::new(members, setup.epoch(), 0, 3333).into();
     let err = build_reduced_nodes(
         &committee,
         TEST_WEIGHT_DIVISOR,
@@ -17818,12 +17881,13 @@ fn derived_threshold_rejects_max_faulty_at_or_above_a_third() {
                 )
             })
             .collect();
-        let committee = Committee::new(
+        let committee: RuntimeCommittee = Committee::new(
             members,
             setup.epoch(),
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             f_bps,
-        );
+        )
+        .into();
         let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
         assert!(
             matches!(err, MpcError::InvalidThreshold(ref m) if m.contains("must exceed max_faulty")),

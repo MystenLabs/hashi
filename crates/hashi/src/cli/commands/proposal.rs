@@ -144,7 +144,7 @@ impl QuorumProgress {
     pub fn new(
         votes: &[Address],
         quorum_threshold_bps: u64,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
     ) -> Self {
         let total_weight = committee.total_weight();
         let voted_weight = votes
@@ -254,7 +254,7 @@ pub fn refuse_vote_state(
 }
 
 fn seated_members(
-    committee: Option<&hashi_types::committee::Committee>,
+    committee: Option<&hashi_types::committee::RuntimeCommittee>,
 ) -> Option<(u64, Vec<Address>)> {
     committee.map(|c| {
         (
@@ -1624,7 +1624,7 @@ fn print_proposal_detailed(
     proposal: &Proposal,
     status: &str,
     details: Option<&crate::cli::client::ProposalDetails>,
-    committee: Option<&hashi_types::committee::Committee>,
+    committee: Option<&hashi_types::committee::RuntimeCommittee>,
 ) {
     println!("{}", "━".repeat(60).dimmed());
     println!(

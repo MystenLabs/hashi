@@ -447,7 +447,7 @@ impl Hashi {
 
     fn find_encryption_key_for_committee(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<EncryptionPrivateKey> {
@@ -457,7 +457,7 @@ impl Hashi {
 
     fn try_find_encryption_key_for_committee(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Option<EncryptionPrivateKey>> {
@@ -485,7 +485,7 @@ impl Hashi {
 
     pub(crate) fn committee_encryption_key_lost(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         committee
@@ -503,7 +503,7 @@ impl Hashi {
 
     pub(crate) fn committee_signing_key_lost(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         committee
@@ -515,7 +515,7 @@ impl Hashi {
 
     pub(crate) fn committee_key_lost(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
     ) -> bool {
         self.committee_encryption_key_lost(committee, validator_address)
@@ -535,7 +535,7 @@ impl Hashi {
 
     pub(crate) fn find_signing_key_for_committee(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Bls12381PrivateKey> {
@@ -545,7 +545,7 @@ impl Hashi {
 
     fn try_find_signing_key_for_committee(
         &self,
-        committee: &hashi_types::committee::Committee,
+        committee: &hashi_types::committee::RuntimeCommittee,
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Option<Bls12381PrivateKey>> {
@@ -1555,6 +1555,7 @@ mod test {
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::committee::RuntimeCommittee;
     use hashi_types::pgp::test_utils::mock_pgp_cert;
     use sui_sdk_types::Address;
 
@@ -1890,7 +1891,12 @@ mod test {
         // Committee records a BLS pub key the DB knows nothing about.
         let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
-        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+        let committee = RuntimeCommittee::from(one_member_committee(
+            5,
+            validator_address,
+            unknown_bls_pub,
+            enc_pub,
+        ));
 
         let err = hashi
             .find_signing_key_for_committee(&committee, validator_address, 5)
@@ -1910,7 +1916,12 @@ mod test {
         // Committee records an encryption pub key the DB knows nothing about.
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let unknown_enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
-        let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
+        let committee = RuntimeCommittee::from(one_member_committee(
+            5,
+            validator_address,
+            bls_pub,
+            unknown_enc_pub,
+        ));
 
         let err = hashi
             .find_encryption_key_for_committee(&committee, validator_address, 5)
@@ -1928,7 +1939,12 @@ mod test {
         let validator_address = Address::new([1u8; 32]);
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let unknown_enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
-        let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
+        let committee = RuntimeCommittee::from(one_member_committee(
+            5,
+            validator_address,
+            bls_pub,
+            unknown_enc_pub,
+        ));
         assert!(hashi.committee_encryption_key_lost(&committee, validator_address));
     }
 
@@ -1938,7 +1954,8 @@ mod test {
         let validator_address = Address::new([1u8; 32]);
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let enc_pub = hashi.prepare_encryption_key(5).unwrap();
-        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        let committee =
+            RuntimeCommittee::from(one_member_committee(5, validator_address, bls_pub, enc_pub));
         assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
     }
 
@@ -1948,7 +1965,12 @@ mod test {
         let validator_address = Address::new([1u8; 32]);
         let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let enc_pub = hashi.prepare_encryption_key(5).unwrap();
-        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+        let committee = RuntimeCommittee::from(one_member_committee(
+            5,
+            validator_address,
+            unknown_bls_pub,
+            enc_pub,
+        ));
         assert!(hashi.committee_signing_key_lost(&committee, validator_address));
         assert!(hashi.committee_key_lost(&committee, validator_address));
         assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
@@ -1960,7 +1982,8 @@ mod test {
         let validator_address = Address::new([1u8; 32]);
         let bls_pub = hashi.prepare_signing_key(5).unwrap().public_key();
         let enc_pub = hashi.prepare_encryption_key(5).unwrap();
-        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        let committee =
+            RuntimeCommittee::from(one_member_committee(5, validator_address, bls_pub, enc_pub));
         assert!(!hashi.committee_signing_key_lost(&committee, validator_address));
         assert!(!hashi.committee_key_lost(&committee, validator_address));
     }
@@ -1970,7 +1993,12 @@ mod test {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
         let enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
-        let committee = one_member_committee(5, Address::new([2u8; 32]), bls_pub, enc_pub);
+        let committee = RuntimeCommittee::from(one_member_committee(
+            5,
+            Address::new([2u8; 32]),
+            bls_pub,
+            enc_pub,
+        ));
         assert!(!hashi.committee_encryption_key_lost(&committee, Address::new([1u8; 32])));
     }
 

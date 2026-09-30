@@ -306,10 +306,10 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         (true, None) => {
             let master_g = onchain_state.onchain_verifying_key_g()?;
             let committee = onchain_state
-                .current_committee()
+                .current_raw_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
             Some(
-                GenesisState::new(committee, cfg.hashi.hashi_ids.hashi_object_id, master_g)
+                GenesisState::from_parts(committee, cfg.hashi.hashi_ids.hashi_object_id, master_g)
                     .digest(),
             )
         }

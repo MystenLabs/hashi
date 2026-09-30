@@ -17,7 +17,7 @@ use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
-use hashi_types::committee::Committee;
+use hashi_types::committee::RuntimeCommittee;
 use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -90,7 +90,7 @@ impl PresigBatch {
 
 struct SigningEpochConfig {
     address: Address,
-    committee: Committee,
+    committee: RuntimeCommittee,
     params: Parameters,
     key_shares: avss::SharesForNode,
     verifying_key: G,
@@ -279,7 +279,7 @@ impl SigningManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
-        committee: Committee,
+        committee: RuntimeCommittee,
         params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
@@ -331,7 +331,7 @@ impl SigningManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new_recovered(
         address: Address,
-        committee: Committee,
+        committee: RuntimeCommittee,
         params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
@@ -1470,6 +1470,7 @@ pub(crate) mod tests {
     use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use fastcrypto_tbls::types::ShareIndex;
+    use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
     use rand::SeedableRng;
@@ -1903,7 +1904,7 @@ pub(crate) mod tests {
                     )
                 })
                 .collect();
-            let committee = Committee::new(members, 100, 0u16, 3333u16);
+            let committee: RuntimeCommittee = Committee::new(members, 100, 0u16, 3333u16).into();
 
             // Fake DKG
             let sk = S::rand(&mut rng);
@@ -2256,7 +2257,7 @@ pub(crate) mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, 100, 0u16, 3333u16);
+        let committee: RuntimeCommittee = Committee::new(members, 100, 0u16, 3333u16).into();
 
         let sk = S::rand(&mut rng);
         let vk = G::generator() * sk;
