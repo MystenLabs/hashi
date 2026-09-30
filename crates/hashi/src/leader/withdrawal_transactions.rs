@@ -8,6 +8,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::MpcInputSignaturesChunk;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalBroadcastError;
 use crate::withdrawals::WithdrawalBroadcastErrorKind;
@@ -763,12 +764,13 @@ impl LeaderService {
             .map(|(_, sig)| sig.to_byte_array().to_vec())
             .collect();
 
-        let signed_message = MpcInputSignaturesMessage {
+        let chunk = MpcInputSignaturesChunk {
             withdrawal_id: txn.id,
             indices: indices.clone(),
             signatures: signatures.clone(),
         };
-        let proto_request = signed_message.to_proto();
+        let proto_request = chunk.to_proto();
+        let signed_message = MpcInputSignaturesMessage::new(&chunk, txn.generation);
 
         let mut sig_tasks = JoinSet::new();
         for member in members {
@@ -1628,8 +1630,8 @@ impl WithdrawalTxSigning {
     }
 }
 
-impl MpcInputSignaturesMessage {
-    /// Converts the chunk message into the bridge-service protobuf request type.
+impl MpcInputSignaturesChunk {
+    /// Converts the chunk into the bridge-service protobuf request type.
     fn to_proto(&self) -> SignMpcInputSignaturesRequest {
         SignMpcInputSignaturesRequest {
             withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),

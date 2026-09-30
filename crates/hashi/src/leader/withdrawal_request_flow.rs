@@ -784,6 +784,7 @@ impl WithdrawalTxCommitment {
                 })
                 .collect(),
             txid: self.txid.as_bytes().to_vec().into(),
+            sighash_digest: self.sighash_digest.as_bytes().to_vec().into(),
         }
     }
 }

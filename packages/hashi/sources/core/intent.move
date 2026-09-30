@@ -45,7 +45,7 @@ const TLS_PROOF_OF_POSSESSION: u16 = 0x0006;
 const DEPOSIT_CONFIRMATION: u16 = 0x0100;
 /// Withdrawal request approval.
 const WITHDRAWAL_REQUEST_APPROVAL: u16 = 0x0101;
-/// Withdrawal transaction commitment (inputs/outputs/txid).
+/// Withdrawal transaction commitment (inputs/outputs/txid/sighash digest).
 const WITHDRAWAL_COMMITMENT: u16 = 0x0102;
 /// Incremental per-input MPC signature submission.
 const MPC_INPUT_SIGNATURES: u16 = 0x0103;
@@ -56,6 +56,8 @@ const WITHDRAWAL_CONFIRMATION: u16 = 0x0105;
 /// Request for the guardian to co-sign a withdrawal. Verified off-chain
 /// only; reserved here so the registry is complete.
 const GUARDIAN_WITHDRAWAL_REQUEST: u16 = 0x0106;
+/// Certified reset of a withdrawal that cannot complete as signed.
+const WITHDRAWAL_RESET: u16 = 0x0107;
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
@@ -86,3 +88,5 @@ public(package) fun withdrawal_signed(): u16 { WITHDRAWAL_SIGNED }
 public(package) fun withdrawal_confirmation(): u16 { WITHDRAWAL_CONFIRMATION }
 
 public(package) fun guardian_withdrawal_request(): u16 { GUARDIAN_WITHDRAWAL_REQUEST }
+
+public(package) fun withdrawal_reset(): u16 { WITHDRAWAL_RESET }

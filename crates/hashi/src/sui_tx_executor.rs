@@ -1635,6 +1635,7 @@ impl SuiTxExecutor {
             build_chunked_move_vec_arg(&mut builder, output_elements, output_utxo_type.into());
 
         let txid_arg = builder.pure(&approval.txid);
+        let sighash_digest_arg = builder.pure(&approval.sighash_digest);
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
 
         let clock_arg = builder.object(
@@ -1660,6 +1661,7 @@ impl SuiTxExecutor {
                 selected_utxos_arg,
                 outputs_arg,
                 txid_arg,
+                sighash_digest_arg,
                 cert_arg,
                 clock_arg,
                 random_arg,
@@ -1678,7 +1680,8 @@ impl SuiTxExecutor {
 
     /// Execute `withdraw::commit_input_signatures` to durably record one chunk of
     /// out-of-order per-input MPC signatures on-chain. Cert is over
-    /// `MpcInputSignaturesMessage { withdrawal_id, indices, signatures }`.
+    /// `MpcInputSignaturesMessage { withdrawal_id, generation, indices,
+    /// signatures }`, with the generation read from the object on chain.
     ///
     /// Sui limits each pure argument to 16 KiB; the `Vec<Vec<u8>>` of signatures
     /// is split into chunks that each fit the pure-arg budget and stitched back

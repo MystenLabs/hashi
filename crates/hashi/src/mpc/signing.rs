@@ -990,6 +990,32 @@ pub struct SignInput {
     pub derivation_address: Option<DerivationAddress>,
 }
 
+pub struct InputSigning {
+    pub message: Vec<u8>,
+    pub derivation_address: Option<DerivationAddress>,
+}
+
+const WITHDRAWAL_SIGHASH_DIGEST_TAG: &[u8] = b"hashi-withdrawal-sighash-digest-v1";
+
+pub fn withdrawal_sighash_digest(inputs: &[InputSigning]) -> Address {
+    use fastcrypto::hash::HashFunction;
+    let mut hasher = fastcrypto::hash::Blake2b256::default();
+    hasher.update(WITHDRAWAL_SIGHASH_DIGEST_TAG);
+    hasher.update((inputs.len() as u64).to_le_bytes());
+    for input in inputs {
+        hasher.update((input.message.len() as u64).to_le_bytes());
+        hasher.update(&input.message);
+        match &input.derivation_address {
+            Some(address) => {
+                hasher.update([1u8]);
+                hasher.update(address);
+            }
+            None => hasher.update([0u8]),
+        }
+    }
+    Address::new(hasher.finalize().digest)
+}
+
 struct InputSigningState {
     signing_id: Address,
     message: Vec<u8>,
@@ -4670,6 +4696,24 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn golden_withdrawal_sighash_digest() {
+        let digest = withdrawal_sighash_digest(&[
+            InputSigning {
+                message: vec![0x11; 32],
+                derivation_address: Some([0x22; 32]),
+            },
+            InputSigning {
+                message: vec![0x33; 32],
+                derivation_address: None,
+            },
+        ]);
+        assert_eq!(
+            hex::encode(digest.as_bytes()),
+            "4a0cd37dd69ace9e826bb6385f1600d3e60ce6d97ca7baa9263ad0aaf2942793"
+        );
+    }
+
     const GOLDEN_SEED: u64 = 2;
     const GOLDEN_SIGNING_FIXTURE: &str =
         "2d346c97c202394098e235e9332dd2795000940f0b1d2d6b60f16b73a9825e0f";
@@ -4933,6 +4977,8 @@ pub(crate) mod tests {
         "efd11b65c32eeca4365a0011307d2dc3d30643398959ebda23ce69edbb8a492f",
         "bfa75cd7882027268fb6cdc87cb7c1d2e99d8e93d3444ceb999165943369013f",
     ];
+    const GOLDEN_WITHDRAWAL_SIGHASH_DIGEST: &str =
+        "2a01d403fa3c70b767528bdb9186390b3272a3e21fbbf3bcc37b85a2bb137d24";
     const GOLDEN_INPUT_KEYS: [&str; 4] = [
         "ed54a01bae825b938ea324119712108b9c7fea158bca00c1ec764e40081670c5",
         "74ee074dd433d09ed8cecd91cd2c8bc21bf2fea12283dcf6b7130f69acea400b",
@@ -5039,10 +5085,35 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(signing_keys, GOLDEN_INPUT_KEYS);
+        let input_signings = hashi.withdrawal_input_signings(&tx, &inputs).unwrap();
+        assert_eq!(
+            input_signings
+                .iter()
+                .map(|s| (hex::encode(&s.message), s.derivation_address))
+                .collect::<Vec<_>>(),
+            GOLDEN_SIGHASHES
+                .iter()
+                .zip(&inputs)
+                .map(|(message, input)| {
+                    (
+                        message.to_string(),
+                        Some(crate::withdrawals::withdrawal_input_derivation_address(
+                            input,
+                        )),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hex::encode(withdrawal_sighash_digest(&input_signings).as_bytes()),
+            GOLDEN_WITHDRAWAL_SIGHASH_DIGEST
+        );
 
         let txn = crate::onchain::types::WithdrawalTransaction {
             id: Address::new([0x77; 32]),
             txid: tx.compute_txid().into(),
+            sighash_digest: Address::ZERO,
+            generation: 0,
             request_ids: vec![Address::new([0x01; 32]), Address::new([0x02; 32])],
             inputs: inputs.clone(),
             withdrawal_outputs: outputs[..2].to_vec(),

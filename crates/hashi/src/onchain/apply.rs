@@ -1499,6 +1499,8 @@ mod tests {
         move_types::WithdrawalTransaction {
             id: value_id,
             txid: BitcoinTxid::from(addr(0x66)),
+            sighash_digest: Address::ZERO,
+            generation: 0,
             request_ids: vec![],
             inputs: vec![utxo(0x77, 0, 1_000)],
             withdrawal_outputs: vec![],

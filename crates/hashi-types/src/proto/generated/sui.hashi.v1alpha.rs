@@ -93,6 +93,9 @@ pub struct SignWithdrawalTxConstructionRequest {
     /// Bitcoin transaction id of the unsigned transaction (32 bytes).
     #[prost(bytes = "bytes", tag = "4")]
     pub txid: ::prost::bytes::Bytes,
+    /// Digest of every input's signing message and key path (32 bytes).
+    #[prost(bytes = "bytes", tag = "5")]
+    pub sighash_digest: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalOutput {
@@ -127,7 +130,7 @@ pub struct SignWithdrawalTransactionPartial {
     #[prost(bytes = "bytes", tag = "2")]
     pub signature: ::prost::bytes::Bytes,
 }
-/// Maps to crate::withdrawals::MpcInputSignaturesMessage
+/// Maps to crate::withdrawals::MpcInputSignaturesChunk
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignMpcInputSignaturesRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).

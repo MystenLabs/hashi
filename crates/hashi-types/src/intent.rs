@@ -54,7 +54,7 @@ pub enum Intent {
     DepositConfirmation = 0x0100,
     /// Withdrawal request approval.
     WithdrawalRequestApproval = 0x0101,
-    /// Withdrawal transaction commitment (inputs/outputs/txid).
+    /// Withdrawal transaction commitment (inputs/outputs/txid/sighash digest).
     WithdrawalCommitment = 0x0102,
     /// Incremental per-input MPC signature submission.
     MpcInputSignatures = 0x0103,
@@ -64,6 +64,8 @@ pub enum Intent {
     WithdrawalConfirmation = 0x0105,
     /// Request for the guardian to co-sign a withdrawal.
     GuardianWithdrawalRequest = 0x0106,
+    /// Certified reset of a withdrawal that cannot complete as signed.
+    WithdrawalReset = 0x0107,
 
     /// Test-only signing domain for raw byte messages. Never used in
     /// production and absent from non-test builds.
@@ -113,5 +115,6 @@ mod tests {
         assert_eq!(Intent::WithdrawalSigned as u16, 0x0104);
         assert_eq!(Intent::WithdrawalConfirmation as u16, 0x0105);
         assert_eq!(Intent::GuardianWithdrawalRequest as u16, 0x0106);
+        assert_eq!(Intent::WithdrawalReset as u16, 0x0107);
     }
 }

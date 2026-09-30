@@ -125,6 +125,11 @@ public struct WithdrawalRequestQueue has store {
 public struct WithdrawalTransaction has key, store {
     id: UID,
     txid: address,
+    /// Committee-certified digest of every input's signing message and key
+    /// path.
+    sighash_digest: address,
+    /// Number of certified resets.
+    generation: u64,
     request_ids: vector<address>,
     /// UTXOs consumed by this withdrawal. The UTXOs remain locked in the pool
     /// until `confirm_withdrawal()` moves them to spent; these copies are kept
@@ -138,7 +143,8 @@ public struct WithdrawalTransaction has key, store {
     change_outputs: vector<OutputUtxo>,
     created_timestamp_ms: u64,
     /// Clock timestamp at which the transaction became fully signed
-    /// (guardian signatures attached). `None` until `finalize_withdrawal`.
+    /// (guardian signatures attached). `None` until `finalize_withdrawal`, and
+    /// again after a certified reset.
     signed_timestamp_ms: Option<u64>,
     /// Clock timestamp at which the Bitcoin transaction was confirmed.
     /// `None` until `confirm_withdrawal`.
@@ -150,7 +156,8 @@ public struct WithdrawalTransaction has key, store {
     signing: SigningBatch,
     /// Per-input Schnorr signatures from the guardian enclave. Same length as
     /// the MPC signatures; together they form the 2-of-2 taproot witness.
-    /// Written once at `finalize_withdrawal` (the guardian signs in one shot).
+    /// Written at `finalize_withdrawal` (the guardian signs in one shot) and
+    /// cleared by a certified reset.
     guardian_signatures: Option<vector<vector<u8>>>,
 }
 
@@ -215,6 +222,16 @@ public struct WithdrawalSigned has copy, drop {
 public struct WithdrawalPresigsReassigned has copy, drop {
     withdrawal_txn_id: address,
     epoch: u64,
+}
+
+public struct WithdrawalReset has copy, drop {
+    withdrawal_txn_id: address,
+    txid: address,
+    generation: u64,
+    epoch: u64,
+    randomness: vector<u8>,
+    signed_count: u64,
+    finalized: bool,
 }
 
 public struct WithdrawalConfirmed has copy, drop {
@@ -439,6 +456,7 @@ public(package) fun new_withdrawal_txn(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
+    sighash_digest: address,
     presigs: vector<Presig>,
     epoch: u64,
     config: &Config,
@@ -509,6 +527,8 @@ public(package) fun new_withdrawal_txn(
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
+        sighash_digest,
+        generation: 0,
         request_ids,
         inputs,
         withdrawal_outputs: outputs,
@@ -570,7 +590,7 @@ public(package) fun record_input_signatures(
 }
 
 /// Finalize a fully-MPC-signed withdrawal: attach the one-shot guardian
-/// signatures, flip the broadcast gate, and emit the terminal signed event.
+/// signatures, flip the broadcast gate, and emit the signed event.
 /// Caller must cert-gate this over the bound (MPC + guardian) message.
 public(package) fun finalize_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
@@ -715,6 +735,43 @@ public(package) fun reallocate_presigs_for_withdrawal_txn(
     });
 }
 
+public(package) fun withdrawal_txn_reset_state(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): (u64, u64, bool) {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    (txn.generation, txn.signing.signed_count(), txn.guardian_signatures.is_some())
+}
+
+public(package) fun reset_withdrawal_txn(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+    sighash_digest: address,
+    presigs: vector<Presig>,
+    epoch: u64,
+    randomness: vector<u8>,
+) {
+    let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
+    assert!(txn.confirmed_timestamp_ms.is_none(), EWithdrawalAlreadyConfirmed);
+    let signed_count = txn.signing.signed_count();
+    let finalized = txn.guardian_signatures.is_some();
+    txn.signing.reset_slots(presigs, epoch);
+    txn.randomness = randomness;
+    txn.guardian_signatures = option::none();
+    txn.signed_timestamp_ms = option::none();
+    txn.sighash_digest = sighash_digest;
+    txn.generation = txn.generation + 1;
+    sui::event::emit(WithdrawalReset {
+        withdrawal_txn_id: withdrawal_id,
+        txid: txn.txid,
+        generation: txn.generation,
+        epoch,
+        randomness: txn.randomness,
+        signed_count,
+        finalized,
+    });
+}
+
 // === Signing Views (drive the leader/watcher) ===
 
 /// Number of inputs still awaiting an MPC signature (what must be re-presigned
@@ -805,6 +862,14 @@ public(package) fun withdrawal_txn_request_ids(self: &WithdrawalTransaction): &v
 
 public(package) fun txid(self: &WithdrawalTransaction): address {
     self.txid
+}
+
+public(package) fun sighash_digest(self: &WithdrawalTransaction): address {
+    self.sighash_digest
+}
+
+public(package) fun generation(self: &WithdrawalTransaction): u64 {
+    self.generation
 }
 
 public(package) fun withdrawal_txn_inputs(self: &WithdrawalTransaction): &vector<Utxo> {
@@ -962,6 +1027,8 @@ public(package) fun new_withdrawal_txn_for_testing(
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
+        sighash_digest: @0x0,
+        generation: 0,
         request_ids,
         inputs,
         withdrawal_outputs,
@@ -973,4 +1040,28 @@ public(package) fun new_withdrawal_txn_for_testing(
         signing: mpc_signing::new(num_inputs, mpc_signing::presigs_for_testing(0, num_inputs), 0),
         guardian_signatures: option::none(),
     }
+}
+
+#[test_only]
+public(package) fun withdrawal_txn_randomness(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): vector<u8> {
+    self.borrow_withdrawal_txn(withdrawal_id).randomness
+}
+
+#[test_only]
+public(package) fun withdrawal_txn_signing(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): &SigningBatch {
+    &self.borrow_withdrawal_txn(withdrawal_id).signing
+}
+
+#[test_only]
+public(package) fun withdrawal_txn_created_timestamp_ms(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): u64 {
+    self.borrow_withdrawal_txn(withdrawal_id).created_timestamp_ms
 }

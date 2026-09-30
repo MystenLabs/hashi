@@ -45,8 +45,9 @@ const EWithdrawalNotFullySigned: vector<u8> =
 
 // ~~~~~~~ Structs ~~~~~~~
 
-// The message structs below are committee-signed and their BCS encodings are
-// frozen: never add, remove, or reorder fields.
+// The message structs below are committee-signed. Their BCS encodings freeze
+// once the package is published: from then on, never add, remove, or reorder
+// fields.
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -59,6 +60,7 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    sighash_digest: address,
 }
 
 // MESSAGE STEP 3
@@ -73,9 +75,11 @@ public struct WithdrawalSignedMessage has copy, drop, store {
 }
 
 // MESSAGE STEP 3 (incremental): one cert per out-of-order chunk of MPC
-// signatures, binding exactly the input indices and signature bytes written.
+// signatures, binding exactly the input indices and signature bytes written,
+// and the withdrawal's generation, so a chunk cert cannot land across a reset.
 public struct MpcInputSignaturesMessage has copy, drop, store {
     withdrawal_id: address,
+    generation: u64,
     indices: vector<u64>,
     signatures: vector<vector<u8>>,
 }
@@ -83,6 +87,14 @@ public struct MpcInputSignaturesMessage has copy, drop, store {
 // MESSAGE STEP 4
 public struct WithdrawalConfirmationMessage has copy, drop, store {
     withdrawal_id: address,
+}
+
+public struct WithdrawalResetMessage has copy, drop, store {
+    withdrawal_id: address,
+    generation: u64,
+    signed_count: u64,
+    finalized: bool,
+    sighash_digest: address,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -115,6 +127,7 @@ entry fun commit_withdrawal_tx(
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    sighash_digest: address,
     cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
@@ -132,11 +145,12 @@ entry fun commit_withdrawal_tx(
         selected_utxos,
         outputs,
         txid,
+        sighash_digest,
     };
 
     hashi.verify(hashi::intent::withdrawal_commitment(), approval, cert);
 
-    let WithdrawalCommitmentMessage { outputs, txid, .. } = approval;
+    let WithdrawalCommitmentMessage { outputs, txid, sighash_digest, .. } = approval;
 
     // Copy the full UTXO data from the pool before locking — used for fee
     // accounting and event emission inside new_withdrawal_txn.
@@ -158,6 +172,7 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
+        sighash_digest,
         presigs,
         epoch,
         hashi.config(),
@@ -193,7 +208,8 @@ entry fun commit_withdrawal_tx(
 
 /// Record a chunk of completed per-input MPC signatures into the withdrawal's
 /// signing batch (out-of-order, first-writer-wins). Cert-gated over exactly the
-/// `(withdrawal_id, indices, signatures)` written, by the current committee.
+/// `(withdrawal_id, indices, signatures)` written and the withdrawal's current
+/// generation, by the current committee.
 /// Repeated across checkpoints/leaders until every input is signed; the leader
 /// may bundle a final chunk + `finalize_withdrawal` in one PTB for small txns.
 entry fun commit_input_signatures(
@@ -207,7 +223,12 @@ entry fun commit_input_signatures(
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
 
-    let approval = MpcInputSignaturesMessage { withdrawal_id, indices, signatures };
+    let generation = hashi
+        .bitcoin()
+        .withdrawal_queue()
+        .borrow_withdrawal_txn(withdrawal_id)
+        .generation();
+    let approval = MpcInputSignaturesMessage { withdrawal_id, generation, indices, signatures };
     hashi.verify(hashi::intent::mpc_input_signatures(), approval, cert);
     let MpcInputSignaturesMessage { indices, signatures, .. } = approval;
 
@@ -365,7 +386,8 @@ entry fun finish_archive_withdrawal_txns(hashi: &mut Hashi, withdrawal_ids: vect
 
 /// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal
 /// whose signing batch is from a previous epoch. Only the pending tail is
-/// re-presigned; already-collected signatures are final and epoch-independent.
+/// re-presigned; already-collected signatures are final (short of a certified
+/// reset) and epoch-independent.
 ///
 /// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
 /// in-progress reconfiguration settles first, then this runs afterward to recover
@@ -383,6 +405,54 @@ entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
         .bitcoin_mut()
         .withdrawal_queue_mut()
         .reallocate_presigs_for_withdrawal_txn(withdrawal_id, presigs, current_epoch);
+}
+
+entry fun reset_withdrawal_tx(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    sighash_digest: address,
+    cert: CommitteeSignature,
+    r: &Random,
+    ctx: &mut TxContext,
+) {
+    let mut rng = sui::random::new_generator(r, ctx);
+    let randomness = rng.generate_bytes(32);
+    reset_withdrawal_tx_with_randomness(hashi, withdrawal_id, sighash_digest, cert, randomness);
+}
+
+fun reset_withdrawal_tx_with_randomness(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    sighash_digest: address,
+    cert: CommitteeSignature,
+    randomness: vector<u8>,
+) {
+    hashi.versioning().assert_version_enabled();
+    hashi.assert_unpaused();
+    hashi.assert_not_reconfiguring();
+
+    let (generation, signed_count, finalized) = hashi
+        .bitcoin()
+        .withdrawal_queue()
+        .withdrawal_txn_reset_state(withdrawal_id);
+    hashi.verify(
+        hashi::intent::withdrawal_reset(),
+        WithdrawalResetMessage {
+            withdrawal_id,
+            generation,
+            signed_count,
+            finalized,
+            sighash_digest,
+        },
+        cert,
+    );
+    let epoch = hashi.committee_set().epoch();
+    let num_inputs = hashi.bitcoin().withdrawal_queue().withdrawal_txn_num_inputs(withdrawal_id);
+    let presigs = hashi.allocate_presigs(num_inputs);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .reset_withdrawal_txn(withdrawal_id, sighash_digest, presigs, epoch, randomness);
 }
 
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
@@ -496,8 +566,9 @@ public(package) fun new_withdrawal_commitment_message(
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    sighash_digest: address,
 ): WithdrawalCommitmentMessage {
-    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
+    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid, sighash_digest }
 }
 
 public(package) fun new_withdrawal_signed_message(
@@ -514,14 +585,38 @@ public(package) fun new_withdrawal_signed_message(
 
 public(package) fun new_mpc_input_signatures_message(
     withdrawal_id: address,
+    generation: u64,
     indices: vector<u64>,
     signatures: vector<vector<u8>>,
 ): MpcInputSignaturesMessage {
-    MpcInputSignaturesMessage { withdrawal_id, indices, signatures }
+    MpcInputSignaturesMessage { withdrawal_id, generation, indices, signatures }
 }
 
 public(package) fun new_withdrawal_confirmation_message(
     withdrawal_id: address,
 ): WithdrawalConfirmationMessage {
     WithdrawalConfirmationMessage { withdrawal_id }
+}
+
+public(package) fun new_withdrawal_reset_message(
+    withdrawal_id: address,
+    generation: u64,
+    signed_count: u64,
+    finalized: bool,
+    sighash_digest: address,
+): WithdrawalResetMessage {
+    WithdrawalResetMessage { withdrawal_id, generation, signed_count, finalized, sighash_digest }
+}
+
+// ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public(package) fun reset_withdrawal_tx_for_testing(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    sighash_digest: address,
+    cert: CommitteeSignature,
+    randomness: vector<u8>,
+) {
+    reset_withdrawal_tx_with_randomness(hashi, withdrawal_id, sighash_digest, cert, randomness);
 }
