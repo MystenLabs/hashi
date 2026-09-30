@@ -1207,7 +1207,7 @@ mod tests {
             >,
         >,
     > {
-        let beacon_value = {
+        let input_delta = {
             let mut hasher = fastcrypto::hash::Blake2b256::default();
             for (signing_id, _, _, _) in inputs {
                 hasher.update(signing_id.as_bytes());
@@ -1228,7 +1228,6 @@ mod tests {
                     hashi::metrics::MPC_LABEL_SIGNING,
                 )
                 .with_max_owned_shares(signing_manager.max_owned_count());
-                let beacon = beacon_value;
                 let metrics = node.hashi().metrics.clone();
                 let requests = || -> Vec<hashi::mpc::SignInput> {
                     inputs
@@ -1238,6 +1237,7 @@ mod tests {
                             message: msg.clone(),
                             global_presig_index: *pidx,
                             derivation_address: *deriv,
+                            input_delta,
                         })
                         .collect()
                 };
@@ -1258,7 +1258,6 @@ mod tests {
                             .sign(
                                 &p2p_channel,
                                 requests(),
-                                &beacon,
                                 seals,
                                 SIGNING_TIMEOUT,
                                 &metrics,
