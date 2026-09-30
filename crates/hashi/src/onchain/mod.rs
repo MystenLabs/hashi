@@ -2355,6 +2355,9 @@ mod tests {
     use fastcrypto::traits::ToFromBytes;
 
     use crate::mpc::EncryptionGroupElement;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::EncryptionPrivateKey;
 
     use super::*;
 
@@ -2492,24 +2495,35 @@ mod tests {
     #[test]
     fn test_convert_move_committee_uses_fallback_key() {
         let mut rng = rand::thread_rng();
-        let validator_address =
-            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let members = (1..=3u8)
+            .map(|i| {
+                let encryption_public_key = if i == 2 {
+                    hashi_types::committee::fallback_encryption_public_key()
+                } else {
+                    EncryptionPrivateKey::new(&mut rng).public_key()
+                };
+                CommitteeMember::new(
+                    Address::new([i; 32]),
+                    Bls12381PrivateKey::generate(&mut rng).public_key(),
+                    encryption_public_key,
+                    u64::from(i),
+                )
+            })
+            .collect();
+        let expected = Committee::with_config(
+            members,
+            7,
+            move_types::Config::from_mpc_params(250, 2000, 30),
+        );
+        let mut onchain = move_types::Committee::from(&expected);
         let mut encryption_key_vec = vec![0u8; 32];
         encryption_key_vec[0] = 1;
-
-        let move_committee_member = move_types::CommitteeMember {
-            validator_address,
-            public_key: signing_keypair.public().as_bytes().to_owned(),
-            encryption_public_key: encryption_key_vec,
-            weight: 1,
-        };
-        let committee = convert_move_committee(one_member_committee(move_committee_member));
+        onchain.members[1].encryption_public_key = encryption_key_vec;
 
         assert_eq!(
-            *committee.members()[0].encryption_public_key(),
-            hashi_types::committee::fallback_encryption_public_key()
-        )
+            convert_move_committee(onchain),
+            RuntimeCommittee::from(expected)
+        );
     }
 
     // The Move contract stores the BLS12-381 G1 identity element as a member's

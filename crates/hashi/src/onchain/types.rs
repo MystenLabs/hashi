@@ -16,7 +16,6 @@ use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
 
 use crate::grpc::Client;
-use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
@@ -491,9 +490,12 @@ impl CommitteeSet {
         self
     }
 
-    /// Install strictly parsed committees, deriving the raw view by an exact
-    /// round trip. Chain-fed paths install the decoded on-chain committees instead.
-    pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
+    /// Derives the raw view by re-encoding `committees` (see `raw_committees`).
+    #[cfg(test)]
+    pub fn set_committees(
+        &mut self,
+        committees: BTreeMap<u64, hashi_types::committee::Committee>,
+    ) -> &mut Self {
         self.raw_committees = committees
             .iter()
             .map(|(epoch, committee)| (*epoch, move_types::Committee::from(committee)))
@@ -1046,6 +1048,7 @@ impl Coin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::committee::Committee;
 
     fn config_with(entries: &[(&str, ConfigValue)]) -> Config {
         Config {
