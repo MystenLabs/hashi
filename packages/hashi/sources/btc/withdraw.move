@@ -386,10 +386,11 @@ entry fun reallocate_presigs(
     let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
     let presigs = hashi.allocate_presigs(pending);
     let mut rng = sui::random::new_generator(r, ctx);
+    let randomness = rng.generate_bytes(32);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, presigs, current_epoch, &mut rng);
+        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, presigs, current_epoch, randomness);
 }
 
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
