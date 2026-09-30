@@ -55,7 +55,9 @@ public struct Hashi has key {
     /// TOB certificates by (epoch, batch_index, protocol_type). Every value
     /// is an `EpochCertsV1` bucket.
     tob: Bag,
-    /// The only source of presignatures for the current epoch.
+    /// The only source of `Presig` handles for the current epoch. The
+    /// presignatures themselves come from the committee's off-chain
+    /// presigning protocol.
     presig_allocator: PresigAllocator,
 }
 
@@ -241,7 +243,7 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
-/// Mint `count` fresh presignatures for the current epoch.
+/// Mint `count` fresh `Presig` handles for the current epoch.
 public(package) fun allocate_presigs(self: &mut Hashi, count: u64): vector<Presig> {
     self.presig_allocator.allocate(count)
 }

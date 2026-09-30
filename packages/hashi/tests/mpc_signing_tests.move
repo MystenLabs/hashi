@@ -255,3 +255,18 @@ fun test_record_length_mismatch_aborts() {
     b.record(vector[0, 1], vector[sig(0xAA)]);
     b.destroy_for_testing();
 }
+
+/// The Rust mirrors read `MpcSig::Pending` and `Hashi.presig_allocator` as a
+/// bare `u64`, so a layout change here must fail a test rather than only a
+/// decode in e2e.
+#[test]
+fun test_presig_and_allocator_bcs_is_bare_u64() {
+    let mut presigs = mpc_signing::presigs_for_testing(42, 1);
+    let presig = presigs.pop_back();
+    presigs.destroy_empty();
+    assert!(sui::bcs::to_bytes(&presig) == sui::bcs::to_bytes(&42u64));
+
+    let allocator = mpc_signing::new_allocator_for_testing(42);
+    assert!(sui::bcs::to_bytes(&allocator) == sui::bcs::to_bytes(&42u64));
+    allocator.destroy_allocator_for_testing();
+}

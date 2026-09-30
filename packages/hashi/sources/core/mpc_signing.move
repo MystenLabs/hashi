@@ -55,9 +55,13 @@ public struct Presig has drop, store {
     index: u64,
 }
 
-/// Monotonic per-epoch presignature allocator, embedded in `Hashi`. Recovering
-/// nodes read `num_consumed` to derive `(batch_index, index_in_batch)`, so its
-/// BCS layout (a single `u64`) is mirrored off chain.
+/// Monotonic per-epoch presignature allocator. Exactly one may exist: the
+/// `Hashi.presig_allocator` field. A second allocator would restart at 0 and
+/// mint indices that collide with the live one, and the type system does not
+/// prevent constructing it, so `new_allocator` must only be called when
+/// creating `Hashi`. Recovering nodes read `num_consumed` to derive
+/// `(batch_index, index_in_batch)`, so its BCS layout (a single `u64`) is
+/// mirrored off chain.
 public struct PresigAllocator has store {
     /// Number of presignatures consumed in the current epoch.
     num_consumed: u64,
@@ -261,6 +265,11 @@ public(package) fun destroy_allocator_for_testing(self: PresigAllocator) {
 #[test_only]
 public(package) fun num_consumed(self: &PresigAllocator): u64 {
     self.num_consumed
+}
+
+#[test_only]
+public(package) fun index(self: &Presig): u64 {
+    self.index
 }
 
 /// Presigs `base`, `base + 1`, and so on, as a fresh allocator that had
