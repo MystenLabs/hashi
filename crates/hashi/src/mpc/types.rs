@@ -1146,20 +1146,22 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
-pub(crate) fn input_delta(randomness: &[u8], input_index: u32) -> S {
-    signing_delta_oracle("input").evaluate_to_group_element(&(randomness, input_index))
+pub(crate) fn message_delta(randomness: &[u8; 32], input_index: u32) -> S {
+    signing_delta_oracle(crate::constants::MESSAGE_DELTA_LABEL)
+        .evaluate_to_group_element(&(randomness, input_index))
 }
 
-pub(crate) fn presig_delta(randomness: &[u8], global_presig_index: u64) -> S {
-    signing_delta_oracle("presig").evaluate_to_group_element(&(randomness, global_presig_index))
+pub(crate) fn presig_delta(randomness: &[u8; 32], global_presig_index: u64) -> S {
+    signing_delta_oracle(crate::constants::PRESIG_DELTA_LABEL)
+        .evaluate_to_group_element(&(randomness, global_presig_index))
 }
 
 fn signing_delta_oracle(label: &str) -> RandomOracle {
-    RandomOracle::new("hashi_signing_delta").extend(label)
+    RandomOracle::new(crate::constants::SIGNING_DELTA_DOMAIN).extend(label)
 }
 
-pub(crate) fn signing_beacon(input_delta: &S, presig_delta: &S) -> S {
-    *input_delta + *presig_delta
+pub(crate) fn signing_delta(message_delta: &S, presig_delta: &S) -> S {
+    *message_delta + *presig_delta
 }
 
 pub(crate) fn signing_request_digest(
@@ -1191,7 +1193,7 @@ pub struct PartialSigningOutput {
 impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
-        input_delta: &S,
+        message_delta: &S,
         presig_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
@@ -1200,7 +1202,7 @@ impl PartialSigningOutput {
         Self {
             signing_nonce_bytes: signing_nonce_bytes(
                 &public_nonce,
-                &signing_beacon(input_delta, &presig_delta),
+                &signing_delta(message_delta, &presig_delta),
             ),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
@@ -1270,6 +1272,9 @@ pub enum SigningError {
 
     #[error("Presig batch {batch_index} was sealed over a dealer set this node did not build")]
     SealDealerSetMismatch { batch_index: u32 },
+
+    #[error("Presig batch {batch_index} was sealed with randomness that is not 32 bytes")]
+    MalformedSealRandomness { batch_index: u32 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

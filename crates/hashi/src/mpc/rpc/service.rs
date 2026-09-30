@@ -294,6 +294,9 @@ pub(crate) fn signing_error_to_status(err: SigningError) -> Status {
         SigningError::RequestChanged { .. } => Status::failed_precondition(err.to_string()),
         SigningError::PresigBatchNotSealed { .. } => Status::unavailable(err.to_string()),
         SigningError::SealDealerSetMismatch { .. } => Status::failed_precondition(err.to_string()),
+        SigningError::MalformedSealRandomness { .. } => {
+            Status::failed_precondition(err.to_string())
+        }
     }
 }
 

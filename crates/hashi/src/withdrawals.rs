@@ -1321,6 +1321,11 @@ impl Hashi {
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
         let seals = self.onchain_state().presig_seals(epoch);
+        let randomness: &[u8; 32] = txn
+            .randomness
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Withdrawal {} randomness is not 32 bytes", txn.id))?;
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
@@ -1355,7 +1360,7 @@ impl Hashi {
                 message: message.to_vec(),
                 global_presig_index,
                 derivation_address: Some(derivation_address),
-                input_delta: crate::mpc::types::input_delta(&txn.randomness, input_index as u32),
+                message_delta: crate::mpc::types::message_delta(randomness, input_index as u32),
             });
         }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
