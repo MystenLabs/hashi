@@ -32,10 +32,12 @@ use sui_sdk_types::bcs::ToBcs;
 ///
 /// The inner committee is private, with no `Deref`, serialization implementation,
 /// or conversion back to `Committee` or Move. This prevents an accidental
-/// deserialize/fallback/serialize round trip. Activation hashing deliberately
-/// commits to the installed runtime state, including any fallback keys.
+/// deserialize/fallback/serialize round trip, though not a deliberate rebuild
+/// from `members()`. Activation hashing deliberately commits to the installed
+/// runtime state, including any fallback keys.
 ///
-/// A runtime view cannot be converted back into an ordinary or wire committee:
+/// A runtime view, owned or borrowed, cannot be converted back into an ordinary
+/// or wire committee:
 /// ```compile_fail
 /// use hashi_types::committee::{Committee, RuntimeCommittee};
 /// fn into_committee(runtime: RuntimeCommittee) -> Committee {
@@ -43,9 +45,28 @@ use sui_sdk_types::bcs::ToBcs;
 /// }
 /// ```
 /// ```compile_fail
+/// use hashi_types::committee::{Committee, RuntimeCommittee};
+/// fn into_committee(runtime: &RuntimeCommittee) -> Committee {
+///     runtime.into()
+/// }
+/// ```
+/// ```compile_fail
+/// use hashi_types::{committee::RuntimeCommittee, move_types};
+/// fn into_move(runtime: RuntimeCommittee) -> move_types::Committee {
+///     runtime.into()
+/// }
+/// ```
+/// ```compile_fail
 /// use hashi_types::{committee::RuntimeCommittee, move_types};
 /// fn into_move(runtime: &RuntimeCommittee) -> move_types::Committee {
 ///     runtime.into()
+/// }
+/// ```
+/// Nor does it deref to one:
+/// ```compile_fail
+/// use hashi_types::committee::{Committee, RuntimeCommittee};
+/// fn deref(runtime: &RuntimeCommittee) -> &Committee {
+///     runtime
 /// }
 /// ```
 /// Nor can it be serialized as if it were the original committee:
