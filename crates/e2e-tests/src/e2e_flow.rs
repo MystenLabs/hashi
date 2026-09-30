@@ -974,11 +974,53 @@ mod tests {
             guardian_state.last_updated_at,
         );
 
+        wait_for_presig_seal(
+            &networks,
+            hashi.onchain_state().epoch(),
+            0,
+            Duration::from_secs(60),
+        )
+        .await?;
+
         assert_no_unrouted_objects(&networks);
         assert_tob_mirror_parity(&networks).await?;
 
         info!("=== Bitcoin Withdrawal E2E Test Passed ===");
         Ok(())
+    }
+
+    async fn wait_for_presig_seal(
+        networks: &TestNetworks,
+        epoch: u64,
+        batch_index: u32,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let seals: Vec<_> = networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .map(|node| {
+                    node.hashi()
+                        .onchain_state()
+                        .presig_seals(epoch)
+                        .remove(&batch_index)
+                })
+                .collect();
+            if let Some(Some(seal)) = seals.first()
+                && seals.iter().all(|s| s.as_ref() == Some(seal))
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "presig batch {batch_index} of epoch {epoch} is not sealed on every node: \
+                     {seals:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     async fn withdraw_and_confirm(

@@ -5,10 +5,17 @@
 module hashi::cert_submission_tests;
 
 use hashi::test_utils;
+use std::bcs;
 
 const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
 const VOTER3: address = @0x3;
+const DIGEST: vector<u8> = x"d1d1";
+const OTHER_DIGEST: vector<u8> = x"d2d2";
+const SEED_1: vector<u8> = x"0101";
+const SEED_2: vector<u8> = x"0202";
+const RANDOMNESS_SEED: vector<u8> =
+    x"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f";
 
 #[test]
 fun test_dkg_and_rotation_certs_use_separate_buckets() {
@@ -266,4 +273,151 @@ fun test_nonce_bucket_takes_a_second_writer() {
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
+}
+
+fun build_cert_message<T: copy + drop + store>(
+    hashi_id: address,
+    epoch: u64,
+    intent: u16,
+    message: &T,
+): vector<u8> {
+    let mut bytes = bcs::to_bytes(&intent);
+    bytes.append(bcs::to_bytes(&hashi_id));
+    bytes.append(bcs::to_bytes(&epoch));
+    bytes.append(bcs::to_bytes(message));
+    bytes
+}
+
+fun nonce_key(epoch: u64): hashi::tob::TobKey {
+    hashi::tob::tob_key(epoch, option::some(0), hashi::tob::protocol_type_nonce_generation())
+}
+
+fun submit_one_nonce_cert(
+    hashi: &mut hashi::hashi::Hashi,
+    epoch: u64,
+    clock: &sui::clock::Clock,
+    ctx: &mut TxContext,
+) {
+    hashi::cert_submission::submit_nonce_cert(
+        hashi,
+        epoch,
+        0,
+        VOTER1,
+        vector[1u8, 2, 3],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        clock,
+        ctx,
+    );
+}
+
+fun presig_completed_cert(
+    hashi: &hashi::hashi::Hashi,
+    epoch: u64,
+    digest: vector<u8>,
+): hashi::committee::CommitteeSignature {
+    let message = hashi::cert_submission::new_presig_completed_message(epoch, 0, digest);
+    let bytes = build_cert_message(
+        object::id_address(hashi),
+        epoch,
+        hashi::intent::presig_completed(),
+        &message,
+    );
+    test_utils::sign_certificate(epoch, &bytes, 3)
+}
+
+#[test]
+fun test_only_the_first_presig_completed_seals_the_batch() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let epoch = ctx.epoch();
+    let clock = sui::clock::create_for_testing(ctx);
+    submit_one_nonce_cert(&mut hashi, epoch, &clock, ctx);
+
+    let first = presig_completed_cert(&hashi, epoch, DIGEST);
+    hashi::cert_submission::submit_presig_completed_for_testing(
+        &mut hashi,
+        epoch,
+        0,
+        DIGEST,
+        first,
+        SEED_1,
+    );
+    let second = presig_completed_cert(&hashi, epoch, OTHER_DIGEST);
+    hashi::cert_submission::submit_presig_completed_for_testing(
+        &mut hashi,
+        epoch,
+        0,
+        OTHER_DIGEST,
+        second,
+        SEED_2,
+    );
+
+    let bucket = hashi.epoch_certs_ref(nonce_key(epoch));
+    assert!(
+        bucket.seal_randomness() == sui::random::new_generator_from_seed_for_testing(SEED_1).generate_bytes(32),
+    );
+    assert!(bucket.seal_dealer_set_digest() == DIGEST);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee::ESigVerification)]
+fun test_presig_completed_with_a_bad_certificate_aborts() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let epoch = ctx.epoch();
+    let clock = sui::clock::create_for_testing(ctx);
+    submit_one_nonce_cert(&mut hashi, epoch, &clock, ctx);
+
+    let wrong = test_utils::sign_certificate(epoch, &bcs::to_bytes(&epoch), 3);
+    hashi::cert_submission::submit_presig_completed_for_testing(
+        &mut hashi,
+        epoch,
+        0,
+        DIGEST,
+        wrong,
+        SEED_1,
+    );
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_submit_presig_completed_draws_randomness() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut scenario = sui::test_scenario::begin(@0x0);
+    sui::random::create_for_testing(scenario.ctx());
+    scenario.next_tx(@0x0);
+    let mut random = scenario.take_shared<sui::random::Random>();
+    random.update_randomness_state_for_testing(0, RANDOMNESS_SEED, scenario.ctx());
+    scenario.next_tx(VOTER1);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, scenario.ctx());
+    let epoch = scenario.ctx().epoch();
+    let clock = sui::clock::create_for_testing(scenario.ctx());
+    submit_one_nonce_cert(&mut hashi, epoch, &clock, scenario.ctx());
+
+    let cert = presig_completed_cert(&hashi, epoch, DIGEST);
+    hashi::cert_submission::submit_presig_completed(
+        &mut hashi,
+        epoch,
+        0,
+        DIGEST,
+        cert,
+        &random,
+        scenario.ctx(),
+    );
+
+    let drawn = hashi.epoch_certs_ref(nonce_key(epoch)).seal_randomness();
+    assert!(drawn.length() == 32);
+    assert!(drawn != RANDOMNESS_SEED);
+
+    clock.destroy_for_testing();
+    sui::test_scenario::return_shared(random);
+    std::unit_test::destroy(hashi);
+    scenario.end();
 }

@@ -4,7 +4,7 @@
 module hashi::tob;
 
 use hashi::committee::CommitteeSignature;
-use sui::linked_table::{Self, LinkedTable};
+use sui::{linked_table::{Self, LinkedTable}, random::RandomGenerator};
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -33,6 +33,12 @@ public struct EpochCertsV1 has store {
     protocol_type: ProtocolType,
     /// Dealer submissions indexed by dealer address (first-submission-wins).
     certs: LinkedTable<address, DealerSubmissionV1>,
+    seal: Option<PresigSealV1>,
+}
+
+public struct PresigSealV1 has copy, drop, store {
+    randomness: vector<u8>,
+    dealer_set_digest: vector<u8>,
 }
 
 public struct DealerMessagesHashV1 has copy, drop, store {
@@ -86,6 +92,7 @@ public(package) fun create(
         epoch,
         protocol_type,
         certs: linked_table::new(ctx),
+        seal: option::none(),
     }
 }
 
@@ -106,10 +113,22 @@ public(package) fun submit_cert_with_signature(
     epoch_certs.certs.push_back(dealer, submission);
 }
 
+public(package) fun is_sealed(self: &EpochCertsV1): bool {
+    self.seal.is_some()
+}
+
+public(package) fun seal(
+    self: &mut EpochCertsV1,
+    rng: &mut RandomGenerator,
+    dealer_set_digest: vector<u8>,
+) {
+    self.seal.fill(PresigSealV1 { randomness: rng.generate_bytes(32), dealer_set_digest });
+}
+
 /// Remove all certificates and destroy the EpochCertsV1 in one transaction.
 /// Can only be called when current_epoch >= epoch + 2.
 public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
-    let EpochCertsV1 { epoch, protocol_type: _, mut certs } = epoch_certs;
+    let EpochCertsV1 { epoch, protocol_type: _, mut certs, seal: _ } = epoch_certs;
     assert!(current_epoch >= epoch + 2, ETooEarlyToDestroy);
     while (!certs.is_empty()) {
         let (_, _) = certs.pop_front();
@@ -122,6 +141,16 @@ public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
 #[test_only]
 public fun submission_timestamp_ms(self: &EpochCertsV1, dealer: address): u64 {
     self.certs.borrow(dealer).timestamp_ms
+}
+
+#[test_only]
+public fun seal_randomness(self: &EpochCertsV1): vector<u8> {
+    self.seal.borrow().randomness
+}
+
+#[test_only]
+public fun seal_dealer_set_digest(self: &EpochCertsV1): vector<u8> {
+    self.seal.borrow().dealer_set_digest
 }
 
 #[test_only]
