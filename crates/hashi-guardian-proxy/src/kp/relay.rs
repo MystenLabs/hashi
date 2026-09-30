@@ -12,7 +12,7 @@
 //!
 //! The relay's backend is the guardian KPs are provisioning: the proxy's
 //! standby when one is configured, else the active guardian.
-//! `GetProvisioningTargetInfo` exposes that backend's `GetGuardianInfo` so KP
+//! `GetProvisioningTargetInfo` exposes that backend's `GetAttestedGuardianInfo` so KP
 //! tooling pins the session it is actually submitting to (the node-facing
 //! `GetGuardianInfo` always answers for the ACTIVE guardian).
 //!
@@ -21,8 +21,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use crate::kp;
 use crate::kp::roster::RosterCache;
@@ -96,26 +94,11 @@ struct BackendArming {
     genesis_state_hash: Option<[u8; 32]>,
 }
 
-/// `GetProvisioningTargetInfo` is public and unauthenticated, and the enclave
-/// mints a fresh Nitro attestation for every attested `GetGuardianInfo`, so a flood could
-/// crowd out provisioning. The request carries no nonce, so a seconds-old
-/// response is as good as a fresh one; cache it briefly to bound the backend's
-/// exposure. The only effect of staleness is that a KP may pin a session that
-/// has since changed, and `single_provisioner_init` reads the session fresh and
-/// rejects that loudly.
-const TARGET_INFO_TTL: Duration = Duration::from_secs(5);
-
-struct CachedTargetInfo {
-    at: Instant,
-    response: proto::GetGuardianInfoResponse,
-}
-
 #[derive(Clone)]
 pub struct Relay<L> {
     client: GuardianServiceClient<Channel>,
     accumulator: Arc<Mutex<Accumulator>>,
     roster: Arc<RosterCache<L>>,
-    target_info: Arc<Mutex<Option<CachedTargetInfo>>>,
 }
 
 impl<L: LogStore> Relay<L> {
@@ -124,7 +107,6 @@ impl<L: LogStore> Relay<L> {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
             roster,
-            target_info: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -134,9 +116,7 @@ impl<L: LogStore> Relay<L> {
         let pb = self
             .client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            })
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await?
             .into_inner();
         let resp = GetGuardianInfoResponse::try_from(pb)
@@ -256,31 +236,20 @@ fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
 
 #[tonic::async_trait]
 impl<L: LogStore> GuardianRelayService for Relay<L> {
-    /// The relay backend's `GetGuardianInfo`, verbatim. The lock is held across
-    /// the fetch, so a burst collapses into one backend call.
+    /// Fresh attested info from the provisioning backend, without caching.
     async fn get_provisioning_target_info(
         &self,
-        _request: Request<proto::GetProvisioningTargetInfoRequest>,
+        request: Request<proto::GetProvisioningTargetInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let mut cached = self.target_info.lock().await;
-        if let Some(entry) = cached.as_ref() {
-            if entry.at.elapsed() < TARGET_INFO_TTL {
-                return Ok(Response::new(entry.response.clone()));
-            }
-        }
-        let response = self
-            .client
+        let (metadata, extensions, _) = request.into_parts();
+        self.client
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: true,
-            })
-            .await?
-            .into_inner();
-        *cached = Some(CachedTargetInfo {
-            at: Instant::now(),
-            response: response.clone(),
-        });
-        Ok(Response::new(response))
+            .get_attested_guardian_info(Request::from_parts(
+                metadata,
+                extensions,
+                proto::GetAttestedGuardianInfoRequest {},
+            ))
+            .await
     }
 
     async fn single_provisioner_init(
@@ -565,7 +534,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
-    /// A stub guardian whose `GetGuardianInfo` carries a tag, so a test can
+    /// A stub guardian whose `GetAttestedGuardianInfo` carries a tag, so a test can
     /// tell which backend answered.
     #[derive(Clone)]
     struct TaggedGuardian {
@@ -586,9 +555,14 @@ mod tests {
     impl hashi_types::proto::guardian_service_server::GuardianService for TaggedGuardian {
         async fn get_guardian_info(
             &self,
-            request: Request<proto::GetGuardianInfoRequest>,
+            _: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-            assert!(request.into_inner().include_attestation);
+            panic!("provisioning info must use the attested RPC")
+        }
+        async fn get_attested_guardian_info(
+            &self,
+            _: Request<proto::GetAttestedGuardianInfoRequest>,
+        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Response::new(proto::GetGuardianInfoResponse {
                 signing_pub_key: Some(vec![self.tag; 32].into()),
@@ -695,10 +669,9 @@ mod tests {
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
     }
 
-    /// `GetProvisioningTargetInfo` is unauthenticated and every backend call mints a fresh
-    /// Nitro attestation, so a flood must not reach the enclave.
+    /// Every provisioning info request must generate a fresh attestation.
     #[tokio::test]
-    async fn get_provisioning_target_info_serves_a_burst_from_one_backend_call() {
+    async fn get_provisioning_target_info_never_caches_attestations() {
         let guardian = TaggedGuardian::new(0xC);
         let calls = guardian.calls.clone();
         let relay = relay_fronting(guardian).await;
@@ -713,7 +686,7 @@ mod tests {
                 .into_inner();
             assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xC; 32]);
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
     #[test]

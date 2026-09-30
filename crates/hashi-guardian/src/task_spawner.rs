@@ -30,7 +30,6 @@ use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
-use hashi_types::guardian::GetGuardianInfoRequest;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -51,12 +50,18 @@ use std::sync::Arc;
 /// lifecycle advances. Serialize status requests with those operations so signed
 /// responses cannot expose partially committed state, without per-stage masking.
 /// Withdrawals publish their limiter snapshot separately after durable logging.
-pub async fn get_guardian_info(
+pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
+    enclave
+        .spawn_control_task(false, info::get_guardian_info)
+        .await
+}
+
+/// Generate a fresh attestation under the same control lock as ordinary info reads.
+pub async fn get_attested_guardian_info(
     enclave: Arc<Enclave>,
-    request: GetGuardianInfoRequest,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(request, info::get_guardian_info)
+        .spawn_control_task(true, info::get_guardian_info)
         .await
 }
 

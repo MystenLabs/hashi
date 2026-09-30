@@ -8,7 +8,6 @@ use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
-use hashi_types::guardian::GetGuardianInfoRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -84,16 +83,27 @@ fn to_status(e: GuardianError) -> Status {
 impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn get_guardian_info(
         &self,
-        request: Request<proto::GetGuardianInfoRequest>,
+        _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let domain_req: GetGuardianInfoRequest = request.into_inner().into();
-        let resp = task_spawner::get_guardian_info(self.enclave.clone(), domain_req)
+        let resp = task_spawner::get_guardian_info(self.enclave.clone())
             .await
             .map_err(to_status)?;
 
         let resp_pb = proto_conversions::get_guardian_info_response_to_pb(resp);
 
         Ok(Response::new(resp_pb))
+    }
+
+    async fn get_attested_guardian_info(
+        &self,
+        _request: Request<proto::GetAttestedGuardianInfoRequest>,
+    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone())
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(
+            proto_conversions::get_guardian_info_response_to_pb(resp),
+        ))
     }
 
     async fn setup_new_key(
@@ -312,7 +322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guardian_info_only_includes_attestation_when_requested() {
+    async fn guardian_info_rpcs_separate_attestation_from_ordinary_info() {
         let enclave = Enclave::create_with_random_keys();
         let expected_info = enclave.info().await;
         let rpc = GuardianGrpc {
@@ -320,13 +330,17 @@ mod tests {
         };
 
         for include_attestation in [false, true] {
-            let response = rpc
-                .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                    include_attestation,
-                }))
+            let response = if include_attestation {
+                rpc.get_attested_guardian_info(Request::new(
+                    proto::GetAttestedGuardianInfoRequest {},
+                ))
                 .await
-                .unwrap()
-                .into_inner();
+            } else {
+                rpc.get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
+                    .await
+            }
+            .unwrap()
+            .into_inner();
             assert_eq!(response.attestation.is_some(), include_attestation);
             assert_eq!(
                 response.signing_pub_key.unwrap().as_ref(),

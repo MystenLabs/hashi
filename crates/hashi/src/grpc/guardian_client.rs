@@ -113,14 +113,11 @@ impl GuardianClient {
 
     pub async fn get_guardian_info(
         &self,
-        include_attestation: bool,
     ) -> Result<hashi_types::proto::GetGuardianInfoResponse, tonic::Status> {
         let mut client = self.guardian_service_client();
         let response = tokio::time::timeout(
             GET_GUARDIAN_INFO_TIMEOUT,
-            client.get_guardian_info(hashi_types::proto::GetGuardianInfoRequest {
-                include_attestation,
-            }),
+            client.get_guardian_info(hashi_types::proto::GetGuardianInfoRequest {}),
         )
         .await
         .map_err(|_| tonic::Status::deadline_exceeded("GetGuardianInfo timed out"))??;

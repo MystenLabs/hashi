@@ -4,8 +4,8 @@
 //! Out-of-enclave gRPC proxy for the hashi guardian. It fronts the enclave with
 //! a stable, hardenable surface. [`forward`] forwards the `GuardianService` RPCs
 //! to the enclave, rejecting operator/ceremony RPCs, and [`guardian_info`]
-//! caches `GetGuardianInfo` for every caller. The rest is grouped by who calls
-//! it:
+//! caches ordinary `GetGuardianInfo` for every caller. `GetAttestedGuardianInfo`
+//! always forwards to the enclave without caching. The rest is grouped by who calls it:
 //!
 //! - [`node`]: [`node::cache`] makes `StandardWithdrawal` responses idempotent
 //!   by `wid` — an in-process LRU in front of the guardian's own S3 withdrawal

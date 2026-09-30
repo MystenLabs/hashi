@@ -242,9 +242,7 @@ where
     async fn guardian_info(&self) -> anyhow::Result<GuardianInfo> {
         let info_pb = self
             .inner
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            }))
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
             .await
             .map_err(|s| anyhow::anyhow!("get_guardian_info: {s}"))?
             .into_inner();
@@ -324,12 +322,16 @@ where
 {
     async fn get_guardian_info(
         &self,
-        request: Request<proto::GetGuardianInfoRequest>,
+        _request: Request<proto::GetGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        self.info_cache
-            .get(request.into_inner().include_attestation)
-            .await
-            .map(Response::new)
+        self.info_cache.get().await.map(Response::new)
+    }
+
+    async fn get_attested_guardian_info(
+        &self,
+        request: Request<proto::GetAttestedGuardianInfoRequest>,
+    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        self.inner.get_attested_guardian_info(request).await
     }
 
     async fn setup_new_key(
@@ -503,11 +505,17 @@ mod tests {
 
     #[tonic::async_trait]
     impl GuardianService for StubGuardian {
+        async fn get_attested_guardian_info(
+            &self,
+            _: Request<proto::GetAttestedGuardianInfoRequest>,
+        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            unimplemented!("ordinary info must not request attestation")
+        }
+
         async fn get_guardian_info(
             &self,
-            request: Request<proto::GetGuardianInfoRequest>,
+            _request: Request<proto::GetGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-            assert!(!request.into_inner().include_attestation);
             self.info_calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(self.info_delay).await;
             match &self.info {
@@ -749,9 +757,7 @@ mod tests {
     }
 
     fn info_request() -> Request<proto::GetGuardianInfoRequest> {
-        Request::new(proto::GetGuardianInfoRequest {
-            include_attestation: false,
-        })
+        Request::new(proto::GetGuardianInfoRequest {})
     }
 
     #[tokio::test(start_paused = true)]

@@ -1009,7 +1009,7 @@ impl Hashi {
     async fn fetch_guardian_info(&self) -> Option<hashi_types::proto::GetGuardianInfoResponse> {
         let client = self.guardian_client()?;
         let rpc_start = std::time::Instant::now();
-        let rpc_result = client.get_guardian_info(false).await;
+        let rpc_result = client.get_guardian_info().await;
         let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
         match rpc_result {
             Ok(info) => {

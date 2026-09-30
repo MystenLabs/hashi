@@ -124,6 +124,26 @@ sequenceDiagram
     Guardian->>S3: Publish kp-shares state, then ceremony commit
 ```
 
+## Guardian info queries
+
+`GetGuardianInfo` returns signed guardian state without generating an attestation.
+The proxy caches these responses for one second; the public HTTP `/info` view
+keeps its separate configurable cache.
+
+KPs and operators use `GetAttestedGuardianInfo` to receive signed guardian state
+alongside a fresh Nitro attestation. Attested responses are never cached.
+`GetProvisioningTargetInfo` forwards to that RPC on the provisioning guardian
+(the standby when configured, otherwise the active guardian), also without caching.
+
+The distinct RPC paths allow deployments to restrict attestation queries while
+leaving ordinary info public. The proxy does not itself add authentication for
+these queries: an access policy must cover both `GetAttestedGuardianInfo` and
+`GetProvisioningTargetInfo`.
+
+Clients that previously set `include_attestation` on `GetGuardianInfo` must switch
+to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation. Upgrade the guardian and proxy before
+switching KP/operator clients to the new RPC.
+
 ## Withdraw-mode provisioning flow
 
 ```mermaid
@@ -150,7 +170,7 @@ sequenceDiagram
 
     Note over KPs,Guardian: Threshold share provisioning
     KPs->>Proxy: GetProvisioningTargetInfo
-    Proxy->>Guardian: GetGuardianInfo
+    Proxy->>Guardian: GetAttestedGuardianInfo
     Proxy-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
