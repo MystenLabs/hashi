@@ -489,9 +489,6 @@ impl LeaderService {
             .current_committee()
             .expect("No current committee");
 
-        let total_weight = committee.total_weight();
-        let required_weight = certificate_threshold(total_weight);
-
         // Fan out signature requests to all members in parallel.
         let mut sig_tasks = JoinSet::new();
         for member in members {
@@ -505,8 +502,6 @@ impl LeaderService {
             });
         }
 
-        // Collect signatures, stopping once we reach quorum or members report
-        // enough approvals that it can't be reached.
         let confirmation_message = DepositConfirmationMessage {
             request_id: deposit_request.id,
             utxo: deposit_request.utxo.clone(),
@@ -516,36 +511,8 @@ impl LeaderService {
             &committee,
             confirmation_message,
         );
-        let mut already_approved_weight = 0;
-        while let Some(result) = sig_tasks.join_next().await {
-            let Ok((weight, reply)) = result else {
-                continue;
-            };
-            match reply {
-                Ok(sig) => {
-                    if let Err(e) = aggregator.add_signature(sig) {
-                        error!("Failed to add deposit signature: {e}");
-                    }
-                }
-                Err(NoSignature::AlreadyApproved) => {
-                    already_approved_weight += weight;
-                    if quorum_ruled_out(already_approved_weight, total_weight, required_weight) {
-                        return Err(UnapprovedDepositError::AlreadyApprovedThisEpoch);
-                    }
-                }
-                Err(NoSignature::Failed) => {}
-            }
-            if aggregator.weight() >= required_weight {
-                break;
-            }
-        }
-
-        if aggregator.weight() < required_weight {
-            return Err(UnapprovedDepositError::FailedQuorum {
-                weight: aggregator.weight(),
-                required_weight,
-            });
-        }
+        collect_deposit_signatures(&mut sig_tasks, &mut aggregator, committee.total_weight())
+            .await?;
 
         let signed_message = match aggregator.finish() {
             Ok(signed_message) => signed_message,
@@ -669,7 +636,7 @@ impl LeaderService {
         let response = match rpc_client.sign_deposit_confirmation(proto_request).await {
             Ok(response) => response,
             Err(status) if is_already_approved_refusal(&status) => {
-                debug!("{validator_address} already holds this epoch's approval for the deposit");
+                debug!("{validator_address} reports the deposit already approved");
                 return Err(NoSignature::AlreadyApproved);
             }
             Err(e) => {
@@ -727,10 +694,45 @@ fn is_already_approved_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::AlreadyExists
 }
 
-/// Honest members only report a deposit approved once they have seen the cert,
-/// so more than `total - required` such weight means another leader landed it.
-fn quorum_ruled_out(already_approved_weight: u64, total_weight: u64, required_weight: u64) -> bool {
-    already_approved_weight > total_weight.saturating_sub(required_weight)
+async fn collect_deposit_signatures(
+    sig_tasks: &mut JoinSet<(u64, Result<MemberSignature, NoSignature>)>,
+    aggregator: &mut BlsSignatureAggregator<'_, DepositConfirmationMessage>,
+    total_weight: u64,
+) -> Result<(), UnapprovedDepositError> {
+    let required_weight = certificate_threshold(total_weight);
+    let mut already_approved_weight = 0;
+    while let Some(result) = sig_tasks.join_next().await {
+        let Ok((weight, reply)) = result else {
+            continue;
+        };
+        match reply {
+            Ok(sig) => {
+                if let Err(e) = aggregator.add_signature(sig) {
+                    error!("Failed to add deposit signature: {e}");
+                }
+            }
+            Err(NoSignature::AlreadyApproved) => {
+                already_approved_weight += weight;
+                // Past `total - required`, quorum is out of reach, and that is more weight
+                // than faulty members can hold, so an approval really landed.
+                if already_approved_weight > total_weight.saturating_sub(required_weight) {
+                    return Err(UnapprovedDepositError::AlreadyApprovedThisEpoch);
+                }
+            }
+            Err(NoSignature::Failed) => {}
+        }
+        if aggregator.weight() >= required_weight {
+            break;
+        }
+    }
+
+    if aggregator.weight() < required_weight {
+        return Err(UnapprovedDepositError::FailedQuorum {
+            weight: aggregator.weight(),
+            required_weight,
+        });
+    }
+    Ok(())
 }
 
 fn select_deposit_requests_to_approve(
@@ -817,6 +819,7 @@ fn filter_deposit_confirmation_candidates(
 mod tests {
     use super::*;
     use crate::onchain::types::Utxo;
+    use hashi_types::committee::Committee;
     use hashi_types::move_types::CommitteeSignature;
     use sui_sdk_types::Digest;
 
@@ -995,13 +998,61 @@ mod tests {
         ] {
             assert!(!is_already_approved_refusal(&refusal(err)));
         }
+        // Older peers send the same refusal as `failed_precondition`.
+        assert!(!is_already_approved_refusal(
+            &tonic::Status::failed_precondition(
+                UnapprovedDepositError::AlreadyApprovedThisEpoch.to_string()
+            )
+        ));
     }
 
-    #[test]
-    fn already_approved_weight_rules_out_quorum_only_past_the_missing_share() {
-        let total = 10_000;
-        let required = certificate_threshold(total);
-        assert!(!quorum_ruled_out(total - required, total, required));
-        assert!(quorum_ruled_out(total - required + 1, total, required));
+    fn deposit_aggregator(
+        committee: &Committee,
+    ) -> BlsSignatureAggregator<'_, DepositConfirmationMessage> {
+        let message = DepositConfirmationMessage {
+            request_id: Address::ZERO,
+            utxo: deposit_request(1, 1).utxo,
+        };
+        BlsSignatureAggregator::new(Address::ZERO, committee, message)
+    }
+
+    #[tokio::test]
+    async fn stops_collecting_once_already_approved_weight_rules_out_quorum() {
+        let committee = Committee::new(vec![], 0, 0, 5_000);
+        let mut aggregator = deposit_aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_334, Err(NoSignature::AlreadyApproved)) });
+        sig_tasks.spawn(std::future::pending());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_deposit_signatures(&mut sig_tasks, &mut aggregator, 10_000),
+        )
+        .await
+        .expect("should stop without waiting for the member that never answers");
+
+        assert!(matches!(
+            result,
+            Err(UnapprovedDepositError::AlreadyApprovedThisEpoch)
+        ));
+    }
+
+    #[tokio::test]
+    async fn keeps_collecting_while_already_approved_weight_leaves_quorum_reachable() {
+        let committee = Committee::new(vec![], 0, 0, 5_000);
+        let mut aggregator = deposit_aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_333, Err(NoSignature::AlreadyApproved)) });
+        sig_tasks.spawn(async { (6_667, Err(NoSignature::Failed)) });
+
+        let result = collect_deposit_signatures(&mut sig_tasks, &mut aggregator, 10_000).await;
+
+        assert!(matches!(
+            result,
+            Err(UnapprovedDepositError::FailedQuorum {
+                weight: 0,
+                required_weight: 6_667,
+            })
+        ));
     }
 }
