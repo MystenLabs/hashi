@@ -17,7 +17,7 @@ use hashi::{
     mpc_signing::{Self, Presig, SigningBatch},
     utxo::{Utxo, UtxoId}
 };
-use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
+use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag, random::RandomGenerator};
 
 use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
 
@@ -700,15 +700,18 @@ public(package) fun finish_archive_withdrawal_txn(
 }
 
 /// Reassign fresh presigs, allocated in `current_epoch`, to the still-pending
-/// inputs of a stale-epoch withdrawal.
+/// inputs of a stale-epoch withdrawal, redrawing its randomness if any are pending.
 public(package) fun reallocate_presigs_for_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     presigs: vector<Presig>,
     current_epoch: u64,
+    rng: &mut RandomGenerator,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
+    let reassigns = !presigs.is_empty();
     txn.signing.reallocate(presigs, current_epoch);
+    if (reassigns) txn.randomness = rng.generate_bytes(32);
     sui::event::emit(WithdrawalPresigsReassigned {
         withdrawal_txn_id: withdrawal_id,
         epoch: current_epoch,
@@ -946,6 +949,14 @@ public(package) fun withdrawal_txn_signing_for_testing(
 ): &SigningBatch {
     let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
     &txn.signing
+}
+
+#[test_only]
+public(package) fun withdrawal_txn_randomness(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): vector<u8> {
+    self.borrow_withdrawal_txn(withdrawal_id).randomness
 }
 
 #[test_only]

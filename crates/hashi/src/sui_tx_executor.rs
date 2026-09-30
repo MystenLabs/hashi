@@ -1357,13 +1357,18 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let random_arg = builder.object(
+            ObjectInput::new(SUI_RANDOM_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
         builder.move_call(
             Function::new(
                 self.active_call_package_id(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
-            vec![hashi_arg, withdrawal_id_arg],
+            vec![hashi_arg, withdrawal_id_arg, random_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {

@@ -294,10 +294,23 @@ fun setup_fully_signed_txn(
     clock: &clock::Clock,
     ctx: &mut TxContext,
 ): (address, address) {
+    let (id, txn_id) = setup_committed_txn(hashi, clock, @0xBEEF, ctx);
+    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
+    (id, txn_id)
+}
+
+fun setup_committed_txn(
+    hashi: &mut hashi::hashi::Hashi,
+    clock: &clock::Clock,
+    input_txid: address,
+    ctx: &mut TxContext,
+): (address, address) {
     let id = setup_withdrawal_request(hashi, clock, 10_000, ctx);
     hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), clock);
 
-    let input_id = utxo::utxo_id(@0xBEEF, 0);
+    let input_id = utxo::utxo_id(input_txid, 0);
     let input = utxo::utxo(input_id, 1_000_000, option::none());
     hashi.bitcoin_mut().utxo_pool_mut().insert_active(input);
 
@@ -314,10 +327,6 @@ fun setup_fully_signed_txn(
     let btc = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&txn);
     btc.destroy_for_testing();
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(txn);
-
-    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
-    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
     (id, txn_id)
 }
 
@@ -525,12 +534,31 @@ fun insert_epoch_zero_txn(
     txn_id
 }
 
+fun new_random(): (sui::test_scenario::Scenario, sui::random::Random) {
+    let mut scenario = sui::test_scenario::begin(@0x0);
+    sui::random::create_for_testing(scenario.ctx());
+    scenario.next_tx(@0x0);
+    let mut random = scenario.take_shared<sui::random::Random>();
+    random.update_randomness_state_for_testing(
+        0,
+        x"1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F1F",
+        scenario.ctx(),
+    );
+    (scenario, random)
+}
+
+fun destroy_random(scenario: sui::test_scenario::Scenario, random: sui::random::Random) {
+    sui::test_scenario::return_shared(random);
+    scenario.end();
+}
+
 #[test]
 fun test_reallocate_presigs_assigns_fresh_presigs_to_pending_inputs() {
     // The committee is on epoch 1, so the epoch-0 batch is stale.
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
     let clock = clock::create_for_testing(ctx);
+    let (scenario, random) = new_random();
     let txn_id = insert_epoch_zero_txn(&mut hashi, 3, &clock, ctx);
     hashi
         .bitcoin_mut()
@@ -539,7 +567,7 @@ fun test_reallocate_presigs_assigns_fresh_presigs_to_pending_inputs() {
     // Earlier withdrawals this epoch already consumed presigs 0 through 4.
     let _ = hashi.allocate_presigs(5);
 
-    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id, &random, ctx);
 
     let queue = hashi.bitcoin().withdrawal_queue();
     let signing = queue.withdrawal_txn_signing_for_testing(txn_id);
@@ -550,6 +578,7 @@ fun test_reallocate_presigs_assigns_fresh_presigs_to_pending_inputs() {
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
+    destroy_random(scenario, random);
 }
 
 #[test]
@@ -557,26 +586,30 @@ fun test_reallocate_presigs_with_every_input_signed_only_moves_epoch() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
     let clock = clock::create_for_testing(ctx);
+    let (scenario, random) = new_random();
     let txn_id = insert_epoch_zero_txn(&mut hashi, 2, &clock, ctx);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
         .record_input_signatures(txn_id, vector[0, 1], vector[x"00", x"11"]);
+    let randomness = hashi.bitcoin().withdrawal_queue().withdrawal_txn_randomness(txn_id);
 
-    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id, &random, ctx);
 
     let queue = hashi.bitcoin().withdrawal_queue();
     assert!(queue.withdrawal_txn_signing_epoch(txn_id) == 1);
     assert!(queue.withdrawal_txn_mpc_signatures(txn_id) == vector[x"00", x"11"]);
+    assert!(queue.withdrawal_txn_randomness(txn_id) == randomness);
     // Nothing was pending, so the next reallocation still starts at 0.
     let other_txn_id = insert_epoch_zero_txn(&mut hashi, 1, &clock, ctx);
-    hashi::withdraw::reallocate_presigs(&mut hashi, other_txn_id);
+    hashi::withdraw::reallocate_presigs(&mut hashi, other_txn_id, &random, ctx);
     let queue = hashi.bitcoin().withdrawal_queue();
     let signing = queue.withdrawal_txn_signing_for_testing(other_txn_id);
     assert!(signing.pending_index(0) == option::some(0));
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
+    destroy_random(scenario, random);
 }
 
 #[test]
@@ -585,11 +618,36 @@ fun test_reallocate_presigs_twice_in_one_epoch_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
     let clock = clock::create_for_testing(ctx);
+    let (scenario, random) = new_random();
     let txn_id = insert_epoch_zero_txn(&mut hashi, 1, &clock, ctx);
 
-    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
-    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id);
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id, &random, ctx);
+    hashi::withdraw::reallocate_presigs(&mut hashi, txn_id, &random, ctx);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
+    destroy_random(scenario, random);
+}
+
+#[test]
+fun test_reallocate_presigs_redraws_randomness() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 1);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+    let clock = clock::create_for_testing(ctx);
+    let (scenario, random) = new_random();
+    let (_, first) = setup_committed_txn(&mut hashi, &clock, @0xBEEF, ctx);
+    let (_, second) = setup_committed_txn(&mut hashi, &clock, @0xCAFE, ctx);
+
+    hashi::withdraw::reallocate_presigs(&mut hashi, first, &random, ctx);
+    hashi::withdraw::reallocate_presigs(&mut hashi, second, &random, ctx);
+
+    let queue = hashi.bitcoin().withdrawal_queue();
+    let drawn = queue.withdrawal_txn_randomness(first);
+    assert!(queue.withdrawal_txn_signing_epoch(first) == 1);
+    assert!(drawn.length() == 32);
+    assert!(drawn != queue.withdrawal_txn_randomness(second));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+    destroy_random(scenario, random);
 }
