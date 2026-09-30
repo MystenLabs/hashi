@@ -50,9 +50,8 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
-use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeSignature;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::move_types;
 use hashi_types::move_types::ReconfigCompletionMessage;
@@ -741,7 +740,7 @@ impl MpcService {
         &self,
         epoch: u64,
         batch_index: u32,
-    ) -> anyhow::Result<(Committee, Presignatures, u16, Parameters)> {
+    ) -> anyhow::Result<(RuntimeCommittee, Presignatures, u16, Parameters)> {
         let onchain_state = self.inner.onchain_state().clone();
         let committee = onchain_state
             .state()
@@ -2381,7 +2380,7 @@ impl MpcService {
         &self,
         epoch: u64,
         mpc_public_key: &[u8],
-        committee: &Committee,
+        committee: &RuntimeCommittee,
     ) -> anyhow::Result<hashi_types::committee::SignedMessage<ReconfigCompletionMessage>> {
         let message = ReconfigCompletionMessage {
             epoch,
@@ -2394,9 +2393,8 @@ impl MpcService {
             .expect("own signature must be stored before collecting");
         let my_sig =
             BLS12381Signature::from_bytes(&my_sig_bytes).expect("stored signature must be valid");
-        let mut aggregator = BlsSignatureAggregator::new(
+        let mut aggregator = committee.signature_aggregator(
             self.inner.config.hashi_ids().hashi_object_id,
-            committee,
             message.clone(),
         );
         aggregator

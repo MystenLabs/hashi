@@ -489,7 +489,7 @@ pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
 /// Install activation-derived live state for tests that need normal operation.
 pub fn activate_enclave_for_testing(
     enclave: &Arc<Enclave>,
-    committee: HashiCommittee,
+    committee: impl Into<RuntimeCommittee>,
     limiter_config: LimiterConfig,
     limiter_state: LimiterState,
 ) -> GuardianResult<()> {

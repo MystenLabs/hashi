@@ -34,10 +34,9 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
-use crate::mpc::fallback_encryption_public_key;
 use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
-use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
@@ -688,7 +687,7 @@ impl OnchainState {
     pub fn committee_transition(
         &self,
         from_epoch: u64,
-    ) -> Option<(Committee, move_types::Committee)> {
+    ) -> Option<(RuntimeCommittee, move_types::Committee)> {
         let state = self.state();
         let committees = &state.hashi().committees;
         let from = committees.committees().get(&from_epoch)?.clone();
@@ -771,8 +770,15 @@ impl OnchainState {
             .cloned()
     }
 
-    pub fn current_committee(&self) -> Option<Committee> {
+    pub fn current_committee(&self) -> Option<RuntimeCommittee> {
         self.state().hashi.committees.current_committee().cloned()
+    }
+
+    /// The current committee as stored on chain, for records that must match its bytes.
+    pub fn current_raw_committee(&self) -> Option<move_types::Committee> {
+        let state = self.state();
+        let committees = &state.hashi.committees;
+        committees.raw_committee(committees.epoch()).cloned()
     }
 
     /// The next epoch a reconfiguration is currently transitioning to, if
@@ -955,7 +961,7 @@ impl OnchainState {
 
     /// The governed MPC parameters from the epoch config: what the NEXT
     /// committee will be formed with. The active committee reads its own
-    /// pinned copy via [`Committee::config`](hashi_types::committee::Committee::config).
+    /// pinned copy via [`RuntimeCommittee::config`].
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
         self.state()
             .hashi()
@@ -1396,7 +1402,7 @@ async fn scrape_hashi(
 
     let (
         (member_seed, member_info),
-        (committee_seed, (committees_per_epoch, raw_committees_per_epoch, committee_handoffs)),
+        (committee_seed, (committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
         (proposal_seed, proposals),
         (tob_seed, tob_buckets),
@@ -1438,8 +1444,7 @@ async fn scrape_hashi(
         .set_pending_epoch_change(committees.pending_epoch_change.map(|pending| pending.epoch))
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
-        .set_committees(committees_per_epoch)
-        .set_raw_committees(raw_committees_per_epoch)
+        .set_onchain_committees(committees_per_epoch)
         .set_committee_handoffs(committee_handoffs);
 
     if let Some(metrics) = metrics {
@@ -1831,7 +1836,6 @@ async fn scrape_committees(
 ) -> Result<(
     route::ContainerSeed,
     (
-        BTreeMap<u64, Committee>,
         BTreeMap<u64, move_types::Committee>,
         BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
     ),
@@ -1921,43 +1925,13 @@ async fn scrape_committees(
             Ok((from_epoch, signed))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    let committees = move_committees
-        .iter()
-        .map(|(epoch, committee)| (*epoch, convert_move_committee(committee.clone())))
-        .collect();
 
-    Ok((seed, (committees, move_committees, handoffs)))
+    Ok((seed, (move_committees, handoffs)))
 }
 
-fn convert_move_committee_member(
-    move_types::CommitteeMember {
-        validator_address,
-        public_key,
-        encryption_public_key,
-        weight,
-    }: move_types::CommitteeMember,
-) -> CommitteeMember {
-    CommitteeMember::new(
-        validator_address,
-        convert_move_uncompressed_g1_pubkey(&public_key),
-        // Use fallback key for nodes without valid encryption key.
-        // These nodes cannot decrypt shares but still count toward thresholds.
-        parse_encryption_public_key(encryption_public_key.as_slice())
-            .map(Into::into)
-            .unwrap_or_else(fallback_encryption_public_key),
-        weight,
-    )
-}
-
-fn convert_move_committee(c: move_types::Committee) -> Committee {
-    let members = c
-        .members
-        .into_iter()
-        .map(convert_move_committee_member)
-        .collect();
-    // Carry the pinned config verbatim so the rich committee re-serializes to
-    // the exact on-chain bytes (used to verify the signed handoff cert).
-    Committee::with_config(members, c.epoch, c.config)
+fn convert_move_committee(c: move_types::Committee) -> RuntimeCommittee {
+    RuntimeCommittee::from_move_with_encryption_key_fallback(c)
+        .expect("onchain committee BLS keys are uncompressed G1")
 }
 
 fn convert_move_committee_handoff(
@@ -2376,6 +2350,9 @@ mod tests {
     use fastcrypto::traits::ToFromBytes;
 
     use crate::mpc::EncryptionGroupElement;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::EncryptionPrivateKey;
 
     use super::*;
 
@@ -2472,8 +2449,17 @@ mod tests {
         }
     }
 
+    fn one_member_committee(member: move_types::CommitteeMember) -> move_types::Committee {
+        move_types::Committee {
+            epoch: 0,
+            total_weight: member.weight,
+            members: vec![member],
+            config: move_types::Config::from_mpc_params(0, 3333, 0),
+        }
+    }
+
     #[test]
-    fn test_convert_move_committee_member() {
+    fn test_convert_move_committee() {
         let mut rng = rand::thread_rng();
         let validator_address =
             Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
@@ -2489,7 +2475,8 @@ mod tests {
             encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
             weight: 1,
         };
-        let committee_member = convert_move_committee_member(move_committee_member);
+        let committee = convert_move_committee(one_member_committee(move_committee_member));
+        let committee_member = &committee.members()[0];
 
         assert_eq!(committee_member.validator_address(), validator_address);
         assert_eq!(committee_member.public_key(), signing_keypair.public());
@@ -2501,26 +2488,37 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_move_committee_member_uses_fallback_key() {
+    fn test_convert_move_committee_uses_fallback_key() {
         let mut rng = rand::thread_rng();
-        let validator_address =
-            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let members = (1..=3u8)
+            .map(|i| {
+                let encryption_public_key = if i == 2 {
+                    hashi_types::committee::fallback_encryption_public_key()
+                } else {
+                    EncryptionPrivateKey::new(&mut rng).public_key()
+                };
+                CommitteeMember::new(
+                    Address::new([i; 32]),
+                    Bls12381PrivateKey::generate(&mut rng).public_key(),
+                    encryption_public_key,
+                    u64::from(i),
+                )
+            })
+            .collect();
+        let expected = Committee::with_config(
+            members,
+            7,
+            move_types::Config::from_mpc_params(250, 2000, 30),
+        );
+        let mut onchain = move_types::Committee::from(&expected);
         let mut encryption_key_vec = vec![0u8; 32];
         encryption_key_vec[0] = 1;
-
-        let move_committee_member = move_types::CommitteeMember {
-            validator_address,
-            public_key: signing_keypair.public().as_bytes().to_owned(),
-            encryption_public_key: encryption_key_vec,
-            weight: 1,
-        };
-        let committee_member = convert_move_committee_member(move_committee_member);
+        onchain.members[1].encryption_public_key = encryption_key_vec;
 
         assert_eq!(
-            *committee_member.encryption_public_key(),
-            fallback_encryption_public_key()
-        )
+            convert_move_committee(onchain),
+            RuntimeCommittee::from(expected)
+        );
     }
 
     // The Move contract stores the BLS12-381 G1 identity element as a member's

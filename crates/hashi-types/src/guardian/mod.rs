@@ -7,10 +7,8 @@ mod deployment;
 pub mod errors;
 pub mod lifecycle;
 pub mod proto_conversions;
-mod runtime_committee;
 pub mod s3;
 pub(crate) mod serde;
-pub use runtime_committee::RuntimeCommittee;
 mod session;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -51,6 +49,7 @@ use crate::bitcoin::TxUTXOs;
 use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
+pub use crate::committee::RuntimeCommittee;
 pub use crate::committee::SignedMessage as HashiSigned;
 use ::serde::Deserialize;
 use ::serde::Serialize;
@@ -454,18 +453,6 @@ impl CeremonyConfirmationResponse {
 }
 
 impl GenesisState {
-    pub fn new(
-        committee: HashiCommittee,
-        hashi_object_id: sui_sdk_types::Address,
-        mpc_master_g: HashiMasterG,
-    ) -> Self {
-        Self {
-            committee: (&committee).into(),
-            hashi_object_id,
-            mpc_master_g,
-        }
-    }
-
     pub fn from_parts(
         committee: crate::move_types::Committee,
         hashi_object_id: sui_sdk_types::Address,
@@ -964,7 +951,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct ActivationStateRepr {
     pub config_hash: [u8; 32],
     pub secret_sharing_instance: SecretSharingInstance,
-    pub committee: runtime_committee::ActivationCommitteeRepr,
+    pub committee: crate::committee::ActivationCommitteeRepr,
     pub limiter_state: LimiterState,
 }
 
