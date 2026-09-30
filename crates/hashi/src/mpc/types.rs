@@ -1146,6 +1146,22 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
+pub(crate) fn input_delta(randomness: &[u8], input_index: u32) -> S {
+    signing_delta_oracle("input").evaluate_to_group_element(&(randomness, input_index))
+}
+
+pub(crate) fn presig_delta(randomness: &[u8], global_presig_index: u64) -> S {
+    signing_delta_oracle("presig").evaluate_to_group_element(&(randomness, global_presig_index))
+}
+
+fn signing_delta_oracle(label: &str) -> RandomOracle {
+    RandomOracle::new("hashi_signing_delta").extend(label)
+}
+
+pub(crate) fn signing_beacon(input_delta: &S, presig_delta: &S) -> S {
+    *input_delta + *presig_delta
+}
+
 pub(crate) fn signing_request_digest(
     message: &[u8],
     derivation_address: Option<&DerivationAddress>,
@@ -1166,6 +1182,7 @@ pub(crate) fn signing_request_digest(
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
     public_nonce: G,
+    presig_delta: S,
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
     request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
@@ -1174,17 +1191,26 @@ pub struct PartialSigningOutput {
 impl PartialSigningOutput {
     pub fn new(
         public_nonce: G,
-        beacon: &S,
+        input_delta: &S,
+        presig_delta: S,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            signing_nonce_bytes: signing_nonce_bytes(
+                &public_nonce,
+                &signing_beacon(input_delta, &presig_delta),
+            ),
             request_digest: signing_request_digest(message, derivation_address),
             public_nonce,
+            presig_delta,
             partial_sigs,
         }
+    }
+
+    pub fn presig_delta(&self) -> S {
+        self.presig_delta
     }
 
     pub fn public_nonce(&self) -> G {
