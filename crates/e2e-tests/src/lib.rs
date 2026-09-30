@@ -1207,7 +1207,7 @@ mod tests {
             >,
         >,
     > {
-        let input_delta = {
+        let message_delta = {
             let mut hasher = fastcrypto::hash::Blake2b256::default();
             for (signing_id, _, _, _) in inputs {
                 hasher.update(signing_id.as_bytes());
@@ -1237,7 +1237,7 @@ mod tests {
                             message: msg.clone(),
                             global_presig_index: *pidx,
                             derivation_address: *deriv,
-                            input_delta,
+                            message_delta,
                         })
                         .collect()
                 };

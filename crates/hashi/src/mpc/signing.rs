@@ -42,7 +42,7 @@ use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
 use crate::mpc::types::presig_delta;
-use crate::mpc::types::signing_beacon;
+use crate::mpc::types::signing_delta;
 use crate::mpc::types::signing_nonce_bytes;
 use crate::mpc::types::signing_request_digest;
 
@@ -605,7 +605,7 @@ impl SigningManager {
                     input.signing_id,
                     &input.message,
                     input.global_presig_index,
-                    &input.input_delta,
+                    &input.message_delta,
                     seals,
                     input.derivation_address.as_ref(),
                     metrics,
@@ -850,7 +850,7 @@ impl SigningManager {
         signing_id: Address,
         message: &[u8],
         global_presig_index: u64,
-        input_delta: &S,
+        message_delta: &S,
         seals: &BTreeMap<u32, PresigSealV1>,
         derivation_address: Option<&DerivationAddress>,
         metrics: &Metrics,
@@ -860,7 +860,7 @@ impl SigningManager {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
                 let digest = signing_request_digest(message, derivation_address);
-                let beacon = signing_beacon(input_delta, &existing.presig_delta());
+                let beacon = signing_delta(message_delta, &existing.presig_delta());
                 let nonce = signing_nonce_bytes(&existing.public_nonce(), &beacon);
                 if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
                 {
@@ -954,7 +954,13 @@ impl SigningManager {
                         batch_index: batch.batch_index,
                     });
                 }
-                let presig_delta = presig_delta(&seal.randomness, global_presig_index);
+                let randomness: &[u8; 32] =
+                    seal.randomness.as_slice().try_into().map_err(|_| {
+                        SigningError::MalformedSealRandomness {
+                            batch_index: batch.batch_index,
+                        }
+                    })?;
+                let presig_delta = presig_delta(randomness, global_presig_index);
                 let target_position = (global_presig_index - batch.start_index) as usize;
                 let presig = batch
                     .pool
@@ -996,7 +1002,7 @@ impl SigningManager {
         let (public_nonce, partial_sigs, presig_delta) = match taken {
             CacheOrPresig::Cached(nonce, sigs, presig_delta) => (nonce, sigs, presig_delta),
             CacheOrPresig::Presig(presig, presig_delta) => {
-                let beacon = signing_beacon(input_delta, &presig_delta);
+                let beacon = signing_delta(message_delta, &presig_delta);
                 let _timer = metrics
                     .mpc_sign_partial_gen_duration_seconds
                     .with_label_values(&[MPC_LABEL_SIGNING])
@@ -1015,7 +1021,7 @@ impl SigningManager {
                     signing_id,
                     PartialSigningOutput::new(
                         public_nonce,
-                        input_delta,
+                        message_delta,
                         presig_delta,
                         message,
                         derivation_address,
@@ -1028,7 +1034,7 @@ impl SigningManager {
         Ok((
             public_nonce,
             partial_sigs,
-            signing_beacon(input_delta, &presig_delta),
+            signing_delta(message_delta, &presig_delta),
         ))
     }
 }
@@ -1038,8 +1044,8 @@ pub struct SignInput {
     pub message: Vec<u8>,
     pub global_presig_index: u64,
     pub derivation_address: Option<DerivationAddress>,
-    /// This input's term of the beacon, from its withdrawal's randomness.
-    pub input_delta: S,
+    /// This input's term of the signing delta, from its withdrawal's randomness.
+    pub message_delta: S,
 }
 
 struct InputSigningState {
@@ -1513,7 +1519,7 @@ pub(crate) mod tests {
     use crate::mpc::types::RetrieveMessagesResponse;
     use crate::mpc::types::SendMessagesRequest;
     use crate::mpc::types::SendMessagesResponse;
-    use crate::mpc::types::input_delta;
+    use crate::mpc::types::message_delta;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
@@ -1555,9 +1561,13 @@ pub(crate) mod tests {
         [0xD0 + batch_index as u8; 32]
     }
 
+    fn seal_randomness_for_test(batch_index: u32) -> [u8; 32] {
+        [1 + batch_index as u8; 32]
+    }
+
     fn seal_for_test(batch_index: u32) -> PresigSealV1 {
         PresigSealV1 {
-            randomness: vec![1 + batch_index as u8; 32],
+            randomness: seal_randomness_for_test(batch_index).to_vec(),
             dealer_set_digest: digest_for_test(batch_index).to_vec(),
         }
     }
@@ -1566,10 +1576,10 @@ pub(crate) mod tests {
         (0..8).map(|b| (b, seal_for_test(b))).collect()
     }
 
-    fn beacon_for_test(input_delta: &S, global_presig_index: u64, batch_index: u32) -> S {
-        signing_beacon(
-            input_delta,
-            &presig_delta(&seal_for_test(batch_index).randomness, global_presig_index),
+    fn signing_delta_for_test(message_delta: &S, global_presig_index: u64, batch_index: u32) -> S {
+        signing_delta(
+            message_delta,
+            &presig_delta(&seal_randomness_for_test(batch_index), global_presig_index),
         )
     }
 
@@ -1596,7 +1606,7 @@ pub(crate) mod tests {
             signing_id: Address,
             message: &[u8],
             global_presig_index: u64,
-            input_delta: &S,
+            message_delta: &S,
             derivation_address: Option<&DerivationAddress>,
             timeout: Duration,
             metrics: &Metrics,
@@ -1609,7 +1619,7 @@ pub(crate) mod tests {
                     message: message.to_vec(),
                     global_presig_index,
                     derivation_address: derivation_address.copied(),
-                    input_delta: *input_delta,
+                    message_delta: *message_delta,
                 }],
                 &seals_for_test(),
                 timeout,
@@ -2066,7 +2076,7 @@ pub(crate) mod tests {
         fn prepare_all(
             &self,
             message: &[u8],
-            input_delta: &S,
+            message_delta: &S,
             request_id: Address,
             global_presig_index: u64,
             skip: Option<usize>,
@@ -2094,8 +2104,8 @@ pub(crate) mod tests {
                         .unwrap()
                 };
                 let presig_delta =
-                    presig_delta(&seal_for_test(batch_index).randomness, global_presig_index);
-                let beacon = signing_beacon(input_delta, &presig_delta);
+                    presig_delta(&seal_randomness_for_test(batch_index), global_presig_index);
+                let beacon = signing_delta(message_delta, &presig_delta);
                 let (pn, sigs) = generate_partial_signatures(
                     message,
                     presig,
@@ -2109,7 +2119,7 @@ pub(crate) mod tests {
                     request_id,
                     PartialSigningOutput::new(
                         pn,
-                        input_delta,
+                        message_delta,
                         presig_delta,
                         message,
                         None,
@@ -2518,11 +2528,11 @@ pub(crate) mod tests {
         let setup = SigningTestSetup::new(4);
         let message = b"test";
         let mut rng = StdRng::seed_from_u64(6501);
-        let withdrawal_delta = S::rand(&mut rng);
+        let message_delta = S::rand(&mut rng);
         let req_id = test_request_id();
 
-        setup.prepare_all(message, &withdrawal_delta, req_id, 0, None);
-        let beacon = beacon_for_test(&withdrawal_delta, 0, 0);
+        setup.prepare_all(message, &message_delta, req_id, 0, None);
+        let beacon = signing_delta_for_test(&message_delta, 0, 0);
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
@@ -2564,9 +2574,9 @@ pub(crate) mod tests {
         let setup = SigningTestSetup::new(4);
         let req_id = test_request_id();
         let mut rng = StdRng::seed_from_u64(6502);
-        let withdrawal_delta = S::rand(&mut rng);
-        setup.prepare_all(b"test", &withdrawal_delta, req_id, 0, None);
-        let beacon = beacon_for_test(&withdrawal_delta, 0, 0);
+        let message_delta = S::rand(&mut rng);
+        setup.prepare_all(b"test", &message_delta, req_id, 0, None);
+        let beacon = signing_delta_for_test(&message_delta, 0, 0);
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
@@ -2653,7 +2663,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_sign_multi_input_all_succeed() {
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
-        let beacon = S::zero();
+        let message_delta = S::zero();
         let inputs: Vec<(Address, Vec<u8>, u64)> = (0..3u8)
             .map(|j| {
                 (
@@ -2664,7 +2674,7 @@ pub(crate) mod tests {
             })
             .collect();
         for (sid, msg, pidx) in &inputs {
-            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+            setup.prepare_all(msg, &message_delta, *sid, *pidx, Some(0));
         }
         let requests: Vec<SignInput> = inputs
             .iter()
@@ -2673,7 +2683,7 @@ pub(crate) mod tests {
                 message: msg.clone(),
                 global_presig_index: *pidx,
                 derivation_address: None,
-                input_delta: beacon,
+                message_delta,
             })
             .collect();
 
@@ -2704,7 +2714,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_sign_multi_input_one_fails_others_succeed() {
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
-        let beacon = S::zero();
+        let message_delta = S::zero();
         let good: Vec<(Address, Vec<u8>, u64)> = (0..2u8)
             .map(|j| {
                 (
@@ -2717,7 +2727,7 @@ pub(crate) mod tests {
         let bad_id = Address::new([0xBF; 32]);
 
         for (sid, msg, pidx) in &good {
-            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+            setup.prepare_all(msg, &message_delta, *sid, *pidx, Some(0));
         }
         // Deliberately do NOT prepare peers for the bad input: they return no
         // partial for it, so it can never reach threshold.
@@ -2729,7 +2739,7 @@ pub(crate) mod tests {
                 message: msg.clone(),
                 global_presig_index: *pidx,
                 derivation_address: None,
-                input_delta: beacon,
+                message_delta,
             })
             .collect();
         requests.push(SignInput {
@@ -2737,7 +2747,7 @@ pub(crate) mod tests {
             message: b"bad".to_vec(),
             global_presig_index: 2,
             derivation_address: None,
-            input_delta: beacon,
+            message_delta,
         });
 
         let p2p = setup.mock_p2p_for(0);
@@ -2794,7 +2804,7 @@ pub(crate) mod tests {
                 PartialSigningOutput::new(
                     public_nonce,
                     &beacon,
-                    presig_delta(&seal_for_test(0).randomness, 0),
+                    presig_delta(&seal_randomness_for_test(0), 0),
                     message,
                     None,
                     vec![],
@@ -2825,7 +2835,7 @@ pub(crate) mod tests {
         // Give exactly 2 peers partial sigs, rest return errors.
         let setup = SigningTestSetup::new(7);
         let message = b"threshold";
-        let beacon = S::zero();
+        let message_delta = S::zero();
         let req_id = test_request_id();
 
         // Only peers 1 and 2 prepare partial sigs.
@@ -2835,11 +2845,11 @@ pub(crate) mod tests {
                 let state = mgr.state.read().unwrap();
                 state.batches[0].pool[0].clone().unwrap()
             };
-            let input_beacon = beacon_for_test(&beacon, 0, 0);
+            let beacon = signing_delta_for_test(&message_delta, 0, 0);
             let (pn, sigs) = generate_partial_signatures(
                 message,
                 presig,
-                &input_beacon,
+                &beacon,
                 &mgr.config.key_shares,
                 &mgr.config.verifying_key,
                 None,
@@ -2849,8 +2859,8 @@ pub(crate) mod tests {
                 req_id,
                 PartialSigningOutput::new(
                     pn,
-                    &beacon,
-                    presig_delta(&seal_for_test(0).randomness, 0),
+                    &message_delta,
+                    presig_delta(&seal_randomness_for_test(0), 0),
                     message,
                     None,
                     sigs,
@@ -2866,7 +2876,7 @@ pub(crate) mod tests {
             req_id,
             message,
             0,
-            &beacon,
+            &message_delta,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2970,13 +2980,12 @@ pub(crate) mod tests {
         let setup = SigningTestSetup::new(7);
         let message = b"drop-and-aggregate";
         let mut rng = StdRng::seed_from_u64(6503);
-        let withdrawal_delta = S::rand(&mut rng);
+        let message_delta = S::rand(&mut rng);
         let req_id = test_request_id();
         let diverged = test_address(6);
 
-        let (public_nonce, all_sigs) =
-            setup.prepare_all(message, &withdrawal_delta, req_id, 0, None);
-        let beacon = beacon_for_test(&withdrawal_delta, 0, 0);
+        let (public_nonce, all_sigs) = setup.prepare_all(message, &message_delta, req_id, 0, None);
+        let beacon = signing_delta_for_test(&message_delta, 0, 0);
         let honest_nonce = public_nonce + G::generator() * beacon;
 
         let mut responses = HashMap::new();
@@ -3067,7 +3076,7 @@ pub(crate) mod tests {
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
-        let input_delta = S::from(5u128);
+        let message_delta = S::from(5u128);
         let message = b"retry after prune";
 
         let first = mgr
@@ -3075,7 +3084,7 @@ pub(crate) mod tests {
                 test_request_id(),
                 message,
                 0,
-                &input_delta,
+                &message_delta,
                 &seals_for_test(),
                 None,
                 &metrics,
@@ -3092,7 +3101,7 @@ pub(crate) mod tests {
             test_address(99),
             b"from the next batch",
             batch_size,
-            &input_delta,
+            &message_delta,
             &seals_for_test(),
             None,
             &metrics,
@@ -3113,7 +3122,7 @@ pub(crate) mod tests {
                 test_request_id(),
                 message,
                 0,
-                &input_delta,
+                &message_delta,
                 &BTreeMap::new(),
                 None,
                 &metrics,
@@ -3121,7 +3130,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(retried.0, first.0);
-        assert_eq!(retried.2, beacon_for_test(&input_delta, 0, 0));
+        assert_eq!(retried.2, signing_delta_for_test(&message_delta, 0, 0));
     }
 
     #[tokio::test]
@@ -3129,14 +3138,14 @@ pub(crate) mod tests {
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
-        let input_delta = S::from(5u128);
+        let message_delta = S::from(5u128);
 
         let unsealed = mgr
             .prepare_local_partial_signatures(
                 test_request_id(),
                 b"not sealed yet",
                 0,
-                &input_delta,
+                &message_delta,
                 &BTreeMap::new(),
                 None,
                 &metrics,
@@ -3152,14 +3161,14 @@ pub(crate) mod tests {
                 test_request_id(),
                 b"not sealed yet",
                 0,
-                &input_delta,
+                &message_delta,
                 &seals_for_test(),
                 None,
                 &metrics,
             )
             .await
             .unwrap();
-        assert_eq!(sealed.2, beacon_for_test(&input_delta, 0, 0));
+        assert_eq!(sealed.2, signing_delta_for_test(&message_delta, 0, 0));
     }
 
     #[tokio::test]
@@ -3882,7 +3891,7 @@ pub(crate) mod tests {
                 PartialSigningOutput::new(
                     public_nonce,
                     &beacon,
-                    presig_delta(&seal_for_test(0).randomness, 0),
+                    presig_delta(&seal_randomness_for_test(0), 0),
                     message,
                     None,
                     corrupted,
@@ -4433,7 +4442,7 @@ pub(crate) mod tests {
         let batch_size = setup.managers[0].initial_presig_count() as u64;
         setup.set_next_batch_on_all();
         setup.advance_peers_to_next_batch(0);
-        let withdrawal_delta = S::from(5u128);
+        let message_delta = S::from(5u128);
         let inputs = [
             (
                 Address::new([0xC1; 32]),
@@ -4447,7 +4456,7 @@ pub(crate) mod tests {
             ),
         ];
         for (sid, msg, pidx) in &inputs {
-            setup.prepare_all(msg, &withdrawal_delta, *sid, *pidx, Some(0));
+            setup.prepare_all(msg, &message_delta, *sid, *pidx, Some(0));
         }
         let requests: Vec<SignInput> = inputs
             .iter()
@@ -4456,7 +4465,7 @@ pub(crate) mod tests {
                 message: msg.clone(),
                 global_presig_index: *pidx,
                 derivation_address: None,
-                input_delta: withdrawal_delta,
+                message_delta,
             })
             .collect();
 
@@ -5036,10 +5045,10 @@ pub(crate) mod tests {
     }
 
     const GOLDEN_PARTIALS: [&str; 4] = [
-        "677a0cc67b5c42bbb4d6c0eb3d7143e196711879070b0a575288f71cc3a21c08",
-        "d8462eec4f3a3dff03b072bbca46e10d46e5a36a3269b6b8ef3ab98317f5ea40",
-        "13a66bc47bda1c8703d97eb63f6751a02aac4291420fb14041c17996d71ce878",
-        "0ea03a7e2a5ddb4cd5ccb4e108f730dbdf8562c20780ae638ba1f4a3201d0d82",
+        "03c4cdf96e16525d21feb877b8828a869fa658e7caf53327758f889f084171d8",
+        "7262600a4b872e631a0e2c604684c19024595201dbd2d88c3cf63e6d9b327067",
+        "8581f5ce375e2e2bf8fc319c3a7adc94e74f2602f56d0fe983276de1c0aa0b33",
+        "eee100e5393c0896a6bfbd2a6de2b13c73fe120d39009f8900020ad580e0a55a",
     ];
 
     fn derived_key(vk: &G, address: &DerivationAddress) -> G {
@@ -5080,7 +5089,7 @@ pub(crate) mod tests {
             .find(|b| b.contains(index))
             .unwrap()
             .batch_index;
-        presig_delta(&seal_for_test(batch_index).randomness, index)
+        presig_delta(&seal_randomness_for_test(batch_index), index)
     }
 
     fn prepare_peers(setup: &SigningTestSetup, input: &SignInput) {
@@ -5100,7 +5109,7 @@ pub(crate) mod tests {
             let (nonce, sigs) = generate_partial_signatures(
                 &input.message,
                 presig,
-                &signing_beacon(&input.input_delta, &presig_delta),
+                &signing_delta(&input.message_delta, &presig_delta),
                 &mgr.config.key_shares,
                 &mgr.config.verifying_key,
                 input.derivation_address.as_ref(),
@@ -5110,7 +5119,7 @@ pub(crate) mod tests {
                 input.signing_id,
                 PartialSigningOutput::new(
                     nonce,
-                    &input.input_delta,
+                    &input.message_delta,
                     presig_delta,
                     &input.message,
                     input.derivation_address.as_ref(),
@@ -5148,7 +5157,7 @@ pub(crate) mod tests {
             message: format!("golden {i}").into_bytes(),
             global_presig_index: index,
             derivation_address: Some([0x40 + i; 32]),
-            input_delta: S::from(5u128),
+            message_delta: S::from(5u128),
         }
     }
 
@@ -5178,8 +5187,8 @@ pub(crate) mod tests {
             .map(|input| {
                 (pooled_nonce(&setup.managers[1], input.global_presig_index)
                     + G::generator()
-                        * signing_beacon(
-                            &input.input_delta,
+                        * signing_delta(
+                            &input.message_delta,
                             &presig_delta_at(&setup.managers[1], input.global_presig_index),
                         ))
                 .has_even_y()
@@ -5232,16 +5241,16 @@ pub(crate) mod tests {
         "01fa1d399f7d72f95bb6bd85e90ef1be07468cc55a47edc3fae3aecd969e95d200",
         "9a483f662371568c8fe5036a32a03631c826a23961adcd397caba208cddb5cbf00",
     ];
-    const GOLDEN_INPUT_DELTAS: [&str; 3] = [
-        "639a3428218c880f08ca665b3ece5d73a5df8cc20dc2eae4bad2f1fb2538c2a4",
-        "08a193b13ce7833047ecc5b3d2af621ee364c22ae8b1043274cc00191f0aec4d",
-        "27a2391b6806c71c89f69c4fc4e4530041ce75e3acefbe099aa25ddf0be273eb",
+    const GOLDEN_MESSAGE_DELTAS: [&str; 3] = [
+        "25cd67859dab2b3cffb3cf6d370bba3425c27fd310ff614fe32476bda5f456d6",
+        "904e1b9a859bd3005152d39ae4c45a1b4dd513fdf676fed8f7417b214f59b600",
+        "6c4c332cc2d4ea4ce223774620f2b5b042b94346a2d1701e275660e8329acfc4",
     ];
     const GOLDEN_PRESIG_DELTAS: [&str; 2] = [
-        "5de2e4d6fa9de50f373cf92bfdf78c17c2d1e3123fe0645478ebbd9e554bfb1c",
-        "ecc63d5ee8ee1d1c7511629c9297846c52decb7d7ab50dd9611d262ff416016b",
+        "3580ee421f060fcf104d5b35251ad0e5ab1cd433e2690c9a0f82ce91ff1245a3",
+        "1bc55222ad2a946c856074ccc5ee3e90e16c9b01882a51b99644930c589dc2f4",
     ];
-    const GOLDEN_NONCE: &str = "86d4d7be5f213a234fcce10650fd707650c1bed855a30cba72f21cafadf6a80a00";
+    const GOLDEN_NONCE: &str = "1ff81295b4a2a5ca3851bbf4ddcd55d70e6388d4388fa88a27015094fd8f863000";
 
     #[test]
     fn golden_presig_nonces_and_beacon() {
@@ -5264,22 +5273,22 @@ pub(crate) mod tests {
         }
         assert_eq!(nonces, GOLDEN_PRESIG_NONCES);
 
-        let randomness: [Vec<u8>; 2] = [(0u8..32).collect(), vec![0xff; 32]];
-        let input_deltas: Vec<String> = [
+        let randomness: [[u8; 32]; 2] = [std::array::from_fn(|i| i as u8), [0xff; 32]];
+        let message_deltas: Vec<String> = [
             (&randomness[0], 0),
             (&randomness[0], 1),
             (&randomness[1], 0),
         ]
         .iter()
-        .map(|(r, i)| hex::encode(input_delta(r, *i).to_byte_array()))
+        .map(|(r, i)| hex::encode(message_delta(r, *i).to_byte_array()))
         .collect();
-        assert_eq!(input_deltas, GOLDEN_INPUT_DELTAS);
+        assert_eq!(message_deltas, GOLDEN_MESSAGE_DELTAS);
         let presig_deltas: Vec<String> = [0, 1]
             .iter()
             .map(|&index| hex::encode(presig_delta(&randomness[1], index).to_byte_array()))
             .collect();
         assert_eq!(presig_deltas, GOLDEN_PRESIG_DELTAS);
-        let beacon = signing_beacon(&input_delta(&randomness[0], 0), &presig_delta_at(mgr, 0));
+        let beacon = signing_delta(&message_delta(&randomness[0], 0), &presig_delta_at(mgr, 0));
         assert_eq!(
             hex::encode(signing_nonce_bytes(&pooled_nonce(mgr, 0), &beacon)),
             GOLDEN_NONCE
