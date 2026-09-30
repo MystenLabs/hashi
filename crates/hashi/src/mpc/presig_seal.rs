@@ -123,7 +123,7 @@ fn done_or_not_relevant(inner: &Hashi, message: &PresigCompletedMessage) -> bool
             if seal.dealer_set_digest != message.dealer_set_digest {
                 warn!(
                     "Presig batch {} of epoch {} was sealed over a dealer set this node did \
-                     not build",
+                     not build; this node will not sign from it",
                     message.batch_index, message.epoch,
                 );
             }
