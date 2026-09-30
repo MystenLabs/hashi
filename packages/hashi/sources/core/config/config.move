@@ -29,6 +29,7 @@ const DEFAULT_EMERGENCY_UNPAUSE_THRESHOLD_BPS: u64 = 6667;
 const PAUSED_KEY: vector<u8> = b"paused";
 const RECONFIG_HOLD_KEY: vector<u8> = b"reconfig_hold";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
+const GUARDIAN_NODE_URL_KEY: vector<u8> = b"guardian_node_url";
 const GUARDIAN_BTC_PUBLIC_KEY_KEY: vector<u8> = b"guardian_btc_public_key";
 const GUARDIAN_BTC_PUBLIC_KEY_LEN: u64 = 32;
 const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pause_threshold_bps";
@@ -148,14 +149,25 @@ public(package) fun guardian_url(self: &Config): Option<String> {
     self.try_get(GUARDIAN_URL_KEY).map!(|v| v.as_string())
 }
 
+public(package) fun guardian_node_url(self: &Config): Option<String> {
+    self.try_get(GUARDIAN_NODE_URL_KEY).map!(|v| v.as_string())
+}
+
 public(package) fun guardian_btc_public_key(self: &Config): Option<vector<u8>> {
     self.try_get(GUARDIAN_BTC_PUBLIC_KEY_KEY).map!(|v| v.as_bytes())
 }
 
-/// Set the guardian's URL. The ephemeral signing key is intentionally not pinned
-/// onchain; the node authenticates the guardian over TLS + the immutable BTC key.
+/// Set the guardian's public URL: `/info`, the key-provisioner relay and every
+/// other call that isn't a node RPC.
 public(package) fun set_guardian_url(self: &mut Config, url: String) {
     self.upsert(GUARDIAN_URL_KEY, config_value::new_string(url));
+}
+
+/// Set the URL nodes call the guardian on, presenting their registered TLS key.
+/// The ephemeral signing key is intentionally not pinned onchain; the node
+/// authenticates the guardian over TLS + the immutable BTC key.
+public(package) fun set_guardian_node_url(self: &mut Config, url: String) {
+    self.upsert(GUARDIAN_NODE_URL_KEY, config_value::new_string(url));
 }
 
 /// Pin the guardian's x-only BTC pubkey (32 bytes). Immutable once set —

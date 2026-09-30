@@ -124,8 +124,10 @@ impl TestNetworks {
 /// committee forms, so `build()` does not finalize it.
 #[derive(Clone)]
 pub struct ExternalGuardian {
-    /// Endpoint the hashi nodes reach the guardian at (typically its proxy).
+    /// The guardian's public endpoint (typically its proxy).
     pub url: String,
+    /// Endpoint the hashi nodes reach the guardian at.
+    pub node_url: String,
     /// The guardian's x-only BTC master pubkey, printed by `operator ceremony`.
     pub btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
 }
@@ -333,10 +335,12 @@ impl TestNetworksBuilder {
             Some(external) => {
                 let guardian_config = hashi::publish::GuardianConfig {
                     url: external.url.clone(),
+                    node_url: external.node_url.clone(),
                     btc_public_key: external.btc_pubkey.serialize().to_vec(),
                 };
                 tracing::info!(
                     endpoint = %external.url,
+                    node_endpoint = %external.node_url,
                     "using external guardian (dockerized replica); provisioner-init runs out-of-band"
                 );
                 (guardian_config, None)
@@ -347,6 +351,7 @@ impl TestNetworksBuilder {
                 let guardian_btc_pubkey = harness.ensure_btc_pubkey()?;
                 let guardian_config = hashi::publish::GuardianConfig {
                     url: harness.endpoint().to_string(),
+                    node_url: harness.endpoint().to_string(),
                     btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
                 };
                 tracing::info!(

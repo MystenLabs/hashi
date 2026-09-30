@@ -260,7 +260,8 @@ pub enum CreateProposalCommands {
     ///   bitcoin_withdrawal_minimum (u64),
     ///   bitcoin_confirmation_threshold (u64),
     ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool),
-    ///   reconfig_hold (bool), guardian_url (string)
+    ///   reconfig_hold (bool), guardian_url (string),
+    ///   guardian_node_url (string)
     ///
     /// The MPC parameters live in the epoch config: see `update-epoch-config`
     /// and `update-mpc-config`.
@@ -855,10 +856,15 @@ pub struct LaunchOpts {
     #[clap(long, required_unless_present = "status")]
     pub bitcoin_chain_id: Option<String>,
 
-    /// Guardian gRPC endpoint URL. Required — every deposit address is a
-    /// 2-of-2 (mpc, guardian) taproot leaf.
+    /// Guardian's public endpoint URL (`/info`, the key-provisioner relay).
+    /// Required — every deposit address is a 2-of-2 (mpc, guardian) taproot
+    /// leaf.
     #[clap(long, required_unless_present = "status")]
     pub guardian_url: Option<String>,
+
+    /// Guardian endpoint URL nodes call, presenting their registered TLS key.
+    #[clap(long, required_unless_present = "status")]
+    pub guardian_node_url: Option<String>,
 
     /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
     /// on-chain for 2-of-2 deposit address derivation.
@@ -1816,6 +1822,9 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     let guardian_url = opts
         .guardian_url
         .expect("required unless --status (enforced by clap)");
+    let guardian_node_url = opts
+        .guardian_node_url
+        .expect("required unless --status (enforced by clap)");
     let btc_public_key = hex::decode(
         guardian_btc_public_key
             .strip_prefix("0x")
@@ -1829,6 +1838,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     );
     let guardian = crate::publish::GuardianConfig {
         url: guardian_url,
+        node_url: guardian_node_url,
         btc_public_key,
     };
     let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {

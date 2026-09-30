@@ -23,6 +23,8 @@ fun guardian_btc_public_key_key(): String { b"guardian_btc_public_key".to_string
 
 fun guardian_url_key(): String { b"guardian_url".to_string() }
 
+fun guardian_node_url_key(): String { b"guardian_node_url".to_string() }
+
 fun bitcoin_chain_id_key(): String { b"bitcoin_chain_id".to_string() }
 
 fun deposit_minimum_key(): String { b"bitcoin_deposit_minimum".to_string() }
@@ -162,9 +164,9 @@ fun test_guardian_url_stays_governable() {
 }
 
 #[test]
-fun test_guardian_url_written_at_launch_is_governable() {
-    // `UpdateConfig` only writes keys that already exist, so changing the URL
-    // through governance depends on the launch call having stored it.
+fun test_guardian_urls_written_at_launch_are_governable() {
+    // `UpdateConfig` only writes keys that already exist, so changing the URLs
+    // through governance depends on the launch call having stored them.
     //
     // The registry is built first: its constructor asserts a system-address
     // sender, and building a test context replaces the sender for the whole
@@ -179,6 +181,7 @@ fun test_guardian_url_written_at_launch_is_governable() {
         sui::package::test_publish(std::type_name::original_id<Hashi>().to_id(), ctx),
         @0xb17c,
         b"https://launch.example".to_string(),
+        b"https://node.launch.example".to_string(),
         guardian_key(0),
         &mut registry,
         ctx,
@@ -187,13 +190,21 @@ fun test_guardian_url_written_at_launch_is_governable() {
         config::guardian_url(hashi.config()).destroy_some() == b"https://launch.example".to_string(),
     );
 
-    propose_and_execute(
-        &mut hashi,
-        single(guardian_url_key(), config_value::new_string(b"https://new.example".to_string())),
-        ctx,
+    let mut entries = vec_map::empty();
+    entries.insert(
+        guardian_url_key(),
+        config_value::new_string(b"https://new.example".to_string()),
     );
+    entries.insert(
+        guardian_node_url_key(),
+        config_value::new_string(b"https://node.new.example".to_string()),
+    );
+    propose_and_execute(&mut hashi, entries, ctx);
     assert!(
         config::guardian_url(hashi.config()).destroy_some() == b"https://new.example".to_string(),
+    );
+    assert!(
+        config::guardian_node_url(hashi.config()).destroy_some() == b"https://node.new.example".to_string(),
     );
 
     std::unit_test::destroy(hashi);

@@ -72,7 +72,7 @@ public struct Hashi has key {
 // has registered. `Option::fill` inside `set_upgrade_cap` (and the write-once
 // BTC currency/treasury registration) make this call-once.
 //
-// The guardian URL and BTC key are both required: the guardian is a
+// The guardian URLs and BTC key are all required: the guardian is a
 // load-bearing component of every deposit address (2-of-2 taproot leaf)
 // and every withdrawal signature, so a deploy without them would produce
 // a non-functional bridge.
@@ -81,6 +81,7 @@ entry fun finish_publish(
     upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
     guardian_url: String,
+    guardian_node_url: String,
     guardian_btc_public_key: vector<u8>,
     bitcoin_confirmation_threshold: Option<u64>,
     bitcoin_deposit_time_delay_ms: Option<u64>,
@@ -97,6 +98,7 @@ entry fun finish_publish(
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
     self.config_mut().set_guardian_url(guardian_url);
+    self.config_mut().set_guardian_node_url(guardian_node_url);
     self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
 
     if (bitcoin_confirmation_threshold.is_some()) {
@@ -332,6 +334,7 @@ public fun finish_publish_for_testing(
     upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
     guardian_url: String,
+    guardian_node_url: String,
     guardian_btc_public_key: vector<u8>,
     coin_registry: &mut sui::coin_registry::CoinRegistry,
     ctx: &mut TxContext,
@@ -341,6 +344,7 @@ public fun finish_publish_for_testing(
         upgrade_cap,
         bitcoin_chain_id,
         guardian_url,
+        guardian_node_url,
         guardian_btc_public_key,
         option::none(),
         option::none(),
