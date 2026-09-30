@@ -233,7 +233,7 @@ jobs:
           set -euo pipefail
           docker pull --quiet --platform linux/amd64 "$IMAGE@$image_digest"
           CONTAINER=$(docker create --platform linux/amd64 "$IMAGE@$image_digest")
-          docker cp "$CONTAINER:/opt/hashi/bin/hashi" release/docker-hashi
+          docker cp -L "$CONTAINER:/opt/hashi/bin/hashi" release/docker-hashi
           docker rm "$CONTAINER" > /dev/null
           DOCKER_BINARY_HASH=$(sha256sum release/docker-hashi | awk '{print $1}')
           if [ "$DOCKER_BINARY_HASH" != "$binary_hash" ]; then
