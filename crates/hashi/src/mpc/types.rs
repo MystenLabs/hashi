@@ -1238,6 +1238,12 @@ pub enum SigningError {
          derivation address or beacon"
     )]
     RequestChanged { signing_id: Address },
+
+    #[error("Presig batch {batch_index} has no PresigCompleted seal yet")]
+    PresigBatchNotSealed { batch_index: u32 },
+
+    #[error("Presig batch {batch_index} was sealed over a dealer set this node did not build")]
+    SealDealerSetMismatch { batch_index: u32 },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

@@ -292,6 +292,8 @@ pub(crate) fn signing_error_to_status(err: SigningError) -> Status {
         }
         SigningError::PoolExhausted => Status::resource_exhausted(err.to_string()),
         SigningError::RequestChanged { .. } => Status::failed_precondition(err.to_string()),
+        SigningError::PresigBatchNotSealed { .. } => Status::unavailable(err.to_string()),
+        SigningError::SealDealerSetMismatch { .. } => Status::failed_precondition(err.to_string()),
     }
 }
 

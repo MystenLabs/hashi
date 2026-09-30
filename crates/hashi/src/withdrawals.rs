@@ -1322,6 +1322,7 @@ impl Hashi {
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
         let beacon = withdrawal_beacon(&txn.randomness);
+        let seals = self.onchain_state().presig_seals(epoch);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
@@ -1365,6 +1366,7 @@ impl Hashi {
             p2p_channel_ref,
             requests,
             beacon_ref,
+            &seals,
             WITHDRAWAL_SIGNING_TIMEOUT,
             metrics_ref,
             result_tx,
@@ -2185,6 +2187,10 @@ async fn forward_signing_results(
                     }
                     crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
                     crate::mpc::types::SigningError::RequestChanged { .. } => "request_changed",
+                    crate::mpc::types::SigningError::PresigBatchNotSealed { .. } => "not_sealed",
+                    crate::mpc::types::SigningError::SealDealerSetMismatch { .. } => {
+                        "seal_mismatch"
+                    }
                     _ => "other",
                 };
                 metrics
