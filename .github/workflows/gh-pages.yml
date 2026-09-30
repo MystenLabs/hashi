@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
 
     steps:
       - name: Checkout repository
@@ -43,38 +42,6 @@ jobs:
           mv ./target/doc site/rustdoc
           mv design/build site/design
 
-      # We deploy with `force_orphan: true` so the gh-pages branch stays a
-      # single orphan commit (no history accumulation), but that wipes the
-      # branch contents — which would blow away the `pr-preview/` directory
-      # the .github/workflows/pages-preview.yaml workflow writes there.
-      #
-      # To keep both properties (single-commit history + live PR previews),
-      # we explicitly fetch the previews of open PRs from gh-pages and carry
-      # them into the deploy folder so they round-trip through the orphan
-      # rewrite. Previews of closed PRs are dropped.
-      - name: Preserve open PR previews from prior gh-pages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if git fetch origin gh-pages --depth=1 2>/dev/null; then
-            OPEN_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 \
-              --json number --jq '.[].number')
-            git worktree add /tmp/gh-pages-prev origin/gh-pages
-            mkdir -p site/pr-preview
-            PRESERVED=0
-            for PR in $OPEN_PRS; do
-              if [ -d "/tmp/gh-pages-prev/pr-preview/pr-$PR" ]; then
-                cp -R "/tmp/gh-pages-prev/pr-preview/pr-$PR" site/pr-preview/
-                PRESERVED=$((PRESERVED + 1))
-              fi
-            done
-            echo "Preserved $PRESERVED open PR preview(s)"
-            git worktree remove --force /tmp/gh-pages-prev
-          else
-            echo "gh-pages branch does not exist yet — fresh deploy"
-          fi
-
       - name: Upload site
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
         with:
@@ -86,13 +53,52 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Download site
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
           name: site
           path: site
+
+      # We deploy with `force_orphan: true` so the gh-pages branch stays a
+      # single orphan commit (no history accumulation), but that wipes the
+      # branch contents — which would blow away the `pr-preview/` directory
+      # the .github/workflows/pages-preview.yaml workflow writes there.
+      #
+      # To keep both properties (single-commit history + live PR previews),
+      # we explicitly fetch the previews of open PRs from gh-pages and carry
+      # them into the deploy folder so they round-trip through the orphan
+      # rewrite. Previews of closed PRs are dropped. This runs just before the
+      # push so a preview published while the site builds isn't lost.
+      - name: Preserve open PR previews from prior gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          GH_PAGES_REF=$(git ls-remote origin refs/heads/gh-pages)
+          if [ -z "$GH_PAGES_REF" ]; then
+            echo "gh-pages branch does not exist yet — fresh deploy"
+            exit 0
+          fi
+          OPEN_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 \
+            --json number --jq '.[].number')
+          git fetch origin gh-pages --depth=1
+          git worktree add /tmp/gh-pages-prev origin/gh-pages
+          mkdir -p site/pr-preview
+          PRESERVED=0
+          for PR in $OPEN_PRS; do
+            if [ -d "/tmp/gh-pages-prev/pr-preview/pr-$PR" ]; then
+              cp -R "/tmp/gh-pages-prev/pr-preview/pr-$PR" site/pr-preview/
+              PRESERVED=$((PRESERVED + 1))
+            fi
+          done
+          echo "Preserved $PRESERVED open PR preview(s)"
+          git worktree remove --force /tmp/gh-pages-prev
 
       - name: Deploy Docs
         uses: peaceiris/actions-gh-pages@373f7f263a76c20808c831209c920827a82a2847 # pin@v3.9.3
