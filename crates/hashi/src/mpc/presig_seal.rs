@@ -59,7 +59,7 @@ pub(crate) fn start(
 }
 
 fn sign(inner: &Hashi, message: &PresigCompletedMessage) -> anyhow::Result<BLS12381Signature> {
-    let committee = committee(inner, message.epoch)?;
+    let committee = inner.committee_for_epoch(message.epoch)?;
     let my_address = inner.config.validator_address()?;
     let key = inner.find_signing_key_for_committee(&committee, my_address, message.epoch)?;
     Ok(key
@@ -88,16 +88,16 @@ async fn try_seal(
     message: &PresigCompletedMessage,
     signature: &BLS12381Signature,
 ) -> anyhow::Result<()> {
-    if done(inner, message) {
+    if done_or_not_relevant(inner, message) {
         return Ok(());
     }
-    let committee = committee(inner, message.epoch)?;
+    let committee = inner.committee_for_epoch(message.epoch)?;
+    let my_address = inner.config.validator_address()?;
+    tokio::time::sleep(submit_delay(&committee, my_address, message.batch_index)).await;
     let Some(cert) = collect(inner, &committee, message, signature).await? else {
         return Ok(());
     };
-    let my_address = inner.config.validator_address()?;
-    tokio::time::sleep(submit_delay(&committee, my_address, message.batch_index)).await;
-    if done(inner, message) {
+    if done_or_not_relevant(inner, message) {
         return Ok(());
     }
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::from_hashi(Arc::clone(inner))?;
@@ -111,7 +111,7 @@ async fn try_seal(
     Ok(())
 }
 
-fn done(inner: &Hashi, message: &PresigCompletedMessage) -> bool {
+fn done_or_not_relevant(inner: &Hashi, message: &PresigCompletedMessage) -> bool {
     let onchain_state = inner.onchain_state();
     if onchain_state.epoch() > message.epoch {
         return true;
@@ -159,7 +159,7 @@ async fn collect(
     let mut rejected: HashSet<Address> = HashSet::new();
     let mut poll_interval = POLL_INTERVAL;
     while aggregator.weight() < required_weight {
-        if done(inner, message) {
+        if done_or_not_relevant(inner, message) {
             return Ok(None);
         }
         let fetched = join_all(missing.iter().map(|&address| async move {
@@ -212,18 +212,6 @@ async fn collect(
         .finish()
         .map(Some)
         .map_err(|e| anyhow::anyhow!("failed to finalize PresigCompleted certificate: {e}"))
-}
-
-fn committee(inner: &Hashi, epoch: u64) -> anyhow::Result<Committee> {
-    inner
-        .onchain_state()
-        .state()
-        .hashi()
-        .committees
-        .committees()
-        .get(&epoch)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("no committee found for epoch {epoch}"))
 }
 
 fn submit_delay(committee: &Committee, my_address: Address, batch_index: u32) -> Duration {

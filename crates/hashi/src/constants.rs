@@ -23,6 +23,10 @@ pub const BITCOIN_REGTEST_CHAIN_ID: &str =
 /// `initial_pool_size / PRESIG_REFILL_DIVISOR`.
 pub const PRESIG_REFILL_DIVISOR: usize = 2;
 
+pub const PRESIG_DEALER_SET_DOMAIN: &[u8] = b"hashi/presig-dealer-set/v1";
+
+pub const PRESIG_BATCH_IDENTITY_DOMAIN: &[u8] = b"hashi/presig-batch-identity/v1";
+
 /// The `hashi::versioning` package versions whose on-chain semantics this
 /// binary implements.
 ///

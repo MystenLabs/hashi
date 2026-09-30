@@ -15595,7 +15595,7 @@ fn test_dealer_set_digest_covers_only_the_admitted_certs() {
     );
     assert_eq!(
         hex::encode(admitted.dealer_set_digest()),
-        "1ede6b208fe52e7c5f4afbbd331269e9e3c0f9929c8051648abf613dc6f294aa",
+        "e1568d3be309645d5f0cc272655f4d9e29e02a1e571c69bedc84e16b91d0e5ca",
     );
 }
 

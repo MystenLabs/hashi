@@ -10,6 +10,7 @@ use std::sync::RwLock;
 
 use anyhow::anyhow;
 use hashi_types::committee::Bls12381PrivateKey;
+use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
@@ -1475,6 +1476,17 @@ impl Hashi {
                 }
             }
         })
+    }
+
+    pub(crate) fn committee_for_epoch(&self, epoch: u64) -> anyhow::Result<Committee> {
+        self.onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .cloned()
+            .ok_or_else(|| anyhow!("no committee found for epoch {epoch}"))
     }
 
     pub(crate) fn is_in_committee_for(&self, epoch: u64) -> bool {

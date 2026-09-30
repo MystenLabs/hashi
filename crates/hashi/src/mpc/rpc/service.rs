@@ -206,6 +206,7 @@ impl MpcService for HttpService {
         let batch_index = external_request
             .batch_index
             .ok_or_else(|| Status::invalid_argument("batch_index: missing required field"))?;
+        // Only present once this node has fixed the batch's dealer set.
         let signature = self
             .get_presig_seal_signature(epoch, batch_index)
             .map(Into::into);
