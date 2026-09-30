@@ -22,8 +22,9 @@
 //!   `fetch` clients can read limiter status the gRPC surface only exposes to
 //!   nodes — on the same port as gRPC, so the guardian exposes one interface.
 //!
-//! Nodes call it on a second listener, where the proxy terminates TLS itself and
-//! requires their registered TLS key as a client certificate ([`tls`]).
+//! Nodes call it on a second listener, where the proxy terminates TLS itself,
+//! requires their registered TLS key as a client certificate ([`tls`]), and
+//! serves only node RPCs and guardian info.
 //!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
@@ -54,9 +55,10 @@ pub use node::member_auth::MemberGate;
 
 use crate::log_store::LogStore;
 
-/// Everything the proxy serves, on both listeners: gRPC (forwarder, relay,
-/// health) and the HTTP `/info` + `/health`. `Router::layer` only wraps the
-/// routes added before it, so the member gate goes last.
+/// Everything the proxy serves: gRPC (forwarder, relay, health) and the HTTP
+/// `/info` + `/health`. Both listeners mount it, and the member gate picks what
+/// each one serves. `Router::layer` only wraps the routes added before it, so
+/// the member gate goes last.
 pub fn router<L: LogStore, H: Health>(
     guardian: CachingGuardianGrpc<Forwarding<L>, L>,
     relay: Relay<L>,
@@ -174,18 +176,20 @@ mod tests {
         }
 
         /// The node listener, presenting `key`'s certificate.
-        fn node(&self, key: &ed25519_dalek::SigningKey) -> GuardianServiceClient<Channel> {
+        fn node_channel(&self, key: &ed25519_dalek::SigningKey) -> Channel {
             let tls = ClientTlsConfig::new()
                 .ca_certificate(Certificate::from_pem(&self.cert.cert_pem))
                 .domain_name("localhost")
                 .identity(node_identity(key));
-            GuardianServiceClient::new(
-                Endpoint::from_shared(format!("https://{}", self.node_server.local_addr()))
-                    .unwrap()
-                    .tls_config(tls)
-                    .unwrap()
-                    .connect_lazy(),
-            )
+            Endpoint::from_shared(format!("https://{}", self.node_server.local_addr()))
+                .unwrap()
+                .tls_config(tls)
+                .unwrap()
+                .connect_lazy()
+        }
+
+        fn node(&self, key: &ed25519_dalek::SigningKey) -> GuardianServiceClient<Channel> {
+            GuardianServiceClient::new(self.node_channel(key))
         }
     }
 
@@ -309,6 +313,36 @@ mod tests {
             .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_node_listener_refuses_kp_and_status_routes_even_to_members() {
+        let proxy = spawn_proxy().await;
+        let channel = proxy.node_channel(&member_key());
+
+        let confirm = GuardianServiceClient::new(channel.clone())
+            .confirm_ceremony(proto::SignedCeremonyConfirmationRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(confirm.code(), Code::PermissionDenied);
+        assert!(confirm.message().contains("guardian_url"), "{confirm:?}");
+
+        let relay = GuardianRelayServiceClient::new(channel.clone())
+            .get_provisioning_target_info(proto::GetProvisioningTargetInfoRequest {})
+            .await
+            .unwrap_err();
+        assert_eq!(relay.code(), Code::PermissionDenied);
+
+        let health = HealthClient::new(channel)
+            .check(HealthCheckRequest {
+                service: String::new(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(health.code(), Code::PermissionDenied);
+
+        assert_eq!(proxy.stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
