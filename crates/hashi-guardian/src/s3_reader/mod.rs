@@ -7,6 +7,8 @@
 //! records with their writing session's attestation-anchored key and required
 //! initialization logs, and caches the verified session info for reuse.
 
+use crate::clock::SharedClock;
+use crate::clock::SystemClock;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3::S3HourDirectory;
@@ -25,6 +27,7 @@ use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::info;
 
 mod heartbeat_checks;
@@ -42,12 +45,14 @@ pub use verified::VerifiedSessionInfo;
 /// expected bucket, region, retention environment, and Bitcoin network.
 pub struct GuardianReader {
     s3: GuardianS3Client,
+    clock: SharedClock,
     expected_deployment: DeploymentConfig,
     sessions: HashMap<SessionID, VerifiedSessionInfo>,
 }
 
 impl GuardianReader {
-    /// Create a reader after checking S3 connectivity and object-lock support.
+    /// Create an off-enclave reader using system time, after checking S3 connectivity
+    /// and object-lock support. Enclaves reuse their PTP clock via `from_s3_client`.
     pub async fn new(
         expected_deployment: DeploymentConfig,
         credentials: S3Credentials,
@@ -58,7 +63,11 @@ impl GuardianReader {
             &credentials,
         )
         .await?;
-        Ok(Self::from_s3_client(s3, expected_deployment))
+        Ok(Self::from_s3_client(
+            s3,
+            expected_deployment,
+            Arc::new(SystemClock),
+        ))
     }
 
     /// Reuse the enclave's S3 client, constructed from the same deployment
@@ -66,9 +75,11 @@ impl GuardianReader {
     pub(crate) fn from_s3_client(
         s3: GuardianS3Client,
         expected_deployment: DeploymentConfig,
+        clock: SharedClock,
     ) -> Self {
         Self {
             s3,
+            clock,
             expected_deployment,
             sessions: HashMap::new(),
         }
@@ -501,7 +512,8 @@ pub(crate) fn reader_with_record_for_test(
         config.deployment().retention_environment,
         client,
     );
-    let mut reader = GuardianReader::from_s3_client(s3, config.deployment().clone());
+    let mut reader =
+        GuardianReader::from_s3_client(s3, config.deployment().clone(), Arc::new(SystemClock));
     // Seed the attestation cache; the records still undergo normal signature,
     // object-key, history, and lock verification.
     reader.sessions.insert(
@@ -525,9 +537,13 @@ mod tests {
 
     async fn next(keys: &[&str]) -> GuardianResult<u64> {
         let s3 = mock_logger_with_layout(keys.iter().map(|key| key.to_string()));
-        GuardianReader::from_s3_client(s3, DeploymentConfig::mock_for_testing())
-            .next_sharing_seq()
-            .await
+        GuardianReader::from_s3_client(
+            s3,
+            DeploymentConfig::mock_for_testing(),
+            Arc::new(SystemClock),
+        )
+        .next_sharing_seq()
+        .await
     }
 
     async fn next_after_ceremony(sharing_seq: u64, keys: &[&str]) -> GuardianResult<u64> {
@@ -602,7 +618,11 @@ mod tests {
             std::iter::empty(),
             ["kp-shares/00000000000000000007/00000000000000000000.json".to_string()],
         );
-        let mut reader = GuardianReader::from_s3_client(s3, DeploymentConfig::mock_for_testing());
+        let mut reader = GuardianReader::from_s3_client(
+            s3,
+            DeploymentConfig::mock_for_testing(),
+            Arc::new(SystemClock),
+        );
         assert_eq!(reader.next_sharing_seq().await.unwrap(), 8);
     }
 

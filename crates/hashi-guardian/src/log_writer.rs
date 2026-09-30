@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::clock::SharedClock;
 use crate::s3_client::GuardianS3Client;
 use crate::ACTIVATING_READER_CLOCK_SKEW_BUDGET;
 use crate::OTHER_SESSION_QUIET_PERIOD;
@@ -24,6 +25,7 @@ const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 /// Serializes every Guardian log write and owns the session-heartbeat fence.
 pub(crate) struct LogWriter {
     state: Mutex<LatestHeartbeatTime>,
+    clock: SharedClock,
 }
 
 struct LatestHeartbeatTime(Option<Instant>);
@@ -56,9 +58,10 @@ impl LatestHeartbeatTime {
 }
 
 impl LogWriter {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(clock: SharedClock) -> Self {
         Self {
             state: Mutex::new(LatestHeartbeatTime::new()),
+            clock,
         }
     }
 
@@ -72,7 +75,13 @@ impl LogWriter {
     ) {
         let mut state = self.state.lock().await;
         let write_started_at = Instant::now();
-        let record = LogRecord::new(session_id, message, signing_key);
+        // As with persistence failures, abort rather than leave consumed limiter
+        // state or generated signatures without a durable log.
+        let timestamp = self
+            .clock
+            .now_ms()
+            .expect("Cannot timestamp Guardian S3 log");
+        let record = LogRecord::new_at_timestamp(session_id, message, signing_key, timestamp);
         let deadline = state.next_write_deadline();
 
         write_with_retries(s3, &record, deadline).await;
@@ -227,6 +236,34 @@ mod tests {
         ))))
     }
 
+    #[tokio::test]
+    async fn logs_use_the_supplied_wall_clock() {
+        let (s3, captures) = crate::test_utils::mock_logger_capturing();
+        let writer = LogWriter::new(Arc::new(crate::clock::FixedClock(1_700_000_000_123)));
+        let key = signing_key();
+        writer
+            .write(&s3, session_id(&key), heartbeat(1), &key)
+            .await;
+        let captured = captures.lock().unwrap();
+        let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        assert_eq!(record.timestamp_ms(), 1_700_000_000_123);
+        assert_eq!(captured[0].0, record.object_key());
+    }
+
+    #[tokio::test]
+    async fn clock_failure_panics_before_put() {
+        let (s3, captures) = crate::test_utils::mock_logger_capturing();
+        let writer = LogWriter::new(Arc::new(crate::clock::FailedClock));
+        let task = tokio::spawn(async move {
+            let key = signing_key();
+            writer
+                .write(&s3, session_id(&key), heartbeat(1), &key)
+                .await;
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(captures.lock().unwrap().is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retries_four_failures_then_succeeds() {
         let put_flaky = mock!(Client::put_object)
@@ -241,7 +278,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let writer = LogWriter::new(Arc::new(crate::clock::SystemClock));
         let signing_key = signing_key();
 
         writer
@@ -267,7 +304,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let writer = LogWriter::new(Arc::new(crate::clock::SystemClock));
         let signing_key = signing_key();
 
         writer
@@ -285,7 +322,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let writer = Arc::new(LogWriter::new(Arc::new(crate::clock::SystemClock)));
         let signing_key = Arc::new(signing_key());
         let state_guard = writer.state.lock().await;
 
@@ -321,7 +358,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_fail]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let writer = Arc::new(LogWriter::new(Arc::new(crate::clock::SystemClock)));
         let signing_key = Arc::new(signing_key());
 
         let task = tokio::spawn(async move {
@@ -344,7 +381,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let writer = Arc::new(LogWriter::new(Arc::new(crate::clock::SystemClock)));
         let signing_key = Arc::new(signing_key());
 
         writer
@@ -377,7 +414,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let writer = Arc::new(LogWriter::new(Arc::new(crate::clock::SystemClock)));
         let signing_key = Arc::new(signing_key());
 
         writer
@@ -404,7 +441,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let writer = LogWriter::new(Arc::new(crate::clock::SystemClock));
         let signing_key = signing_key();
 
         writer

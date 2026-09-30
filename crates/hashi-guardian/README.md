@@ -25,6 +25,19 @@ Tooling verifies an independently approved PCR before initialization and the
 signed deployment summary afterward. The revision is a label, not proof of the
 source. The host's S3 forwarders must match the configured bucket and region.
 
+## Guardian wall time
+
+Production startup opens `/dev/ptp0` and requires a successful PTP read before
+creating keys or serving requests. The descriptor stays open for the process
+lifetime. S3 log timestamps, heartbeat scan windows and quietness checks, and
+withdrawal request freshness use this clock directly through `nix`.
+
+There is no system-clock fallback. A failed heartbeat or withdrawal freshness
+read returns an error. A failed log timestamp read follows the writer's existing
+fatal failure policy, because state may already have changed before logging.
+Off-enclave readers and `non-enclave-dev` explicitly use the system clock.
+`Instant` deadlines, AWS SDK signing, and TLS clocks are unchanged.
+
 ## Heartbeat write fencing
 
 Every Guardian S3 log write is serialized. After the first successful
@@ -47,7 +60,7 @@ signed wall-clock timestamp. The fencing argument makes these assumptions:
     boundary. Reader-ahead skew and any post-deadline S3 durability delay share
     that margin; their combined duration must not exhaust it.
   - **Where we make it:** `LogWriter::write` captures the monotonic renewal time
-    immediately before `LogRecord::new` captures the signed wall-clock time, and
+    immediately before reading PTP for the signed wall-clock time, and
     `LatestHeartbeatTime` subtracts the skew budget from the writer's fence.
     Heartbeat readers derive inactivity from the signed timestamp and the full
     quiet period.

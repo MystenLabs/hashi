@@ -43,10 +43,13 @@ async fn main() -> Result<()> {
         );
     }
 
+    let clock = hashi_guardian::clock::initialize_clock()?;
+    info!("Guardian wall clock initialized");
+
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, clock));
 
     // The StandardWithdrawal idempotency cache now lives out-of-enclave in
     // `hashi-guardian-proxy`; the enclave serves the bare handler.

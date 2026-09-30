@@ -197,8 +197,11 @@ pub async fn operator_init(
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
     let withdraw_mode = match withdraw_inputs {
         Some((config, genesis_state)) => {
-            let mut reader =
-                GuardianReader::from_s3_client(logger.clone(), config.deployment().clone());
+            let mut reader = GuardianReader::from_s3_client(
+                logger.clone(),
+                config.deployment().clone(),
+                enclave.clock.clone(),
+            );
             let ceremony_state = reader.read_latest_ceremony_state().await?;
             Some(
                 OIWithdrawModeInstall::from_ceremony_state(
@@ -362,8 +365,11 @@ mod tests {
     async fn bootstrap_installs_supplied_genesis_bindings_and_authorization_hash() {
         // This logger cannot service reads: bootstrap must use the supplied state.
         let args = crate::test_utils::OperatorInitTestArgs::default();
-        let mut reader =
-            GuardianReader::from_s3_client(args.s3_logger, args.config.deployment().clone());
+        let mut reader = GuardianReader::from_s3_client(
+            args.s3_logger,
+            args.config.deployment().clone(),
+            Arc::new(crate::clock::SystemClock),
+        );
         let genesis = GenesisState::mock_for_testing();
         let expected_hash = genesis.digest();
         let (_, object_id, master_g) = genesis.clone().into_parts();
@@ -433,6 +439,7 @@ mod tests {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
+            Arc::new(crate::clock::SystemClock),
         ));
 
         let (logger, captures) = crate::test_utils::mock_logger_capturing();

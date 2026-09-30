@@ -7,7 +7,6 @@ use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::s3::S3HourDirectory;
-use hashi_types::guardian::time::now_timestamp_ms;
 use hashi_types::guardian::time::unix_millis_to_seconds;
 use hashi_types::guardian::time::UnixMillis;
 use hashi_types::guardian::GuardianError::CurrentSessionHeartbeatNotLive;
@@ -85,13 +84,13 @@ impl GuardianReader {
     }
 
     async fn read_recent_heartbeat_summary(&mut self) -> GuardianResult<HeartbeatScan> {
-        let started_at = now_timestamp_ms();
+        let started_at = self.clock.now_ms()?;
         let recent_heartbeats = self.read_recent_heartbeat_logs(started_at).await?;
         let sessions = summarize_heartbeats_by_session(recent_heartbeats)?;
         Ok(HeartbeatScan {
             sessions,
             started_at,
-            completed_at: now_timestamp_ms(),
+            completed_at: self.clock.now_ms()?,
         })
     }
 
@@ -201,6 +200,63 @@ mod tests {
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::LogMessage;
+
+    #[tokio::test]
+    async fn heartbeat_scan_uses_supplied_clock_for_prefixes() {
+        use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
+        use aws_sdk_s3::Client;
+        use aws_smithy_mocks::mock;
+        use aws_smithy_mocks::mock_client;
+        use aws_smithy_mocks::RuleMode;
+        use hashi_types::guardian::DeploymentConfig;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let now_ms = 1_700_000_000_123;
+        let prefixes = Arc::new(Mutex::new(Vec::new()));
+        let seen = prefixes.clone();
+        let list = mock!(Client::list_object_versions)
+            .match_requests(move |req| {
+                seen.lock().unwrap().push(req.prefix().unwrap().to_string());
+                true
+            })
+            .then_output(|| ListObjectVersionsOutput::builder().build());
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list]);
+        let deployment = DeploymentConfig::mock_for_testing();
+        let s3 = crate::s3_client::GuardianS3Client::from_client(
+            deployment.bucket_info.clone(),
+            deployment.retention_environment,
+            client,
+        );
+        let mut reader = GuardianReader::from_s3_client(
+            s3,
+            deployment,
+            Arc::new(crate::clock::FixedClock(now_ms)),
+        );
+        let scan = reader.read_recent_heartbeat_summary().await.unwrap();
+        assert_eq!(scan.started_at, now_ms);
+        assert_eq!(scan.completed_at, now_ms);
+        let mut dir = S3HourDirectory::heartbeat(now_ms / 1_000 - 3_600);
+        let mut expected = Vec::new();
+        for _ in 0..3 {
+            expected.push(dir.to_string());
+            dir = dir.next_dir();
+        }
+        assert_eq!(*prefixes.lock().unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn activation_check_fails_when_clock_is_unavailable() {
+        let mut reader = crate::test_utils::mock_reader(
+            hashi_types::guardian::DeploymentConfig::mock_for_testing(),
+        );
+        reader.clock = std::sync::Arc::new(crate::clock::FailedClock);
+        let result = reader.ensure_session_live_and_others_quiet("session").await;
+        assert!(matches!(
+            result,
+            Err(hashi_types::guardian::GuardianError::Unavailable(_))
+        ));
+    }
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::mock_for_testing("current", 1)

@@ -178,6 +178,7 @@ mod tests {
         Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
+            Arc::new(crate::clock::SystemClock),
         ))
     }
 

@@ -29,6 +29,7 @@ const _: () = assert!(
 
 pub mod attestation;
 pub mod ceremony_mode;
+pub mod clock;
 pub mod enclave;
 pub mod info;
 mod log_writer;

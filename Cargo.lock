@@ -488,7 +488,7 @@ source = "git+https://github.com/aws/aws-nitro-enclaves-nsm-api.git/?rev=8ec7eac
 dependencies = [
  "libc",
  "log",
- "nix",
+ "nix 0.26.4",
  "serde",
  "serde_bytes",
  "serde_cbor",
@@ -2200,7 +2200,7 @@ dependencies = [
  "hashi",
  "hashi-guardian",
  "hashi-types",
- "nix",
+ "nix 0.26.4",
  "prometheus",
  "rand 0.8.5",
  "reqwest",
@@ -3057,6 +3057,7 @@ dependencies = [
  "hex",
  "hpke",
  "k256",
+ "nix 0.31.3",
  "rand 0.8.5",
  "serde",
  "serde_bytes",
@@ -3911,9 +3912,9 @@ checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
 
 [[package]]
 name = "libc"
-version = "0.2.184"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libm"
@@ -4271,6 +4272,18 @@ dependencies = [
  "libc",
  "memoffset",
  "pin-utils",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.11.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

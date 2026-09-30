@@ -48,7 +48,11 @@ pub fn mock_logger() -> GuardianS3Client {
 
 /// A reader over `mock_logger`, for tests that never read from it.
 pub fn mock_reader(expected_deployment: DeploymentConfig) -> GuardianReader {
-    GuardianReader::from_s3_client(mock_logger(), expected_deployment)
+    GuardianReader::from_s3_client(
+        mock_logger(),
+        expected_deployment,
+        Arc::new(crate::clock::SystemClock),
+    )
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -392,7 +396,11 @@ impl Enclave {
     pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys))
+        Arc::new(Enclave::new(
+            signing_keys,
+            encryption_keys,
+            Arc::new(crate::clock::SystemClock),
+        ))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().

@@ -31,6 +31,7 @@ use std::time::Duration;
 use tokio::sync::OwnedMutexGuard;
 use tracing::info;
 
+use crate::clock::SharedClock;
 use crate::log_writer::LogWriter;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;
@@ -51,6 +52,7 @@ pub struct Enclave {
     pending_ceremony: OnceLock<PendingCeremony>,
     /// Serializes and fences every S3 log write from this enclave session.
     log_writer: LogWriter,
+    pub(crate) clock: SharedClock,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -417,7 +419,11 @@ impl Enclave {
     // Construction
     // ========================================================================
 
-    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
+    pub fn new(
+        signing_keys: GuardianSignKeyPair,
+        encryption_keys: GuardianEncKeyPair,
+        clock: SharedClock,
+    ) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
@@ -429,7 +435,8 @@ impl Enclave {
             temporary_init_state: RwLock::new(None),
             pending_ceremony: OnceLock::new(),
             control_lock: tokio::sync::Mutex::new(()),
-            log_writer: LogWriter::new(),
+            log_writer: LogWriter::new(clock.clone()),
+            clock,
         }
     }
 
@@ -799,6 +806,7 @@ impl Enclave {
         Ok(GuardianReader::from_s3_client(
             self.config.s3_logger()?.clone(),
             self.config.deployment()?.clone(),
+            self.clock.clone(),
         ))
     }
 

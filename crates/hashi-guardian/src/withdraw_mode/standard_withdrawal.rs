@@ -3,7 +3,6 @@
 
 use super::verify_hashi_cert;
 use crate::Enclave;
-use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -42,7 +41,7 @@ pub async fn standard_withdrawal(
     //    The returned guard holds the mutex — no other withdrawal can proceed
     //    until this one is durably logged or the enclave aborts.
     //
-    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
+    validate_request_timestamp(request.timestamp_secs(), enclave.clock.now_secs()?)?;
 
     info!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
@@ -120,6 +119,7 @@ mod tests {
     use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::HashiMasterG;
     use hashi_types::bitcoin::BTC_LIB;
+    use hashi_types::guardian::now_timestamp_secs;
     use hashi_types::guardian::EnclaveLifecycle;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
@@ -184,6 +184,39 @@ mod tests {
 
         assert!(enclave.require_fully_initialized().is_ok());
         (enclave, captures)
+    }
+
+    #[tokio::test]
+    async fn freshness_uses_enclave_clock_and_propagates_read_failure() {
+        for clock in [
+            Arc::new(crate::clock::FixedClock(1_700_000_000_000)) as crate::clock::SharedClock,
+            Arc::new(crate::clock::FailedClock),
+        ] {
+            let (request, committee) =
+                StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                    Network::Regtest,
+                    WithdrawalID::new([0x44; 32]),
+                    1_700_000_000 + MAX_CLOCK_SKEW_SECS + 1,
+                    0,
+                );
+            let amount = request.message().utxos().gross_outflow_amount().to_sat();
+            let (mut enclave, captures) =
+                setup_fully_initialized_enclave(Network::Regtest, committee, amount).await;
+            // Only the freshness clock is changed: both cases must reject before logging.
+            let unavailable = clock.now_ms().is_err();
+            Arc::get_mut(&mut enclave).unwrap().clock = clock;
+            let before = enclave.state.limiter_snapshot();
+            let result = standard_withdrawal(enclave.clone(), request).await;
+            if unavailable {
+                assert!(matches!(result, Err(GuardianError::Unavailable(_))));
+            } else {
+                assert!(
+                    matches!(result, Err(InvalidInputs(message)) if message.contains("too far in the future"))
+                );
+            }
+            assert_eq!(enclave.state.limiter_snapshot(), before);
+            assert!(captures.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
