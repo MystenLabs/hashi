@@ -24,21 +24,78 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+/// Runtime-object budget for one GC transaction. Sui admits at most 1000
+/// child objects into a transaction's object-runtime cache
+/// (`object_runtime_max_num_cached_objects`); the next dynamic-field load
+/// fails with `MovePrimitiveRuntimeError` inside `sui::dynamic_field`. A
+/// probe of an absent key counts like a load. The leader only submits what
+/// simulates, so an oversized sweep never lands, and because every sweep
+/// picks the oldest victims it retries the same batch forever: the backlog
+/// grows and the GC never recovers on its own. Same budget as the withdrawal
+/// flow: 922 leaves 7.8% headroom below the hard cap.
+const GC_RUNTIME_OBJECT_BUDGET: usize =
+    crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET;
+
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60; // 1 minute
-const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
+
+/// Runtime-object cost of `deposit::delete_expired_deposit`: the
+/// `BitcoinState` dynamic field once per transaction, then per request the
+/// `processed` probe (one `Field`) and the `requests` ObjectBag remove
+/// (`Field` plus child). Measured on testnet against the deployed package:
+/// a PTB of 333 deletions simulates, 334 fails on its 1000th load.
+const DEPOSIT_DELETE_FIXED_RUNTIME_OBJECTS: usize = 1;
+const DEPOSIT_DELETE_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
+const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = (GC_RUNTIME_OBJECT_BUDGET
+    - DEPOSIT_DELETE_FIXED_RUNTIME_OBJECTS)
+    / DEPOSIT_DELETE_RUNTIME_OBJECTS_PER_REQUEST;
 
 const MAX_PROPOSAL_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
 const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 
-// Cap how many proposals we delete per GC so the `delete_expired` PTB stays within Sui's
-// 1024-command-per-PTB ceiling. A larger backlog drains over successive checkpoints, oldest first.
-// Mirrors `MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC`.
-const MAX_PROPOSAL_DELETIONS_PER_GC: usize = 500;
+/// Runtime-object cost of `proposal::delete_expired`, one command per
+/// proposal: the `executed` probe (one `Field`) and the `active` ObjectBag
+/// remove (`Field` plus child). The bags hang off a plain `Hashi` field, so
+/// nothing is loaded up front; the fixed term is slack. Modeled, not
+/// measured: same shape as the deposit delete.
+const PROPOSAL_DELETE_FIXED_RUNTIME_OBJECTS: usize = 1;
+const PROPOSAL_DELETE_RUNTIME_OBJECTS_PER_PROPOSAL: usize = 3;
+const MAX_PROPOSAL_DELETIONS_PER_GC: usize = (GC_RUNTIME_OBJECT_BUDGET
+    - PROPOSAL_DELETE_FIXED_RUNTIME_OBJECTS)
+    / PROPOSAL_DELETE_RUNTIME_OBJECTS_PER_PROPOSAL;
 
-// Cap the orphan scan so one cleanup task stays bounded; a larger backlog
-// drains over successive checkpoints. Mirrors the two caps above.
-const MAX_UTXO_CLEANUPS_PER_GC: usize = 500;
+/// Runtime-object cost of `cleanup_spent_utxos`, one command for the whole
+/// batch: the `BitcoinState` dynamic field once, then per UTXO the
+/// `utxo_records` probe (one `Field`; the remove reuses the cache) and the
+/// `spent_utxos` add, whose existence check probes one more `Field`.
+/// Modeled, not measured: at the old cap of 500 the last add would be the
+/// 1000th load.
+const UTXO_CLEANUP_FIXED_RUNTIME_OBJECTS: usize = 1;
+const UTXO_CLEANUP_RUNTIME_OBJECTS_PER_UTXO: usize = 2;
+const MAX_UTXO_CLEANUPS_PER_GC: usize = (GC_RUNTIME_OBJECT_BUDGET
+    - UTXO_CLEANUP_FIXED_RUNTIME_OBJECTS)
+    / UTXO_CLEANUP_RUNTIME_OBJECTS_PER_UTXO;
+
+/// Sui's hard object-runtime cache limit, and the testnet measurement the
+/// deposit model has to reproduce: 333 deletions fit, 334 do not. A change
+/// to either deposit coefficient must come with a new measurement.
+const SUI_OBJECT_RUNTIME_CACHE_LIMIT: usize = 1000;
+const _: () = assert!(
+    DEPOSIT_DELETE_FIXED_RUNTIME_OBJECTS + DEPOSIT_DELETE_RUNTIME_OBJECTS_PER_REQUEST * 333
+        <= SUI_OBJECT_RUNTIME_CACHE_LIMIT
+);
+const _: () = assert!(
+    DEPOSIT_DELETE_FIXED_RUNTIME_OBJECTS + DEPOSIT_DELETE_RUNTIME_OBJECTS_PER_REQUEST * 334
+        > SUI_OBJECT_RUNTIME_CACHE_LIMIT
+);
+const _: () = assert!(GC_RUNTIME_OBJECT_BUDGET < SUI_OBJECT_RUNTIME_CACHE_LIMIT);
+
+/// Sui's per-PTB command ceiling. The per-command sweeps above are bound by
+/// the object budget first; this pins the ordering so a cheaper Move path
+/// cannot push a cap past the command limit unnoticed.
+const MAX_PTB_COMMANDS: usize = 1024;
+const _: () = assert!(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC <= MAX_PTB_COMMANDS);
+const _: () = assert!(MAX_PROPOSAL_DELETIONS_PER_GC <= MAX_PTB_COMMANDS);
 
 // Cap how many TOB cert buckets one prune sweep destroys. Lower than the
 // caps above because each destroyed bucket is much heavier than one deleted
@@ -948,6 +1005,23 @@ mod tests {
         assert_eq!(
             deposit_request_expiration_timestamp_ms(&malformed),
             100 + MAX_DEPOSIT_REQUEST_AGE_MS
+        );
+    }
+
+    #[test]
+    fn expired_deposit_scan_is_capped_per_gc() {
+        let now = 10 * MAX_DEPOSIT_REQUEST_AGE_MS;
+        let requests: Vec<DepositRequest> = (0..MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC as u64 + 7)
+            .map(|i| deposit_request(i, i, None))
+            .collect();
+
+        let result = find_expired_deposit_requests(requests, now);
+        assert_eq!(result.len(), MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC);
+        // oldest first, so the overflow that waits for the next sweep is the youngest
+        assert_eq!(result[0].created_timestamp_ms, 0);
+        assert_eq!(
+            result[result.len() - 1].created_timestamp_ms,
+            MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC as u64 - 1
         );
     }
 
