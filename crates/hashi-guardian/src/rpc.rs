@@ -96,9 +96,15 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
 
     async fn get_attested_guardian_info(
         &self,
-        _request: Request<proto::GetAttestedGuardianInfoRequest>,
+        request: Request<proto::GetAttestedGuardianInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone())
+        let nonce = request
+            .into_inner()
+            .nonce
+            .as_ref()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("attestation nonce must be exactly 32 bytes"))?;
+        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone(), nonce)
             .await
             .map_err(to_status)?;
         Ok(Response::new(
@@ -322,6 +328,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attested_info_requires_a_32_byte_nonce() {
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_with_random_keys(),
+        };
+        for len in [0, 31, 33, 513] {
+            let error = rpc
+                .get_attested_guardian_info(Request::new(proto::GetAttestedGuardianInfoRequest {
+                    nonce: vec![9; len].into(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[tokio::test]
     async fn guardian_info_rpcs_separate_attestation_from_ordinary_info() {
         let enclave = Enclave::create_with_random_keys();
         let expected_info = enclave.info().await;
@@ -332,7 +354,9 @@ mod tests {
         for include_attestation in [false, true] {
             let response = if include_attestation {
                 rpc.get_attested_guardian_info(Request::new(
-                    proto::GetAttestedGuardianInfoRequest {},
+                    proto::GetAttestedGuardianInfoRequest {
+                        nonce: vec![9; 32].into(),
+                    },
                 ))
                 .await
             } else {

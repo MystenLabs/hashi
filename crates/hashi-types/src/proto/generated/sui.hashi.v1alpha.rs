@@ -1354,8 +1354,12 @@ pub mod bridge_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetProvisioningTargetInfoRequest {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetProvisioningTargetInfoRequest {
+    /// Required 32-byte challenge chosen by the caller and echoed in the attestation.
+    #[prost(bytes = "bytes", tag = "1")]
+    pub nonce: ::prost::bytes::Bytes,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SingleProvisionerInitResponse {
     /// Distinct shares the relay now holds for the current session.
@@ -1803,8 +1807,12 @@ pub mod guardian_relay_service_server {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetGuardianInfoRequest {}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetAttestedGuardianInfoRequest {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAttestedGuardianInfoRequest {
+    /// Required 32-byte challenge chosen by the caller and echoed in the attestation.
+    #[prost(bytes = "bytes", tag = "1")]
+    pub nonce: ::prost::bytes::Bytes,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation document; present only for attested info RPCs.

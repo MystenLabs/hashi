@@ -131,9 +131,23 @@ The proxy caches these responses for one second; the public HTTP `/info` view
 keeps its separate configurable cache.
 
 KPs and operators use `GetAttestedGuardianInfo` to receive signed guardian state
-alongside a fresh Nitro attestation. Attested responses are never cached.
+alongside a fresh Nitro attestation. Both attested-query RPCs require a 32-byte
+`nonce` chosen by the caller. KP/operator clients generate a fresh cryptographically
+random nonce for each query and retain it for verification; the relay forwards it
+unchanged. Attested responses are never cached.
+
 `GetProvisioningTargetInfo` forwards to that RPC on the provisioning guardian
 (the standby when configured, otherwise the active guardian), also without caching.
+
+The attestation's `public_key` is the guardian signing key, `nonce` is the caller's
+challenge, and `user_data` is the 32-byte Blake2b-256 digest of the BCS-serialized
+`GuardianInfo` returned in the signed response. The enclave captures the info once
+and uses that same snapshot for the attestation and signature. Live verification
+checks the nonce and recomputed info digest as well as the signature, certificate
+chain, public key, and PCR pin. Missing or mismatched bindings are rejected.
+
+The operator-init attestation stored in S3 remains a signing-key/PCR pin without
+live query bindings. Its generation and replay verification are unchanged.
 
 The distinct RPC paths allow deployments to restrict attestation queries while
 leaving ordinary info public. The proxy does not itself add authentication for
@@ -141,8 +155,8 @@ these queries: an access policy must cover both `GetAttestedGuardianInfo` and
 `GetProvisioningTargetInfo`.
 
 Clients that previously set `include_attestation` on `GetGuardianInfo` must switch
-to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation. Upgrade the guardian and proxy before
-switching KP/operator clients to the new RPC.
+to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation.
+Upgrade the guardian and proxy before switching KP/operator clients to the new RPC.
 
 ## Withdraw-mode provisioning flow
 

@@ -25,6 +25,7 @@ use crate::withdraw_mode::provisioner_init as provisioner_init_domain;
 use crate::withdraw_mode::provisioner_rotate_cert as provisioner_rotate_cert_domain;
 use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
+use hashi_types::guardian::AttestationNonce;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
@@ -52,16 +53,17 @@ use std::sync::Arc;
 /// Withdrawals publish their limiter snapshot separately after durable logging.
 pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(false, info::get_guardian_info)
+        .spawn_control_task(None, info::get_guardian_info)
         .await
 }
 
 /// Generate a fresh attestation under the same control lock as ordinary info reads.
 pub async fn get_attested_guardian_info(
     enclave: Arc<Enclave>,
+    nonce: AttestationNonce,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(true, info::get_guardian_info)
+        .spawn_control_task(Some(nonce), info::get_guardian_info)
         .await
 }
 

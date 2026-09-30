@@ -26,7 +26,10 @@ service GuardianRelayService {
   rpc GetProvisioningTargetInfo(GetProvisioningTargetInfoRequest) returns (GetGuardianInfoResponse);
 }
 
-message GetProvisioningTargetInfoRequest {}
+message GetProvisioningTargetInfoRequest {
+  // Required 32-byte challenge chosen by the caller and echoed in the attestation.
+  bytes nonce = 1;
+}
 
 message SingleProvisionerInitResponse {
   // Distinct shares the relay now holds for the current session.

@@ -5,9 +5,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-#[cfg(not(any(test, feature = "non-enclave-dev")))]
+#[cfg(any(test, not(feature = "non-enclave-dev")))]
 use crate::guardian::CryptoVerificationError;
 use crate::guardian::CryptoVerificationResult;
+use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::errors::GuardianError::BuildNotAllowlisted;
@@ -22,6 +23,44 @@ pub type GitRevision = String;
 // Nitro Enclave PCR0 uses SHA-384 (384 bits / 8 = 48 bytes).
 // https://github.com/aws/aws-nitro-enclaves-image-format#eif-measurements
 pub(crate) const NITRO_PCR0_LEN: usize = 48;
+
+/// Caller-chosen challenge for one live guardian-info query.
+pub type AttestationNonce = [u8; 32];
+
+/// Live query bindings carried in Nitro's `user_data` and `nonce` fields.
+#[derive(Debug, Clone, Copy)]
+pub struct AttestationBindings {
+    pub guardian_info_hash: [u8; 32],
+    pub nonce: AttestationNonce,
+}
+
+impl AttestationBindings {
+    pub fn new(info: &GuardianInfo, nonce: AttestationNonce) -> Self {
+        Self {
+            guardian_info_hash: info.digest(),
+            nonce,
+        }
+    }
+
+    #[cfg(any(test, not(feature = "non-enclave-dev")))]
+    fn verify(
+        &self,
+        user_data: Option<&[u8]>,
+        nonce: Option<&[u8]>,
+    ) -> CryptoVerificationResult<()> {
+        if user_data != Some(self.guardian_info_hash.as_slice()) {
+            return Err(CryptoVerificationError::new(
+                "attestation user_data does not match the guardian info hash",
+            ));
+        }
+        if nonce != Some(self.nonce.as_slice()) {
+            return Err(CryptoVerificationError::new(
+                "attestation nonce does not match the caller's challenge",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,7 +77,9 @@ impl NitroAttestation {
 
     /// Verify a LIVE attestation document (COSE signature + AWS cert chain to the
     /// Nitro root, chain validity checked at the current time), that it commits to
-    /// `signing_pubkey`, and that its PCR0 matches `build_pcrs`.
+    /// `signing_pubkey`, and that its PCR0 matches `build_pcrs`. Live info queries
+    /// also require `bindings`; operator-init's locally generated signing-key/PCR
+    /// pin has no caller challenge and passes `None`.
     ///
     /// In non-enclave dev/test builds the enclave emits a mock document, so the
     /// attestation check is a no-op, mirroring `get_attestation` `non-enclave-dev`
@@ -47,8 +88,9 @@ impl NitroAttestation {
         &self,
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
+        bindings: Option<&AttestationBindings>,
     ) -> CryptoVerificationResult<()> {
-        self.verify_at(signing_pubkey, build_pcrs, VerifyTime::Now)
+        self.verify_at(signing_pubkey, build_pcrs, VerifyTime::Now, bindings)
     }
 
     /// Verify a REPLAYED attestation document read back from the S3 audit log.
@@ -63,7 +105,12 @@ impl NitroAttestation {
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
     ) -> CryptoVerificationResult<()> {
-        self.verify_at(signing_pubkey, build_pcrs, VerifyTime::DocumentTimestamp)
+        self.verify_at(
+            signing_pubkey,
+            build_pcrs,
+            VerifyTime::DocumentTimestamp,
+            None,
+        )
     }
 
     fn verify_at(
@@ -71,10 +118,11 @@ impl NitroAttestation {
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
         verify_time: VerifyTime,
+        bindings: Option<&AttestationBindings>,
     ) -> CryptoVerificationResult<()> {
         #[cfg(any(test, feature = "non-enclave-dev"))]
         {
-            let _ = (signing_pubkey, build_pcrs, verify_time);
+            let _ = (signing_pubkey, build_pcrs, verify_time, bindings);
             // Real attestation is stubbed here — announce it loudly (once) so a
             // `non-enclave-dev` binary can't be mistaken for a real enclave.
             // Gated off `test` so unit tests stay quiet.
@@ -116,6 +164,10 @@ impl NitroAttestation {
                 return Err(CryptoVerificationError::new(
                     "attestation public_key does not match the session signing pubkey",
                 ));
+            }
+
+            if let Some(bindings) = bindings {
+                bindings.verify(doc.user_data.as_deref(), doc.nonce.as_deref())?;
             }
 
             // Pin PCR0 (the whole EIF image hash).
@@ -303,6 +355,45 @@ impl<'de> Deserialize<'de> for PcrAllowlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_bindings_require_both_info_hash_and_challenge() {
+        let info = GuardianInfo::mock_for_testing();
+        let bindings = AttestationBindings::new(&info, [9; 32]);
+        let hash = bindings.guardian_info_hash;
+        let nonce = bindings.nonce;
+        bindings.verify(Some(&hash), Some(&nonce)).unwrap();
+
+        for user_data in [None, Some([0; 32].as_slice()), Some(&hash[..31])] {
+            let error = bindings.verify(user_data, Some(&nonce)).unwrap_err();
+            assert!(error.to_string().contains("user_data"));
+        }
+        for challenge in [None, Some([8; 32].as_slice()), Some(&nonce[..31])] {
+            let error = bindings.verify(Some(&hash), challenge).unwrap_err();
+            assert!(error.to_string().contains("nonce"));
+        }
+    }
+
+    #[test]
+    fn an_attestation_cannot_be_reused_for_different_info_or_a_new_challenge() {
+        let info = GuardianInfo::mock_for_testing();
+        let original = AttestationBindings::new(&info, [9; 32]);
+        let mut changed = info.clone();
+        changed.encryption_pubkey[0] ^= 1;
+        let changed_info = AttestationBindings::new(&changed, original.nonce);
+        assert!(
+            changed_info
+                .verify(Some(&original.guardian_info_hash), Some(&original.nonce))
+                .is_err()
+        );
+
+        let new_query = AttestationBindings::new(&info, [10; 32]);
+        assert!(
+            new_query
+                .verify(Some(&original.guardian_info_hash), Some(&original.nonce))
+                .is_err()
+        );
+    }
 
     #[test]
     fn pcr_serialization_round_trips_json_and_preserves_binary_commitments() {

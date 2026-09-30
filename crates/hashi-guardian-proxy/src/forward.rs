@@ -192,6 +192,7 @@ mod tests {
                 request.metadata().get("x-attestation-test").unwrap(),
                 "forwarded"
             );
+            assert_eq!(request.get_ref().nonce.as_ref(), &[9; 32]);
             let call = self
                 .get_attested_guardian_info_calls
                 .fetch_add(1, Ordering::SeqCst);
@@ -379,7 +380,9 @@ mod tests {
                 .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
                 .await
                 .unwrap();
-            let mut request = Request::new(proto::GetAttestedGuardianInfoRequest {});
+            let mut request = Request::new(proto::GetAttestedGuardianInfoRequest {
+                nonce: vec![9; 32].into(),
+            });
             request
                 .metadata_mut()
                 .insert("x-attestation-test", "forwarded".parse().unwrap());

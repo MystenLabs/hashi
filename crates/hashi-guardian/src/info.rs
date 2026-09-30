@@ -9,22 +9,30 @@ use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 
-/// Return signed guardian info, optionally attesting the enclave's signing public key.
+/// Return signed info, optionally binding it and the caller's nonce into an attestation.
 pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
-    include_attestation: bool,
+    nonce: Option<AttestationNonce>,
 ) -> GuardianResult<GetGuardianInfoResponse> {
-    info!(include_attestation, "/get_guardian_info - Received request");
+    info!(
+        include_attestation = nonce.is_some(),
+        "/get_guardian_info - Received request"
+    );
 
     let signing_pub_key = enclave.signing_pubkey();
-    let attestation = if include_attestation {
-        Some(get_attestation(&signing_pub_key)?)
-    } else {
-        None
-    };
+    // Attest and sign the same snapshot, including fields updated by withdrawals.
+    let info = enclave.info().await;
+    let attestation = nonce
+        .map(|nonce| {
+            get_attestation(
+                &signing_pub_key,
+                Some(&AttestationBindings::new(&info, nonce)),
+            )
+        })
+        .transpose()?;
     Ok(GetGuardianInfoResponse::new(
         attestation,
         signing_pub_key,
-        enclave.sign(enclave.info().await),
+        enclave.sign(info),
     ))
 }

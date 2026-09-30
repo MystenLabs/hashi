@@ -889,12 +889,14 @@ impl GetGuardianInfoResponse {
     /// - initialized sessions report the expected deployment revision;
     /// - the Nitro attestation is present and has a valid signature;
     /// - the certificate chain is valid now;
-    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`;
+    /// - `user_data` commits to this exact info, and `nonce` matches the caller's challenge.
     ///
     /// Callers check whether the verified lifecycle is appropriate for their operation.
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,
+        expected_nonce: &AttestationNonce,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
         let info = self
             .signed_info
@@ -922,7 +924,11 @@ impl GetGuardianInfoResponse {
         self.attestation
             .as_ref()
             .ok_or_else(|| CryptoVerificationError::new("missing guardian attestation"))?
-            .verify_live(&self.signing_pub_key, expected_build)?;
+            .verify_live(
+                &self.signing_pub_key,
+                expected_build,
+                Some(&AttestationBindings::new(&info, *expected_nonce)),
+            )?;
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
@@ -1084,7 +1090,7 @@ mod tests {
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert_eq!(
-            resp.verify_live(&BuildPcrs::mock_for_testing("test-revision", 1))
+            resp.verify_live(&BuildPcrs::mock_for_testing("test-revision", 1), &[9; 32])
                 .unwrap_err()
                 .to_string(),
             "signature invalid"
@@ -1105,7 +1111,7 @@ mod tests {
 
         assert_eq!(
             response
-                .verify_live(&BuildPcrs::mock_for_testing("approved", 1))
+                .verify_live(&BuildPcrs::mock_for_testing("approved", 1), &[9; 32])
                 .unwrap_err()
                 .to_string(),
             "missing guardian attestation",
@@ -1126,17 +1132,25 @@ mod tests {
         let mut info = GuardianInfo::mock_for_testing();
         info.lifecycle = None;
         info.deployment_info = None;
-        assert!(response(info.clone()).verify_live(&build).is_ok());
+        assert!(response(info.clone()).verify_live(&build, &[9; 32]).is_ok());
         let mut deployment = DeploymentConfig::mock_for_testing().summary();
         deployment.git_revision = "approved".into();
         info.deployment_info = Some(deployment);
-        assert!(response(info.clone()).verify_live(&build).is_err());
+        assert!(
+            response(info.clone())
+                .verify_live(&build, &[9; 32])
+                .is_err()
+        );
         info.lifecycle = CeremonyStage::OperatorInitialized.into();
-        assert!(response(info.clone()).verify_live(&build).is_ok());
+        assert!(response(info.clone()).verify_live(&build, &[9; 32]).is_ok());
         info.deployment_info.as_mut().unwrap().git_revision = "wrong-label".into();
-        assert!(response(info.clone()).verify_live(&build).is_err());
+        assert!(
+            response(info.clone())
+                .verify_live(&build, &[9; 32])
+                .is_err()
+        );
         info.deployment_info = None;
-        assert!(response(info).verify_live(&build).is_err());
+        assert!(response(info).verify_live(&build, &[9; 32]).is_err());
     }
 
     #[test]

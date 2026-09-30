@@ -61,6 +61,11 @@ impl DeploymentConfig {
 }
 
 impl GuardianInfo {
+    /// Blake2b-256 of BCS-serialized guardian info, committed by live attestations.
+    pub fn digest(&self) -> [u8; 32] {
+        Blake2b::<U32>::digest(bcs::to_bytes(self).expect("serializable guardian info")).into()
+    }
+
     pub fn deployment_info(&self) -> GuardianResult<&DeploymentConfigSummary> {
         self.deployment_info
             .as_ref()

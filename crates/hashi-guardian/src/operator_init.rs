@@ -179,11 +179,12 @@ pub async fn operator_init(
             )
         }
     };
-    let attestation = get_attestation(&enclave.signing_pubkey())?;
+    let attestation = get_attestation(&enclave.signing_pubkey(), None)?;
     attestation
         .verify_live(
             &enclave.signing_pubkey(),
             deployment.pcr_allowlist.current_build(),
+            None,
         )
         .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
     let logger = GuardianS3Client::new_with_custom_resolver(
@@ -451,7 +452,7 @@ mod tests {
             EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
-        let attestation = get_attestation(&enclave.signing_pubkey()).unwrap();
+        let attestation = get_attestation(&enclave.signing_pubkey(), None).unwrap();
         let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
         commit_operator_init(&enclave, install).await;
         (enclave, captures)

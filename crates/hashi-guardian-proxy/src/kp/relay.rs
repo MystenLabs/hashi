@@ -241,13 +241,15 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         &self,
         request: Request<proto::GetProvisioningTargetInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let (metadata, extensions, _) = request.into_parts();
+        let (metadata, extensions, request) = request.into_parts();
         self.client
             .clone()
             .get_attested_guardian_info(Request::from_parts(
                 metadata,
                 extensions,
-                proto::GetAttestedGuardianInfoRequest {},
+                proto::GetAttestedGuardianInfoRequest {
+                    nonce: request.nonce,
+                },
             ))
             .await
     }
@@ -561,8 +563,9 @@ mod tests {
         }
         async fn get_attested_guardian_info(
             &self,
-            _: Request<proto::GetAttestedGuardianInfoRequest>,
+            request: Request<proto::GetAttestedGuardianInfoRequest>,
         ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            assert_eq!(request.get_ref().nonce.as_ref(), &[9; 32]);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Response::new(proto::GetGuardianInfoResponse {
                 signing_pub_key: Some(vec![self.tag; 32].into()),
@@ -662,7 +665,9 @@ mod tests {
         let relay = relay_fronting(TaggedGuardian::new(0xB)).await;
 
         let info = relay
-            .get_provisioning_target_info(Request::new(proto::GetProvisioningTargetInfoRequest {}))
+            .get_provisioning_target_info(Request::new(proto::GetProvisioningTargetInfoRequest {
+                nonce: vec![9; 32].into(),
+            }))
             .await
             .unwrap()
             .into_inner();
@@ -679,7 +684,9 @@ mod tests {
         for _ in 0..5 {
             let info = relay
                 .get_provisioning_target_info(Request::new(
-                    proto::GetProvisioningTargetInfoRequest {},
+                    proto::GetProvisioningTargetInfoRequest {
+                        nonce: vec![9; 32].into(),
+                    },
                 ))
                 .await
                 .unwrap()

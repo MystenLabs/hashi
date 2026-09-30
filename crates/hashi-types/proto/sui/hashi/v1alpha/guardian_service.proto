@@ -51,7 +51,10 @@ service GuardianService {
 
 message GetGuardianInfoRequest {}
 
-message GetAttestedGuardianInfoRequest {}
+message GetAttestedGuardianInfoRequest {
+  // Required 32-byte challenge chosen by the caller and echoed in the attestation.
+  bytes nonce = 1;
+}
 
 message GetGuardianInfoResponse {
   reserved 4;
