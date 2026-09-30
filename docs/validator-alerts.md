@@ -29,6 +29,8 @@ Two principles shape this list:
 | Crash looping           | `changes(process_start_time_seconds{job="<your-node>"}[1h]) > 3`      | Uses the standard process exporter if you run one; any restart-count source works.                                                                                                                                        |
 | Previous shares missing | `increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0`  | The node owed shares to a rotation and had none, so its weight did not reach the new key.                                                                                                                                 |
 | Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
+| Withdrawal fails bitcoind | `increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0` | Your bitcoind says a signed withdrawal is invalid. If other operators see it too, withdrawals are broken: raise it in the operator channel. If only you see it, check your bitcoind. |
+| Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
 
 Dashboard-worthy but **not** alerts:
 
@@ -46,6 +48,10 @@ Dashboard-worthy but **not** alerts:
 - `hashi_deposit_outpoint_confirmations{status="not_found"}` — expected for
   unbroadcast transactions. It is suspicious only when your node reports it
   while peers report confirmations for the same deposits.
+- `hashi_withdrawal_bitcoin_check_total{result="unavailable"}` and
+  `hashi_withdrawal_bitcoin_check_latency_seconds` — finalize checks that got
+  no answer in time, and how long answers take. A steady share of
+  `unavailable` means the check is not running; `rejected_other` is normal.
 
 ## What NOT to alert on
 
@@ -72,6 +78,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
 | `hashi_withdrawal_commitment_left_out_total` | node (counts only while leading) |
 | `hashi_db_*` | node |
+| `hashi_withdrawal_bitcoin_check_*` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

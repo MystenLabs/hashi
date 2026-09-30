@@ -129,3 +129,25 @@ groups:
             until operators coordinate a fix. Honest nodes never trigger this.
             Never add a complaint-response-policy entry on your own: one wrong
             entry can leak your shares.
+
+      - alert: HashiWithdrawalFailsBitcoinScripts
+        expr: increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "bitcoind says a signed withdrawal is invalid"
+          description: >-
+            If other operators see it too, withdrawals are broken: raise it in
+            the operator channel. Otherwise check this node's bitcoind.
+
+      - alert: HashiWithdrawalCheckBlind
+        expr: hashi_withdrawal_bitcoin_check_blind == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "withdrawal check is blind"
+          description: >-
+            This node's bitcoind cannot check withdrawals, so the node signs
+            them unchecked. Usually testmempoolaccept is not allowed on the RPC
+            endpoint; see the error log.
