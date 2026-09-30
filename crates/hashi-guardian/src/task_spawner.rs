@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// Withdrawals publish their limiter snapshot separately after durable logging.
 pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(None, info::get_guardian_info)
+        .spawn_control_task((), |enclave, ()| info::get_guardian_info(enclave))
         .await
 }
 
@@ -63,7 +63,7 @@ pub async fn get_attested_guardian_info(
     nonce: AttestationNonce,
 ) -> GuardianResult<GetGuardianInfoResponse> {
     enclave
-        .spawn_control_task(Some(nonce), info::get_guardian_info)
+        .spawn_control_task(nonce, info::get_attested_guardian_info)
         .await
 }
 
