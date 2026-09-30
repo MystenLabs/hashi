@@ -472,6 +472,7 @@ mod tests {
         };
         let guardian = GuardianConfig {
             url: "http://guardian.invalid".to_owned(),
+            node_url: "http://node.guardian.invalid".to_owned(),
             btc_public_key: vec![0; 32],
         };
         let err = build_finish_publish_tx(
