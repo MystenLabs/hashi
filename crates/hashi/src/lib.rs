@@ -23,6 +23,7 @@ pub mod constants;
 pub mod db;
 pub(crate) mod deposit_tracker;
 pub mod deposits;
+pub mod finalize_bitcoin_check;
 pub mod grpc;
 pub mod guardian_limiter;
 pub mod keys;
@@ -72,6 +73,7 @@ pub struct Hashi {
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// The last guardian-finalized withdrawal and the guardian seq read since, for pacing.
     guardian_pacing: RwLock<guardian_limiter::FinalizePacing>,
+    finalize_bitcoin_check: Arc<finalize_bitcoin_check::FinalizeBitcoinCheck>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
     reported_registration_aborts: RwLock<HashSet<String>>,
@@ -92,6 +94,9 @@ impl Hashi {
         let metrics = Arc::new(metrics::Metrics::new_default());
         let trm_client = trm::TrmClient::from_config(&config)?;
         metrics.trm_enabled.set(i64::from(trm_client.is_some()));
+        let finalize_bitcoin_check = Arc::new(finalize_bitcoin_check::FinalizeBitcoinCheck::new(
+            metrics.clone(),
+        ));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -108,6 +113,7 @@ impl Hashi {
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
+            finalize_bitcoin_check,
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -128,6 +134,9 @@ impl Hashi {
         let metrics = Arc::new(metrics::Metrics::new(registry));
         let trm_client = trm::TrmClient::from_config(&config)?;
         metrics.trm_enabled.set(i64::from(trm_client.is_some()));
+        let finalize_bitcoin_check = Arc::new(finalize_bitcoin_check::FinalizeBitcoinCheck::new(
+            metrics.clone(),
+        ));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -144,6 +153,7 @@ impl Hashi {
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
+            finalize_bitcoin_check,
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -950,6 +960,8 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let finalize_bitcoin_check_probe_service =
+            self.clone().start_finalize_bitcoin_check_probe();
         let sui_balance_service = self.clone().start_sui_balance_metric();
         let sui_address_balance_sweeper_service = self.clone().start_sui_address_balance_sweeper();
         let db_metrics_service = self.clone().start_db_metrics();
@@ -963,6 +975,7 @@ impl Hashi {
             .merge(backup_service)
             .merge(mpc_service)
             .merge(guardian_bootstrap_service)
+            .merge(finalize_bitcoin_check_probe_service)
             .merge(sui_balance_service)
             .merge(sui_address_balance_sweeper_service)
             .merge(db_metrics_service);

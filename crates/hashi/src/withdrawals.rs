@@ -100,6 +100,20 @@ fn limiter_outflow(input_total: u64, change_outputs: &[OutputUtxo]) -> u64 {
     input_total.saturating_sub(change_outputs.iter().map(|o| o.amount).sum())
 }
 
+fn ensure_committed_txid(
+    txn: &WithdrawalTransaction,
+    tx: &bitcoin::Transaction,
+) -> anyhow::Result<()> {
+    let rebuilt_txid = BitcoinTxid::from(tx.compute_txid());
+    anyhow::ensure!(
+        txn.txid == rebuilt_txid,
+        "Txid mismatch: WithdrawalTransaction has {:?}, rebuilt tx has {:?}",
+        txn.txid,
+        rebuilt_txid
+    );
+    Ok(())
+}
+
 /// Conservative runtime-object budget shared by the withdrawal flow's Sui
 /// transactions.
 ///
@@ -943,7 +957,7 @@ impl Hashi {
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
-    pub fn validate_and_sign_withdrawal_tx_signing(
+    pub async fn validate_and_sign_withdrawal_tx_signing(
         &self,
         message: &WithdrawalTxSigning,
         expected_limiter_seq: Option<u64>,
@@ -1075,7 +1089,27 @@ impl Hashi {
                     anyhow!("Guardian signature verification failed for input {i}: {e}")
                 })?;
         }
-
+        ensure_committed_txid(&txn, &tx)?;
+        let txid = tx.compute_txid();
+        let verdict = match self.signed_withdrawal_tx(
+            &txn,
+            tx,
+            &message.signatures,
+            &message.guardian_signatures,
+        ) {
+            Ok(signed) => {
+                let monitor = self.btc_monitor().clone();
+                self.finalize_bitcoin_check
+                    .check(message.withdrawal_id, signed, move |tx| async move {
+                        monitor.test_mempool_accept(tx).await
+                    })
+                    .await
+            }
+            Err(e) => self
+                .finalize_bitcoin_check
+                .unavailable(message.withdrawal_id, format!("{e:#}")),
+        };
+        verdict.ensure_signable(message.withdrawal_id, txid)?;
         self.sign_message_proto(message)
     }
 
@@ -1274,15 +1308,68 @@ impl Hashi {
 
         // Rebuild the unsigned BTC tx and verify the txid matches
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        let expected_txid = BitcoinTxid::from(tx.compute_txid());
-        anyhow::ensure!(
-            txn.txid == expected_txid,
-            "Txid mismatch: WithdrawalTransaction has {:?}, rebuilt tx has {:?}",
-            txn.txid,
-            expected_txid
-        );
+        ensure_committed_txid(&txn, &tx)?;
 
         Ok((txn.clone(), tx))
+    }
+
+    pub(crate) fn signed_withdrawal_tx(
+        &self,
+        txn: &WithdrawalTransaction,
+        mut tx: bitcoin::Transaction,
+        mpc_signatures: &[Vec<u8>],
+        guardian_signatures: &[Vec<u8>],
+    ) -> anyhow::Result<bitcoin::Transaction> {
+        ensure_committed_txid(txn, &tx)?;
+        anyhow::ensure!(
+            mpc_signatures.len() == tx.input.len(),
+            "MPC signature count mismatch: tx has {} inputs, got {} signatures",
+            tx.input.len(),
+            mpc_signatures.len()
+        );
+        anyhow::ensure!(
+            guardian_signatures.len() == tx.input.len(),
+            "Guardian signature count mismatch: tx has {} inputs, got {} signatures",
+            tx.input.len(),
+            guardian_signatures.len()
+        );
+        anyhow::ensure!(
+            tx.input.len() == txn.inputs.len(),
+            "Input count mismatch: tx has {} inputs, txn has {}",
+            tx.input.len(),
+            txn.inputs.len()
+        );
+
+        for (((input, txn_input), mpc_sig), guardian_sig) in tx
+            .input
+            .iter_mut()
+            .zip(txn.inputs.iter())
+            .zip(mpc_signatures)
+            .zip(guardian_signatures)
+        {
+            input.witness = self.withdrawal_input_witness(
+                txn_input.derivation_path.as_ref(),
+                mpc_sig,
+                guardian_sig,
+            )?;
+        }
+
+        Ok(tx)
+    }
+
+    pub(crate) fn withdrawal_input_witness(
+        &self,
+        derivation_path: Option<&Address>,
+        mpc_signature: &[u8],
+        guardian_signature: &[u8],
+    ) -> anyhow::Result<bitcoin::Witness> {
+        let (script, control_block, _) = self.deposit_spend_artifacts(derivation_path)?;
+        let mut witness = bitcoin::Witness::new();
+        witness.push(mpc_signature);
+        witness.push(guardian_signature);
+        witness.push(script.to_bytes());
+        witness.push(control_block.serialize());
+        Ok(witness)
     }
 
     /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.

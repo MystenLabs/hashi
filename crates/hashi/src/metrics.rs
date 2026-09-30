@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use prometheus::Histogram;
 use prometheus::HistogramVec;
 use prometheus::IntCounter;
 use prometheus::IntCounterVec;
@@ -8,6 +9,7 @@ use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 use prometheus::Registry;
 use prometheus::register_histogram_vec_with_registry;
+use prometheus::register_histogram_with_registry;
 use prometheus::register_int_counter_vec_with_registry;
 use prometheus::register_int_counter_with_registry;
 use prometheus::register_int_gauge_vec_with_registry;
@@ -163,6 +165,9 @@ pub struct Metrics {
     /// required (raise the cap or have the user cancel).
     pub guardian_limiter_stuck_oversize_skipped_total: IntCounter,
     pub withdrawal_commitment_left_out_total: IntCounterVec,
+    pub withdrawal_bitcoin_check_total: IntCounterVec,
+    pub withdrawal_bitcoin_check_latency_seconds: Histogram,
+    pub withdrawal_bitcoin_check_blind: IntGauge,
 
     pub btc_fee_rate_sat_per_kvb: IntGauge,
 
@@ -346,7 +351,7 @@ impl Metrics {
     }
 
     pub fn new(registry: &Registry) -> Self {
-        Self {
+        let metrics = Self {
             inflight_requests: register_int_gauge_vec_with_registry!(
                 "hashi_inflight_requests",
                 "Total in-flight RPC requests per route",
@@ -1054,6 +1059,27 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            withdrawal_bitcoin_check_total: register_int_counter_vec_with_registry!(
+                "hashi_withdrawal_bitcoin_check_total",
+                "Finalize requests checked with bitcoind, by result.",
+                &["result"],
+                registry,
+            )
+            .unwrap(),
+            withdrawal_bitcoin_check_latency_seconds: register_histogram_with_registry!(
+                "hashi_withdrawal_bitcoin_check_latency_seconds",
+                "Latency of a finalize check's testmempoolaccept call, in seconds.",
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            withdrawal_bitcoin_check_blind: register_int_gauge_with_registry!(
+                "hashi_withdrawal_bitcoin_check_blind",
+                "1 when a probe shows bitcoind cannot check withdrawals, 0 once a spend probe \
+                 passed, -1 before that.",
+                registry,
+            )
+            .unwrap(),
             btc_fee_rate_sat_per_kvb: register_int_gauge_with_registry!(
                 "hashi_btc_fee_rate_sat_per_kvb",
                 "Current estimated Bitcoin fee rate in sat/kvB used for withdrawals",
@@ -1537,7 +1563,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-        }
+        };
+        metrics.withdrawal_bitcoin_check_blind.set(-1);
+        metrics
     }
 
     pub fn record_limiter_state(

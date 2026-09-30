@@ -1387,66 +1387,20 @@ impl LeaderService {
     }
 
     /// Rebuilds a fully signed Bitcoin transaction from on-chain
-    /// `WithdrawalTransaction` data and broadcast-ready 2-of-2 witness.
-    ///
-    /// Witness layout per input (BIP342 multi_a, verified against
-    /// rust-miniscript's `Terminal::MultiA` satisfier):
-    ///
-    /// ```text
-    /// [hashi_sig, guardian_sig, leaf_script, control_block]
-    /// ```
+    /// `WithdrawalTransaction` data.
     fn rebuild_signed_tx_from_onchain(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
     ) -> anyhow::Result<bitcoin::Transaction> {
-        let raw_sigs = txn
+        let mpc_signatures = txn
             .mpc_signatures()
             .ok_or_else(|| anyhow::anyhow!("Withdrawal transaction is not fully signed"))?;
-        let raw_guardian_sigs = txn
+        let guardian_signatures = txn
             .guardian_signatures
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No guardian signatures on withdrawal transaction"))?;
-
-        let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-
-        anyhow::ensure!(
-            raw_sigs.len() == tx.input.len(),
-            "MPC signature count mismatch: tx has {} inputs, on-chain has {} signatures",
-            tx.input.len(),
-            raw_sigs.len()
-        );
-        anyhow::ensure!(
-            raw_guardian_sigs.len() == tx.input.len(),
-            "Guardian signature count mismatch: tx has {} inputs, on-chain has {} signatures",
-            tx.input.len(),
-            raw_guardian_sigs.len()
-        );
-        anyhow::ensure!(
-            tx.input.len() == txn.inputs.len(),
-            "Input count mismatch: tx has {} inputs, txn has {}",
-            tx.input.len(),
-            txn.inputs.len()
-        );
-
-        for (((input, txn_input), hashi_sig_bytes), guardian_sig_bytes) in tx
-            .input
-            .iter_mut()
-            .zip(txn.inputs.iter())
-            .zip(raw_sigs)
-            .zip(raw_guardian_sigs)
-        {
-            let (script, control_block, _) =
-                inner.deposit_spend_artifacts(txn_input.derivation_path.as_ref())?;
-            let mut witness = bitcoin::Witness::new();
-            // multi_a satisfier order: hashi_sig (bottom) then guardian_sig (top).
-            witness.push(hashi_sig_bytes);
-            witness.push(guardian_sig_bytes);
-            witness.push(script.to_bytes());
-            witness.push(control_block.serialize());
-            input.witness = witness;
-        }
-
-        Ok(tx)
+        let tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        inner.signed_withdrawal_tx(txn, tx, &mpc_signatures, guardian_signatures)
     }
 
     /// Collects a confirmation certificate and submits the finalized withdrawal to Sui.
