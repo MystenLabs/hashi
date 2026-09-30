@@ -579,7 +579,7 @@ impl HashiNetworkBuilder {
                 .clone()
                 .or(corrupt_target_address.map(|_| ComplaintResponsePolicy::AllowAll));
             // Deliberately NO local `guardian_endpoint`: nodes must resolve
-            // the guardian client lazily from the on-chain guardian_url set
+            // the guardian client lazily from the on-chain guardian_node_url set
             // by the launch tx, so every e2e run exercises the
             // guardian-set-up-last path.
             config.hashi_ids = Some(hashi_ids);

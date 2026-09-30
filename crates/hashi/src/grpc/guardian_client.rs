@@ -10,6 +10,7 @@ use tonic::body::Body;
 use tonic::transport::Channel;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
+use tonic::transport::Identity;
 use tower::ServiceBuilder;
 use tower::util::BoxCloneService;
 
@@ -45,7 +46,24 @@ impl std::fmt::Debug for GuardianClient {
 }
 
 impl GuardianClient {
-    pub fn new(endpoint: &str) -> Result<Self, tonic::Status> {
+    /// Over TLS the client presents the node's registered TLS key as its
+    /// certificate: the guardian proxy serves node RPCs only to committee members.
+    pub fn new(
+        endpoint: &str,
+        tls_private_key: &ed25519_dalek::SigningKey,
+    ) -> Result<Self, tonic::Status> {
+        Self::with_tls_config(
+            endpoint,
+            tls_private_key,
+            ClientTlsConfig::new().with_webpki_roots(),
+        )
+    }
+
+    fn with_tls_config(
+        endpoint: &str,
+        tls_private_key: &ed25519_dalek::SigningKey,
+        tls_config: ClientTlsConfig,
+    ) -> Result<Self, tonic::Status> {
         let mut builder = Endpoint::from_shared(endpoint.to_string())
             .map_err(Into::<BoxError>::into)
             .map_err(tonic::Status::from_error)?
@@ -53,8 +71,9 @@ impl GuardianClient {
             .http2_keep_alive_interval(Duration::from_secs(5));
         // tonic rejects an https:// endpoint without a TLS config; http:// stays plaintext.
         if endpoint.starts_with("https://") {
+            let (cert, key) = crate::tls::make_identity_pem(tls_private_key);
             builder = builder
-                .tls_config(ClientTlsConfig::new().with_webpki_roots())
+                .tls_config(tls_config.identity(Identity::from_pem(cert, key.as_bytes())))
                 .map_err(Into::<BoxError>::into)
                 .map_err(tonic::Status::from_error)?;
         }
@@ -155,5 +174,61 @@ impl GuardianClient {
             .update_committee_chain(request)
             .await?;
         Ok(response.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tonic::transport::Certificate;
+
+    type SeenKeys = Arc<Mutex<Vec<ed25519_dalek::VerifyingKey>>>;
+
+    /// A TLS server built like a node's, recording each caller's certificate key
+    /// and answering `Unimplemented`.
+    fn spawn_tls_stub() -> (sui_http::ServerHandle, Certificate, SeenKeys) {
+        crate::init_crypto_provider();
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let seen = SeenKeys::default();
+        let recorder = seen.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let key = request
+                .extensions()
+                .get::<sui_http::PeerCertificates>()
+                .and_then(|certs| certs.peer_certs().first().cloned())
+                .map(|cert| crate::tls::public_key_from_certificate(&cert).unwrap());
+            recorder.lock().unwrap().extend(key);
+            async { tonic::Status::unimplemented("stub").into_http::<axum::body::Body>() }
+        });
+        let server = sui_http::Builder::new()
+            .tls_config(crate::tls::make_server_config(server_key.clone()))
+            .serve("127.0.0.1:0", app)
+            .unwrap();
+        let (server_cert, _) = crate::tls::make_identity_pem(&server_key);
+        (server, Certificate::from_pem(server_cert), seen)
+    }
+
+    #[tokio::test]
+    async fn presents_the_tls_key_as_its_client_certificate() {
+        let (server, server_cert, seen) = spawn_tls_stub();
+        let tls_private_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let client = GuardianClient::with_tls_config(
+            &format!("https://{}", server.local_addr()),
+            &tls_private_key,
+            ClientTlsConfig::new()
+                .ca_certificate(server_cert)
+                .domain_name("hashi"),
+        )
+        .unwrap();
+
+        let status = client.get_guardian_info().await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        let status = client
+            .standard_withdrawal(Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        assert_eq!(*seen.lock().unwrap(), [tls_private_key.verifying_key(); 2]);
     }
 }

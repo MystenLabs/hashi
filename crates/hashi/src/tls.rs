@@ -190,10 +190,36 @@ impl rustls::client::danger::ServerCertVerifier for ServerCertVerifier {
     }
 }
 
+/// This key's self-signed certificate and PKCS#8 private key, both PEM, for
+/// clients such as tonic that take their TLS identity that way.
+pub fn make_identity_pem(
+    private_key: &ed25519_dalek::SigningKey,
+) -> (
+    String,
+    ed25519_dalek::pkcs8::spki::der::zeroize::Zeroizing<String>,
+) {
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+
+    let private_key_der = PrivateKeyDer::try_from(private_key.to_pkcs8_der().unwrap().as_bytes())
+        .expect("cannot open private key file")
+        .clone_key();
+    let cert = self_signed_tls_certificate(&private_key_der, HASHI_SERVER_NAME).pem();
+    (cert, private_key.to_pkcs8_pem(LineEnding::LF).unwrap())
+}
+
 fn generate_self_signed_tls_certificate(
     private_key: &PrivateKeyDer,
     server_name: &str,
 ) -> CertificateDer<'static> {
+    self_signed_tls_certificate(private_key, server_name)
+        .der()
+        .to_owned()
+}
+
+fn self_signed_tls_certificate(
+    private_key: &PrivateKeyDer,
+    server_name: &str,
+) -> rcgen::Certificate {
     let keypair =
         rcgen::KeyPair::from_der_and_sign_algo(private_key, &rcgen::PKCS_ED25519).unwrap();
 
@@ -203,8 +229,6 @@ fn generate_self_signed_tls_certificate(
         .expect(
             "unreachable! from_params should only fail if the key is incompatible with params.algo",
         )
-        .der()
-        .to_owned()
 }
 
 fn public_key_der_from_certificate<'a>(
