@@ -16,6 +16,7 @@ use hashi::{
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
+    mpc_signing::{Self, Presig, PresigAllocator},
     proposals::{Self, Proposals},
     threshold,
     treasury::Treasury,
@@ -54,9 +55,8 @@ public struct Hashi has key {
     /// TOB certificates by (epoch, batch_index, protocol_type). Every value
     /// is an `EpochCertsV1` bucket.
     tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
-    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
-    num_consumed_presigs: u64,
+    /// The only source of presignatures for the current epoch.
+    presig_allocator: PresigAllocator,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -241,18 +241,13 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
-public(package) fun num_consumed_presigs(self: &Hashi): u64 {
-    self.num_consumed_presigs
+/// Mint `count` fresh presignatures for the current epoch.
+public(package) fun allocate_presigs(self: &mut Hashi, count: u64): vector<Presig> {
+    self.presig_allocator.allocate(count)
 }
 
-public(package) fun allocate_presigs(self: &mut Hashi, count: u64): u64 {
-    let start = self.num_consumed_presigs;
-    self.num_consumed_presigs = self.num_consumed_presigs + count;
-    start
-}
-
-public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
-    self.num_consumed_presigs = 0;
+public(package) fun reset_presig_allocator(self: &mut Hashi) {
+    self.presig_allocator.reset();
 }
 
 // ~~~~~~~ Private Functions ~~~~~~~
@@ -276,7 +271,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         proposals: proposals::create(ctx),
         tob: bag::new(ctx),
-        num_consumed_presigs: 0,
+        presig_allocator: mpc_signing::new_allocator(),
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -320,7 +315,7 @@ public fun create_for_testing(
         treasury,
         proposals,
         tob,
-        num_consumed_presigs: 0,
+        presig_allocator: mpc_signing::new_allocator(),
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi

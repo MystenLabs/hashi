@@ -142,7 +142,7 @@ entry fun end_reconfig(
     );
     let is_initial_reconfig = self.committee_set().mpc_public_key().is_empty();
 
-    self.reset_num_consumed_presigs();
+    self.reset_presig_allocator();
     let (epoch, committee_handoff_cert) = self
         .committee_set_mut()
         .end_reconfig(mpc_public_key, ctx);
