@@ -133,9 +133,10 @@ public(package) fun new(num_inputs: u64, presigs: vector<Presig>, epoch: u64): S
 /// against the stable committee group key forever, so it may be recorded under
 /// any epoch (this is what lets signed slots survive a reconfig). Nonce safety
 /// is NOT enforced here — it lives in presig allocation (`allocate`) and in
-/// the off-chain rule that each presig index signs exactly one sighash and a
-/// stale-epoch index is never signed with. Caller must cert-gate the
-/// write (the entry verifies a current-epoch committee cert over these bytes).
+/// the off-chain rule that each presig index signs exactly one sighash under
+/// one beacon and a stale-epoch index is never signed with. Caller must
+/// cert-gate the write (the entry verifies a current-epoch committee cert over
+/// these bytes).
 public(package) fun record(
     self: &mut SigningBatch,
     indices: vector<u64>,
