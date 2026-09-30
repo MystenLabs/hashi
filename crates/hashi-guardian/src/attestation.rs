@@ -31,6 +31,13 @@ pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<NitroAttes
 
     info!("Initializing NSM driver.");
     let fd = driver::nsm_init();
+    // nsm_init returns -1 if opening /dev/nsm fails:
+    // https://github.com/aws/aws-nitro-enclaves-nsm-api/blob/8ec7eac72bbb2097f1058ee32c13e1ff232f13e8/src/driver/mod.rs#L113-L127
+    if fd < 0 {
+        return Err(GuardianError::InternalError(
+            "failed to initialize NSM driver".to_string(),
+        ));
+    }
 
     info!("Requesting attestation document from NSM.");
     // Send attestation request to NSM driver with public key set.
