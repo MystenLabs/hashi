@@ -453,18 +453,6 @@ impl CeremonyConfirmationResponse {
 }
 
 impl GenesisState {
-    pub fn new(
-        committee: HashiCommittee,
-        hashi_object_id: sui_sdk_types::Address,
-        mpc_master_g: HashiMasterG,
-    ) -> Self {
-        Self {
-            committee: (&committee).into(),
-            hashi_object_id,
-            mpc_master_g,
-        }
-    }
-
     pub fn from_parts(
         committee: crate::move_types::Committee,
         hashi_object_id: sui_sdk_types::Address,

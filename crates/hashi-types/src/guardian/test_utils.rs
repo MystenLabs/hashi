@@ -266,8 +266,8 @@ impl GenesisState {
     pub fn mock_for_testing() -> Self {
         let kp =
             BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1u8; 32]).expect("valid test secret key");
-        Self::new(
-            mock_committee_with_one_member(0),
+        Self::from_parts(
+            (&mock_committee_with_one_member(0)).into(),
             TEST_HASHI_OBJECT_ID,
             HashiMasterG::with_even_y_from_x_be_bytes(&kp.x_only_public_key().0.serialize())
                 .expect("valid x-only public key"),
