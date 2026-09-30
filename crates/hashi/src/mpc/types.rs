@@ -230,14 +230,14 @@ impl AdmittedNonceDealers {
     }
 
     pub(crate) fn dealer_set_digest(&self) -> [u8; 32] {
+        let dealers: Vec<_> = self
+            .dealers
+            .iter()
+            .map(|admitted| (admitted.dealer, admitted.cert.message().messages_hash))
+            .collect();
         let mut hasher = Blake2b256::default();
-        hasher.update(b"hashi/presig-dealer-set/v1");
-        for admitted in &self.dealers {
-            hasher.update(
-                bcs::to_bytes(&(admitted.dealer, admitted.cert.message().messages_hash))
-                    .expect("serialization should always succeed"),
-            );
-        }
+        hasher.update(crate::constants::PRESIG_DEALER_SET_DOMAIN);
+        hasher.update(bcs::to_bytes(&dealers).expect("serialization should always succeed"));
         hasher.finalize().digest
     }
 }

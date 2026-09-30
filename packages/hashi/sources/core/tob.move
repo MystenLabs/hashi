@@ -4,7 +4,7 @@
 module hashi::tob;
 
 use hashi::committee::CommitteeSignature;
-use sui::{linked_table::{Self, LinkedTable}, random::RandomGenerator};
+use sui::linked_table::{Self, LinkedTable};
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -119,10 +119,10 @@ public(package) fun is_sealed(self: &EpochCertsV1): bool {
 
 public(package) fun seal(
     self: &mut EpochCertsV1,
-    rng: &mut RandomGenerator,
+    randomness: vector<u8>,
     dealer_set_digest: vector<u8>,
 ) {
-    self.seal.fill(PresigSealV1 { randomness: rng.generate_bytes(32), dealer_set_digest });
+    self.seal.fill(PresigSealV1 { randomness, dealer_set_digest });
 }
 
 /// Remove all certificates and destroy the EpochCertsV1 in one transaction.

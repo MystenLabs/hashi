@@ -4,7 +4,7 @@
 module hashi::cert_submission;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
-use sui::random::{Random, RandomGenerator};
+use sui::random::Random;
 
 // ~~~~~~~ Constants ~~~~~~~
 
@@ -37,8 +37,6 @@ const ETooEarlyToDestroyKeyGenCerts: vector<u8> =
 #[error]
 const EKeyGenCertsStillNeeded: vector<u8> =
     b"Key-generation cert buckets must be strictly older than the previous committee, whose bucket seeds the next rotation";
-#[error]
-const EPresigCompletedWrongEpoch: vector<u8> = b"PresigCompleted must name the current epoch";
 #[error]
 const ENoNonceBucket: vector<u8> = b"No nonce cert bucket exists for this batch";
 
@@ -98,7 +96,6 @@ entry fun submit_nonce_cert(
 
 entry fun submit_presig_completed(
     hashi: &mut Hashi,
-    epoch: u64,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
     cert: CommitteeSignature,
@@ -106,7 +103,8 @@ entry fun submit_presig_completed(
     ctx: &mut TxContext,
 ) {
     let mut rng = sui::random::new_generator(r, ctx);
-    submit_presig_completed_internal(hashi, epoch, batch_index, dealer_set_digest, cert, &mut rng);
+    let randomness = rng.generate_bytes(32);
+    submit_presig_completed_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
 }
 
 /// Destroy the key-generation (DKG or rotation) cert buckets of `epoch`.
@@ -166,14 +164,13 @@ entry fun destroy_nonce_certs(hashi: &mut Hashi, epoch: u64, batch_index: u32) {
 
 fun submit_presig_completed_internal(
     hashi: &mut Hashi,
-    epoch: u64,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
     cert: CommitteeSignature,
-    rng: &mut RandomGenerator,
+    randomness: vector<u8>,
 ) {
     hashi.versioning().assert_version_enabled();
-    assert!(epoch == hashi.committee_set().epoch(), EPresigCompletedWrongEpoch);
+    let epoch = hashi.committee_set().epoch();
     hashi.verify(
         hashi::intent::presig_completed(),
         PresigCompletedMessage { epoch, batch_index, dealer_set_digest: copy dealer_set_digest },
@@ -190,7 +187,7 @@ fun submit_presig_completed_internal(
     if (bucket.is_sealed()) {
         return
     };
-    bucket.seal(rng, dealer_set_digest);
+    bucket.seal(randomness, dealer_set_digest);
 }
 
 /// Remove and drain the bucket stored under `key`. An absent bucket is an
@@ -237,14 +234,14 @@ fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContex
 #[test_only]
 public fun submit_presig_completed_for_testing(
     hashi: &mut Hashi,
-    epoch: u64,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
     cert: CommitteeSignature,
     seed: vector<u8>,
 ) {
     let mut rng = sui::random::new_generator_from_seed_for_testing(seed);
-    submit_presig_completed_internal(hashi, epoch, batch_index, dealer_set_digest, cert, &mut rng);
+    let randomness = rng.generate_bytes(32);
+    submit_presig_completed_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
 }
 
 #[test_only]

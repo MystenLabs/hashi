@@ -266,7 +266,7 @@ fn presig_batch_fingerprint<'a>(
 ) -> [u8; 32] {
     use fastcrypto::hash::HashFunction;
     let mut hasher = fastcrypto::hash::Blake2b256::default();
-    hasher.update(b"hashi/presig-batch-identity/v1");
+    hasher.update(crate::constants::PRESIG_BATCH_IDENTITY_DOMAIN);
     hasher.update(epoch.to_le_bytes());
     hasher.update((nonces.len() as u32).to_le_bytes());
     for nonce in nonces {

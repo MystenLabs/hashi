@@ -1699,7 +1699,6 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
-        let epoch_arg = builder.pure(&message.epoch);
         let batch_index_arg = builder.pure(&message.batch_index);
         let digest_arg = builder.pure(&message.dealer_set_digest);
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
@@ -1714,14 +1713,7 @@ impl SuiTxExecutor {
                 Identifier::from_static("cert_submission"),
                 Identifier::from_static("submit_presig_completed"),
             ),
-            vec![
-                hashi_arg,
-                epoch_arg,
-                batch_index_arg,
-                digest_arg,
-                cert_arg,
-                random_arg,
-            ],
+            vec![hashi_arg, batch_index_arg, digest_arg, cert_arg, random_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {

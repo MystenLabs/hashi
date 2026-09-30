@@ -337,7 +337,6 @@ fun test_only_the_first_presig_completed_seals_the_batch() {
     let first = presig_completed_cert(&hashi, epoch, DIGEST);
     hashi::cert_submission::submit_presig_completed_for_testing(
         &mut hashi,
-        epoch,
         0,
         DIGEST,
         first,
@@ -346,7 +345,6 @@ fun test_only_the_first_presig_completed_seals_the_batch() {
     let second = presig_completed_cert(&hashi, epoch, OTHER_DIGEST);
     hashi::cert_submission::submit_presig_completed_for_testing(
         &mut hashi,
-        epoch,
         0,
         OTHER_DIGEST,
         second,
@@ -376,7 +374,6 @@ fun test_presig_completed_with_a_bad_certificate_aborts() {
     let wrong = test_utils::sign_certificate(epoch, &bcs::to_bytes(&epoch), 3);
     hashi::cert_submission::submit_presig_completed_for_testing(
         &mut hashi,
-        epoch,
         0,
         DIGEST,
         wrong,
@@ -404,7 +401,6 @@ fun test_submit_presig_completed_draws_randomness() {
     let cert = presig_completed_cert(&hashi, epoch, DIGEST);
     hashi::cert_submission::submit_presig_completed(
         &mut hashi,
-        epoch,
         0,
         DIGEST,
         cert,
