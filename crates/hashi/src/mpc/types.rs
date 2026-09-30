@@ -228,6 +228,18 @@ impl AdmittedNonceDealers {
     pub(crate) fn floor_reached(&self) -> bool {
         self.weight >= self.required_weight
     }
+
+    pub(crate) fn dealer_set_digest(&self) -> [u8; 32] {
+        let mut hasher = Blake2b256::default();
+        hasher.update(b"hashi/presig-dealer-set/v1");
+        for admitted in &self.dealers {
+            hasher.update(
+                bcs::to_bytes(&(admitted.dealer, admitted.cert.message().messages_hash))
+                    .expect("serialization should always succeed"),
+            );
+        }
+        hasher.finalize().digest
+    }
 }
 
 pub(crate) struct AdmittedNonceDealer {

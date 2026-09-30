@@ -722,10 +722,12 @@ fn apply_write(
                             head: None,
                             size: 0,
                             nodes: std::collections::BTreeMap::new(),
+                            seal: None,
                         });
                     bucket.certs_id = certs_id;
                     bucket.head = field.value.certs.head;
                     bucket.size = field.value.certs.size;
+                    bucket.seal = field.value.seal;
                     TrackedKind::TobBucket(key)
                 })
             })
@@ -2110,6 +2112,7 @@ mod tests {
 
     /// `value_tag` is the value type the Field's tag advertises, so a
     /// test can present a bucket type this binary does not decode.
+    #[allow(clippy::too_many_arguments)]
     fn tob_bucket_object_with_value_tag(
         field_id: Address,
         version: u64,
@@ -2117,6 +2120,7 @@ mod tests {
         head: Option<Address>,
         tail: Option<Address>,
         size: u64,
+        seal: Option<move_types::PresigSealV1>,
         value_tag: TypeTag,
     ) -> Object {
         let value = move_types::EpochCertsV1 {
@@ -2128,6 +2132,7 @@ mod tests {
                 head,
                 tail,
             },
+            seal,
         };
         let contents = bcs::to_bytes(&FieldEnc {
             id: field_id,
@@ -2158,6 +2163,7 @@ mod tests {
             head,
             tail,
             size,
+            None,
             hashi_struct("tob", "EpochCertsV1", vec![]),
         )
     }
@@ -2339,6 +2345,47 @@ mod tests {
     }
 
     #[test]
+    fn tob_seal_write_reaches_the_mirror() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let node1 = addr(0x82);
+        let d1 = addr(0xE1);
+        let seal = move_types::PresigSealV1 {
+            randomness: vec![5; 32],
+            dealer_set_digest: vec![6; 32],
+        };
+
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+            )),
+            written(tob_node_object_at(node1, 1, d1, None, None, 1_000)),
+        ]));
+        assert_eq!(fixture.hashi.tob.buckets.get(&key).unwrap().seal, None);
+
+        let out = fixture.apply(&tx(vec![written(tob_bucket_object_with_value_tag(
+            bucket_field,
+            2,
+            key,
+            Some(d1),
+            Some(d1),
+            1,
+            Some(seal.clone()),
+            hashi_struct("tob", "EpochCertsV1", vec![]),
+        ))]));
+        assert!(out.unrouted.is_empty());
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.seal, Some(seal));
+        assert_eq!(bucket.certs_in_order().len(), 1);
+    }
+
+    #[test]
     fn tob_node_of_unknown_submission_type_trips_the_tripwire() {
         let mut fixture = Fixture::new();
         let key = tob_key(7);
@@ -2384,6 +2431,7 @@ mod tests {
             None,
             None,
             0,
+            None,
             hashi_struct("tob", "EpochCertsV3", vec![]),
         ))]));
         assert_eq!(out.unrouted.len(), 1);

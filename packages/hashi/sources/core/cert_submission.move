@@ -4,6 +4,7 @@
 module hashi::cert_submission;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
+use sui::random::{Random, RandomGenerator};
 
 // ~~~~~~~ Constants ~~~~~~~
 
@@ -36,6 +37,18 @@ const ETooEarlyToDestroyKeyGenCerts: vector<u8> =
 #[error]
 const EKeyGenCertsStillNeeded: vector<u8> =
     b"Key-generation cert buckets must be strictly older than the previous committee, whose bucket seeds the next rotation";
+#[error]
+const EPresigCompletedWrongEpoch: vector<u8> = b"PresigCompleted must name the current epoch";
+#[error]
+const ENoNonceBucket: vector<u8> = b"No nonce cert bucket exists for this batch";
+
+// ~~~~~~~ Structs ~~~~~~~
+
+public struct PresigCompletedMessage has copy, drop, store {
+    epoch: u64,
+    batch_index: u32,
+    dealer_set_digest: vector<u8>,
+}
 
 // ~~~~~~~ Entry Functions ~~~~~~~
 
@@ -81,6 +94,19 @@ entry fun submit_nonce_cert(
         hashi::tob::protocol_type_nonce_generation(),
     );
     submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
+}
+
+entry fun submit_presig_completed(
+    hashi: &mut Hashi,
+    epoch: u64,
+    batch_index: u32,
+    dealer_set_digest: vector<u8>,
+    cert: CommitteeSignature,
+    r: &Random,
+    ctx: &mut TxContext,
+) {
+    let mut rng = sui::random::new_generator(r, ctx);
+    submit_presig_completed_internal(hashi, epoch, batch_index, dealer_set_digest, cert, &mut rng);
 }
 
 /// Destroy the key-generation (DKG or rotation) cert buckets of `epoch`.
@@ -138,6 +164,35 @@ entry fun destroy_nonce_certs(hashi: &mut Hashi, epoch: u64, batch_index: u32) {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
+fun submit_presig_completed_internal(
+    hashi: &mut Hashi,
+    epoch: u64,
+    batch_index: u32,
+    dealer_set_digest: vector<u8>,
+    cert: CommitteeSignature,
+    rng: &mut RandomGenerator,
+) {
+    hashi.versioning().assert_version_enabled();
+    assert!(epoch == hashi.committee_set().epoch(), EPresigCompletedWrongEpoch);
+    hashi.verify(
+        hashi::intent::presig_completed(),
+        PresigCompletedMessage { epoch, batch_index, dealer_set_digest: copy dealer_set_digest },
+        cert,
+    );
+    let key = hashi::tob::tob_key(
+        epoch,
+        option::some(batch_index),
+        hashi::tob::protocol_type_nonce_generation(),
+    );
+    let tob = hashi.tob_mut();
+    assert!(tob.contains(key), ENoNonceBucket);
+    let bucket: &mut hashi::tob::EpochCertsV1 = tob.borrow_mut(key);
+    if (bucket.is_sealed()) {
+        return
+    };
+    bucket.seal(rng, dealer_set_digest);
+}
+
 /// Remove and drain the bucket stored under `key`. An absent bucket is an
 /// idempotent no-op. Presence is probed without a value type, so a value that
 /// is not an `EpochCertsV1` aborts in the typed `remove` instead of being
@@ -177,4 +232,26 @@ fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContex
     assert!(hashi.committee_set().member_authorized(dealer, ctx));
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
+}
+
+#[test_only]
+public fun submit_presig_completed_for_testing(
+    hashi: &mut Hashi,
+    epoch: u64,
+    batch_index: u32,
+    dealer_set_digest: vector<u8>,
+    cert: CommitteeSignature,
+    seed: vector<u8>,
+) {
+    let mut rng = sui::random::new_generator_from_seed_for_testing(seed);
+    submit_presig_completed_internal(hashi, epoch, batch_index, dealer_set_digest, cert, &mut rng);
+}
+
+#[test_only]
+public fun new_presig_completed_message(
+    epoch: u64,
+    batch_index: u32,
+    dealer_set_digest: vector<u8>,
+): PresigCompletedMessage {
+    PresigCompletedMessage { epoch, batch_index, dealer_set_digest }
 }

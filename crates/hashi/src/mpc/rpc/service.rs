@@ -13,6 +13,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;
 use hashi_types::proto::GetPartialSignaturesResponse;
+use hashi_types::proto::GetPresigCompletedSignatureRequest;
+use hashi_types::proto::GetPresigCompletedSignatureResponse;
 use hashi_types::proto::GetPublicMpcOutputRequest;
 use hashi_types::proto::GetPublicMpcOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
@@ -189,6 +191,27 @@ impl MpcService for HttpService {
         Ok(tonic::Response::new(
             GetReconfigCompletionSignatureResponse { signature },
         ))
+    }
+
+    #[tracing::instrument(skip(self, request))]
+    async fn get_presig_completed_signature(
+        &self,
+        request: tonic::Request<GetPresigCompletedSignatureRequest>,
+    ) -> Result<tonic::Response<GetPresigCompletedSignatureResponse>, Status> {
+        authenticate_caller(&request)?;
+        let external_request = request.into_inner();
+        let epoch = external_request
+            .epoch
+            .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+        let batch_index = external_request
+            .batch_index
+            .ok_or_else(|| Status::invalid_argument("batch_index: missing required field"))?;
+        let signature = self
+            .get_presig_seal_signature(epoch, batch_index)
+            .map(Into::into);
+        Ok(tonic::Response::new(GetPresigCompletedSignatureResponse {
+            signature,
+        }))
     }
 
     #[tracing::instrument(skip(self, request))]

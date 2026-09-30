@@ -15549,6 +15549,57 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
 }
 
 #[test]
+fn test_dealer_set_digest_covers_only_the_admitted_certs() {
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
+    let mgr = setup.create_manager(0);
+    let epoch = setup.committee().epoch();
+    let from_chain = |submissions: Vec<(Address, hashi_types::move_types::DealerSubmissionV1)>| {
+        let kinds = submissions
+            .iter()
+            .map(|(dealer, _)| (*dealer, CertKind::AvidVote))
+            .collect();
+        crate::mpc::service::nonce_certificates(
+            &VerifiedNonceCerts::new(submissions, kinds),
+            epoch,
+            0,
+        )
+    };
+    let all = [0, 1, 2, 3];
+
+    let admitted = mgr
+        .avid_admitted_nonce_dealers(
+            &from_chain(vec![
+                valid_dealer_submission_signed_by(&setup, 0, 1_000, &all),
+                valid_dealer_submission_signed_by(&setup, 1, 1_100, &all),
+                valid_dealer_submission_signed_by(&setup, 2, 1_200, &[3]),
+                valid_dealer_submission_signed_by(&setup, 3, 5_000, &all),
+            ]),
+            Some(2_000),
+        )
+        .unwrap();
+    let only_admitted = mgr
+        .avid_admitted_nonce_dealers(
+            &from_chain(vec![
+                valid_dealer_submission_signed_by(&setup, 0, 1_000, &all),
+                valid_dealer_submission_signed_by(&setup, 1, 1_100, &all),
+            ]),
+            Some(2_000),
+        )
+        .unwrap();
+
+    let admitted_dealers: Vec<Address> = admitted.dealers.iter().map(|d| d.dealer).collect();
+    assert_eq!(admitted_dealers, vec![setup.address(0), setup.address(1)]);
+    assert_eq!(
+        admitted.dealer_set_digest(),
+        only_admitted.dealer_set_digest()
+    );
+    assert_eq!(
+        hex::encode(admitted.dealer_set_digest()),
+        "1ede6b208fe52e7c5f4afbbd331269e9e3c0f9929c8051648abf613dc6f294aa",
+    );
+}
+
+#[test]
 fn test_avid_sizing_counts_past_the_floor() {
     let setup = TestSetup::with_weights(&[3, 3, 3, 1]);
     let mgr = setup.create_manager(0);

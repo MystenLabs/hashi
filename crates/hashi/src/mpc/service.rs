@@ -36,6 +36,7 @@ use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
+use crate::mpc::presig_seal;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::signing::IdentityInputs;
 use crate::mpc::types::CertificateV1;
@@ -128,6 +129,7 @@ pub struct MpcService {
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
+    presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +195,7 @@ impl MpcService {
             next_manager_restore: Mutex::new(None),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
+            presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -804,6 +807,13 @@ impl MpcService {
         if !admitted.floor_reached() {
             return Err(admitted.below_floor_error(batch_index, metrics).into());
         }
+        presig_seal::start(
+            &self.inner,
+            &self.presig_seal_tasks,
+            epoch,
+            batch_index,
+            admitted.dealer_set_digest(),
+        );
         let nonce_result = MpcManager::run_avid_nonce_party_phase(
             &mpc_manager,
             batch_index,
@@ -1727,6 +1737,13 @@ impl MpcService {
                     .below_floor_error(batch_index, &self.inner.metrics)
                     .into());
             }
+            presig_seal::start(
+                &self.inner,
+                &self.presig_seal_tasks,
+                epoch,
+                batch_index,
+                admitted.dealer_set_digest(),
+            );
             let outcome = MpcManager::run_avid_nonce_party_phase(
                 mpc_manager,
                 batch_index,
@@ -2512,7 +2529,7 @@ pub(crate) async fn verify_fetched_certificates(
 
 /// Live, boundary sizing and replay admit the same dealers only if they
 /// convert the served certs identically.
-fn nonce_certificates(
+pub(crate) fn nonce_certificates(
     certs: &VerifiedNonceCerts<move_types::DealerSubmissionV1>,
     epoch: u64,
     batch_index: u32,
