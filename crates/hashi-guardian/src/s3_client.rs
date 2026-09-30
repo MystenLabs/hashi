@@ -1132,7 +1132,7 @@ mod tests {
     #[tokio::test]
     async fn signed_log_rejects_cross_prefix_relocation() {
         assert_log_read_rejects_relocation(
-            "withdraw/2023/11/14/22/session-00000000000000000042.json",
+            "withdraw/2023/11/14/22/00000000000000000042-widabc.json",
         )
         .await;
     }

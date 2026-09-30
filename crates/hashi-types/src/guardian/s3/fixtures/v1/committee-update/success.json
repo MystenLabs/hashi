@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "object_key": "committee-update/00000000000000000001-d54207da194977dc.json",
+  "object_key": "committee-update/00000000000000000001.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
@@ -179,5 +179,5 @@
       }
     }
   },
-  "signature": "86f9bc8d12145bd4d9328c97487af601c7cb78559811e983984622f2e8e126fcba1f19c6eae3a8fab7b686be74b0d1896ccdd7daa0d6a0d01c815dadc1a59d0d"
+  "signature": "e64e60fc22eb7ea2f606320fa5f720f5ea19f5efa4ea1974e29caba13b9c35edbba4c5c7175b943e54fb9bfb66100647c69af773bb3a636581ae3ffdbbe4c801"
 }

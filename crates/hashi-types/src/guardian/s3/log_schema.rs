@@ -113,14 +113,12 @@ impl LogMessageV1 {
         match self {
             Self::Heartbeat(message) => message.object_key(session_id, timestamp_ms),
             Self::Init(message) => message.object_key(session_id),
-            Self::Withdrawal(message) => message.object_key(session_id, timestamp_ms),
-            Self::Ceremony(message) => message.object_key(session_id),
-            Self::KpShareState(message) => KpShareStateLogMessage::object_key(
-                session_id,
-                message.sharing_seq,
-                message.cert_seq,
-            ),
-            Self::CommitteeUpdate(message) => message.object_key(session_id),
+            Self::Withdrawal(message) => message.object_key(timestamp_ms),
+            Self::Ceremony(message) => message.object_key(),
+            Self::KpShareState(message) => {
+                KpShareStateLogMessage::object_key(message.sharing_seq, message.cert_seq)
+            }
+            Self::CommitteeUpdate(message) => message.object_key(),
             Self::Genesis(_) => GenesisLogMessage::object_key(),
             Self::CeremonyProposal(_) => CeremonyProposalLogMessage::object_key(session_id),
         }

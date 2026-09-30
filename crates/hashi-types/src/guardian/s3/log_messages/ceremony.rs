@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::log_layout::S3_DIR_CEREMONY;
-use super::super::log_layout::S3_DIR_KP_SHARES;
+use super::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::KpEncryptedShareRoster;
 use crate::guardian::SecretSharingInstance;
@@ -15,7 +15,7 @@ use serde::Serialize;
 /// is auditable from the log alone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CeremonyLogMessage {
-    /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
+    /// Initial key setup (`setup_new_key`), possibly after abandoned attempts.
     NewKey {
         instance: SecretSharingInstance,
         /// The x-only BTC master pubkey this ceremony produced; lets KPs and
@@ -38,8 +38,8 @@ impl CeremonyLogMessage {
     }
 
     /// Consume the ceremony result. `NewKey` yields its initial instance;
-    /// `Rotate` yields the new instance after verifying that it advances exactly
-    /// one `sharing_seq` from the consumed instance.
+    /// `Rotate` yields the new instance after verifying that it advances
+    /// to a greater `sharing_seq` than the consumed instance.
     pub fn into_instance_and_pubkey(self) -> (SecretSharingInstance, BitcoinPubkey) {
         match self {
             Self::NewKey {
@@ -51,14 +51,9 @@ impl CeremonyLogMessage {
                 new_instance,
                 btc_master_pubkey,
             } => {
-                let expected = old_instance
-                    .sharing_seq()
-                    .checked_add(1)
-                    .expect("Rotate old sharing_seq must not be u64::MAX");
-                assert_eq!(
-                    new_instance.sharing_seq(),
-                    expected,
-                    "Rotate must advance sharing_seq by exactly one"
+                assert!(
+                    new_instance.sharing_seq() > old_instance.sharing_seq(),
+                    "Rotate must advance sharing_seq"
                 );
                 (new_instance, btc_master_pubkey)
             }
@@ -73,12 +68,8 @@ impl CeremonyLogMessage {
         }
     }
 
-    pub fn object_key(&self, session_id: &str) -> String {
-        format!(
-            "{}{:020}-{session_id}.json",
-            Self::object_key_dir(),
-            self.sharing_seq(),
-        )
+    pub fn object_key(&self) -> String {
+        format!("{}{:020}.json", Self::object_key_dir(), self.sharing_seq())
     }
 }
 
@@ -100,9 +91,14 @@ impl CeremonyProposalLogMessage {
         }
     }
 
+    /// The slash-terminated prefix containing ceremony proposals.
+    pub fn object_key_dir() -> String {
+        format!("{}proposed/", KpShareStateLogMessage::root_dir())
+    }
+
     /// `kp-shares/proposed/{session_id}.json` — one proposal per ceremony
     /// enclave session.
     pub fn object_key(session_id: &str) -> String {
-        format!("{S3_DIR_KP_SHARES}/proposed/{session_id}.json")
+        format!("{}{session_id}.json", Self::object_key_dir())
     }
 }

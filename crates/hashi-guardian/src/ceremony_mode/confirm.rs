@@ -180,10 +180,11 @@ mod tests {
             let captured = context.captures.lock().unwrap();
             assert_eq!(captured.len(), 3);
             assert!(captured[0].0.starts_with("kp-shares/proposed/"));
-            assert!(captured[1]
-                .0
-                .starts_with("kp-shares/00000000000000000000/00000000000000000000-"));
-            assert!(captured[2].0.starts_with("ceremony/00000000000000000000-"));
+            assert_eq!(
+                captured[1].0,
+                "kp-shares/00000000000000000000/00000000000000000000.json"
+            );
+            assert_eq!(captured[2].0, "ceremony/00000000000000000000.json");
         }
         let repeated = confirm_ceremony(
             context.enclave.clone(),

@@ -169,7 +169,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     )?;
 
     let updated_state = reader
-        .read_kp_share_state_log_from_current_build(&session_id, sharing_seq, cert_seq)
+        .read_kp_share_state_log_from_current_build(sharing_seq, cert_seq)
         .await
         .context("read the certificate-rotation kp-shares snapshot")?;
     updated_state

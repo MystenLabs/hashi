@@ -87,7 +87,7 @@ pub struct ShareCommitments(
 );
 
 /// Public description of the current BTC key's secret-sharing scheme.
-/// `sharing_seq` versions the instance: setup writes 0, each rotation bumps it by 1.
+/// `sharing_seq` versions the instance; completed rotations increase it, skipping abandoned attempts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SecretSharingInstance {
     commitments: ShareCommitments,

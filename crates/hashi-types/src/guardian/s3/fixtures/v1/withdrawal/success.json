@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "object_key": "withdraw/2023/11/14/22/00000000000000000000-d54207da194977dc-wid0xabababababababababababababababababababababababababababababababab.json",
+  "object_key": "withdraw/2023/11/14/22/00000000000000000000-wid0xabababababababababababababababababababababababababababababababab.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
@@ -58,5 +58,5 @@
       }
     }
   },
-  "signature": "796e34c9abf30237fc6c6c8a65524d5bde626030c04c0921aade80b77f08b9b434c507d2c0a16a6d8c662861a96554334f9a2ed6c8d04f3fd215bbc454d96d07"
+  "signature": "2b2634bda7789488db2ac7b2c235e10e63c01c956f0aea9900f95f68c7b556c38dd874a70ca897bdd0bf9746c4b608912f3f05faf2b01255a75b4950bd8b960a"
 }

@@ -217,7 +217,7 @@ mod tests {
     }
 
     fn withdrawal_key(year: u16, month: u8, day: u8, hour: u8, seq: u64) -> String {
-        format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/{seq:020}-sess-widabc.json")
+        format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/{seq:020}-widabc.json")
     }
 
     fn assert_bucket(actual: Option<S3HourDirectory>, expected_path: &str) {

@@ -44,13 +44,15 @@ pub async fn rotate_kp_set(
     let mut reader = enclave.new_guardian_reader()?;
     let latest_s3_state = reader.read_latest_ceremony_state().await?;
 
-    complete_rotation(&enclave, proposal, latest_s3_state).await
+    let new_sharing_seq = reader.next_sharing_seq().await?;
+    complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
 }
 
 async fn complete_rotation(
     enclave: &Arc<Enclave>,
     proposal: VerifiedRotationProposal,
     latest_s3_state: CeremonyState,
+    new_sharing_seq: u64,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     let CeremonyState {
         secret_sharing_instance: old_instance,
@@ -79,6 +81,7 @@ async fn complete_rotation(
         btc_master_pubkey,
         proposal.new_kp_certs_roster,
         proposal.new_params,
+        new_sharing_seq,
     )
     .await?;
     enclave
@@ -177,6 +180,7 @@ async fn finalize_rotation(
     expected_btc_master_pubkey: BitcoinPubkey,
     new_certs_roster: KpCertRoster,
     new_params: SecretSharingParams,
+    new_sharing_seq: u64,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     info!("Threshold reached, reconstructing BTC key.");
 
@@ -218,7 +222,6 @@ async fn finalize_rotation(
         "Re-encrypted one share for each new key provisioner."
     );
 
-    let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
     let ceremony_log = CeremonyLogMessage::Rotate {
         old_instance: old_instance.clone(),
@@ -273,7 +276,8 @@ mod tests {
             &enclave.s3_session_id(),
             &enclave.config.deployment()?.digest(),
         )?;
-        complete_rotation(&enclave, proposal, latest_s3_state).await
+        let new_sharing_seq = latest_s3_state.secret_sharing_instance.sharing_seq() + 1;
+        complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
     }
 
     struct TestContext {
@@ -504,6 +508,35 @@ mod tests {
 
         assert_eq!(proposal.encrypted_shares, *response_shares);
         assert_eq!(proposal.encrypted_shares.share_count(), new_n);
+    }
+
+    #[tokio::test]
+    async fn rotation_proposal_and_response_preserve_a_sequence_gap() {
+        let ctx = setup_rotation_enclave().await;
+        let (roster, _) = ctx.build_roster_with_secrets(TEST_N);
+        let req = ctx.request(&ctx.shares[..TEST_T], roster, TEST_T).unwrap();
+        let proposal = verify_signed_submissions(
+            req.submissions(),
+            &ctx.enclave.s3_session_id(),
+            &ctx.deployment.digest(),
+        )
+        .unwrap();
+        let signed = complete_rotation(&ctx.enclave, proposal, ctx.latest_s3_state(), 3)
+            .await
+            .unwrap();
+        let response = signed
+            .verify_into_data(&ctx.enclave.signing_pubkey())
+            .unwrap()
+            .response;
+        assert_eq!(response.new_instance.sharing_seq(), 3);
+        let captured = ctx.captures.lock().unwrap();
+        let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) = record.message()
+        else {
+            panic!("expected ceremony proposal");
+        };
+        let (instance, _) = proposal.ceremony.clone().into_instance_and_pubkey();
+        assert_eq!(instance, response.new_instance);
     }
 
     #[tokio::test]

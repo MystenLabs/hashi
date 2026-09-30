@@ -270,9 +270,10 @@ mod tests {
 
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        assert!(captured[0]
-            .0
-            .starts_with("kp-shares/00000000000000000000/00000000000000000008-"));
+        assert_eq!(
+            captured[0].0,
+            "kp-shares/00000000000000000000/00000000000000000008.json"
+        );
         let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::KpShareState(persisted)) = record.message()
         else {

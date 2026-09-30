@@ -54,6 +54,10 @@ pub struct S3NumericDirectory {
 }
 
 impl S3NumericDirectory {
+    pub fn components(&self) -> &[u64] {
+        &self.components
+    }
+
     /// Parse `{prefix}/{number}/...`, with one optional trailing slash.
     pub fn from_path(path: &str) -> anyhow::Result<Self> {
         let mut parts = path.strip_suffix('/').unwrap_or(path).split('/');
