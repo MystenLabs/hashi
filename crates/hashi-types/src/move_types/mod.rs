@@ -196,7 +196,9 @@ pub struct Hashi {
     /// TOB certificates by (epoch, batch_index, protocol_type). Every value
     /// is an `EpochCertsV1` bucket.
     pub tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
+    /// Number of presignatures consumed in the current epoch. Mirrors Move's
+    /// `presig_allocator: PresigAllocator`, a one-field struct whose BCS
+    /// encoding is exactly this `u64`.
     pub num_consumed_presigs: u64,
 }
 
@@ -650,7 +652,9 @@ pub struct CommittedRequestInfo {
 /// MUST match Move (Pending = 0, Signed = 1) for BCS.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum MpcSig {
-    /// Awaiting signature; holds the presignature index (valid in the batch's epoch).
+    /// Awaiting signature; holds the presignature index (valid in the batch's
+    /// epoch). Mirrors Move's `Pending(Presig)`, a one-field struct whose BCS
+    /// encoding is exactly this `u64`.
     Pending(u64),
     /// Completed per-input MPC Schnorr signature bytes.
     Signed(Vec<u8>),
@@ -1723,7 +1727,6 @@ impl From<WithdrawalInputsSigned> for HashiEvent {
 pub struct WithdrawalPresigsReassigned {
     pub withdrawal_txn_id: Address,
     pub epoch: u64,
-    pub presig_start_index: u64,
 }
 
 impl MoveType for WithdrawalPresigsReassigned {

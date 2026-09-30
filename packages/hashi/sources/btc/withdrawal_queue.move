@@ -14,7 +14,7 @@ use hashi::{
     btc_config,
     committee::CommitteeSignature,
     config::Config,
-    mpc_signing::{Self, SigningBatch},
+    mpc_signing::{Self, Presig, SigningBatch},
     utxo::{Utxo, UtxoId}
 };
 use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
@@ -215,7 +215,6 @@ public struct WithdrawalSigned has copy, drop {
 public struct WithdrawalPresigsReassigned has copy, drop {
     withdrawal_txn_id: address,
     epoch: u64,
-    presig_start_index: u64,
 }
 
 public struct WithdrawalConfirmed has copy, drop {
@@ -440,7 +439,7 @@ public(package) fun new_withdrawal_txn(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
-    presig_start_index: u64,
+    presigs: vector<Presig>,
     epoch: u64,
     config: &Config,
     clock: &Clock,
@@ -505,8 +504,7 @@ public(package) fun new_withdrawal_txn(
     num_change.do!(|_| change_outputs.push_back(outputs.pop_back()));
     change_outputs.reverse();
 
-    // Contiguously assign presig indices: input `i` uses `presig_start_index + i`.
-    let signing = mpc_signing::new(inputs.length(), presig_start_index, epoch);
+    let signing = mpc_signing::new(inputs.length(), presigs, epoch);
 
     WithdrawalTransaction {
         id: object::new(ctx),
@@ -701,22 +699,19 @@ public(package) fun finish_archive_withdrawal_txn(
     self.confirmed_txns.add(withdrawal_id, txn);
 }
 
-/// Reassign fresh presig indices to the still-pending inputs of a stale-epoch
-/// withdrawal. `new_base` must be the start of a freshly allocated block of size
-/// `allocated_count`, which must equal the txn's pending count, in `current_epoch`.
+/// Reassign fresh presigs, allocated in `current_epoch`, to the still-pending
+/// inputs of a stale-epoch withdrawal.
 public(package) fun reallocate_presigs_for_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
-    new_base: u64,
+    presigs: vector<Presig>,
     current_epoch: u64,
-    allocated_count: u64,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
-    txn.signing.reallocate(new_base, current_epoch, allocated_count);
+    txn.signing.reallocate(presigs, current_epoch);
     sui::event::emit(WithdrawalPresigsReassigned {
         withdrawal_txn_id: withdrawal_id,
         epoch: current_epoch,
-        presig_start_index: new_base,
     });
 }
 
@@ -945,6 +940,15 @@ public(package) fun has_confirmed_txn(self: &WithdrawalRequestQueue, id: address
 }
 
 #[test_only]
+public(package) fun withdrawal_txn_signing_for_testing(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): &SigningBatch {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    &txn.signing
+}
+
+#[test_only]
 public(package) fun new_withdrawal_txn_for_testing(
     request_ids: vector<address>,
     inputs: vector<Utxo>,
@@ -966,7 +970,7 @@ public(package) fun new_withdrawal_txn_for_testing(
         signed_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
         randomness: vector[0, 0, 0, 0],
-        signing: mpc_signing::new(num_inputs, 0, 0),
+        signing: mpc_signing::new(num_inputs, mpc_signing::presigs_for_testing(0, num_inputs), 0),
         guardian_signatures: option::none(),
     }
 }

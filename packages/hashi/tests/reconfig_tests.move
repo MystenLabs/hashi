@@ -119,6 +119,9 @@ fun test_end_reconfig_stores_committee_handoff() {
         3,
     );
 
+    // Withdrawals in the old epoch consumed presigs 0 through 2.
+    let _ = hashi.allocate_presigs(3);
+
     let in_window = &test_utils::new_tx_context(VOTER1, next_epoch);
     reconfig::submit_committee_handoff_for_testing(
         &mut hashi,
@@ -130,6 +133,9 @@ fun test_end_reconfig_stores_committee_handoff() {
 
     assert!(hashi.committee_set().epoch() == next_epoch);
     assert!(hashi.committee_set().has_committee_handoff_for_testing(0));
+    // The new committee's presig pool starts over, so numbering does too.
+    let presigs = hashi.allocate_presigs(1);
+    assert!(presigs[0].index() == 0);
     std::unit_test::destroy(hashi);
 }
 

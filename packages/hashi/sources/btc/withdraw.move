@@ -145,8 +145,7 @@ entry fun commit_withdrawal_tx(
     // Extract request data for fee validation (read-only, before the object exists).
     let request_infos = hashi.bitcoin().withdrawal_queue().extract_request_infos(&request_ids);
 
-    // Allocate presigs from core counter
-    let presig_start_index = hashi.allocate_presigs(inputs.length());
+    let presigs = hashi.allocate_presigs(inputs.length());
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(32);
@@ -159,7 +158,7 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
-        presig_start_index,
+        presigs,
         epoch,
         hashi.config(),
         clock,
@@ -379,11 +378,11 @@ entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
     hashi.assert_not_reconfiguring();
     let current_epoch = hashi.committee_set().epoch();
     let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
-    let new_base = hashi.allocate_presigs(pending);
+    let presigs = hashi.allocate_presigs(pending);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, new_base, current_epoch, pending);
+        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, presigs, current_epoch);
 }
 
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
