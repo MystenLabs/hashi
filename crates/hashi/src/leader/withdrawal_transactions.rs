@@ -12,6 +12,7 @@ use crate::withdrawals::MpcInputSignaturesChunk;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalBroadcastError;
 use crate::withdrawals::WithdrawalBroadcastErrorKind;
+use crate::withdrawals::WithdrawalTxSignatures;
 use crate::withdrawals::WithdrawalTxSigning;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
@@ -503,11 +504,12 @@ impl LeaderService {
 
         // 4. Build the WithdrawalTxSigning (binds BOTH sig arrays) and get
         // the BLS certificate via fan-out.
-        let signed_message = WithdrawalTxSigning {
+        let signatures = WithdrawalTxSignatures {
             withdrawal_id: txn.id,
             signatures: witness_signatures.clone(),
             guardian_signatures: guardian_signatures.clone(),
         };
+        let signed_message = WithdrawalTxSigning::new(&signatures, txn.generation);
 
         let committee = inner
             .onchain_state()
@@ -518,7 +520,7 @@ impl LeaderService {
         // Pass the limiter seq/timestamp the leader validated against (above) as
         // validation-only fields so each committee member re-validates the rate
         // limit once at the finalize cert. They are NOT part of the signed message.
-        let proto_request = signed_message.to_proto(expected_limiter_seq, timestamp_secs);
+        let proto_request = signatures.to_proto(expected_limiter_seq, timestamp_secs);
 
         let mut sig_tasks = JoinSet::new();
         for member in members {
@@ -1601,8 +1603,8 @@ impl LeaderService {
     }
 }
 
-impl WithdrawalTxSigning {
-    /// Converts the withdrawal signing message into the bridge-service protobuf request type.
+impl WithdrawalTxSignatures {
+    /// Converts the withdrawal signatures into the bridge-service protobuf request type.
     ///
     /// `expected_limiter_seq`/`timestamp_secs` are validation-only RPC fields —
     /// committee members re-validate the rate limit at finalize against them. They

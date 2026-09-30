@@ -591,7 +591,7 @@ public(package) fun record_input_signatures(
 
 /// Finalize a fully-MPC-signed withdrawal: attach the one-shot guardian
 /// signatures, flip the broadcast gate, and emit the signed event.
-/// Caller must cert-gate this over the bound (MPC + guardian) message.
+/// Caller must cert-gate this over the bound (generation + MPC + guardian) message.
 public(package) fun finalize_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -746,6 +746,8 @@ public(package) fun withdrawal_txn_reset_state(
 public(package) fun reset_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
+    signed_count: u64,
+    finalized: bool,
     sighash_digest: address,
     presigs: vector<Presig>,
     epoch: u64,
@@ -753,8 +755,6 @@ public(package) fun reset_withdrawal_txn(
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     assert!(txn.confirmed_timestamp_ms.is_none(), EWithdrawalAlreadyConfirmed);
-    let signed_count = txn.signing.signed_count();
-    let finalized = txn.guardian_signatures.is_some();
     txn.signing.reset_slots(presigs, epoch);
     txn.randomness = randomness;
     txn.guardian_signatures = option::none();
@@ -1048,14 +1048,6 @@ public(package) fun withdrawal_txn_randomness(
     withdrawal_id: address,
 ): vector<u8> {
     self.borrow_withdrawal_txn(withdrawal_id).randomness
-}
-
-#[test_only]
-public(package) fun withdrawal_txn_signing(
-    self: &WithdrawalRequestQueue,
-    withdrawal_id: address,
-): &SigningBatch {
-    &self.borrow_withdrawal_txn(withdrawal_id).signing
 }
 
 #[test_only]

@@ -736,7 +736,7 @@ pub struct WithdrawalTransaction {
     /// Committee-certified digest of every input's signing message and key
     /// path.
     pub sighash_digest: Address,
-    /// Number of certified resets. Chunk certificates bind it.
+    /// Number of certified resets. Chunk and finalize certificates bind it.
     pub generation: u64,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,

@@ -149,7 +149,7 @@ pub struct SignMpcInputSignaturesResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
-/// Maps to crate::withdrawals::WithdrawalTxSigning
+/// Maps to crate::withdrawals::WithdrawalTxSignatures
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).

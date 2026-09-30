@@ -1742,8 +1742,9 @@ impl SuiTxExecutor {
 
     /// Execute `withdraw::finalize_withdrawal` to attach the one-shot guardian
     /// signatures and flip the broadcast gate once every input is MPC-signed.
-    /// Cert is over `WithdrawalSignedMessage { withdrawal_id, signatures (read
-    /// from the batch on-chain), guardian_signatures }`.
+    /// Cert is over `WithdrawalSignedMessage { withdrawal_id, generation,
+    /// signatures, guardian_signatures }`, with the generation and signatures
+    /// read from the object on chain.
     #[tracing::instrument(
         level = "info",
         skip_all,

@@ -67,9 +67,11 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
 //
 // The cert binds both signature arrays — otherwise a malicious leader
 // could pair valid MPC sigs with garbage guardian sigs and the cert
-// would still pass.
+// would still pass. It also binds the generation, so a finalize cert cannot
+// land across a reset.
 public struct WithdrawalSignedMessage has copy, drop, store {
     withdrawal_id: address,
+    generation: u64,
     signatures: vector<vector<u8>>,
     guardian_signatures: vector<vector<u8>>,
 }
@@ -239,9 +241,10 @@ entry fun commit_input_signatures(
 }
 
 /// Finalize a withdrawal once all MPC signatures are in: attach the one-shot
-/// guardian signatures and flip the broadcast gate. The cert binds the full MPC
-/// signature set (read from the batch) together with the guardian signatures, so
-/// a malicious leader cannot pair valid MPC sigs with garbage guardian sigs.
+/// guardian signatures and flip the broadcast gate. The cert binds the withdrawal's
+/// current generation and the full MPC signature set (read from the batch) together
+/// with the guardian signatures, so a malicious leader cannot pair valid MPC sigs
+/// with garbage guardian sigs.
 entry fun finalize_withdrawal(
     hashi: &mut Hashi,
     withdrawal_id: address,
@@ -259,9 +262,15 @@ entry fun finalize_withdrawal(
         .bitcoin()
         .withdrawal_queue()
         .withdrawal_txn_mpc_signatures(withdrawal_id);
+    let generation = hashi
+        .bitcoin()
+        .withdrawal_queue()
+        .borrow_withdrawal_txn(withdrawal_id)
+        .generation();
 
     let approval = WithdrawalSignedMessage {
         withdrawal_id,
+        generation,
         signatures,
         guardian_signatures,
     };
@@ -452,7 +461,15 @@ fun reset_withdrawal_tx_with_randomness(
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .reset_withdrawal_txn(withdrawal_id, sighash_digest, presigs, epoch, randomness);
+        .reset_withdrawal_txn(
+            withdrawal_id,
+            signed_count,
+            finalized,
+            sighash_digest,
+            presigs,
+            epoch,
+            randomness,
+        );
 }
 
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
@@ -573,11 +590,13 @@ public(package) fun new_withdrawal_commitment_message(
 
 public(package) fun new_withdrawal_signed_message(
     withdrawal_id: address,
+    generation: u64,
     signatures: vector<vector<u8>>,
     guardian_signatures: vector<vector<u8>>,
 ): WithdrawalSignedMessage {
     WithdrawalSignedMessage {
         withdrawal_id,
+        generation,
         signatures,
         guardian_signatures,
     }

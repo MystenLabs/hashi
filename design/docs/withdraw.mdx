@@ -247,3 +247,16 @@ withdrawal, returning the spent UTXOs' change output to the pool.
 If a transaction gets stuck, fee bumping is handled through CPFP. Either the
 withdrawal recipient spends their output with a high-fee child, or Hashi
 spends the change UTXO (see [Fees: stuck transactions](fees.mdx#stuck-transactions)).
+
+## Reset
+
+A committed withdrawal that cannot complete as signed, for example after a
+sighash fix, can be reset in place by `hashi::withdraw::reset_withdrawal_tx`
+under a committee certificate. The reset keeps the withdrawal and its Bitcoin
+transaction but discards its signatures, so every input is signed again. Each
+reset bumps a generation counter, and the certificates that record signatures
+bind it, so none from before a reset can land after it.
+
+Nodes do not propose or certify resets yet. Once they do, each validator will
+certify one only when its own view shows the withdrawal cannot complete as
+signed.

@@ -551,7 +551,7 @@ fun test_reset_withdrawal_tx() {
     assert!(txn.sighash_digest() == @0xD16E57);
     assert!(queue.withdrawal_txn_randomness(txn_id) == RESET_RANDOMNESS);
     assert!(queue.withdrawal_txn_created_timestamp_ms(txn_id) == created_ms);
-    let signing = queue.withdrawal_txn_signing(txn_id);
+    let signing = queue.withdrawal_txn_signing_for_testing(txn_id);
     assert!(signing.pending_index(0) == option::some(5));
     assert!(signing.pending_index(1) == option::some(6));
 
@@ -567,14 +567,29 @@ fun test_reset_withdrawal_tx() {
     };
     reset_withdrawal(&mut hashi, txn_id, 2, 2, true);
 
-    let signing = hashi.bitcoin().withdrawal_queue().withdrawal_txn_signing(txn_id);
+    let signing = hashi.bitcoin().withdrawal_queue().withdrawal_txn_signing_for_testing(txn_id);
     assert!(signing.pending_index(0) == option::some(9));
     assert!(signing.pending_index(1) == option::some(10));
-    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.record_input_signatures(txn_id, vector[0, 1], vector[x"CAFE", x"CAFE"]);
-    assert!(!queue.withdrawal_txn_is_fully_signed(txn_id));
-    queue.finalize_withdrawal_txn(txn_id, vector[x"CC", x"DD"], &clock);
-    assert!(queue.withdrawal_txn_is_fully_signed(txn_id));
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(txn_id, vector[0, 1], vector[x"CAFE", x"CAFE"]);
+    assert!(!hashi.bitcoin().withdrawal_queue().withdrawal_txn_is_fully_signed(txn_id));
+    let finalize = hashi::withdraw::new_withdrawal_signed_message(
+        txn_id,
+        3,
+        vector[x"CAFE", x"CAFE"],
+        vector[x"CC", x"DD"],
+    );
+    let finalize_cert = sign_message(&hashi, hashi::intent::withdrawal_signed(), &finalize);
+    hashi::withdraw::finalize_withdrawal(
+        &mut hashi,
+        txn_id,
+        vector[x"CC", x"DD"],
+        finalize_cert,
+        &clock,
+    );
+    assert!(hashi.bitcoin().withdrawal_queue().withdrawal_txn_is_fully_signed(txn_id));
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -591,6 +606,48 @@ fun test_reset_aborts_after_confirm() {
     let (_id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
     confirm_via_entry(&mut hashi, txn_id, &clock);
     reset_withdrawal(&mut hashi, txn_id, 0, 1, true);
+    abort 0
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee::ESigVerification)]
+fun test_pre_reset_finalize_cert_aborts_after_reset() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_two_input_txn(&mut hashi, &clock, ctx);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(txn_id, vector[0, 1], vector[x"CAFE", x"CAFE"]);
+    let finalize = hashi::withdraw::new_withdrawal_signed_message(
+        txn_id,
+        0,
+        vector[x"CAFE", x"CAFE"],
+        vector[x"AA", x"BB"],
+    );
+    let finalize_cert = sign_message(&hashi, hashi::intent::withdrawal_signed(), &finalize);
+    hashi::withdraw::finalize_withdrawal(
+        &mut hashi,
+        txn_id,
+        vector[x"AA", x"BB"],
+        finalize_cert,
+        &clock,
+    );
+    reset_withdrawal(&mut hashi, txn_id, 0, 2, true);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(txn_id, vector[0, 1], vector[x"CAFE", x"CAFE"]);
+    hashi::withdraw::finalize_withdrawal(
+        &mut hashi,
+        txn_id,
+        vector[x"AA", x"BB"],
+        finalize_cert,
+        &clock,
+    );
     abort 0
 }
 
