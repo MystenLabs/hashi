@@ -105,6 +105,8 @@ impl NitroAttestation {
                 VerifyTime::Now => now_timestamp_ms(),
                 VerifyTime::DocumentTimestamp => doc.timestamp,
             };
+            // Fastcrypto uses this time to validate certificate dates; it does not
+            // check document freshness, which we enforce separately for live RPCs.
             verify_nitro_attestation(&signature, &signed_message, &doc, timestamp_ms).map_err(
                 |e| CryptoVerificationError::new(format!("attestation verification failed: {e}")),
             )?;
