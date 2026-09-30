@@ -341,7 +341,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(health.code(), Code::PermissionDenied);
 
-        assert_eq!(proxy.stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
         assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 0);
     }
 

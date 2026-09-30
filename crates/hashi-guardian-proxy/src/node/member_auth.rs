@@ -5,9 +5,8 @@
 //! only to members of the current or pending committee, identified by the TLS
 //! client certificate they present with their registered key on the node
 //! listener ([`crate::tls`]). Besides node RPCs, the node listener serves only
-//! guardian info: nothing in front of it rate-limits callers, so the public
-//! routes stay on the public listener. It mirrors the node's
-//! `require_known_validator`.
+//! guardian info, since nothing in front of it rate-limits callers. It mirrors
+//! the node's `require_known_validator`.
 
 use std::sync::Arc;
 
