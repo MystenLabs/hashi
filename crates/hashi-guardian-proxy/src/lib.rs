@@ -24,7 +24,7 @@
 //!
 //! Nodes call it on a second listener, where the proxy terminates TLS itself,
 //! requires their registered TLS key as a client certificate ([`tls`]), and
-//! serves only node RPCs and guardian info.
+//! serves only node RPCs and `GetGuardianInfo`.
 //!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
@@ -327,8 +327,14 @@ mod tests {
         assert_eq!(confirm.code(), Code::PermissionDenied);
         assert!(confirm.message().contains("guardian_url"), "{confirm:?}");
 
+        let attested_info = GuardianServiceClient::new(channel.clone())
+            .get_attested_guardian_info(attested(proto::GetAttestedGuardianInfoRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(attested_info.code(), Code::PermissionDenied);
+
         let relay = GuardianRelayServiceClient::new(channel.clone())
-            .get_provisioning_target_info(proto::GetProvisioningTargetInfoRequest {})
+            .get_provisioning_target_info(attested(proto::GetProvisioningTargetInfoRequest {}))
             .await
             .unwrap_err();
         assert_eq!(relay.code(), Code::PermissionDenied);
@@ -341,7 +347,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(health.code(), Code::PermissionDenied);
 
-        assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            proxy
+                .stub
+                .get_attested_guardian_info_calls
+                .load(Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
