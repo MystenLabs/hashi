@@ -147,6 +147,16 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[1; 32])
     }
 
+    /// The stub answers attested info only with the metadata it checks was
+    /// forwarded.
+    fn attested<T>(message: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        request
+            .metadata_mut()
+            .insert("x-attestation-test", "forwarded".parse().unwrap());
+        request
+    }
+
     struct Proxy {
         stub: StubGuardian,
         app: axum::Router,
@@ -296,9 +306,7 @@ mod tests {
         // Guardian info stays open to any node, member or not.
         proxy
             .node(&outsider)
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            })
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .unwrap();
     }
@@ -335,9 +343,7 @@ mod tests {
         let mut client = GuardianServiceClient::new(channel.clone());
 
         client
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            })
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .unwrap();
         assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
@@ -349,11 +355,21 @@ mod tests {
             .unwrap_err();
         assert_eq!(unsigned.code(), Code::InvalidArgument);
 
-        GuardianRelayServiceClient::new(channel.clone())
-            .get_provisioning_target_info(proto::GetProvisioningTargetInfoRequest {})
+        client
+            .get_attested_guardian_info(attested(proto::GetAttestedGuardianInfoRequest {}))
             .await
             .unwrap();
-        assert_eq!(proxy.stub.get_guardian_info_calls.load(Ordering::SeqCst), 2);
+        GuardianRelayServiceClient::new(channel.clone())
+            .get_provisioning_target_info(attested(proto::GetProvisioningTargetInfoRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(
+            proxy
+                .stub
+                .get_attested_guardian_info_calls
+                .load(Ordering::SeqCst),
+            2
+        );
 
         let health = HealthClient::new(channel)
             .check(HealthCheckRequest {

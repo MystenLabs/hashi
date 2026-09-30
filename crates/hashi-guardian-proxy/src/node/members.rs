@@ -160,9 +160,7 @@ impl ChainMemberSource {
         let raw = self
             .guardian
             .clone()
-            .get_guardian_info(proto::GetGuardianInfoRequest {
-                include_attestation: false,
-            })
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .context("GetGuardianInfo")?
             .into_inner();

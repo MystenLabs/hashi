@@ -87,7 +87,10 @@ fn is_public(path: &str) -> bool {
         | tonic_health::pb::health_server::SERVICE_NAME => true,
         guardian_service_server::SERVICE_NAME => matches!(
             method,
-            "GetGuardianInfo" | "ConfirmCeremony" | "ProvisionerRotateCert"
+            "GetGuardianInfo"
+                | "GetAttestedGuardianInfo"
+                | "ConfirmCeremony"
+                | "ProvisionerRotateCert"
         ),
         _ => false,
     }
@@ -206,6 +209,7 @@ mod tests {
             "/sui.hashi.v1alpha.GuardianRelayService/SingleProvisionerInit",
             "/sui.hashi.v1alpha.GuardianRelayService/GetProvisioningTargetInfo",
             "/sui.hashi.v1alpha.GuardianService/GetGuardianInfo",
+            "/sui.hashi.v1alpha.GuardianService/GetAttestedGuardianInfo",
             "/sui.hashi.v1alpha.GuardianService/ConfirmCeremony",
             "/sui.hashi.v1alpha.GuardianService/ProvisionerRotateCert",
         ] {
