@@ -12,25 +12,18 @@ use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use rand::RngCore;
 use tonic::Code;
 use tonic::transport::Channel;
 use tonic::transport::Endpoint;
-
-fn fresh_attestation_nonce() -> AttestationNonce {
-    let mut nonce = [0; 32];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
-    nonce
-}
 
 pub async fn verified_live_guardian_info(
     client: &mut GuardianServiceClient<Channel>,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    let nonce = fresh_attestation_nonce();
+    let nonce = AttestationNonce::random();
     let info_pb = client
         .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {
-            nonce: nonce.to_vec().into(),
+            nonce: nonce.0.to_vec().into(),
         })
         .await
         .context("GetAttestedGuardianInfo RPC failed")?
@@ -47,10 +40,10 @@ pub async fn verified_provisioning_target_info(
     client: &mut GuardianRelayServiceClient<Channel>,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    let nonce = fresh_attestation_nonce();
+    let nonce = AttestationNonce::random();
     let info_pb = client
         .get_provisioning_target_info(pb::GetProvisioningTargetInfoRequest {
-            nonce: nonce.to_vec().into(),
+            nonce: nonce.0.to_vec().into(),
         })
         .await
         .context("GetProvisioningTargetInfo RPC failed")?
@@ -67,7 +60,7 @@ pub async fn verified_ceremony_guardian_info(
     endpoint: &str,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    let nonce = fresh_attestation_nonce();
+    let nonce = AttestationNonce::random();
     let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint, &nonce).await?;
     let verified = verify_info_response(info_pb, current_build, &nonce)?;
     ensure!(
@@ -97,7 +90,7 @@ async fn ceremony_guardian_info_pb(
         .with_context(|| format!("connect to ceremony guardian at {endpoint}"))?;
     match GuardianRelayServiceClient::new(channel.clone())
         .get_provisioning_target_info(pb::GetProvisioningTargetInfoRequest {
-            nonce: nonce.to_vec().into(),
+            nonce: nonce.0.to_vec().into(),
         })
         .await
     {
@@ -105,7 +98,7 @@ async fn ceremony_guardian_info_pb(
         Err(status) if status.code() == Code::Unimplemented => Ok((
             GuardianServiceClient::new(channel)
                 .get_attested_guardian_info(pb::GetAttestedGuardianInfoRequest {
-                    nonce: nonce.to_vec().into(),
+                    nonce: nonce.0.to_vec().into(),
                 })
                 .await
                 .context("GetAttestedGuardianInfo RPC failed")?
@@ -269,7 +262,7 @@ mod tests {
         )
         .await;
 
-        let (info, rpc) = ceremony_guardian_info_pb(&endpoint, &[9; 32])
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint, &AttestationNonce([9; 32]))
             .await
             .unwrap();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
@@ -281,7 +274,7 @@ mod tests {
         let endpoint =
             serve(Server::builder().add_service(GuardianServiceServer::new(Guardian(0xA)))).await;
 
-        let (info, rpc) = ceremony_guardian_info_pb(&endpoint, &[9; 32])
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint, &AttestationNonce([9; 32]))
             .await
             .unwrap();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xA; 32]);

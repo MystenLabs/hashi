@@ -5,6 +5,7 @@ use crate::task_spawner;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::AddressValidation;
+use hashi_types::guardian::AttestationNonce;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
@@ -104,9 +105,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .as_ref()
             .try_into()
             .map_err(|_| Status::invalid_argument("attestation nonce must be exactly 32 bytes"))?;
-        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone(), nonce)
-            .await
-            .map_err(to_status)?;
+        let resp =
+            task_spawner::get_attested_guardian_info(self.enclave.clone(), AttestationNonce(nonce))
+                .await
+                .map_err(to_status)?;
         Ok(Response::new(
             proto_conversions::get_guardian_info_response_to_pb(resp),
         ))

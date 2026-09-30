@@ -72,13 +72,14 @@ fn attestation_request(
     NsmRequest::Attestation {
         public_key: Some(ByteBuf::from(signing_pk.to_bytes())),
         user_data: bindings.map(|b| ByteBuf::from(b.guardian_info_hash)),
-        nonce: bindings.map(|b| ByteBuf::from(b.nonce)),
+        nonce: bindings.map(|b| ByteBuf::from(b.nonce.0)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::AttestationNonce;
     use hashi_types::guardian::GuardianInfo;
     use hashi_types::guardian::GuardianSignKeyPair;
 
@@ -86,7 +87,7 @@ mod tests {
     fn live_nsm_request_binds_key_info_and_challenge() {
         let key = GuardianSignKeyPair::from([1; 32]).verification_key();
         let info = GuardianInfo::mock_for_testing();
-        let bindings = AttestationBindings::new(&info, [9; 32]);
+        let bindings = AttestationBindings::new(&info, AttestationNonce([9; 32]));
         let NsmRequest::Attestation {
             public_key,
             user_data,

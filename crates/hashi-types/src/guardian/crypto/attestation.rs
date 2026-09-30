@@ -25,7 +25,15 @@ pub type GitRevision = String;
 pub(crate) const NITRO_PCR0_LEN: usize = 48;
 
 /// Caller-chosen challenge for one live guardian-info query.
-pub type AttestationNonce = [u8; 32];
+#[derive(Debug, Clone, Copy)]
+pub struct AttestationNonce(pub [u8; 32]);
+
+impl AttestationNonce {
+    /// Generate a fresh challenge using the thread-local cryptographic RNG.
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+}
 
 /// Live query bindings carried in Nitro's `user_data` and `nonce` fields.
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +61,7 @@ impl AttestationBindings {
                 "attestation user_data does not match the guardian info hash",
             ));
         }
-        if nonce != Some(self.nonce.as_slice()) {
+        if nonce != Some(self.nonce.0.as_slice()) {
             return Err(CryptoVerificationError::new(
                 "attestation nonce does not match the caller's challenge",
             ));
@@ -359,9 +367,9 @@ mod tests {
     #[test]
     fn live_bindings_require_both_info_hash_and_challenge() {
         let info = GuardianInfo::mock_for_testing();
-        let bindings = AttestationBindings::new(&info, [9; 32]);
+        let bindings = AttestationBindings::new(&info, AttestationNonce([9; 32]));
         let hash = bindings.guardian_info_hash;
-        let nonce = bindings.nonce;
+        let nonce = bindings.nonce.0;
         bindings.verify(Some(&hash), Some(&nonce)).unwrap();
 
         for user_data in [None, Some([0; 32].as_slice()), Some(&hash[..31])] {
@@ -377,20 +385,20 @@ mod tests {
     #[test]
     fn an_attestation_cannot_be_reused_for_different_info_or_a_new_challenge() {
         let info = GuardianInfo::mock_for_testing();
-        let original = AttestationBindings::new(&info, [9; 32]);
+        let original = AttestationBindings::new(&info, AttestationNonce([9; 32]));
         let mut changed = info.clone();
         changed.encryption_pubkey[0] ^= 1;
         let changed_info = AttestationBindings::new(&changed, original.nonce);
         assert!(
             changed_info
-                .verify(Some(&original.guardian_info_hash), Some(&original.nonce))
+                .verify(Some(&original.guardian_info_hash), Some(&original.nonce.0))
                 .is_err()
         );
 
-        let new_query = AttestationBindings::new(&info, [10; 32]);
+        let new_query = AttestationBindings::new(&info, AttestationNonce([10; 32]));
         assert!(
             new_query
-                .verify(Some(&original.guardian_info_hash), Some(&original.nonce))
+                .verify(Some(&original.guardian_info_hash), Some(&original.nonce.0))
                 .is_err()
         );
     }

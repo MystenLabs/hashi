@@ -1090,9 +1090,12 @@ mod tests {
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert_eq!(
-            resp.verify_live(&BuildPcrs::mock_for_testing("test-revision", 1), &[9; 32])
-                .unwrap_err()
-                .to_string(),
+            resp.verify_live(
+                &BuildPcrs::mock_for_testing("test-revision", 1),
+                &AttestationNonce([9; 32])
+            )
+            .unwrap_err()
+            .to_string(),
             "signature invalid"
         );
     }
@@ -1111,7 +1114,10 @@ mod tests {
 
         assert_eq!(
             response
-                .verify_live(&BuildPcrs::mock_for_testing("approved", 1), &[9; 32])
+                .verify_live(
+                    &BuildPcrs::mock_for_testing("approved", 1),
+                    &AttestationNonce([9; 32])
+                )
                 .unwrap_err()
                 .to_string(),
             "missing guardian attestation",
@@ -1132,25 +1138,37 @@ mod tests {
         let mut info = GuardianInfo::mock_for_testing();
         info.lifecycle = None;
         info.deployment_info = None;
-        assert!(response(info.clone()).verify_live(&build, &[9; 32]).is_ok());
+        assert!(
+            response(info.clone())
+                .verify_live(&build, &AttestationNonce([9; 32]))
+                .is_ok()
+        );
         let mut deployment = DeploymentConfig::mock_for_testing().summary();
         deployment.git_revision = "approved".into();
         info.deployment_info = Some(deployment);
         assert!(
             response(info.clone())
-                .verify_live(&build, &[9; 32])
+                .verify_live(&build, &AttestationNonce([9; 32]))
                 .is_err()
         );
         info.lifecycle = CeremonyStage::OperatorInitialized.into();
-        assert!(response(info.clone()).verify_live(&build, &[9; 32]).is_ok());
+        assert!(
+            response(info.clone())
+                .verify_live(&build, &AttestationNonce([9; 32]))
+                .is_ok()
+        );
         info.deployment_info.as_mut().unwrap().git_revision = "wrong-label".into();
         assert!(
             response(info.clone())
-                .verify_live(&build, &[9; 32])
+                .verify_live(&build, &AttestationNonce([9; 32]))
                 .is_err()
         );
         info.deployment_info = None;
-        assert!(response(info).verify_live(&build, &[9; 32]).is_err());
+        assert!(
+            response(info)
+                .verify_live(&build, &AttestationNonce([9; 32]))
+                .is_err()
+        );
     }
 
     #[test]
