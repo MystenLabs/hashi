@@ -57,15 +57,16 @@ socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 # A non-debug enclave's console can't be read, so the guardian's output goes to
 # the parent, which journals it; with no parent listening it goes to the console.
 mkfifo /tmp/guardian.log
-# Keep a reader on the fifo: a write with none fails with EPIPE, and a failed
-# print! panics the guardian.
+# Keep a reader on the fifo: a write with none fails with EPIPE, and the
+# guardian panics on a failed stderr write.
 exec 3<>/tmp/guardian.log
 (
 	set +e
 	while :; do
-		# -T ends a connection once it has moved nothing for a minute, so a parent
-		# that stops reading can hold up the guardian's writes for that long at most.
-		socat -T 60 -u OPEN:/tmp/guardian.log VSOCK-CONNECT:3:9200 && continue
+		# socat blocks in a write to a parent that stops reading, which -T can't
+		# end, so cap each connection at a minute; the kill (143) reconnects.
+		timeout 60 socat -u OPEN:/tmp/guardian.log VSOCK-CONNECT:3:9200
+		[ $? -eq 143 ] && continue
 		timeout 5 cat /tmp/guardian.log >/dev/console
 	done
 ) 3>&- >/dev/null 2>&1 &
