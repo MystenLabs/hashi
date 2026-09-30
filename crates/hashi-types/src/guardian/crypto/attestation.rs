@@ -39,12 +39,6 @@ impl NitroAttestation {
     /// Verify a LIVE attestation document (COSE signature + AWS cert chain to the
     /// Nitro root, chain validity checked at the current time), that it commits to
     /// `signing_pubkey`, and that its PCR0 matches `build_pcrs`.
-    /// The document must be at most 60 seconds old or 5 seconds in the future.
-    ///
-    /// Pure hardening: KPs must pin the latest approved PCR and reject known-buggy
-    /// builds. Replaying an accepted build's attestation exposes no private keys;
-    /// a still-running session can attest afresh anyway. This does not establish
-    /// freshness of separately signed response data.
     ///
     /// In non-enclave dev/test builds the enclave emits a mock document, so the
     /// attestation check is a no-op, mirroring `get_attestation` `non-enclave-dev`
@@ -140,6 +134,12 @@ impl NitroAttestation {
 
 /// Live RPCs generate an uncached attestation; allow for latency and clock skew.
 /// Historical S3 attestations deliberately do not use this check.
+/// The document must be at most 60 seconds old or 5 seconds in the future.
+///
+/// Pure hardening: KPs must pin the latest approved PCR and reject known-buggy
+/// builds. Replaying an accepted build's attestation exposes no private keys;
+/// a still-running session can attest afresh anyway. This does not establish
+/// freshness of separately signed response data.
 #[cfg(any(test, not(feature = "non-enclave-dev")))]
 fn verify_live_timestamp(document_ms: u64, now_ms: u64) -> CryptoVerificationResult<()> {
     const MAX_AGE_MS: u64 = 60_000;
