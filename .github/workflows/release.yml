@@ -214,7 +214,8 @@ jobs:
       - name: Authenticate to GCP
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # pin@v3.0.0
         with:
-          workload_identity_provider: projects/984139309829/locations/global/workloadIdentityPools/github-actions/providers/github
+          workload_identity_provider: projects/660892227407/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-oidc
+          service_account: gha-hashi-release@cryptic-bolt-398315.iam.gserviceaccount.com
 
       - name: Verify Docker image
         env:
