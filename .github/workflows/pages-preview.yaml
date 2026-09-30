@@ -41,7 +41,11 @@ jobs:
   # write token; `preview` publishes the result.
   preview-build:
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'MystenLabs' && github.event.action != 'closed'
+    # Fork PRs get a read-only token, so they can't publish a preview.
+    if: >-
+      github.repository_owner == 'MystenLabs' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.action != 'closed'
     steps:
       - uses: actions/checkout@v7
       - name: Setup Node.js
@@ -68,6 +72,7 @@ jobs:
     needs: preview-build
     if: >-
       !cancelled() && github.repository_owner == 'MystenLabs' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.preview-build.result == 'success')
     permissions:
       contents: write
