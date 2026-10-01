@@ -214,7 +214,14 @@ mod tests {
         let old_encrypted_shares = ceremony_state.encrypted_shares.clone();
         let original_commitments = ceremony_state.secret_sharing_instance.commitments().clone();
         let btc_master_pubkey = ceremony_state.btc_master_pubkey;
-        let signer_cert = cert_roster.cert_for_share(shares[0].id).unwrap();
+        let recipient = &old_encrypted_shares
+            .iter()
+            .find(|entry| entry.id == shares[0].id)
+            .unwrap()
+            .recipient_fingerprint;
+        let signer_cert = cert_roster
+            .cert_for_fingerprint(&recipient.parse().unwrap())
+            .unwrap();
         let signer_fingerprint = signer_cert.fingerprint().to_hex();
         let signer_secret = secret_keys.get(&signer_fingerprint).unwrap();
         let (new_cert, new_secret) = mock_attested_kp_keypair();

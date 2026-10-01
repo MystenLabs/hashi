@@ -80,18 +80,10 @@ impl KpSetConfig {
             .map_err(|e| anyhow!("invalid sharing params: {e:?}"))
     }
 
-    /// The roster as the rotation deals it. Every submission must carry the
-    /// same roster, so the order comes from the certs, not the config.
+    /// Load the canonical certificate set for the rotation proposal.
     pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
-        dealing_order(load_kp_certs_roster(&self.kp_pgp_cert_paths)?.into_vec())
+        load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
-}
-
-/// Certs in the order a new ceremony deals them: share id `i + 1` goes to the
-/// `i`th fingerprint in hex order. Existing signed state keeps its own ids.
-pub fn dealing_order(mut certs: Vec<AttestedKpCert>) -> Result<KpCertRoster> {
-    certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
-    KpCertRoster::new(certs).context("invalid KP certificate roster")
 }
 
 fn validate_kp_set(num_shares: usize, threshold: usize, cert_paths: &[PathBuf]) -> Result<()> {
