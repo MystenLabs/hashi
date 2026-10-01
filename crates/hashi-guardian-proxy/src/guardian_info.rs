@@ -105,7 +105,7 @@ mod tests {
         async fn get_attested_guardian_info(
             &self,
             _: Request<proto::GetAttestedGuardianInfoRequest>,
-        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
             unimplemented!("ordinary info must not request attestation")
         }
 

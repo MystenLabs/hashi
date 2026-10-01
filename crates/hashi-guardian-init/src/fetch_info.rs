@@ -9,15 +9,16 @@
 //! recorded on chain.
 //!
 //! TODO: Remove this bootstrap helper once deploy no longer records guardian
-//! keys by querying a live guardian. This command does not verify the guardian's
-//! signature, Nitro attestation, or PCRs.
+//! keys by querying a live guardian. This command reads self-reported info
+//! without requesting a signature or Nitro attestation.
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser;
 use clap::ValueEnum;
-use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianResponse;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 
@@ -49,10 +50,11 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();
-    let response = GetGuardianInfoResponse::try_from(resp)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    // TODO: Accept PCR config here and use `verify_live` for attestation/PCR checks.
-    let (info, signing_pub_key) = response.into_info_unchecked();
+    let response = GuardianResponse::<GuardianInfo>::try_from(resp)
+        .map_err(|e| anyhow!("decode GuardianInfo: {e:?}"))?;
+    // TODO: Accept PCR config and use the attested endpoint with `verify_live`.
+    let signing_pub_key = response.response.signing_pub_key;
+    let info = response.response;
     match args.field {
         Field::SigningPubKey => {
             println!("{}", hex::encode(signing_pub_key.as_bytes()));

@@ -75,26 +75,24 @@ pub enum OperatorInitRequest {
     Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
+/// Signed guardian state with a fresh attestation for KP/operator verification.
 #[derive(Debug, PartialEq, Clone)]
-pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation, present only when requested.
-    attestation: Option<NitroAttestation>,
-    /// Signing pub key of the guardian
-    signing_pub_key: GuardianPubKey,
+pub struct AttestedGuardianInfo {
+    attestation: NitroAttestation,
     /// Signed guardian info
     signed_info: GuardianSignedResponse<GuardianInfo>,
 }
 
+/// Guardian info whose signature and live attestation have been verified.
 #[derive(Debug, PartialEq, Clone)]
-pub struct VerifiedGuardianInfo {
-    pub info: GuardianInfo,
-    pub signing_pub_key: GuardianPubKey,
-    pub session_id: SessionID,
-}
+pub struct VerifiedGuardianInfo(GuardianInfo);
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Signed enclave mode and stage; absent until operator initialization commits.
+    /// Guardian signing public key (Ed25519).
+    #[serde(with = "crate::guardian::serde::guardian_pubkey")]
+    pub signing_pub_key: GuardianPubKey,
+    /// Enclave mode and stage; absent until operator initialization commits.
     pub lifecycle: Option<EnclaveLifecycle>,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
@@ -856,15 +854,13 @@ impl StandardWithdrawalRequest {
     }
 }
 
-impl GetGuardianInfoResponse {
+impl AttestedGuardianInfo {
     pub fn new(
-        attestation: Option<NitroAttestation>,
-        signing_pub_key: GuardianPubKey,
+        attestation: NitroAttestation,
         signed_info: GuardianSignedResponse<GuardianInfo>,
     ) -> Self {
         Self {
             attestation,
-            signing_pub_key,
             signed_info,
         }
     }
@@ -884,9 +880,12 @@ impl GetGuardianInfoResponse {
         &self,
         expected_build: &BuildPcrs,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
+        // Read the claimed key only to verify this envelope; the attestation
+        // below authenticates it against the approved build before returning info.
+        let signing_pub_key = self.signed_info.data_unchecked().response.signing_pub_key;
         let info = self
             .signed_info
-            .verify_signature(&self.signing_pub_key)?
+            .verify_signature(&signing_pub_key)?
             .response
             .clone();
         if info.lifecycle.is_some() {
@@ -908,23 +907,22 @@ impl GetGuardianInfoResponse {
             ));
         }
         self.attestation
-            .as_ref()
-            .ok_or_else(|| CryptoVerificationError::new("missing guardian attestation"))?
-            .verify_live(&self.signing_pub_key, expected_build)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key: self.signing_pub_key,
-            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
-        })
+            .verify_live(&signing_pub_key, expected_build)?;
+        Ok(VerifiedGuardianInfo(info))
+    }
+}
+
+impl VerifiedGuardianInfo {
+    pub fn info(&self) -> &GuardianInfo {
+        &self.0
     }
 
-    /// Extract the guardian's self-reported info and signing key WITHOUT verifying
-    /// the signature or attestation.
-    pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
-        (
-            self.signed_info.into_data_unchecked().response,
-            self.signing_pub_key,
-        )
+    pub fn into_info(self) -> GuardianInfo {
+        self.0
+    }
+
+    pub fn session_id(&self) -> SessionID {
+        SessionID::from_signing_pubkey(&self.0.signing_pub_key)
     }
 }
 
@@ -1039,6 +1037,10 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["lifecycle"]["withdraw"], "operator_initialized");
         assert_eq!(json["encryption_pubkey"], hex::encode([0u8; 32]));
+        assert_eq!(
+            json["signing_pub_key"],
+            hex::encode(info.signing_pub_key.as_bytes())
+        );
         assert_eq!(json["config_hash"], hex::encode([0xab; 32]));
         let mpc_master_g = json["mpc_master_g"].as_str().unwrap();
         assert_eq!(mpc_master_g.len(), 66);
@@ -1053,20 +1055,8 @@ mod tests {
     }
 
     #[test]
-    fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
-        resp.attestation = None;
-        let expected_info = GuardianInfo::mock_for_testing();
-        let expected_signing_pub_key = resp.signing_pub_key;
-        let (info, signing_pub_key) = resp.into_info_unchecked();
-
-        assert_eq!(info, expected_info);
-        assert_eq!(signing_pub_key, expected_signing_pub_key);
-    }
-
-    #[test]
-    fn get_guardian_info_verify_live_uses_signed_info_verification() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+    fn get_attested_guardian_info_verify_live_uses_signed_info_verification() {
+        let mut resp = AttestedGuardianInfo::mock_for_testing();
         let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
@@ -1080,23 +1070,21 @@ mod tests {
     }
 
     #[test]
-    fn get_guardian_info_verify_live_requires_attestation() {
-        let key = GuardianSignKeyPair::from([7; 32]);
-        let mut info = GuardianInfo::mock_for_testing();
-        info.lifecycle = None;
-        info.deployment_info = None;
-        let response = GetGuardianInfoResponse::new(
-            None,
-            key.verification_key(),
-            GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
+    fn attested_guardian_info_rejects_mismatched_signing_key() {
+        let signing_key = GuardianSignKeyPair::from([7; 32]);
+        let info = GuardianInfo::mock_for_testing();
+        assert_ne!(info.signing_pub_key, signing_key.verification_key());
+        let response = AttestedGuardianInfo::new(
+            NitroAttestation::new(vec![]),
+            GuardianSigned::sign(GuardianResponse::new(info, 1234), &signing_key),
         );
 
         assert_eq!(
             response
-                .verify_live(&BuildPcrs::mock_for_testing("approved", 1))
+                .verify_live(&BuildPcrs::mock_for_testing("test-revision", 1))
                 .unwrap_err()
                 .to_string(),
-            "missing guardian attestation",
+            "signature invalid"
         );
     }
 
@@ -1104,10 +1092,10 @@ mod tests {
     fn guardian_info_verification_distinguishes_boot_from_initialized_sessions() {
         let key = GuardianSignKeyPair::from([7; 32]);
         let build = BuildPcrs::mock_for_testing("approved", 1);
-        let response = |info| {
-            GetGuardianInfoResponse::new(
-                Some(NitroAttestation::new(vec![])),
-                key.verification_key(),
+        let response = |mut info: GuardianInfo| {
+            info.signing_pub_key = key.verification_key();
+            AttestedGuardianInfo::new(
+                NitroAttestation::new(vec![]),
                 GuardianSigned::sign(GuardianResponse::new(info, 1234), &key),
             )
         };

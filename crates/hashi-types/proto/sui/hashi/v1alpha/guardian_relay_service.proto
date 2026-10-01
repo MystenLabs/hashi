@@ -23,7 +23,7 @@ service GuardianRelayService {
   // GetGuardianInfo, which always answers for the ACTIVE guardian.
   // Always includes a fresh attestation for KP verification; never cached.
   // Apply the same access policy as GuardianService/GetAttestedGuardianInfo.
-  rpc GetProvisioningTargetInfo(GetProvisioningTargetInfoRequest) returns (GetGuardianInfoResponse);
+  rpc GetProvisioningTargetInfo(GetProvisioningTargetInfoRequest) returns (GetAttestedGuardianInfoResponse);
 }
 
 message GetProvisioningTargetInfoRequest {}

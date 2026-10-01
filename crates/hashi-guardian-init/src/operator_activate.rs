@@ -93,9 +93,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "fetching + verifying provisioned standby GuardianInfo"
     );
     let preflight = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
-    let session_id = preflight.session_id.clone();
-    let signing_pub_key = preflight.signing_pub_key;
-    let pre_info = preflight.info.clone();
+    let session_id = preflight.session_id();
+    let signing_pub_key = preflight.info().signing_pub_key;
+    let pre_info = preflight.info().clone();
     let standby = verify_provisioned_standby_info(&pre_info, &cfg)?;
     info!(
         phase = "guardian preflight",
@@ -389,34 +389,34 @@ fn verify_activated_info(
     expected_limiter_state: hashi_types::guardian::LimiterState,
 ) -> anyhow::Result<()> {
     ensure!(
-        post.session_id.as_str() == expected_session_id,
+        post.session_id().as_str() == expected_session_id,
         "guardian session changed during operator activation: started {}, now {}",
         expected_session_id,
-        post.session_id
+        post.session_id()
     );
     ensure!(
-        post.signing_pub_key == expected_signing_key,
+        post.info().signing_pub_key == expected_signing_key,
         "guardian signing key changed during operator activation"
     );
     ensure!(
-        post.info.lifecycle == WithdrawStage::Activated.into(),
+        post.info().lifecycle == WithdrawStage::Activated.into(),
         "guardian is not an activated withdraw enclave"
     );
     ensure!(
-        post.info.enclave_btc_pubkey == Some(expected_enclave_btc_pubkey),
+        post.info().enclave_btc_pubkey == Some(expected_enclave_btc_pubkey),
         "Guardian BTC pubkey changed during operator activation"
     );
     ensure!(
-        post.info.current_committee_epoch == Some(expected_committee_epoch),
+        post.info().current_committee_epoch == Some(expected_committee_epoch),
         "Guardian committee epoch mismatch: expected {}, got {:?}",
         expected_committee_epoch,
-        post.info.current_committee_epoch
+        post.info().current_committee_epoch
     );
     ensure!(
-        post.info.limiter_state == Some(expected_limiter_state),
+        post.info().limiter_state == Some(expected_limiter_state),
         "Guardian limiter state mismatch: expected {:?}, got {:?}",
         expected_limiter_state,
-        post.info.limiter_state
+        post.info().limiter_state
     );
     Ok(())
 }

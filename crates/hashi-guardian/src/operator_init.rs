@@ -600,7 +600,7 @@ mod tests {
             .await
             .expect("status request should finish after initialization")
             .unwrap();
-        let (after, _) = response.into_info_unchecked();
+        let after = response.response;
         assert_eq!(after.lifecycle, CeremonyStage::OperatorInitialized.into());
         assert_eq!(
             after.deployment_info,

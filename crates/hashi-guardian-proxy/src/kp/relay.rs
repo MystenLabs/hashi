@@ -25,7 +25,8 @@ use std::sync::Arc;
 use crate::kp;
 use crate::kp::roster::RosterCache;
 use crate::log_store::LogStore;
-use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianResponse;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SessionID;
 use hashi_types::proto;
@@ -111,7 +112,7 @@ impl<L: LogStore> Relay<L> {
     }
 
     /// Backend's self-reported session, provisioning threshold, and provisioned flag.
-    /// The relay is liveness-only, so it does not verify the signature or attestation.
+    /// The relay is liveness-only, so it uses ordinary, self-reported info.
     async fn backend_status(&self) -> Result<BackendStatus, Status> {
         let pb = self
             .client
@@ -119,9 +120,10 @@ impl<L: LogStore> Relay<L> {
             .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await?
             .into_inner();
-        let resp = GetGuardianInfoResponse::try_from(pb)
+        let resp = GuardianResponse::<GuardianInfo>::try_from(pb)
             .map_err(|e| Status::internal(format!("decode backend GuardianInfo: {e:?}")))?;
-        let (info, signing_pub_key) = resp.into_info_unchecked();
+        let signing_pub_key = resp.response.signing_pub_key;
+        let info = resp.response;
         let session_id = SessionID::from_signing_pubkey(&signing_pub_key);
         let arming = info
             .secret_sharing_instance
@@ -240,7 +242,7 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
     async fn get_provisioning_target_info(
         &self,
         request: Request<proto::GetProvisioningTargetInfoRequest>,
-    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+    ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
         let (metadata, extensions, _) = request.into_parts();
         self.client
             .clone()
@@ -562,10 +564,10 @@ mod tests {
         async fn get_attested_guardian_info(
             &self,
             _: Request<proto::GetAttestedGuardianInfoRequest>,
-        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(proto::GetGuardianInfoResponse {
-                signing_pub_key: Some(vec![self.tag; 32].into()),
+            Ok(Response::new(proto::GetAttestedGuardianInfoResponse {
+                attestation: Some(vec![self.tag; 32].into()),
                 ..Default::default()
             }))
         }
@@ -666,7 +668,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
+        assert_eq!(info.attestation.unwrap().as_ref(), &[0xB; 32]);
     }
 
     /// Every provisioning info request must generate a fresh attestation.
@@ -684,7 +686,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_inner();
-            assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xC; 32]);
+            assert_eq!(info.attestation.unwrap().as_ref(), &[0xC; 32]);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 5);
     }

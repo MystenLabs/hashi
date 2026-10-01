@@ -70,7 +70,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
     async fn get_attested_guardian_info(
         &self,
         request: Request<proto::GetAttestedGuardianInfoRequest>,
-    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+    ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
         self.client
             .clone()
             .get_attested_guardian_info(request)
@@ -188,7 +188,7 @@ pub(crate) mod test_utils {
         async fn get_attested_guardian_info(
             &self,
             request: Request<proto::GetAttestedGuardianInfoRequest>,
-        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
             assert_eq!(
                 request.metadata().get("x-attestation-test").unwrap(),
                 "forwarded"
@@ -196,7 +196,7 @@ pub(crate) mod test_utils {
             let call = self
                 .get_attested_guardian_info_calls
                 .fetch_add(1, Ordering::SeqCst);
-            Ok(Response::new(proto::GetGuardianInfoResponse {
+            Ok(Response::new(proto::GetAttestedGuardianInfoResponse {
                 attestation: Some(vec![call as u8].into()),
                 ..Default::default()
             }))

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Read-only HTTP surface for the proxy: `GET /info` (a curated JSON projection
-//! of the enclave's signed `GetGuardianInfo`) and `GET /health` (proxy
+//! of the enclave's `GetGuardianInfo`) and `GET /health` (proxy
 //! liveness), with permissive CORS. It lets browser/`fetch` clients like the
 //! hashi-ts-sdk read the withdrawal rate-limiter state that the gRPC surface
 //! only exposes to nodes. `u64`s serialize as strings (JSON/JS `2^53`), and
@@ -13,7 +13,7 @@
 //! with a single-slot TTL cache and single-flight refresh: a burst of hits
 //! collapses to at most one `GetGuardianInfo` per TTL, and while the enclave is
 //! briefly unreachable the last good view is served (its age is visible via
-//! `signedAtMs`) rather than erroring.
+//! `timestampMs`) rather than erroring.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,9 +28,9 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
+use hashi_types::guardian::GuardianResponse;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::proto;
@@ -43,7 +43,7 @@ use tower_http::cors::CorsLayer;
 use tracing::error;
 
 /// Curated, read-only projection of `GuardianInfo` served at `GET /info`.
-/// Pubkeys are hex; `signed_at_ms` is a freshness signal.
+/// Pubkeys are hex; `timestamp_ms` is a freshness signal.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GuardianInfoView {
@@ -52,7 +52,7 @@ struct GuardianInfoView {
     committee_epoch: Option<String>,
     btc_pubkey: Option<String>,
     signing_pub_key: String,
-    signed_at_ms: Option<String>,
+    timestamp_ms: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -96,7 +96,7 @@ impl InfoError {
 }
 
 /// Source of a fresh [`GuardianInfoView`]. A trait so the cache can be tested
-/// without a live enclave or a signed response to verify against.
+/// without a live enclave.
 #[tonic::async_trait]
 trait InfoSource: Send + Sync + 'static {
     async fn fetch(&self) -> Result<GuardianInfoView, InfoError>;
@@ -119,14 +119,17 @@ impl InfoSource for GrpcInfoSource {
             .map_err(|status| InfoError::Unreachable(status.to_string()))?
             .into_inner();
 
-        // Read the signing timestamp off the raw proto; the domain conversion drops it.
-        let signed_at_ms = raw.signed_info.as_ref().and_then(|s| s.timestamp_ms);
-        let response = GetGuardianInfoResponse::try_from(raw).map_err(|e| {
+        let response = GuardianResponse::<GuardianInfo>::try_from(raw).map_err(|e| {
             error!(error = ?e, "GetGuardianInfo could not be decoded for /info");
             InfoError::Invalid(format!("{e:?}"))
         })?;
-        let (info, signing_pub_key) = response.into_info_unchecked();
-        Ok(project(&info, &signing_pub_key, signed_at_ms))
+        let signing_pub_key = response.response.signing_pub_key;
+        let info = response.response;
+        Ok(project(
+            &info,
+            &signing_pub_key,
+            Some(response.timestamp_ms),
+        ))
     }
 }
 
@@ -188,7 +191,7 @@ impl InfoState {
         match refreshed {
             Ok(view) => Json(view).into_response(),
             // Enclave unreachable: the last good view (its age is visible via
-            // `signedAtMs`) beats a hard error for an advisory route.
+            // `timestampMs`) beats a hard error for an advisory route.
             Err(err) => self
                 .last_good()
                 .map(|view| Json(view).into_response())
@@ -265,7 +268,7 @@ fn unavailable(error: &str, detail: &str) -> Response {
 fn project(
     info: &GuardianInfo,
     signing_pub_key: &GuardianPubKey,
-    signed_at_ms: Option<u64>,
+    timestamp_ms: Option<u64>,
 ) -> GuardianInfoView {
     GuardianInfoView {
         limiter: limiter_view(info.limiter_state, info.limiter_config),
@@ -279,7 +282,7 @@ fn project(
             .as_ref()
             .map(|pk| hex::encode(pk.serialize())),
         signing_pub_key: hex::encode(signing_pub_key.as_bytes()),
-        signed_at_ms: signed_at_ms.map(|t| t.to_string()),
+        timestamp_ms: timestamp_ms.map(|t| t.to_string()),
     }
 }
 
@@ -339,7 +342,7 @@ mod tests {
             committee_epoch: Some("7".to_string()),
             btc_pubkey: Some("deadbeef".to_string()),
             signing_pub_key: "feedface".to_string(),
-            signed_at_ms: Some("1720000000123".to_string()),
+            timestamp_ms: Some("1720000000123".to_string()),
         };
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
@@ -359,7 +362,7 @@ mod tests {
                 "committeeEpoch": "7",
                 "btcPubkey": "deadbeef",
                 "signingPubKey": "feedface",
-                "signedAtMs": "1720000000123",
+                "timestampMs": "1720000000123",
             })
         );
     }
@@ -374,7 +377,7 @@ mod tests {
             committee_epoch: None,
             btc_pubkey: None,
             signing_pub_key: "feedface".to_string(),
-            signed_at_ms: None,
+            timestamp_ms: None,
         };
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
@@ -384,7 +387,7 @@ mod tests {
                 "committeeEpoch": null,
                 "btcPubkey": null,
                 "signingPubKey": "feedface",
-                "signedAtMs": null,
+                "timestampMs": null,
             })
         );
     }
@@ -396,7 +399,7 @@ mod tests {
             committee_epoch: Some("7".to_string()),
             btc_pubkey: Some("deadbeef".to_string()),
             signing_pub_key: "feedface".to_string(),
-            signed_at_ms: Some("1720000000123".to_string()),
+            timestamp_ms: Some("1720000000123".to_string()),
         }
     }
 

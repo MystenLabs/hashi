@@ -110,9 +110,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "fetching + verifying uninitialized GuardianInfo"
     );
     let preflight = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
-    ensure_uninitialized(&preflight.info)?;
-    let session_id = preflight.session_id.clone();
-    let signing_pub_key = preflight.signing_pub_key;
+    ensure_uninitialized(preflight.info())?;
+    let session_id = preflight.session_id();
+    let signing_pub_key = preflight.info().signing_pub_key;
     info!(
         phase = "guardian preflight",
         session_id = %session_id,
@@ -188,17 +188,17 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     let post = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
     ensure!(
-        post.session_id == session_id,
+        post.session_id() == session_id,
         "guardian session changed during operator provision: started {}, now {}",
         session_id,
-        post.session_id
+        post.session_id()
     );
     ensure!(
-        post.signing_pub_key == signing_pub_key,
+        post.info().signing_pub_key == signing_pub_key,
         "guardian signing key changed during operator provision"
     );
     verify_initialized_info(
-        post.info.clone(),
+        post.info().clone(),
         &scraped_instance,
         &init_config,
         config_hash,
@@ -224,7 +224,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     verified_session
         .info()
-        .match_post_oi_guardian_info(&post.info)?;
+        .match_post_oi_guardian_info(post.info())?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,

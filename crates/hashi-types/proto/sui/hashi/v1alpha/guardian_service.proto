@@ -6,12 +6,12 @@ import "sui/hashi/v1alpha/signature.proto";
 import "sui/hashi/v1alpha/utxo.proto";
 
 service GuardianService {
-  // Query signed guardian state without generating an attestation. May be cached.
+  // Query self-reported guardian state without a signature or attestation. May be cached.
   rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
 
   // KP/operator query: generate a fresh attestation alongside signed guardian info.
   // Never cached. Access can be restricted independently of GetGuardianInfo.
-  rpc GetAttestedGuardianInfo(GetAttestedGuardianInfoRequest) returns (GetGuardianInfoResponse);
+  rpc GetAttestedGuardianInfo(GetAttestedGuardianInfoRequest) returns (GetAttestedGuardianInfoResponse);
 
   // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
@@ -54,17 +54,17 @@ message GetGuardianInfoRequest {}
 message GetAttestedGuardianInfoRequest {}
 
 message GetGuardianInfoResponse {
-  reserved 4;
-  reserved "encrypted_shares";
+  GuardianInfoData info = 1;
+  // Milliseconds since Unix epoch when the state was read.
+  optional uint64 timestamp_ms = 2;
+}
 
-  // AWS Nitro attestation document; present only for attested info RPCs.
+message GetAttestedGuardianInfoResponse {
+  // Required AWS Nitro attestation document.
   optional bytes attestation = 1;
 
-  // Guardian signing public key (Ed25519, 32 bytes).
-  optional bytes signing_pub_key = 2;
-
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
-  SignedGuardianInfo signed_info = 3;
+  SignedGuardianInfo signed_info = 2;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -94,47 +94,50 @@ enum WithdrawStage {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
+  // Guardian signing public key (Ed25519, 32 bytes).
+  optional bytes signing_pub_key = 1;
+
   // Secret-sharing instance (if set).
-  optional SecretSharingInstance secret_sharing_instance = 1;
+  optional SecretSharingInstance secret_sharing_instance = 2;
 
   // Installed deployment summary; absent before operator initialization.
-  DeploymentConfigSummary deployment_info = 2;
+  DeploymentConfigSummary deployment_info = 3;
 
   // Guardian encryption public key (32 bytes).
-  optional bytes encryption_pubkey = 3;
+  optional bytes encryption_pubkey = 4;
 
   // X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
   // Absent before `provisioner_init` has set the keypair.
-  optional bytes enclave_btc_pubkey = 4;
+  optional bytes enclave_btc_pubkey = 5;
 
   // Digest of the operator-supplied InitConfig (32 bytes, if set).
-  optional bytes config_hash = 5;
+  optional bytes config_hash = 6;
 
   // Current rate limiter state (if initialized).
-  LimiterState limiter_state = 6;
+  LimiterState limiter_state = 7;
 
   // Immutable limiter configuration (if initialized).
-  LimiterConfig limiter_config = 7;
+  LimiterConfig limiter_config = 8;
 
   // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-  optional uint64 current_committee_epoch = 8;
+  optional uint64 current_committee_epoch = 9;
 
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
-  optional bytes mpc_master_g = 9;
+  optional bytes mpc_master_g = 10;
 
-  // Signed enclave mode and stage; absent until operator initialization commits.
+  // Enclave mode and stage; absent until operator initialization commits.
   oneof lifecycle {
-    CeremonyStage ceremony = 10;
-    WithdrawStage withdraw = 11;
+    CeremonyStage ceremony = 11;
+    WithdrawStage withdraw = 12;
   }
 
   // Digest of the optional GenesisState pinned during operator_init.
-  optional bytes genesis_state_hash = 12;
+  optional bytes genesis_state_hash = 13;
 
   // The Hashi shared-object id (32 bytes) this guardian serves (set after
   // operator_init). Certificates verified by this enclave are bound to it.
-  optional bytes hashi_object_id = 13;
+  optional bytes hashi_object_id = 14;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

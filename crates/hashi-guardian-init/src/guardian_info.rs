@@ -4,9 +4,9 @@
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
+use hashi_types::guardian::AttestedGuardianInfo;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EnclaveLifecycle;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
@@ -56,11 +56,14 @@ pub async fn verified_ceremony_guardian_info(
     let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
     let verified = verify_info_response(info_pb, current_build)?;
     ensure!(
-        matches!(verified.info.lifecycle, Some(EnclaveLifecycle::Ceremony(_))),
+        matches!(
+            verified.info().lifecycle,
+            Some(EnclaveLifecycle::Ceremony(_))
+        ),
         "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
          guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
          as its provisioning target; a bare endpoint must be the ceremony guardian itself",
-        verified.info.lifecycle
+        verified.info().lifecycle
     );
     Ok(verified)
 }
@@ -71,7 +74,7 @@ pub async fn verified_ceremony_guardian_info(
 /// maps an HTTP 404 to it), which the caller's lifecycle check catches.
 async fn ceremony_guardian_info_pb(
     endpoint: &str,
-) -> anyhow::Result<(pb::GetGuardianInfoResponse, &'static str)> {
+) -> anyhow::Result<(pb::GetAttestedGuardianInfoResponse, &'static str)> {
     // `Endpoint::new`, not `from_shared`: only the former enables TLS for an
     // https endpoint (the relay), as every `Client::connect` in this crate does.
     let channel = Endpoint::new(endpoint.to_string())
@@ -97,11 +100,11 @@ async fn ceremony_guardian_info_pb(
 }
 
 fn verify_info_response(
-    info_pb: pb::GetGuardianInfoResponse,
+    info_pb: pb::GetAttestedGuardianInfoResponse,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    let info_resp = GetGuardianInfoResponse::try_from(info_pb)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
+    let info_resp = AttestedGuardianInfo::try_from(info_pb)
+        .map_err(|e| anyhow!("decode AttestedGuardianInfo: {e:?}"))?;
     info_resp
         .verify_live(current_build)
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e}"))
@@ -121,9 +124,9 @@ mod tests {
     use tonic::transport::server::Router;
     use tonic::transport::server::TcpIncoming;
 
-    fn tagged(tag: u8) -> pb::GetGuardianInfoResponse {
-        pb::GetGuardianInfoResponse {
-            signing_pub_key: Some(vec![tag; 32].into()),
+    fn tagged(tag: u8) -> pb::GetAttestedGuardianInfoResponse {
+        pb::GetAttestedGuardianInfoResponse {
+            attestation: Some(vec![tag; 32].into()),
             ..Default::default()
         }
     }
@@ -143,7 +146,7 @@ mod tests {
         async fn get_attested_guardian_info(
             &self,
             _: Request<pb::GetAttestedGuardianInfoRequest>,
-        ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<pb::GetAttestedGuardianInfoResponse>, Status> {
             Ok(Response::new(tagged(self.0)))
         }
         async fn setup_new_key(
@@ -217,7 +220,7 @@ mod tests {
         async fn get_provisioning_target_info(
             &self,
             _: Request<pb::GetProvisioningTargetInfoRequest>,
-        ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<pb::GetAttestedGuardianInfoResponse>, Status> {
             Ok(Response::new(tagged(self.0)))
         }
         async fn single_provisioner_init(
@@ -247,7 +250,7 @@ mod tests {
         .await;
 
         let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
-        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
+        assert_eq!(info.attestation.unwrap().as_ref(), &[0xB; 32]);
         assert_eq!(rpc, "GetProvisioningTargetInfo");
     }
 
@@ -257,7 +260,7 @@ mod tests {
             serve(Server::builder().add_service(GuardianServiceServer::new(Guardian(0xA)))).await;
 
         let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
-        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xA; 32]);
+        assert_eq!(info.attestation.unwrap().as_ref(), &[0xA; 32]);
         assert_eq!(rpc, "GetAttestedGuardianInfo");
     }
 }

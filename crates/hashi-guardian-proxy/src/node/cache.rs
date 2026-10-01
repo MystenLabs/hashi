@@ -39,8 +39,8 @@ use hashi_types::bitcoin::BitcoinSignature;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::BTC_LIB;
 use hashi_types::guardian::AddressValidation;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianResponse;
 use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
@@ -246,12 +246,11 @@ where
             .await
             .map_err(|s| anyhow::anyhow!("get_guardian_info: {s}"))?
             .into_inner();
-        let response = GetGuardianInfoResponse::try_from(info_pb)
+        let response = GuardianResponse::<GuardianInfo>::try_from(info_pb)
             .map_err(|e| anyhow::anyhow!("parse guardian info: {e:?}"))?;
-        // The proxy talks to the enclave over its own direct channel; like the
-        // node, it does not re-verify the info envelope (worst case is liveness).
-        let (info, _) = response.into_info_unchecked();
-        Ok(info)
+        // The proxy reads self-reported info over its direct enclave channel;
+        // like the node, it uses the keys to check BTC signatures below.
+        Ok(response.response)
     }
 }
 
@@ -330,7 +329,7 @@ where
     async fn get_attested_guardian_info(
         &self,
         request: Request<proto::GetAttestedGuardianInfoRequest>,
-    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+    ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
         self.inner.get_attested_guardian_info(request).await
     }
 
@@ -443,9 +442,7 @@ mod tests {
     use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
-    use hashi_types::guardian::GuardianResponse;
     use hashi_types::guardian::GuardianSignKeyPair;
-    use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
@@ -508,7 +505,7 @@ mod tests {
         async fn get_attested_guardian_info(
             &self,
             _: Request<proto::GetAttestedGuardianInfoRequest>,
-        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
             unimplemented!("ordinary info must not request attestation")
         }
 
@@ -621,7 +618,7 @@ mod tests {
         }
     }
 
-    /// A signed GetGuardianInfoResponse pb carrying the given keys + next_seq.
+    /// A GuardianInfo pb carrying the given keys + next_seq.
     fn stub_info_pb(
         enclave_btc_pubkey: BitcoinPubkey,
         master_g: HashiMasterG,
@@ -629,6 +626,7 @@ mod tests {
     ) -> proto::GetGuardianInfoResponse {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let info = GuardianInfo {
+            signing_pub_key: signing_key.verification_key(),
             lifecycle: hashi_types::guardian::WithdrawStage::Activated.into(),
             secret_sharing_instance: None,
             deployment_info: Some(
@@ -648,9 +646,7 @@ mod tests {
             current_committee_epoch: None,
             mpc_master_g: Some(master_g),
         };
-        let signed_info = GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key);
-        let domain =
-            GetGuardianInfoResponse::new(None, signing_key.verification_key(), signed_info);
+        let domain = GuardianResponse::new(info, 1);
         get_guardian_info_response_to_pb(domain)
     }
 
