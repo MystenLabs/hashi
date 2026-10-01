@@ -1146,14 +1146,26 @@ pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_S
     (*public_presig + G::generator() * beacon).to_byte_array()
 }
 
-pub(crate) fn message_delta(randomness: &[u8; 32], input_index: u32) -> S {
-    signing_delta_oracle(crate::constants::MESSAGE_DELTA_LABEL)
-        .evaluate_to_group_element(&(randomness, input_index))
+pub(crate) fn message_delta(randomness: &[u8; 32], input_index: u32, message: &[u8]) -> S {
+    signing_delta_oracle(crate::constants::MESSAGE_DELTA_LABEL).evaluate_to_group_element(&(
+        randomness,
+        input_index,
+        message,
+    ))
 }
 
-pub(crate) fn presig_delta(randomness: &[u8; 32], global_presig_index: u64) -> S {
-    signing_delta_oracle(crate::constants::PRESIG_DELTA_LABEL)
-        .evaluate_to_group_element(&(randomness, global_presig_index))
+pub(crate) fn presig_delta(
+    randomness: &[u8; 32],
+    global_presig_index: u64,
+    public_nonce: &G,
+    dealer_set_digest: &[u8; 32],
+) -> S {
+    signing_delta_oracle(crate::constants::PRESIG_DELTA_LABEL).evaluate_to_group_element(&(
+        randomness,
+        global_presig_index,
+        public_nonce,
+        dealer_set_digest,
+    ))
 }
 
 fn signing_delta_oracle(label: &str) -> RandomOracle {
