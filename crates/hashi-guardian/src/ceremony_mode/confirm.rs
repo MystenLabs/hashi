@@ -16,12 +16,8 @@ pub async fn confirm_ceremony(
     enclave: Arc<Enclave>,
     signed: KpSigned<CeremonyConfirmationRequest>,
 ) -> GuardianResult<CeremonyConfirmationResponse> {
-    let lifecycle = enclave.lifecycle();
-    if lifecycle != CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
-        && lifecycle != CeremonyStage::Completed.into()
-    {
-        enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
-    }
+    // Once completed, KPs verify the committed ceremony from S3 instead.
+    enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
 
     let pending = enclave.pending_ceremony()?;
     let signer_fingerprint = signed.signer_fingerprint().to_hex();
@@ -44,7 +40,7 @@ pub async fn confirm_ceremony(
         "Accepted key provisioner ceremony confirmation."
     );
 
-    if status.completed && lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() {
+    if status.completed {
         enclave.publish_pending_ceremony(pending).await?;
         enclave
             .advance_lifecycle_into(CeremonyStage::Completed.into())
@@ -186,13 +182,13 @@ mod tests {
             );
             assert_eq!(captured[2].0, "ceremony/00000000000000000000.json");
         }
-        let repeated = confirm_ceremony(
+        let error = confirm_ceremony(
             context.enclave.clone(),
             context.signed_confirmation(TEST_N - 1),
         )
         .await
-        .unwrap();
-        assert!(repeated.completed);
+        .unwrap_err();
+        assert!(matches!(error, GuardianError::LifecycleMismatch { .. }));
         assert_eq!(context.captures.lock().unwrap().len(), 3);
     }
 

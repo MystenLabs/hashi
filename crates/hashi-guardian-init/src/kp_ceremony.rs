@@ -24,7 +24,8 @@ use crate::guardian_info::verified_ceremony_guardian_info;
 use crate::kp_roster::decrypt_kp_share;
 
 /// Verify this KP can fetch and decrypt its ceremony share, then submit a
-/// signed confirmation to the live ceremony guardian.
+/// signed confirmation to the live ceremony guardian, or, if the ceremony has
+/// already completed, check that the committed S3 state matches.
 ///
 /// The share state is anchored to the guardian's S3 attestation log. The live
 /// confirmation endpoint is independently attestation-verified and
@@ -191,6 +192,28 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         share_count = state.encrypted_shares.share_count(),
         "saved ceremony state with encrypted shares",
     );
+
+    // A completed guardian no longer accepts confirmations (e.g. this KP re-runs
+    // after a lost response), so check the committed S3 state instead.
+    if verified.info.lifecycle == CeremonyStage::Completed.into() {
+        let (committed, dealer) = reader.read_latest_ceremony_state_with_dealer().await?;
+        ensure!(
+            dealer == session_id,
+            "latest committed ceremony was dealt by session {dealer}, not {session_id}"
+        );
+        ensure!(
+            &committed == state,
+            "committed ceremony state differs from this session's verified proposal"
+        );
+        info!(
+            phase = "summary",
+            share_id = share_id.get(),
+            sharing_seq = state.secret_sharing_instance.sharing_seq(),
+            fingerprint = %kp_fingerprint,
+            "ceremony already completed; committed state matches the saved share state",
+        );
+        return Ok(());
+    }
 
     // 5. Submit a signed confirmation only after the verified recovery artifact
     //    is safely stored locally.
