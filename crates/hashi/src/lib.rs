@@ -1088,15 +1088,16 @@ impl Hashi {
                 .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE);
             anyhow::bail!("GetGuardianInfo RPC failed");
         };
-        let resp =
-            hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).map_err(|e| {
-                self.metrics.record_guardian_bootstrap_outcome(
-                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
-                );
-                anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
-            })?;
-        let (info, _) = resp.into_info_unchecked();
-        Ok(info)
+        let resp = hashi_types::guardian::GuardianResponse::<
+            hashi_types::guardian::GuardianInfo,
+        >::try_from(info_pb)
+        .map_err(|e| {
+            self.metrics.record_guardian_bootstrap_outcome(
+                metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
+            );
+            anyhow::anyhow!("parse GuardianInfo: {e:?}")
+        })?;
+        Ok(resp.response)
     }
 
     /// Fetch the guardian's authoritative limiter policy and state, plus the

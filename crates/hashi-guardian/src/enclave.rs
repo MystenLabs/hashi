@@ -615,6 +615,7 @@ impl Enclave {
         let lifecycle = self.lifecycle();
         let temporary_init_state = self.temporary_init_state().ok();
         GuardianInfo {
+            signing_pub_key: self.signing_pubkey(),
             lifecycle,
             secret_sharing_instance: temporary_init_state
                 .as_ref()

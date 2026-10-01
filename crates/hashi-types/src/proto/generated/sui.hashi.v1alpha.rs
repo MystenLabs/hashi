@@ -1510,7 +1510,7 @@ pub mod guardian_relay_service_client {
             &mut self,
             request: impl tonic::IntoRequest<super::GetProvisioningTargetInfoRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Response<super::GetAttestedGuardianInfoResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1567,7 +1567,7 @@ pub mod guardian_relay_service_server {
             &self,
             request: tonic::Request<super::GetProvisioningTargetInfoRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Response<super::GetAttestedGuardianInfoResponse>,
             tonic::Status,
         >;
     }
@@ -1717,7 +1717,7 @@ pub mod guardian_relay_service_server {
                     > tonic::server::UnaryService<
                         super::GetProvisioningTargetInfoRequest,
                     > for GetProvisioningTargetInfoSvc<T> {
-                        type Response = super::GetGuardianInfoResponse;
+                        type Response = super::GetAttestedGuardianInfoResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
@@ -1807,14 +1807,19 @@ pub struct GetGuardianInfoRequest {}
 pub struct GetAttestedGuardianInfoRequest {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetGuardianInfoResponse {
-    /// AWS Nitro attestation document; present only for attested info RPCs.
+    #[prost(message, optional, tag = "1")]
+    pub info: ::core::option::Option<GuardianInfoData>,
+    /// Milliseconds since Unix epoch when the state was read.
+    #[prost(uint64, optional, tag = "2")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetAttestedGuardianInfoResponse {
+    /// Required AWS Nitro attestation document.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub attestation: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Guardian signing public key (Ed25519, 32 bytes).
-    #[prost(bytes = "bytes", optional, tag = "2")]
-    pub signing_pub_key: ::core::option::Option<::prost::bytes::Bytes>,
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
@@ -1832,6 +1837,9 @@ pub struct SignedGuardianInfo {
 /// Information about the guardian enclave.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GuardianInfoData {
+    /// Guardian signing public key (Ed25519, 32 bytes).
+    #[prost(bytes = "bytes", optional, tag = "14")]
+    pub signing_pub_key: ::core::option::Option<::prost::bytes::Bytes>,
     /// Secret-sharing instance (if set).
     #[prost(message, optional, tag = "1")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
@@ -1868,13 +1876,13 @@ pub struct GuardianInfoData {
     /// operator_init). Certificates verified by this enclave are bound to it.
     #[prost(bytes = "bytes", optional, tag = "13")]
     pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Signed enclave mode and stage; absent until operator initialization commits.
+    /// Enclave mode and stage; absent until operator initialization commits.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "10, 11")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
 }
 /// Nested message and enum types in `GuardianInfoData`.
 pub mod guardian_info_data {
-    /// Signed enclave mode and stage; absent until operator initialization commits.
+    /// Enclave mode and stage; absent until operator initialization commits.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Lifecycle {
         #[prost(enumeration = "super::CeremonyStage", tag = "10")]
@@ -2573,7 +2581,7 @@ pub mod guardian_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Query signed guardian state without generating an attestation. May be cached.
+        /// Query self-reported guardian state without a signature or attestation. May be cached.
         pub async fn get_guardian_info(
             &mut self,
             request: impl tonic::IntoRequest<super::GetGuardianInfoRequest>,
@@ -2609,7 +2617,7 @@ pub mod guardian_service_client {
             &mut self,
             request: impl tonic::IntoRequest<super::GetAttestedGuardianInfoRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Response<super::GetAttestedGuardianInfoResponse>,
             tonic::Status,
         > {
             self.inner
@@ -2946,7 +2954,7 @@ pub mod guardian_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with GuardianServiceServer.
     #[async_trait]
     pub trait GuardianService: std::marker::Send + std::marker::Sync + 'static {
-        /// Query signed guardian state without generating an attestation. May be cached.
+        /// Query self-reported guardian state without a signature or attestation. May be cached.
         async fn get_guardian_info(
             &self,
             request: tonic::Request<super::GetGuardianInfoRequest>,
@@ -2960,7 +2968,7 @@ pub mod guardian_service_server {
             &self,
             request: tonic::Request<super::GetAttestedGuardianInfoRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetGuardianInfoResponse>,
+            tonic::Response<super::GetAttestedGuardianInfoResponse>,
             tonic::Status,
         >;
         /// Ceremony mode only: generate a new BTC key and distribute encrypted shares.
@@ -3179,7 +3187,7 @@ pub mod guardian_service_server {
                         T: GuardianService,
                     > tonic::server::UnaryService<super::GetAttestedGuardianInfoRequest>
                     for GetAttestedGuardianInfoSvc<T> {
-                        type Response = super::GetGuardianInfoResponse;
+                        type Response = super::GetAttestedGuardianInfoResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,

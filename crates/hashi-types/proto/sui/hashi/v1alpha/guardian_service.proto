@@ -6,12 +6,12 @@ import "sui/hashi/v1alpha/signature.proto";
 import "sui/hashi/v1alpha/utxo.proto";
 
 service GuardianService {
-  // Query signed guardian state without generating an attestation. May be cached.
+  // Query self-reported guardian state without a signature or attestation. May be cached.
   rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
 
   // KP/operator query: generate a fresh attestation alongside signed guardian info.
   // Never cached. Access can be restricted independently of GetGuardianInfo.
-  rpc GetAttestedGuardianInfo(GetAttestedGuardianInfoRequest) returns (GetGuardianInfoResponse);
+  rpc GetAttestedGuardianInfo(GetAttestedGuardianInfoRequest) returns (GetAttestedGuardianInfoResponse);
 
   // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
@@ -54,17 +54,17 @@ message GetGuardianInfoRequest {}
 message GetAttestedGuardianInfoRequest {}
 
 message GetGuardianInfoResponse {
-  reserved 4;
-  reserved "encrypted_shares";
+  GuardianInfoData info = 1;
+  // Milliseconds since Unix epoch when the state was read.
+  optional uint64 timestamp_ms = 2;
+}
 
-  // AWS Nitro attestation document; present only for attested info RPCs.
+message GetAttestedGuardianInfoResponse {
+  // Required AWS Nitro attestation document.
   optional bytes attestation = 1;
 
-  // Guardian signing public key (Ed25519, 32 bytes).
-  optional bytes signing_pub_key = 2;
-
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
-  SignedGuardianInfo signed_info = 3;
+  SignedGuardianInfo signed_info = 2;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -94,6 +94,9 @@ enum WithdrawStage {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
+  // Guardian signing public key (Ed25519, 32 bytes).
+  optional bytes signing_pub_key = 14;
+
   // Secret-sharing instance (if set).
   optional SecretSharingInstance secret_sharing_instance = 1;
 
@@ -123,7 +126,7 @@ message GuardianInfoData {
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 9;
 
-  // Signed enclave mode and stage; absent until operator initialization commits.
+  // Enclave mode and stage; absent until operator initialization commits.
   oneof lifecycle {
     CeremonyStage ceremony = 10;
     WithdrawStage withdraw = 11;

@@ -5,13 +5,13 @@ pub use super::crypto::encryption::attested_test_utils::dev_kp_attestations;
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_certs;
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_keypair;
 
+use super::AttestedGuardianInfo;
 use super::AttestedKpCert;
 use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
 use super::GenesisState;
-use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
 use super::GuardianResponse;
@@ -92,6 +92,7 @@ const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381
 impl GuardianInfo {
     pub fn mock_for_testing() -> Self {
         Self {
+            signing_pub_key: ed25519_consensus::SigningKey::from([1u8; 32]).verification_key(),
             lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
             deployment_info: Some(
@@ -137,14 +138,12 @@ impl super::OperatorInitInfo {
     }
 }
 
-impl GetGuardianInfoResponse {
+impl AttestedGuardianInfo {
     pub fn mock_for_testing() -> Self {
         let signing_key = ed25519_consensus::SigningKey::from([1u8; 32]);
-        let signing_pub_key = signing_key.verification_key();
 
-        GetGuardianInfoResponse::new(
-            Some(NitroAttestation::new("abcd".as_bytes().to_vec())),
-            signing_pub_key,
+        AttestedGuardianInfo::new(
+            NitroAttestation::new("abcd".as_bytes().to_vec()),
             GuardianSigned::sign(
                 GuardianResponse::new(GuardianInfo::mock_for_testing(), 1234),
                 &signing_key,

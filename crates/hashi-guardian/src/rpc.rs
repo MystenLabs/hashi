@@ -97,12 +97,12 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn get_attested_guardian_info(
         &self,
         _request: Request<proto::GetAttestedGuardianInfoRequest>,
-    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+    ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
         let resp = task_spawner::get_attested_guardian_info(self.enclave.clone())
             .await
             .map_err(to_status)?;
         Ok(Response::new(
-            proto_conversions::get_guardian_info_response_to_pb(resp),
+            proto_conversions::get_attested_guardian_info_response_to_pb(resp),
         ))
     }
 
@@ -329,35 +329,35 @@ mod tests {
             enclave: enclave.clone(),
         };
 
-        for include_attestation in [false, true] {
-            let response = if include_attestation {
-                rpc.get_attested_guardian_info(Request::new(
-                    proto::GetAttestedGuardianInfoRequest {},
-                ))
-                .await
-            } else {
-                rpc.get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
-                    .await
-            }
+        let response = rpc
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
+            .await
             .unwrap()
             .into_inner();
-            assert_eq!(response.attestation.is_some(), include_attestation);
-            assert_eq!(
-                response.signing_pub_key.unwrap().as_ref(),
-                enclave.signing_pubkey().as_bytes()
-            );
-            let signed_info = hashi_types::guardian::GuardianSignedResponse::<
-                hashi_types::guardian::GuardianInfo,
-            >::try_from(response.signed_info.unwrap())
-            .unwrap();
-            assert_eq!(
-                signed_info
-                    .verify_signature(&enclave.signing_pubkey())
-                    .unwrap()
-                    .response,
-                expected_info
-            );
-        }
+        let info = hashi_types::guardian::GuardianResponse::<
+            hashi_types::guardian::GuardianInfo,
+        >::try_from(response)
+        .unwrap();
+        assert_eq!(info.response, expected_info);
+        assert_eq!(info.response.signing_pub_key, enclave.signing_pubkey());
+
+        let response = rpc
+            .get_attested_guardian_info(Request::new(proto::GetAttestedGuardianInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.attestation.is_some());
+        let signed_info = hashi_types::guardian::GuardianSignedResponse::<
+            hashi_types::guardian::GuardianInfo,
+        >::try_from(response.signed_info.unwrap())
+        .unwrap();
+        assert_eq!(
+            signed_info
+                .verify_signature(&enclave.signing_pubkey())
+                .unwrap()
+                .response,
+            expected_info
+        );
     }
 
     #[tokio::test]

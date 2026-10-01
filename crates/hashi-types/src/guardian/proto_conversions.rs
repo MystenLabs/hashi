@@ -5,6 +5,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::AttestedGuardianInfo;
 use super::AttestedKpCert;
 use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
@@ -19,7 +20,6 @@ use super::DeploymentConfig;
 use super::DeploymentConfigSummary;
 use super::EnclaveLifecycle;
 use super::GenesisState;
-use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
 use super::GuardianError::InvalidInputs;
@@ -605,23 +605,30 @@ impl TryFrom<pb::InitConfig> for InitConfig {
     }
 }
 
-impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
+impl TryFrom<pb::GetGuardianInfoResponse> for GuardianResponse<GuardianInfo> {
     type Error = GuardianError;
 
     fn try_from(resp: pb::GetGuardianInfoResponse) -> Result<Self, Self::Error> {
-        let signing_pub_key_bytes = resp
-            .signing_pub_key
-            .ok_or_else(|| missing("signing_pub_key"))?;
-        let signing_pub_key = GuardianPubKey::try_from(signing_pub_key_bytes.as_ref())
-            .map_err(|e| InvalidInputs(format!("invalid signing_pub_key: {e}")))?;
+        Ok(GuardianResponse::new(
+            resp.info.ok_or_else(|| missing("info"))?.try_into()?,
+            resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?,
+        ))
+    }
+}
 
+impl TryFrom<pb::GetAttestedGuardianInfoResponse> for AttestedGuardianInfo {
+    type Error = GuardianError;
+
+    fn try_from(resp: pb::GetAttestedGuardianInfoResponse) -> Result<Self, Self::Error> {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = GuardianSignedResponse::<GuardianInfo>::try_from(signed_info_pb)?;
 
-        Ok(GetGuardianInfoResponse::new(
-            resp.attestation
-                .map(|bytes| NitroAttestation::new(bytes.to_vec())),
-            signing_pub_key,
+        Ok(AttestedGuardianInfo::new(
+            NitroAttestation::new(
+                resp.attestation
+                    .ok_or_else(|| missing("attestation"))?
+                    .to_vec(),
+            ),
             signed_info,
         ))
     }
@@ -1007,12 +1014,20 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
     }
 }
 
-pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
+pub fn get_guardian_info_response_to_pb(
+    r: GuardianResponse<GuardianInfo>,
+) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
-        attestation: r
-            .attestation
-            .map(|attestation| attestation.into_bytes().into()),
-        signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
+        info: Some(guardian_info_data_to_pb(r.response)),
+        timestamp_ms: Some(r.timestamp_ms),
+    }
+}
+
+pub fn get_attested_guardian_info_response_to_pb(
+    r: AttestedGuardianInfo,
+) -> pb::GetAttestedGuardianInfoResponse {
+    pb::GetAttestedGuardianInfoResponse {
+        attestation: Some(r.attestation.into_bytes().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
     }
 }
@@ -1169,6 +1184,11 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
     type Error = GuardianError;
 
     fn try_from(data: pb::GuardianInfoData) -> Result<Self, Self::Error> {
+        let signing_pub_key_bytes = data
+            .signing_pub_key
+            .ok_or_else(|| missing("signing_pub_key"))?;
+        let signing_pub_key = GuardianPubKey::try_from(signing_pub_key_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signing_pub_key: {e}")))?;
         let lifecycle = match data.lifecycle {
             None => None,
             Some(pb::guardian_info_data::Lifecycle::Ceremony(stage)) => {
@@ -1241,6 +1261,7 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             .transpose()?;
 
         Ok(Self {
+            signing_pub_key,
             lifecycle,
             secret_sharing_instance,
             deployment_info,
@@ -1267,6 +1288,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         }
     });
     pb::GuardianInfoData {
+        signing_pub_key: Some(info.signing_pub_key.to_bytes().to_vec().into()),
         lifecycle,
         secret_sharing_instance: info
             .secret_sharing_instance
@@ -1848,16 +1870,27 @@ mod tests {
 
     #[test]
     fn get_guardian_info_response_round_trip() {
-        for include_attestation in [false, true] {
-            let mut resp = GetGuardianInfoResponse::mock_for_testing();
-            if !include_attestation {
-                resp.attestation = None;
-            }
-            let pb = get_guardian_info_response_to_pb(resp.clone());
-            assert_eq!(pb.attestation.is_some(), include_attestation);
-            let back = GetGuardianInfoResponse::try_from(pb).unwrap();
-            assert_eq!(resp, back);
-        }
+        let resp = GuardianResponse::new(GuardianInfo::mock_for_testing(), 1234);
+        let pb = get_guardian_info_response_to_pb(resp.clone());
+        assert_eq!(
+            GuardianResponse::<GuardianInfo>::try_from(pb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn get_attested_guardian_info_response_round_trip() {
+        let resp = AttestedGuardianInfo::mock_for_testing();
+        let pb = get_attested_guardian_info_response_to_pb(resp.clone());
+        assert_eq!(AttestedGuardianInfo::try_from(pb).unwrap(), resp);
+    }
+
+    #[test]
+    fn get_attested_guardian_info_requires_attestation() {
+        let mut pb =
+            get_attested_guardian_info_response_to_pb(AttestedGuardianInfo::mock_for_testing());
+        pb.attestation = None;
+        assert!(AttestedGuardianInfo::try_from(pb).is_err());
     }
 
     #[test]
@@ -1869,6 +1902,7 @@ mod tests {
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {
+            signing_pub_key: GuardianInfo::mock_for_testing().signing_pub_key,
             lifecycle: WithdrawStage::ProvisionerInitialized.into(),
             hashi_object_id: None,
             secret_sharing_instance: None,

@@ -15,7 +15,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use hashi_types::guardian::now_timestamp_ms;
 use hashi_types::guardian::unix_millis_to_seconds;
-use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianResponse;
 use hashi_types::move_types;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -164,9 +165,9 @@ impl ChainMemberSource {
             .await
             .context("GetGuardianInfo")?
             .into_inner();
-        let (info, _) = GetGuardianInfoResponse::try_from(raw)
+        let info = GuardianResponse::<GuardianInfo>::try_from(raw)
             .map_err(|e| anyhow::anyhow!("decode GetGuardianInfo: {e:?}"))?
-            .into_info_unchecked();
+            .response;
         let id = info
             .hashi_object_id
             .context("the guardian has no Hashi object id yet")?;
@@ -342,9 +343,7 @@ mod tests {
     use crate::forward::test_utils::spawn_stub;
     use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
     use hashi_types::guardian::GuardianInfo;
-    use hashi_types::guardian::GuardianResponse;
     use hashi_types::guardian::GuardianSignKeyPair;
-    use hashi_types::guardian::GuardianSigned;
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -521,16 +520,13 @@ mod tests {
         let (stub, channel) = spawn_stub().await;
         let signing_key = GuardianSignKeyPair::from([1; 32]);
         let info = GuardianInfo {
+            signing_pub_key: signing_key.verification_key(),
             hashi_object_id: Some(Address::new([7; 32])),
             ..GuardianInfo::mock_for_testing()
         };
-        *stub.info.lock().unwrap() = Some(get_guardian_info_response_to_pb(
-            GetGuardianInfoResponse::new(
-                None,
-                signing_key.verification_key(),
-                GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key),
-            ),
-        ));
+        *stub.info.lock().unwrap() = Some(get_guardian_info_response_to_pb(GuardianResponse::new(
+            info, 1,
+        )));
         // Nothing listens on port 1, so every Sui read fails.
         let source = ChainMemberSource::new(channel, "http://127.0.0.1:1").unwrap();
 

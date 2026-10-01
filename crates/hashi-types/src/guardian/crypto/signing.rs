@@ -166,7 +166,8 @@ impl<T> GuardianResponse<T> {
 }
 
 // Guardian unchecked access is intentionally narrow: LogRecord's custom wire
-// handling and node/proxy/CLI paths that establish trust independently.
+// handling, reading the claimed key for attested-info verification, and node
+// withdrawal paths that establish trust independently.
 // KpSigned has no unchecked extraction; production KP payloads are always
 // verified before access.
 impl<T> GuardianSigned<T> {

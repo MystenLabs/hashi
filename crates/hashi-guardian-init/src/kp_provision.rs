@@ -148,6 +148,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     let verified_session = reader.get_current_session_info(&session_id).await?;
     let GuardianInfo {
+        signing_pub_key: _,
         lifecycle,
         secret_sharing_instance,
         deployment_info: deployment,

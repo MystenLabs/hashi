@@ -9,22 +9,28 @@ use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 
-/// Return signed guardian info, optionally attesting the enclave's signing public key.
+/// Return self-reported guardian info without signing or attesting it.
 pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
-    include_attestation: bool,
-) -> GuardianResult<GetGuardianInfoResponse> {
-    info!(include_attestation, "/get_guardian_info - Received request");
+    _request: (),
+) -> GuardianResult<GuardianResponse<GuardianInfo>> {
+    info!("/get_guardian_info - Received request");
+    Ok(GuardianResponse::new(
+        enclave.info().await,
+        now_timestamp_ms(),
+    ))
+}
 
+/// Return signed guardian info with a fresh attestation of its signing key.
+pub async fn get_attested_guardian_info(
+    enclave: Arc<Enclave>,
+    _request: (),
+) -> GuardianResult<AttestedGuardianInfo> {
+    info!("/get_attested_guardian_info - Received request");
     let signing_pub_key = enclave.signing_pubkey();
-    let attestation = if include_attestation {
-        Some(get_attestation(&signing_pub_key)?)
-    } else {
-        None
-    };
-    Ok(GetGuardianInfoResponse::new(
+    let attestation = get_attestation(&signing_pub_key)?;
+    Ok(AttestedGuardianInfo::new(
         attestation,
-        signing_pub_key,
         enclave.sign(enclave.info().await),
     ))
 }

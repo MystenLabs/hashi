@@ -465,6 +465,7 @@ mod tests {
             };
             withdraw.genesis_state_hash = genesis_state_hash;
             let live = GuardianInfo {
+                signing_pub_key: GuardianInfo::mock_for_testing().signing_pub_key,
                 lifecycle: WithdrawStage::OperatorInitialized.into(),
                 deployment_info: Some(oi.deployment.summary()),
                 encryption_pubkey: oi.encryption_pubkey.clone(),
