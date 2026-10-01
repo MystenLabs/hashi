@@ -127,11 +127,11 @@ impl<'de> Deserialize<'de> for AttestedKpCert {
     }
 }
 
-/// A fingerprint-unique collection of KP certificates in caller-supplied order.
+/// A canonical set of KP certificates, sorted by primary fingerprint in hex order.
 ///
 /// Certificate positions do not identify ownership of existing shares. Use
-/// [`KpEncryptedShareRoster`] for share assignments. Order is preserved for
-/// fresh dealing, equality comparisons, and serialization.
+/// [`KpEncryptedShareRoster`] for share assignments. Canonical order makes
+/// equality, serialization, and fresh dealing independent of input order.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct KpCertRoster(Vec<AttestedKpCert>);
 
@@ -155,7 +155,7 @@ pub struct KpEncryptedShare {
 pub struct KpEncryptedShareRoster(Vec<KpEncryptedShare>);
 
 impl KpCertRoster {
-    pub fn new(kp_certs: Vec<AttestedKpCert>) -> GuardianResult<Self> {
+    pub fn new(mut kp_certs: Vec<AttestedKpCert>) -> GuardianResult<Self> {
         let mut seen = HashSet::with_capacity(kp_certs.len());
         for cert in &kp_certs {
             let fingerprint = cert.fingerprint();
@@ -166,6 +166,7 @@ impl KpCertRoster {
             }
         }
 
+        kp_certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
         Ok(Self(kp_certs))
     }
 
@@ -195,7 +196,8 @@ impl KpCertRoster {
     }
 
     /// Replace the certificate identified by fingerprint while preserving
-    /// fingerprint uniqueness. This does not change any share assignments.
+    /// fingerprint uniqueness and canonical order. This does not change any
+    /// share assignments.
     pub fn replace_cert(
         &self,
         current_fingerprint: &Fingerprint,
@@ -210,16 +212,17 @@ impl KpCertRoster {
         }
 
         let mut kp_certs = self.0.clone();
-        let cert = kp_certs
-            .iter_mut()
-            .find(|cert| cert.fingerprint() == *current_fingerprint)
+        let index = kp_certs
+            .iter()
+            .position(|cert| cert.fingerprint() == *current_fingerprint)
             .ok_or_else(|| {
                 InvalidInputs(format!(
                     "OpenPGP certificate fingerprint {current_fingerprint} is not in the KP \
                      certificate roster"
                 ))
             })?;
-        *cert = new_cert;
+        kp_certs.remove(index);
+        kp_certs.push(new_cert);
         Self::new(kp_certs)
     }
 }
@@ -463,9 +466,9 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
 
 /// Split `sk` into `params.num_shares()` shares with reconstruction threshold
 /// `params.threshold()`, encrypt each share to its matching KP certificate, and
-/// compute one commitment per share. Fresh dealing assigns the certificate at
-/// position `i` to share ID `i + 1` and records ownership in the returned
-/// encrypted-share roster.
+/// compute one commitment per share. Fresh dealing assigns the `i`th certificate
+/// in canonical fingerprint order to share ID `i + 1` and records ownership in
+/// the returned encrypted-share roster.
 ///
 /// # Panics
 ///
@@ -751,9 +754,9 @@ mod tests {
 
     #[test]
     fn recipient_set_preserves_assignments_across_config_permutation_and_rotation() {
-        let first = cert();
-        let second = cert();
-        let replacement = cert();
+        let mut certs = [cert(), cert(), cert()];
+        certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
+        let [replacement, second, first] = certs;
         let shares = KpEncryptedShareRoster::new(
             [&first, &second]
                 .into_iter()
@@ -773,6 +776,12 @@ mod tests {
         )
         .unwrap();
         let config = KpCertRoster::new(vec![second.clone(), first.clone()]).unwrap();
+        // Existing signed share 1 belongs to the higher fingerprint, independent
+        // of the canonical certificate order.
+        assert_eq!(
+            config.fingerprints(),
+            vec![second.fingerprint().to_hex(), first.fingerprint().to_hex()]
+        );
         shares.verify_recipients(&config).unwrap();
         shares
             .verify_recipients(&KpCertRoster::new(vec![first.clone(), second.clone()]).unwrap())
@@ -790,7 +799,8 @@ mod tests {
                 .is_err()
         );
 
-        // The second config entry owns signed share 1, not share 2.
+        // Replacement moves the cert from last to first in canonical order,
+        // while its recorded share ID remains unchanged.
         let rotated_config = config
             .replace_cert(&first.fingerprint(), replacement.clone())
             .unwrap();
@@ -813,6 +823,13 @@ mod tests {
         assert_eq!(
             rotated.find_by_fingerprint(&replacement.fingerprint().to_hex()),
             Some(&changed)
+        );
+        assert_eq!(
+            rotated_config.fingerprints(),
+            vec![
+                replacement.fingerprint().to_hex(),
+                second.fingerprint().to_hex()
+            ]
         );
         rotated.verify_recipients(&rotated_config).unwrap();
         assert_eq!(changed.id.get(), 1);
@@ -935,17 +952,23 @@ mod tests {
     }
 
     #[test]
-    fn cert_roster_preserves_order_and_rejects_fingerprint_collisions() {
-        let old = cert();
-        let other = cert();
-        let replacement = cert();
+    fn cert_roster_canonicalizes_and_rejects_fingerprint_collisions() {
+        let mut certs = [cert(), cert(), cert()];
+        certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
+        let [old, other, replacement] = certs;
         let duplicate_err = KpCertRoster::new(vec![old.clone(), old.clone()])
             .expect_err("a fingerprint may occur only once in the complete roster");
         assert!(
             format!("{duplicate_err}").contains("duplicate"),
             "{duplicate_err}"
         );
-        let roster = KpCertRoster::new(vec![old.clone(), other.clone()]).unwrap();
+        let roster = KpCertRoster::new(vec![other.clone(), old.clone()]).unwrap();
+        let reordered = KpCertRoster::new(vec![old.clone(), other.clone()]).unwrap();
+        assert_eq!(roster, reordered);
+        assert_eq!(
+            bcs::to_bytes(&roster).unwrap(),
+            bcs::to_bytes(&reordered).unwrap()
+        );
 
         assert_eq!(
             roster.fingerprints(),
@@ -959,8 +982,8 @@ mod tests {
         assert_eq!(
             rotated.fingerprints(),
             vec![
-                replacement.fingerprint().to_hex(),
-                other.fingerprint().to_hex()
+                other.fingerprint().to_hex(),
+                replacement.fingerprint().to_hex()
             ]
         );
         assert_eq!(rotated.num_kps(), 2);
@@ -969,6 +992,16 @@ mod tests {
             Some(&other),
             "replacing one certificate must leave the other unchanged"
         );
+
+        assert!(rotated.cert_for_fingerprint(&old.fingerprint()).is_none());
+        assert_eq!(
+            rotated.cert_for_fingerprint(&replacement.fingerprint()),
+            Some(&replacement)
+        );
+        let err = roster
+            .replace_cert(&replacement.fingerprint(), old.clone())
+            .unwrap_err();
+        assert!(format!("{err}").contains("is not in"), "{err}");
 
         let err = roster.replace_cert(&old.fingerprint(), other).unwrap_err();
         assert!(format!("{err}").contains("duplicate"), "{err}");
@@ -979,7 +1012,8 @@ mod tests {
 
     #[test]
     fn split_and_encrypt_n5_t3_assigns_one_decryptable_ciphertext_per_cert() {
-        let keypairs = (0..5).map(|_| cert_and_secret()).collect::<Vec<_>>();
+        let mut keypairs = (0..5).map(|_| cert_and_secret()).collect::<Vec<_>>();
+        keypairs.sort_by_cached_key(|(cert, _)| std::cmp::Reverse(cert.fingerprint().to_hex()));
         let roster =
             KpCertRoster::new(keypairs.iter().map(|(cert, _)| cert.clone()).collect()).unwrap();
         let secret_key = SecretKey::random(&mut rand::thread_rng());
@@ -991,8 +1025,12 @@ mod tests {
 
         assert_eq!(
             encrypted_shares.recipient_fingerprints(),
-            roster.fingerprints(),
-            "fresh dealing must record the recipient assigned to each share"
+            keypairs
+                .iter()
+                .rev()
+                .map(|(cert, _)| cert.fingerprint().to_hex())
+                .collect::<Vec<_>>(),
+            "fresh dealing must assign IDs in ascending fingerprint order"
         );
 
         let mut decrypted_shares = Vec::with_capacity(5);

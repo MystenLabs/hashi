@@ -28,7 +28,6 @@ use tracing::info;
 
 use crate::ceremony::CeremonyGuardian;
 use crate::config::Config;
-use crate::kp_roster::dealing_order;
 
 /// Run the one-time production guardian key ceremony.
 ///
@@ -64,7 +63,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP certificate roster",
     );
-    let certs_roster = dealing_order(cfg.kp_roster.load_certs_roster()?.into_vec())?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),

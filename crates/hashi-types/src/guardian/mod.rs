@@ -274,7 +274,7 @@ pub struct CeremonyOperatorInitRequest {
 /// The confirmation also commits to the full deployment configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    /// One KP certificate per fresh share, in dealing order.
+    /// The canonical KP certificate set for fresh dealing.
     key_provisioner_certs_roster: KpCertRoster,
     /// The secret-sharing params (n, t).
     params: SecretSharingParams,
@@ -320,7 +320,7 @@ pub struct ProvisionerRotateKpSetRequest {
     expected_session_id: SessionID,
     expected_deployment_config_hash: [u8; 32],
     encrypted_old_share: GuardianEncryptedShare,
-    /// OpenPGP certificates for the new KPs, in fresh-dealing order. Its length equals
+    /// The canonical OpenPGP certificate set for the new KPs. Its length equals
     /// `new_params.num_shares()`.
     new_kp_certs_roster: KpCertRoster,
     /// The new secret-sharing params (n, t).
@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
+    fn provisioner_rotate_kp_set_signing_payload_is_canonical() {
         let cert_sets = mock_attested_kp_certs(5);
         let reversed: Vec<AttestedKpCert> = cert_sets.iter().rev().cloned().collect();
         let deployment_config_hash = DeploymentConfig::mock_for_testing().digest();
@@ -1204,7 +1204,7 @@ mod tests {
             3,
         )
         .unwrap();
-        assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
-        assert_ne!(KpSigned::signed_bytes(&a), KpSigned::signed_bytes(&b));
+        assert_eq!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
+        assert_eq!(KpSigned::signed_bytes(&a), KpSigned::signed_bytes(&b));
     }
 }
