@@ -1360,7 +1360,11 @@ impl Hashi {
                 message: message.to_vec(),
                 global_presig_index,
                 derivation_address: Some(derivation_address),
-                message_delta: crate::mpc::types::message_delta(randomness, input_index as u32),
+                message_delta: crate::mpc::types::message_delta(
+                    randomness,
+                    input_index as u32,
+                    message,
+                ),
             });
         }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
