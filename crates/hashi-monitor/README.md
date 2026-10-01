@@ -60,7 +60,8 @@ cargo run -p hashi-monitor -- batch \
   --end 2026-08-04T19:00:00Z
 ```
 CLI timestamps use whole-second UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`). `--end`
-defaults to the current time if omitted.
+defaults to the current time if omitted. A batch audit fails if the Sui node has
+pruned the start of its Sui range.
 
 ### Continuous monitoring
 ```bash
@@ -68,8 +69,13 @@ cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
   --start 2026-08-04T19:00:00Z
 ```
-Without `--start`, the audit resumes from the earliest time whose checks can
-still be pending, which is what a restarted service wants.
+Without `--start`, the audit starts far enough back to cover a monitor outage of
+up to a week, including checks that were still pending when it began. Findings
+from that period are reported again after a restart. If the Sui node has pruned
+part of that range (the public testnet fullnode keeps under six days), the Sui
+scan starts near its oldest checkpoint: withdrawal approvals from before it are
+still read by withdrawal id if the guardian signed them, but deposits and
+unsigned approvals from before it are not audited.
 
 ## Config
 See `audit.sample.yaml` for a complete batch/continuous example:
@@ -111,8 +117,9 @@ deployment:
       git_revision: "0000000000000000000000000000000000000000"
       pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
-    # Older still-trusted builds accepted only for historical S3 logs during an
-    # upgrade window. Omit or leave empty outside an upgrade.
+    # Older still-trusted builds accepted only for historical S3 logs. Keep a
+    # replaced build until a restart no longer re-audits its records: a week and
+    # 2.5 hours plus the longest next-event delay and clock skew.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

@@ -28,6 +28,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// The frequency at which we do validation checks.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// The longest monitor outage a restart without `--start` re-audits.
+const DEFAULT_RESTART_LOOKBACK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// A continuous audit only requires a start time
 pub struct ContinuousAuditWindow {
     pub user_start: UnixSeconds,
@@ -62,18 +65,18 @@ impl ContinuousAuditWindow {
         }
     }
 
-    /// The earliest start whose checks can still be pending: the longest
-    /// next-event delay and clock skew, the lag of the hourly guardian cursor
-    /// that judges those deadlines, and one poll and state tick to report.
+    /// Covers a `DEFAULT_RESTART_LOOKBACK` outage plus the checks still pending when it
+    /// began: the longest next-event delay and clock skew, the lag of the hourly guardian
+    /// cursor that judges those deadlines, and one poll and state tick to report.
     pub fn default_start(cfg: &Config, now: UnixSeconds) -> UnixSeconds {
-        let lookback = cfg
+        let pending = cfg
             .next_event_delays
             .max_delay()
             .saturating_add(cfg.clock_skews.max_skew())
             .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
-        now.saturating_sub(lookback)
+        now.saturating_sub(pending.saturating_add(DEFAULT_RESTART_LOOKBACK.as_secs()))
     }
 }
 
@@ -287,12 +290,12 @@ btc:
 "#;
 
     #[test]
-    fn default_start_covers_the_longest_next_event_delay() {
+    fn default_start_covers_a_week_outage_and_the_checks_pending_when_it_began() {
         let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
 
         assert_eq!(
             ContinuousAuditWindow::default_start(&cfg, 1_000_000),
-            1_000_000 - 86_400 - 7_200 - 4_200 - 600 - 300,
+            1_000_000 - 604_800 - 86_400 - 7_200 - 4_200 - 600 - 300,
         );
     }
 
