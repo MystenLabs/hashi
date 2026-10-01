@@ -12,6 +12,7 @@ use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
+use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
