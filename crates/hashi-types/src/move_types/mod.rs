@@ -733,6 +733,11 @@ impl SigningBatch {
 pub struct WithdrawalTransaction {
     pub id: Address,
     pub txid: BitcoinTxid,
+    /// Committee-certified digest of every input's signing message and key
+    /// path.
+    pub sighash_digest: Address,
+    /// Number of certified resets. Chunk and finalize certificates bind it.
+    pub generation: u64,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -742,7 +747,8 @@ pub struct WithdrawalTransaction {
     pub change_outputs: Vec<OutputUtxo>,
     pub created_timestamp_ms: u64,
     /// Clock timestamp at which the transaction became fully signed
-    /// (guardian signatures attached). `None` until `finalize_withdrawal`.
+    /// (guardian signatures attached). `None` until `finalize_withdrawal`, and
+    /// again after a certified reset.
     pub signed_timestamp_ms: Option<u64>,
     /// Clock timestamp at which the Bitcoin transaction was confirmed.
     /// `None` until `confirm_withdrawal`.
@@ -750,8 +756,9 @@ pub struct WithdrawalTransaction {
     pub randomness: Vec<u8>,
     /// Per-input MPC signatures, accumulated incrementally and out-of-order.
     pub signing: SigningBatch,
-    /// Per-input guardian enclave signatures, written once at finalize.
-    /// Together with the MPC signatures, forms the 2-of-2 taproot witness.
+    /// Per-input guardian enclave signatures, written at finalize and cleared
+    /// by a certified reset. Together with the MPC signatures, forms the 2-of-2
+    /// taproot witness.
     pub guardian_signatures: Option<Vec<Vec<u8>>>,
 }
 
@@ -1140,6 +1147,7 @@ pub enum HashiEvent {
     WithdrawalSigned(WithdrawalSigned),
     WithdrawalInputsSigned(WithdrawalInputsSigned),
     WithdrawalPresigsReassigned(WithdrawalPresigsReassigned),
+    WithdrawalReset(WithdrawalReset),
     WithdrawalConfirmed(WithdrawalConfirmed),
     UtxoSpent(UtxoSpent),
     ReconfigStarted(ReconfigStarted),
@@ -1195,6 +1203,7 @@ impl HashiEvent {
             WithdrawalPresigsReassigned::MODULE_NAME => {
                 WithdrawalPresigsReassigned::from_bcs(bcs.value())?.into()
             }
+            WithdrawalReset::MODULE_NAME => WithdrawalReset::from_bcs(bcs.value())?.into(),
             WithdrawalConfirmed::MODULE_NAME => WithdrawalConfirmed::from_bcs(bcs.value())?.into(),
             UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
@@ -1737,6 +1746,28 @@ impl MoveType for WithdrawalPresigsReassigned {
 impl From<WithdrawalPresigsReassigned> for HashiEvent {
     fn from(value: WithdrawalPresigsReassigned) -> Self {
         Self::WithdrawalPresigsReassigned(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalReset {
+    pub withdrawal_txn_id: Address,
+    pub txid: BitcoinTxid,
+    pub generation: u64,
+    pub epoch: u64,
+    pub randomness: Vec<u8>,
+    pub signed_count: u64,
+    pub finalized: bool,
+}
+
+impl MoveType for WithdrawalReset {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalReset";
+}
+
+impl From<WithdrawalReset> for HashiEvent {
+    fn from(value: WithdrawalReset) -> Self {
+        Self::WithdrawalReset(value)
     }
 }
 

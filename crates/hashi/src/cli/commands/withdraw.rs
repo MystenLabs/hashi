@@ -618,6 +618,8 @@ mod tests {
         WithdrawalTransaction {
             id: sui_sdk_types::Address::new([0xAA; 32]),
             txid,
+            sighash_digest: sui_sdk_types::Address::ZERO,
+            generation: 0,
             request_ids: vec![
                 sui_sdk_types::Address::new([0x01; 32]),
                 sui_sdk_types::Address::new([0x02; 32]),

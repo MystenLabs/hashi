@@ -742,6 +742,8 @@ pub(crate) mod tests {
         WithdrawalTransaction {
             id,
             txid: BitcoinTxid::from(Address::new([0x47; 32])),
+            sighash_digest: Address::ZERO,
+            generation: 0,
             request_ids: vec![],
             inputs: vec![],
             withdrawal_outputs: vec![],

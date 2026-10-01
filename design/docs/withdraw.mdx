@@ -153,19 +153,18 @@ The leader then constructs an unsigned Bitcoin transaction:
    fee is within acceptable bounds (at least `1 sat/vB`, at most 3x their
    own estimate).
 
-The resulting unsigned transaction and its txid are committed onchain by
-calling `hashi::withdraw::commit_withdrawal_tx`:
+The resulting unsigned transaction, its txid and its sighash digest are
+committed onchain by calling `hashi::withdraw::commit_withdrawal_tx`:
 
 ```move
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
-    selected_utxos: vector<vector<u8>>,
-    outputs: vector<vector<u8>>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
     txid: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    sighash_digest: address,
+    cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -248,3 +247,16 @@ withdrawal, returning the spent UTXOs' change output to the pool.
 If a transaction gets stuck, fee bumping is handled through CPFP. Either the
 withdrawal recipient spends their output with a high-fee child, or Hashi
 spends the change UTXO (see [Fees: stuck transactions](fees.mdx#stuck-transactions)).
+
+## Reset
+
+A committed withdrawal that cannot complete as signed, for example after a
+sighash fix, can be reset in place by `hashi::withdraw::reset_withdrawal_tx`
+under a committee certificate. The reset keeps the withdrawal and its Bitcoin
+transaction but discards its signatures, so every input is signed again. Each
+reset bumps a generation counter, and the certificates that record signatures
+bind it, so none from before a reset can land after it.
+
+Nodes do not propose or certify resets yet. Once they do, each validator will
+certify one only when its own view shows the withdrawal cannot complete as
+signed.

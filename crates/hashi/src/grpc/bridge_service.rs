@@ -10,10 +10,10 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
-use crate::withdrawals::MpcInputSignaturesMessage;
+use crate::withdrawals::MpcInputSignaturesChunk;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
-use crate::withdrawals::WithdrawalTxSigning;
+use crate::withdrawals::WithdrawalTxSignatures;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
@@ -265,15 +265,19 @@ impl BridgeService for HttpService {
         let req = request.get_ref();
         let expected_limiter_seq = req.expected_limiter_seq;
         let timestamp_secs = req.timestamp_secs;
-        let message = parse_withdrawal_tx_signing(req)
+        let signatures = parse_withdrawal_tx_signing(req)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record(
             "withdrawal_id",
-            tracing::field::display(&message.withdrawal_id),
+            tracing::field::display(&signatures.withdrawal_id),
         );
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
+            .validate_and_sign_withdrawal_tx_signing(
+                &signatures,
+                expected_limiter_seq,
+                timestamp_secs,
+            )
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {
@@ -292,15 +296,15 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignMpcInputSignaturesResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        let message = parse_mpc_input_signatures(request.get_ref())
+        let chunk = parse_mpc_input_signatures(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record(
             "withdrawal_id",
-            tracing::field::display(&message.withdrawal_id),
+            tracing::field::display(&chunk.withdrawal_id),
         );
         let member_signature = self
             .inner
-            .validate_and_sign_mpc_input_signatures(&message)
+            .validate_and_sign_mpc_input_signatures(&chunk)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!("Signed MPC input signatures chunk");
         Ok(Response::new(SignMpcInputSignaturesResponse {
@@ -457,18 +461,20 @@ fn parse_withdrawal_tx_commitment(
         })
         .collect();
     let txid = parse_address(&request.txid)?.into();
+    let sighash_digest = parse_address(&request.sighash_digest)?;
 
     Ok(WithdrawalTxCommitment {
         request_ids,
         selected_utxos,
         outputs,
         txid,
+        sighash_digest,
     })
 }
 
 fn parse_withdrawal_tx_signing(
     request: &SignWithdrawalTxSigningRequest,
-) -> anyhow::Result<WithdrawalTxSigning> {
+) -> anyhow::Result<WithdrawalTxSignatures> {
     let withdrawal_id = parse_address(&request.withdrawal_id)?;
     let signatures: Vec<Vec<u8>> = request
         .signatures
@@ -480,7 +486,7 @@ fn parse_withdrawal_tx_signing(
         .iter()
         .map(|bytes| bytes.to_vec())
         .collect();
-    Ok(WithdrawalTxSigning {
+    Ok(WithdrawalTxSignatures {
         withdrawal_id,
         signatures,
         guardian_signatures,
@@ -489,7 +495,7 @@ fn parse_withdrawal_tx_signing(
 
 fn parse_mpc_input_signatures(
     request: &SignMpcInputSignaturesRequest,
-) -> anyhow::Result<MpcInputSignaturesMessage> {
+) -> anyhow::Result<MpcInputSignaturesChunk> {
     let withdrawal_id = parse_address(&request.withdrawal_id)?;
     let indices = request.indices.clone();
     let signatures: Vec<Vec<u8>> = request
@@ -497,7 +503,7 @@ fn parse_mpc_input_signatures(
         .iter()
         .map(|bytes| bytes.to_vec())
         .collect();
-    Ok(MpcInputSignaturesMessage {
+    Ok(MpcInputSignaturesChunk {
         withdrawal_id,
         indices,
         signatures,

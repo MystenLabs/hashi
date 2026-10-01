@@ -16,7 +16,8 @@
 /// rotation / restart because they live on chain, and survive committee
 /// reconfiguration: on an epoch change only the still-`Pending` slots are
 /// reassigned fresh presignatures (`reallocate`); `Signed` slots are final
-/// and epoch-independent (the committee group key is stable across rotation).
+/// and epoch-independent (the committee group key is stable across rotation),
+/// except under a certified reset (`reset_slots`), which re-slots every input.
 ///
 /// NONCE SAFETY (a violation leaks the group secret share):
 ///   - every `Pending` index is unique within an epoch — a `Presig` can only
@@ -157,10 +158,11 @@ public(package) fun record(
 
 /// Reassign fresh presignatures, allocated in `current_epoch`, to every
 /// still-`Pending` slot. `Signed` slots are untouched (their signatures are
-/// final and epoch-independent). The j-th still-`Pending` slot (ascending
-/// input order) gets the j-th presig; `presigs` must hold exactly
-/// `pending_count()` presigs so that no slot keeps a stale-epoch index.
-/// Aborts if the batch is not actually stale (guards against double reallocation).
+/// final and epoch-independent; only `reset_slots` overwrites them). The j-th
+/// still-`Pending` slot (ascending input order) gets the j-th presig; `presigs`
+/// must hold exactly `pending_count()` presigs so that no slot keeps a
+/// stale-epoch index. Aborts if the batch is not actually stale (guards against
+/// double reallocation).
 public(package) fun reallocate(
     self: &mut SigningBatch,
     mut presigs: vector<Presig>,
@@ -179,6 +181,12 @@ public(package) fun reallocate(
     };
     presigs.destroy_empty();
     self.epoch = current_epoch;
+}
+
+public(package) fun reset_slots(self: &mut SigningBatch, presigs: vector<Presig>, epoch: u64) {
+    assert!(presigs.length() == self.signatures.length(), EAllocationMismatch);
+    self.signatures = presigs.map!(|presig| MpcSig::Pending(presig));
+    self.epoch = epoch;
 }
 
 // === Views ===
