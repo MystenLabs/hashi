@@ -876,6 +876,7 @@ impl GetGuardianInfoResponse {
     /// - initialized sessions report the expected deployment revision;
     /// - the Nitro attestation is present and has a valid signature;
     /// - the certificate chain is valid now;
+    /// - the attestation is at most 60 seconds old or 5 seconds in the future;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
     ///
     /// Callers check whether the verified lifecycle is appropriate for their operation.

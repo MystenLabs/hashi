@@ -392,12 +392,10 @@ impl GuardianS3Client {
 #[derive(Clone, Copy)]
 pub(crate) enum ImmutabilityCheck {
     /// Validate the exact key has no mutation history and reject the object
-    /// unless its Compliance lock is still unexpired, except when the
-    /// process-wide temporary testnet override is set.
+    /// unless its Compliance lock is still unexpired.
     Required,
     /// The caller already validated the enclosing prefix has no mutations;
-    /// still reject the object unless its Compliance lock is unexpired, except
-    /// when the process-wide temporary testnet override is set.
+    /// still reject the object unless its Compliance lock is unexpired.
     MutationAlreadyChecked,
     /// Do not claim S3 immutability. Used for signed records whose short locks
     /// are expected to expire, such as KP-share state.

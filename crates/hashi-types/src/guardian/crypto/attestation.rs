@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-#[cfg(not(any(test, feature = "non-enclave-dev")))]
+#[cfg(any(test, not(feature = "non-enclave-dev")))]
 use crate::guardian::CryptoVerificationError;
 use crate::guardian::CryptoVerificationResult;
 use crate::guardian::GuardianPubKey;
@@ -105,9 +105,14 @@ impl NitroAttestation {
                 VerifyTime::Now => now_timestamp_ms(),
                 VerifyTime::DocumentTimestamp => doc.timestamp,
             };
+            // Fastcrypto uses this time to validate certificate dates; it does not
+            // check document freshness, which we enforce separately for live RPCs.
             verify_nitro_attestation(&signature, &signed_message, &doc, timestamp_ms).map_err(
                 |e| CryptoVerificationError::new(format!("attestation verification failed: {e}")),
             )?;
+            if matches!(verify_time, VerifyTime::Now) {
+                verify_live_timestamp(doc.timestamp, timestamp_ms)?;
+            }
 
             let attested = doc
                 .public_key
@@ -127,6 +132,32 @@ impl NitroAttestation {
             Ok(())
         }
     }
+}
+
+/// Live RPCs generate an uncached attestation; allow for latency and clock skew.
+/// Historical S3 attestations deliberately do not use this check.
+/// The document must be at most 60 seconds old or 5 seconds in the future.
+///
+/// Pure hardening: KPs must pin the latest approved PCR and reject known-buggy
+/// builds. Replaying an accepted build's attestation exposes no private keys;
+/// a still-running session can attest afresh anyway. This does not establish
+/// freshness of separately signed response data.
+#[cfg(any(test, not(feature = "non-enclave-dev")))]
+fn verify_live_timestamp(document_ms: u64, now_ms: u64) -> CryptoVerificationResult<()> {
+    const MAX_AGE_MS: u64 = 60_000;
+    const MAX_FUTURE_SKEW_MS: u64 = 5_000;
+
+    if now_ms.saturating_sub(document_ms) > MAX_AGE_MS {
+        return Err(CryptoVerificationError::new(
+            "live attestation is more than 60 seconds old",
+        ));
+    }
+    if document_ms.saturating_sub(now_ms) > MAX_FUTURE_SKEW_MS {
+        return Err(CryptoVerificationError::new(
+            "live attestation is more than 5 seconds in the future; check clock synchronization",
+        ));
+    }
+    Ok(())
 }
 
 /// When the attestation's cert chain validity is checked: at the current time
@@ -303,6 +334,24 @@ impl<'de> Deserialize<'de> for PcrAllowlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_attestation_timestamp_window() {
+        let now_ms = 100_000;
+        for document_ms in [now_ms - 60_000, now_ms, now_ms + 5_000] {
+            assert!(verify_live_timestamp(document_ms, now_ms).is_ok());
+        }
+        assert!(verify_live_timestamp(now_ms - 60_001, now_ms).is_err());
+        assert!(verify_live_timestamp(now_ms + 5_001, now_ms).is_err());
+    }
+
+    #[test]
+    fn live_attestation_timestamp_handles_integer_limits() {
+        assert!(verify_live_timestamp(0, 0).is_ok());
+        assert!(verify_live_timestamp(u64::MAX, u64::MAX).is_ok());
+        assert!(verify_live_timestamp(0, u64::MAX).is_err());
+        assert!(verify_live_timestamp(u64::MAX, 0).is_err());
+    }
 
     #[test]
     fn pcr_serialization_round_trips_json_and_preserves_binary_commitments() {
