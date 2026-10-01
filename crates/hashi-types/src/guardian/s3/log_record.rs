@@ -821,7 +821,7 @@ mod tests {
             message: &data.message,
         };
         let signed_bytes = bcs::to_bytes(&(
-            GuardianSigningIntentType::LogEntry,
+            GuardianSigningIntentType::LogEntry as u8,
             payload,
             data.timestamp_ms,
         ))

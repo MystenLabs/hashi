@@ -7,6 +7,7 @@
 //! [`KpSigned`] uses detached OpenPGP signatures produced by key provisioners.
 //! Both serialize a payload together with its signing intent so a signature for
 //! one payload type cannot be replayed as another.
+//! Intent wire values are explicit `u8` discriminants, not Serde enum indices.
 
 use crate::guardian::AttestedKpCert;
 use crate::guardian::CeremonyConfirmationRequest;
@@ -38,7 +39,7 @@ use std::path::Path;
 /// All possible signing intent types.
 /// Using an enum ensures no two types can accidentally share the same intent value.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardianSigningIntentType {
     /// Intent for LogEntry.
     LogEntry = 0,
@@ -66,7 +67,7 @@ pub trait GuardianSigningIntent: Serialize {
 /// intent so a signature for one request cannot be replayed as another request
 /// with the same BCS shape.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KpSigningIntentType {
     /// Intent for ProvisionerInitRequest.
     ProvisionerInitRequest = 0,
@@ -177,7 +178,7 @@ impl<T> GuardianSigned<T> {
     where
         T: GuardianSigningIntent,
     {
-        bcs::to_bytes(&(T::INTENT, data)).expect("serialization should not fail")
+        bcs::to_bytes(&(T::INTENT as u8, data)).expect("serialization should not fail")
     }
 
     /// Sign a payload with intent-based domain separation.
@@ -271,8 +272,7 @@ impl<T: KpSigningIntent> KpSigned<T> {
     /// The exact bytes a key provisioner detached-signs for a typed guardian
     /// request. Binds the request intent and request payload.
     pub fn signed_bytes(data: &T) -> Vec<u8> {
-        let tuple = (T::INTENT, data);
-        bcs::to_bytes(&tuple).expect("serialization should not fail")
+        bcs::to_bytes(&(T::INTENT as u8, data)).expect("serialization should not fail")
     }
 
     /// Verify the signature and borrow the authenticated request.
@@ -316,6 +316,29 @@ mod tests {
     use sequoia_openpgp::serialize::stream::Signer;
     use std::io::Write;
     use std::time::SystemTime;
+
+    /// Intent discriminants are on-wire signing domains. Renumbering them
+    /// invalidates existing Guardian and KP signatures.
+    #[test]
+    fn intent_values_are_stable() {
+        assert_eq!(GuardianSigningIntentType::LogEntry as u8, 0);
+        assert_eq!(GuardianSigningIntentType::SetupNewKeyResponse as u8, 1);
+        assert_eq!(
+            GuardianSigningIntentType::StandardWithdrawalResponse as u8,
+            2
+        );
+        assert_eq!(GuardianSigningIntentType::GuardianInfo as u8, 3);
+        assert_eq!(GuardianSigningIntentType::RotateKpSetResponse as u8, 4);
+        assert_eq!(
+            GuardianSigningIntentType::ProvisionerRotateCertResponse as u8,
+            5
+        );
+
+        assert_eq!(KpSigningIntentType::ProvisionerInitRequest as u8, 0);
+        assert_eq!(KpSigningIntentType::ProvisionerRotateCertRequest as u8, 1);
+        assert_eq!(KpSigningIntentType::ProvisionerRotateKpSetRequest as u8, 2);
+        assert_eq!(KpSigningIntentType::CeremonyConfirmationRequest as u8, 3);
+    }
 
     #[test]
     fn kp_signed_rejects_backdated_signature_from_unattested_expired_subkey() {
