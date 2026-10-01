@@ -446,7 +446,8 @@ mod tests {
             .map(|share| {
                 let recipient = &state
                     .encrypted_shares
-                    .find_by_id(share.id)
+                    .iter()
+                    .find(|entry| entry.id == share.id)
                     .unwrap()
                     .recipient_fingerprint;
                 let cert = roster
@@ -516,7 +517,8 @@ mod tests {
         .unwrap();
         let recipient = &state
             .encrypted_shares
-            .find_by_id(shares[0].id)
+            .iter()
+            .find(|entry| entry.id == shares[0].id)
             .unwrap()
             .recipient_fingerprint;
         let cert = roster
@@ -567,7 +569,8 @@ mod tests {
             .map(|share| {
                 let recipient = &state
                     .encrypted_shares
-                    .find_by_id(share.id)
+                    .iter()
+                    .find(|entry| entry.id == share.id)
                     .unwrap()
                     .recipient_fingerprint;
                 let cert = roster

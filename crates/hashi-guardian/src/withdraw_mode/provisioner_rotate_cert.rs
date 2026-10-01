@@ -215,7 +215,8 @@ mod tests {
         let original_commitments = ceremony_state.secret_sharing_instance.commitments().clone();
         let btc_master_pubkey = ceremony_state.btc_master_pubkey;
         let recipient = &old_encrypted_shares
-            .find_by_id(shares[0].id)
+            .iter()
+            .find(|entry| entry.id == shares[0].id)
             .unwrap()
             .recipient_fingerprint;
         let signer_cert = cert_roster

@@ -156,17 +156,16 @@ pub struct KpEncryptedShareRoster(Vec<KpEncryptedShare>);
 
 impl KpCertRoster {
     pub fn new(mut kp_certs: Vec<AttestedKpCert>) -> GuardianResult<Self> {
-        let mut seen = HashSet::with_capacity(kp_certs.len());
-        for cert in &kp_certs {
-            let fingerprint = cert.fingerprint();
-            if !seen.insert(fingerprint.clone()) {
+        kp_certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
+        for pair in kp_certs.windows(2) {
+            let fingerprint = pair[0].fingerprint();
+            if fingerprint == pair[1].fingerprint() {
                 return Err(InvalidInputs(format!(
                     "duplicate OpenPGP certificate fingerprint {fingerprint}"
                 )));
             }
         }
 
-        kp_certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
         Ok(Self(kp_certs))
     }
 
@@ -212,17 +211,16 @@ impl KpCertRoster {
         }
 
         let mut kp_certs = self.0.clone();
-        let index = kp_certs
-            .iter()
-            .position(|cert| cert.fingerprint() == *current_fingerprint)
+        let cert = kp_certs
+            .iter_mut()
+            .find(|cert| cert.fingerprint() == *current_fingerprint)
             .ok_or_else(|| {
                 InvalidInputs(format!(
                     "OpenPGP certificate fingerprint {current_fingerprint} is not in the KP \
                      certificate roster"
                 ))
             })?;
-        kp_certs.remove(index);
-        kp_certs.push(new_cert);
+        *cert = new_cert;
         Self::new(kp_certs)
     }
 }
@@ -240,12 +238,36 @@ impl KpEncryptedShare {
                 self.recipient_fingerprint
             )));
         }
-        verify_pgp_ciphertext_recipient(
-            self.id,
-            &self.recipient_fingerprint,
-            &self.armored_ciphertext,
-            cert,
-        )
+        let recipients = pgp_message_recipients(&self.armored_ciphertext).map_err(|e| {
+            InvalidInputs(format!(
+                "failed to parse PGP recipients for share id {}: {e}",
+                self.id.get()
+            ))
+        })?;
+        if recipients.is_empty() {
+            return Err(InvalidInputs(format!(
+                "share id {} has no PGP recipients",
+                self.id.get()
+            )));
+        }
+        let expected_key = sequoia_openpgp::KeyHandle::from(cert.encryption_fingerprint().clone());
+        for handle in &recipients {
+            if !expected_key.aliases(handle) {
+                return Err(InvalidInputs(format!(
+                    "share id {} (keyed by {}) is encrypted to key {handle}, which is not the \
+                     attested encryption key",
+                    self.id.get(),
+                    self.recipient_fingerprint
+                )));
+            }
+        }
+        info!(
+            share_id = self.id.get(),
+            fingerprint = %self.recipient_fingerprint,
+            recipient_count = recipients.len(),
+            "verified encrypted share targets only its keyed recipient cert"
+        );
+        Ok(())
     }
 }
 
@@ -297,11 +319,6 @@ impl KpEncryptedShareRoster {
 
     pub fn into_vec(self) -> Vec<KpEncryptedShare> {
         self.0
-    }
-
-    /// Look up the recorded recipient and ciphertext for a share ID.
-    pub fn find_by_id(&self, id: ShareID) -> Option<&KpEncryptedShare> {
-        self.0.get(usize::from(id.get()) - 1)
     }
 
     pub fn find_by_fingerprint(&self, fingerprint: &str) -> Option<&KpEncryptedShare> {
@@ -409,45 +426,6 @@ impl<'de> Deserialize<'de> for KpEncryptedShareRoster {
         let shares = Vec::<KpEncryptedShare>::deserialize(deserializer)?;
         Self::new(shares).map_err(serde::de::Error::custom)
     }
-}
-
-fn verify_pgp_ciphertext_recipient(
-    share_id: ShareID,
-    recipient_fingerprint: &str,
-    ciphertext: &str,
-    expected_cert: &AttestedKpCert,
-) -> GuardianResult<()> {
-    let recipients = pgp_message_recipients(ciphertext).map_err(|e| {
-        InvalidInputs(format!(
-            "failed to parse PGP recipients for share id {}: {e}",
-            share_id.get()
-        ))
-    })?;
-    if recipients.is_empty() {
-        return Err(InvalidInputs(format!(
-            "share id {} has no PGP recipients",
-            share_id.get()
-        )));
-    }
-    let expected_key =
-        sequoia_openpgp::KeyHandle::from(expected_cert.encryption_fingerprint().clone());
-    for handle in &recipients {
-        if !expected_key.aliases(handle) {
-            return Err(InvalidInputs(format!(
-                "share id {} (keyed by {}) is encrypted to key {handle}, which is not the \
-                 attested encryption key",
-                share_id.get(),
-                recipient_fingerprint
-            )));
-        }
-    }
-    info!(
-        share_id = share_id.get(),
-        fingerprint = %recipient_fingerprint,
-        recipient_count = recipients.len(),
-        "verified encrypted share targets only its keyed recipient cert"
-    );
-    Ok(())
 }
 
 /// Encrypt a share with optional AAD
@@ -669,11 +647,6 @@ mod tests {
                 (3, "fingerprint-3"),
             ]
         );
-        assert_eq!(
-            shares.find_by_id(ShareID::new(2).unwrap()),
-            shares.find_by_fingerprint("fingerprint-2")
-        );
-        assert!(shares.find_by_id(ShareID::new(4).unwrap()).is_none());
     }
 
     #[test]
@@ -819,7 +792,6 @@ mod tests {
             )
             .unwrap();
         changed.verify_recipient(&replacement).unwrap();
-        assert_eq!(rotated.find_by_id(changed.id), Some(&changed));
         assert_eq!(
             rotated.find_by_fingerprint(&replacement.fingerprint().to_hex()),
             Some(&changed)
@@ -956,7 +928,7 @@ mod tests {
         let mut certs = [cert(), cert(), cert()];
         certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
         let [old, other, replacement] = certs;
-        let duplicate_err = KpCertRoster::new(vec![old.clone(), old.clone()])
+        let duplicate_err = KpCertRoster::new(vec![old.clone(), other.clone(), old.clone()])
             .expect_err("a fingerprint may occur only once in the complete roster");
         assert!(
             format!("{duplicate_err}").contains("duplicate"),
