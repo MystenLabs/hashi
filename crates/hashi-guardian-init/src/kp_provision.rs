@@ -132,8 +132,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     let endpoint_verified =
         verified_endpoint_guardian_info(&cfg.relay_endpoint, allowlist.current_build()).await?;
-    let session_id = endpoint_verified.session_id;
-    let guardian_info = endpoint_verified.info;
+    let session_id = endpoint_verified.session_id();
+    let guardian_info = endpoint_verified.into_info();
     info!(
         phase = "guardian endpoint",
         session_id = %session_id,
@@ -528,7 +528,7 @@ async fn prechecks(
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let verified = verified_provisioning_target_info(client, current_build).await?;
-    let actual_session_id = verified.session_id;
+    let actual_session_id = verified.session_id();
     info!(
         phase = "relay submit",
         actual_session_id = %actual_session_id,
@@ -543,10 +543,10 @@ async fn prechecks(
         actual_session_id
     );
     anyhow::ensure!(
-        &verified.info == expected_guardian_info,
+        verified.info() == expected_guardian_info,
         "relay endpoint GuardianInfo mismatch: expected {:?}, got {:?}",
         expected_guardian_info,
-        verified.info
+        verified.info()
     );
     info!(
         phase = "relay submit",

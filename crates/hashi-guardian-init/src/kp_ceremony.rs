@@ -101,16 +101,16 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     )
     .await?;
     ensure!(
-        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
-            || verified.info.lifecycle == CeremonyStage::Completed.into(),
+        verified.info().lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
+            || verified.info().lifecycle == CeremonyStage::Completed.into(),
         "guardian is not accepting key provisioner ceremony confirmations"
     );
     let deployment = cfg.deployment.clone();
     ensure!(
-        verified.info.deployment_info()? == &deployment.summary(),
+        verified.info().deployment_info()? == &deployment.summary(),
         "ceremony deployment differs from expected configuration"
     );
-    let session_id = verified.session_id;
+    let session_id = verified.session_id();
 
     info!(
         phase = "s3 connect",
@@ -195,7 +195,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // A completed guardian no longer accepts confirmations (e.g. this KP re-runs
     // after a lost response), so check the committed S3 state instead.
-    if verified.info.lifecycle == CeremonyStage::Completed.into() {
+    if verified.info().lifecycle == CeremonyStage::Completed.into() {
         let (committed, dealer) = reader.read_latest_ceremony_state_with_dealer().await?;
         ensure!(
             dealer == session_id,

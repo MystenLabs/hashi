@@ -73,32 +73,32 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let target =
         verified_ceremony_guardian_info(&cfg.guardian_endpoint, allowlist.current_build()).await?;
     ensure!(
-        target.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        target.info().lifecycle == CeremonyStage::OperatorInitialized.into(),
         "guardian lifecycle is {:?}; expected ceremony/operator_initialized (run `operator rotate-kp-set init`)",
-        target.info.lifecycle
+        target.info().lifecycle
     );
     let deployment = cfg.deployment.clone();
     ensure!(
-        target.info.deployment_info()? == &deployment.summary(),
+        target.info().deployment_info()? == &deployment.summary(),
         "guardian deployment mismatch: expected {:?}, got {:?}",
         deployment.summary(),
-        target.info.deployment_info
+        target.info().deployment_info
     );
     let guardian_pub_key =
-        EncPubKey::from_bytes(&target.info.encryption_pubkey).map_err(anyhow::Error::msg)?;
-    let session_id = target.session_id;
+        EncPubKey::from_bytes(&target.info().encryption_pubkey).map_err(anyhow::Error::msg)?;
+    let session_id = target.session_id();
     let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader.get_current_session_info(&session_id).await?;
     ensure!(
-        verified_session.signing_pubkey() == &target.signing_pub_key,
+        verified_session.signing_pubkey() == &target.info().signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     info!(
         phase = "guardian info",
         session_id = %session_id,
-        enc_pubkey = hex::encode(&target.info.encryption_pubkey),
+        enc_pubkey = hex::encode(&target.info().encryption_pubkey),
         "ceremony guardian verified; session pinned",
     );
 

@@ -81,7 +81,7 @@ impl CeremonyGuardian {
             .await
             .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
         let preflight = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
-        match preflight.info.lifecycle {
+        match preflight.info().lifecycle {
             None => {
                 ensure!(
                     operator_init,
@@ -118,51 +118,51 @@ impl CeremonyGuardian {
 
         let verified = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
         ensure!(
-            verified.session_id == preflight.session_id,
+            verified.session_id() == preflight.session_id(),
             "guardian session changed during OperatorInit: started {}, now {}",
-            preflight.session_id,
-            verified.session_id
+            preflight.session_id(),
+            verified.session_id()
         );
         ensure!(
-            verified.info.deployment_info()? == &cfg.deployment.summary(),
+            verified.info().deployment_info()? == &cfg.deployment.summary(),
             "guardian deployment mismatch: expected {:?}, got {:?}",
             cfg.deployment.summary(),
-            verified.info.deployment_info
+            verified.info().deployment_info
         );
         info!(
             phase = "guardian info",
-            session_id = %verified.session_id,
-            signing_pubkey = hex::encode(verified.signing_pub_key.as_bytes()),
+            session_id = %verified.session_id(),
+            signing_pubkey = hex::encode(verified.info().signing_pub_key.as_bytes()),
             "guardian info attestation and signature verified; session pinned",
         );
 
         info!(
             phase = "attestation pin",
-            session_id = %verified.session_id,
+            session_id = %verified.session_id(),
             "connecting to guardian log bucket + verifying attestation against current build",
         );
         let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
             .await
             .context("connect to guardian log bucket")?;
         let verified_session = reader
-            .get_current_session_info(&verified.session_id)
+            .get_current_session_info(&verified.session_id())
             .await?;
         ensure!(
-            verified_session.signing_pubkey() == &verified.signing_pub_key,
+            verified_session.signing_pubkey() == &verified.info().signing_pub_key,
             "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
         );
         info!(
             phase = "attestation pin",
-            session_id = %verified.session_id,
+            session_id = %verified.session_id(),
             "guardian S3 attestation matches gRPC signing key",
         );
 
         Ok(Self {
             client,
             reader,
-            session_id: verified.session_id,
-            signing_pub_key: verified.signing_pub_key,
-            info: verified.info,
+            session_id: verified.session_id(),
+            signing_pub_key: verified.info().signing_pub_key,
+            info: verified.into_info(),
             allowlist,
         })
     }
@@ -172,7 +172,8 @@ impl CeremonyGuardian {
         let status =
             verified_live_guardian_info(&mut self.client, self.allowlist.current_build()).await?;
         ensure!(
-            status.session_id == self.session_id && status.signing_pub_key == self.signing_pub_key,
+            status.session_id() == self.session_id
+                && status.info().signing_pub_key == self.signing_pub_key,
             "ceremony guardian session changed"
         );
         Ok(status)
@@ -231,7 +232,7 @@ impl CeremonyGuardian {
                 }
                 Err(error) => return Err(error),
             };
-            match status.info.lifecycle {
+            match status.info().lifecycle {
                 lifecycle if lifecycle == CeremonyStage::Completed.into() => break,
                 lifecycle
                     if lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() =>

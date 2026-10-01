@@ -83,12 +83,9 @@ pub struct AttestedGuardianInfo {
     signed_info: GuardianSignedResponse<GuardianInfo>,
 }
 
+/// Guardian info whose signature and live attestation have been verified.
 #[derive(Debug, PartialEq, Clone)]
-pub struct VerifiedGuardianInfo {
-    pub info: GuardianInfo,
-    pub signing_pub_key: GuardianPubKey,
-    pub session_id: SessionID,
-}
+pub struct VerifiedGuardianInfo(GuardianInfo);
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
@@ -911,11 +908,21 @@ impl AttestedGuardianInfo {
         }
         self.attestation
             .verify_live(&signing_pub_key, expected_build)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key,
-            session_id: SessionID::from_signing_pubkey(&signing_pub_key),
-        })
+        Ok(VerifiedGuardianInfo(info))
+    }
+}
+
+impl VerifiedGuardianInfo {
+    pub fn info(&self) -> &GuardianInfo {
+        &self.0
+    }
+
+    pub fn into_info(self) -> GuardianInfo {
+        self.0
+    }
+
+    pub fn session_id(&self) -> SessionID {
+        SessionID::from_signing_pubkey(&self.0.signing_pub_key)
     }
 }
 
