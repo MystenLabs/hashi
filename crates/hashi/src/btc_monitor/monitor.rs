@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
+use corepc_client::types::model::MempoolAcceptance;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -70,8 +71,8 @@ const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
 const BITCOIND_RPC_BUDGET: Duration = Duration::from_secs(65);
 
 /// How long a `MonitorClient` call waits for the loop. A worker starts an RPC
-/// only if its budget fits before this deadline, so a caller that times out
-/// never has one in flight.
+/// only if its budget fits before this deadline, so a call that times out on
+/// it never has one in flight.
 const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const _: () = assert!(MONITOR_REQUEST_TIMEOUT.as_secs() > BITCOIND_RPC_BUDGET.as_secs());
 
@@ -1204,6 +1205,13 @@ impl Monitor {
                     caller,
                 ));
             }
+            MonitorMessage::TestMempoolAccept(tx, caller) => {
+                self.rpc_workers.spawn(Self::test_mempool_accept(
+                    self.bitcoind_rpc.clone(),
+                    tx,
+                    caller,
+                ));
+            }
             MonitorMessage::GetTransactionStatus(txid, caller) => {
                 self.rpc_workers.spawn(Self::get_transaction_status(
                     self.bitcoind_rpc.clone(),
@@ -1281,6 +1289,28 @@ impl Monitor {
                     .set((fee_rate.to_sat_per_kwu() * 4) as i64);
             });
         caller.reply(result);
+    }
+
+    async fn test_mempool_accept(
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+        tx: bitcoin::Transaction,
+        caller: Caller<Vec<MempoolAcceptance>>,
+    ) {
+        let txid = tx.compute_txid();
+        let Some(result) = caller
+            .rpc(&bitcoind_rpc, move |rpc| rpc.test_mempool_accept(&[tx]))
+            .await
+        else {
+            caller.reply(Err(anyhow::anyhow!(
+                "testmempoolaccept for {txid} expired before its bitcoind RPC could start"
+            )));
+            return;
+        };
+        let results = result
+            .map_err(anyhow::Error::from)
+            .and_then(|accept| accept.into_model().map_err(anyhow::Error::from))
+            .map(|accept| accept.results);
+        caller.reply(results);
     }
 
     async fn broadcast_transaction(
@@ -1933,6 +1963,17 @@ impl MonitorClient {
         .await
     }
 
+    pub async fn test_mempool_accept(
+        &self,
+        transaction: bitcoin::Transaction,
+    ) -> Result<Vec<MempoolAcceptance>> {
+        self.request(
+            |caller| MonitorMessage::TestMempoolAccept(transaction, caller),
+            "test_mempool_accept",
+        )
+        .await
+    }
+
     pub async fn get_transaction_status(&self, txid: bitcoin::Txid) -> Result<TxStatus> {
         self.request(
             |caller| MonitorMessage::GetTransactionStatus(txid, caller),
@@ -1957,6 +1998,8 @@ enum MonitorMessage {
 
     // Broadcast a transaction to the network.
     BroadcastTransaction(bitcoin::Transaction, Caller<()>),
+
+    TestMempoolAccept(bitcoin::Transaction, Caller<Vec<MempoolAcceptance>>),
 
     // Query the status of a transaction (confirmed, in mempool, or not found).
     GetTransactionStatus(bitcoin::Txid, Caller<TxStatus>),

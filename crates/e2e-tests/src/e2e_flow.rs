@@ -8,11 +8,15 @@ mod tests {
     use anyhow::anyhow;
     use bitcoin::Amount;
     use bitcoin::Txid;
+    use bitcoin::hashes::Hash;
 
     use futures::StreamExt;
     use hashi::deposits::UnapprovedDepositError;
+    use hashi::finalize_bitcoin_check::Verdict;
+    use hashi::finalize_bitcoin_check::classify;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::committee::certificate_threshold;
     use hashi_types::move_types::ProtocolType;
     use hashi_types::move_types::WithdrawalConfirmed;
     use hashi_types::move_types::WithdrawalPickedForProcessing;
@@ -944,6 +948,8 @@ mod tests {
         // node's mirror. This pins the deferred-archival GC end-to-end.
         wait_for_withdrawal_archival(&networks, Duration::from_secs(60)).await?;
 
+        assert_finalize_bitcoin_check(&networks).await?;
+
         let guardian_state = networks
             .guardian_harness
             .as_ref()
@@ -978,6 +984,87 @@ mod tests {
         assert_tob_mirror_parity(&networks).await?;
 
         info!("=== Bitcoin Withdrawal E2E Test Passed ===");
+        Ok(())
+    }
+
+    async fn assert_finalize_bitcoin_check(networks: &TestNetworks) -> Result<()> {
+        let nodes = networks.hashi_network.nodes();
+        let hashi = nodes[0].hashi();
+        let committee = hashi
+            .onchain_state()
+            .current_committee()
+            .context("no current committee")?;
+        wait_until(
+            "every node's probe to pass",
+            Duration::from_secs(180),
+            || {
+                nodes
+                    .iter()
+                    .all(|node| node.hashi().metrics.withdrawal_bitcoin_check_blind.get() == 0)
+            },
+        )
+        .await?;
+        let mut accepted_weight = 0;
+        for node in nodes {
+            let checks = &node.hashi().metrics.withdrawal_bitcoin_check_total;
+            assert_eq!(checks.with_label_values(&["script_failure"]).get(), 0);
+            if checks.with_label_values(&["accepted"]).get() > 0 {
+                accepted_weight += committee.weight_of(&node.validator_address())?;
+            }
+        }
+        assert!(
+            accepted_weight >= certificate_threshold(committee.total_weight()),
+            "members whose bitcoind accepted the withdrawal hold only weight {accepted_weight}"
+        );
+
+        hashi.probe_withdrawal_script_check().await?;
+
+        let pool_utxo = hashi
+            .onchain_state()
+            .utxo_records()
+            .into_values()
+            .filter(|record| record.spent_by.is_none())
+            .max_by_key(|record| record.utxo.amount)
+            .context("the withdrawal's change is not in the pool")?
+            .utxo;
+        let destination = networks.bitcoin_node.get_new_address()?.script_pubkey();
+        let spend = |previous_output: bitcoin::OutPoint, script_sig: bitcoin::ScriptBuf| {
+            bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output,
+                    script_sig,
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![bitcoin::TxOut {
+                    value: Amount::from_sat(pool_utxo.amount / 2),
+                    script_pubkey: destination.clone(),
+                }],
+            }
+        };
+        let monitor = hashi.btc_monitor();
+
+        let unknown_input = spend(
+            bitcoin::OutPoint::new(Txid::from_byte_array([7; 32]), 0),
+            bitcoin::ScriptBuf::new(),
+        );
+        assert_eq!(
+            classify(&monitor.test_mempool_accept(unknown_input).await?),
+            Verdict::RejectedOther {
+                reason: "missing-inputs".to_string()
+            }
+        );
+
+        let not_push_only = spend(
+            pool_utxo.id.into(),
+            bitcoin::script::Builder::new()
+                .push_opcode(bitcoin::opcodes::all::OP_NOP)
+                .into_script(),
+        );
+        let verdict = classify(&monitor.test_mempool_accept(not_push_only).await?);
+        assert_eq!(verdict.label(), "script_failure", "{verdict:?}");
         Ok(())
     }
 

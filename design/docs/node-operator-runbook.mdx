@@ -193,13 +193,13 @@ Set `sui-chain-id` and `sui-rpc` to match your target network, as shown in the [
 Hashi talks to Bitcoin over **two independent channels**, both of which must be reachable:
 
 1. **P2P**: an embedded [Kyoto](https://github.com/rustaceanrob/kyoto) BIP-157 light client connects over P2P to fetch headers, **compact block filters (BIP-158)**, and full blocks. This requires the serving node to advertise filters (`peerblockfilters=1`) and build the index (`blockfilterindex=1`).
-2. **JSON-RPC**: used for transaction lookup (`getrawtransaction`), fee estimation (`estimatesmartfee`), UTXO checks (`gettxout`), chain info (`getblockchaininfo`), and **broadcasting withdrawals (`sendrawtransaction`)**.
+2. **JSON-RPC**: used for transaction lookup (`getrawtransaction`), fee estimation (`estimatesmartfee`), UTXO checks (`gettxout`), chain info (`getblockchaininfo`), checking withdrawals before finalize (`testmempoolaccept`), and **broadcasting withdrawals (`sendrawtransaction`)**.
 
 For the **JSON-RPC** channel you can run your own archival Signet node or use a verified RPC provider such as [QuickNode](https://www.quicknode.com/) (or another provider that serves Bitcoin Signet). Whichever you choose, the endpoint must be **archival** (Hashi calls `getrawtransaction` on arbitrary deposit txids) and must permit `sendrawtransaction`.
 
 The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) needs a peer that serves filters (`peerblockfilters=1`). Run your own Signet node for this, or use a provider that exposes Signet P2P with compact-filter serving. The simplest setup that satisfies both channels is a single self-hosted archival Signet node.
 
-**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
+**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `testmempoolaccept`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Without `testmempoolaccept` your node cannot catch an invalid withdrawal. It sends each signed withdrawal to the endpoint before finalize, so prefer a bitcoind you run. Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
 
 **Installing Bitcoin Core.** Download the release binaries for **v29 or newer** from [bitcoincore.org](https://bitcoincore.org/en/download/), verify them against the published checksums and signatures, then extract and install:
 
@@ -1040,6 +1040,8 @@ Notes:
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
 | `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
+| `hashi_withdrawal_bitcoin_check_total` | counter | Finalize checks by result. Healthy: `script_failure` stays at 0. |
+| `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals, `-1` until a probe passes. Healthy: `0`. |
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. The count therefore cannot exceed the number of trusted peers you configured, and `1` is the expected steady-state value for the common single-self-hosted-node setup. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count. If you want redundancy here, add more entries to `bitcoin-trusted-peers` rather than expecting the number to grow on its own.
 
@@ -1066,6 +1068,8 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
 | `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
+| `hashi_withdrawal_bitcoin_check_total{result="script_failure"}` increasing | Critical | Your bitcoind says a signed withdrawal is invalid, so your node won't sign its finalize. Tell the operator channel; if only you see it, check your bitcoind. |
+| `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 > **Coming soon:** A metrics **push** service for centralized collection. Details follow once it lands.
