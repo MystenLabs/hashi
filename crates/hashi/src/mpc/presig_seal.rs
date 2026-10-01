@@ -9,8 +9,7 @@ use std::time::Duration;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
 use hashi_types::committee::BLS12381Signature;
-use hashi_types::committee::BlsSignatureAggregator;
-use hashi_types::committee::Committee;
+use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::move_types::PresigCompletedMessage;
@@ -136,16 +135,13 @@ fn done_or_not_relevant(inner: &Hashi, message: &PresigCompletedMessage) -> bool
 
 async fn collect(
     inner: &Hashi,
-    committee: &Committee,
+    committee: &RuntimeCommittee,
     message: &PresigCompletedMessage,
     signature: &BLS12381Signature,
 ) -> anyhow::Result<Option<SignedMessage<PresigCompletedMessage>>> {
     let my_address = inner.config.validator_address()?;
-    let mut aggregator = BlsSignatureAggregator::new(
-        inner.config.hashi_ids().hashi_object_id,
-        committee,
-        message.clone(),
-    );
+    let mut aggregator =
+        committee.signature_aggregator(inner.config.hashi_ids().hashi_object_id, message.clone());
     aggregator
         .add_signature_from(my_address, signature.clone())
         .map_err(|e| anyhow::anyhow!("failed to add own signature: {e}"))?;
@@ -214,7 +210,7 @@ async fn collect(
         .map_err(|e| anyhow::anyhow!("failed to finalize PresigCompleted certificate: {e}"))
 }
 
-fn submit_delay(committee: &Committee, my_address: Address, batch_index: u32) -> Duration {
+fn submit_delay(committee: &RuntimeCommittee, my_address: Address, batch_index: u32) -> Duration {
     let members = committee.members();
     let Some(position) = members
         .iter()
