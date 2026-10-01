@@ -6,6 +6,7 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use crate::deposits::UnapprovedDepositError;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -76,7 +77,7 @@ impl BridgeService for HttpService {
             .inner
             .validate_and_sign_deposit_confirmation(&deposit_request)
             .await
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(deposit_refusal_status)?;
         tracing::info!(
             utxo_txid = %deposit_request.utxo.id.txid,
             utxo_vout = deposit_request.utxo.id.vout,
@@ -368,6 +369,15 @@ impl HttpService {
             refused("cap");
             Status::unavailable(SIGNING_TASK_LIMIT_MSG)
         })
+    }
+}
+
+/// `AlreadyExists` tells the leader another leader already landed this epoch's
+/// approval, so it can drop the deposit instead of retrying it.
+pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
+    match err {
+        UnapprovedDepositError::AlreadyApprovedThisEpoch => Status::already_exists(err.to_string()),
+        err => Status::failed_precondition(err.to_string()),
     }
 }
 
