@@ -127,11 +127,11 @@ impl<'de> Deserialize<'de> for AttestedKpCert {
     }
 }
 
-/// The ordered KP certificate roster for a sharing instance.
+/// A fingerprint-unique collection of KP certificates in caller-supplied order.
 ///
-/// The certificate at position `i` is assigned share id `i + 1`. This type
-/// preserves caller-supplied order and requires every certificate fingerprint
-/// to occur exactly once.
+/// Certificate positions do not identify ownership of existing shares. Use
+/// [`KpEncryptedShareRoster`] for share assignments. Order is preserved for
+/// fresh dealing, equality comparisons, and serialization.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct KpCertRoster(Vec<AttestedKpCert>);
 
@@ -177,10 +177,6 @@ impl KpCertRoster {
         self.0.iter()
     }
 
-    pub fn cert_for_share(&self, share_id: ShareID) -> Option<&AttestedKpCert> {
-        self.0.get(usize::from(share_id.get()) - 1)
-    }
-
     pub fn cert_for_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&AttestedKpCert> {
         self.0
             .iter()
@@ -198,8 +194,8 @@ impl KpCertRoster {
         self.0
     }
 
-    /// Replace one certificate while preserving the KP/share ordering and
-    /// global fingerprint-uniqueness invariant.
+    /// Replace the certificate identified by fingerprint while preserving
+    /// fingerprint uniqueness. This does not change any share assignments.
     pub fn replace_cert(
         &self,
         current_fingerprint: &Fingerprint,
@@ -300,6 +296,11 @@ impl KpEncryptedShareRoster {
         self.0
     }
 
+    /// Look up the recorded recipient and ciphertext for a share ID.
+    pub fn find_by_id(&self, id: ShareID) -> Option<&KpEncryptedShare> {
+        self.0.get(usize::from(id.get()) - 1)
+    }
+
     pub fn find_by_fingerprint(&self, fingerprint: &str) -> Option<&KpEncryptedShare> {
         self.iter()
             .find(|share| share.recipient_fingerprint == fingerprint)
@@ -371,26 +372,9 @@ impl KpEncryptedShareRoster {
             .collect()
     }
 
-    /// Verify every encrypted share against the cert assigned to the same
-    /// ordered share position.
-    pub fn verify_recipients(&self, certs_roster: &KpCertRoster) -> GuardianResult<()> {
-        if self.share_count() != certs_roster.num_kps() {
-            return Err(InvalidInputs(format!(
-                "expected {} KP cert roster entries, got {} encrypted shares",
-                certs_roster.num_kps(),
-                self.share_count()
-            )));
-        }
-
-        for (share, cert) in self.iter().zip(certs_roster.iter()) {
-            share.verify_recipient(cert)?;
-        }
-        Ok(())
-    }
-
     /// Verify the exact configured certificate set and ciphertext recipients,
     /// leaving share assignments to the signed encrypted-share roster.
-    pub fn verify_recipient_set(&self, certs_roster: &KpCertRoster) -> GuardianResult<()> {
+    pub fn verify_recipients(&self, certs_roster: &KpCertRoster) -> GuardianResult<()> {
         if self.share_count() != certs_roster.num_kps() {
             return Err(InvalidInputs(format!(
                 "expected {} KP cert roster entries, got {} encrypted shares",
@@ -479,8 +463,9 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
 
 /// Split `sk` into `params.num_shares()` shares with reconstruction threshold
 /// `params.threshold()`, encrypt each share to its matching KP certificate, and
-/// compute one commitment per share. The roster assigns its certificate at
-/// position `i` to share ID `i + 1`.
+/// compute one commitment per share. Fresh dealing assigns the certificate at
+/// position `i` to share ID `i + 1` and records ownership in the returned
+/// encrypted-share roster.
 ///
 /// # Panics
 ///
@@ -681,6 +666,11 @@ mod tests {
                 (3, "fingerprint-3"),
             ]
         );
+        assert_eq!(
+            shares.find_by_id(ShareID::new(2).unwrap()),
+            shares.find_by_fingerprint("fingerprint-2")
+        );
+        assert!(shares.find_by_id(ShareID::new(4).unwrap()).is_none());
     }
 
     #[test]
@@ -783,16 +773,18 @@ mod tests {
         )
         .unwrap();
         let config = KpCertRoster::new(vec![second.clone(), first.clone()]).unwrap();
-        assert!(shares.verify_recipients(&config).is_err());
-        shares.verify_recipient_set(&config).unwrap();
+        shares.verify_recipients(&config).unwrap();
+        shares
+            .verify_recipients(&KpCertRoster::new(vec![first.clone(), second.clone()]).unwrap())
+            .unwrap();
         assert!(
             shares
-                .verify_recipient_set(&KpCertRoster::new(vec![first.clone()]).unwrap())
+                .verify_recipients(&KpCertRoster::new(vec![first.clone()]).unwrap())
                 .is_err()
         );
         assert!(
             shares
-                .verify_recipient_set(
+                .verify_recipients(
                     &KpCertRoster::new(vec![first.clone(), replacement.clone()]).unwrap()
                 )
                 .is_err()
@@ -817,12 +809,12 @@ mod tests {
             )
             .unwrap();
         changed.verify_recipient(&replacement).unwrap();
-        assert!(
-            changed
-                .verify_recipient(rotated_config.cert_for_share(changed.id).unwrap())
-                .is_err()
+        assert_eq!(rotated.find_by_id(changed.id), Some(&changed));
+        assert_eq!(
+            rotated.find_by_fingerprint(&replacement.fingerprint().to_hex()),
+            Some(&changed)
         );
-        rotated.verify_recipient_set(&rotated_config).unwrap();
+        rotated.verify_recipients(&rotated_config).unwrap();
         assert_eq!(changed.id.get(), 1);
         assert_eq!(rotated.iter().nth(1), shares.iter().nth(1));
     }
@@ -898,7 +890,7 @@ mod tests {
         assert!(
             KpEncryptedShareRoster::new(vec![wrong_recorded_fingerprint])
                 .unwrap()
-                .verify_recipient_set(&KpCertRoster::new(vec![recipient]).unwrap())
+                .verify_recipients(&KpCertRoster::new(vec![recipient]).unwrap())
                 .is_err()
         );
 
@@ -913,7 +905,7 @@ mod tests {
         assert!(
             KpEncryptedShareRoster::new(vec![wrong_ciphertext_recipient])
                 .unwrap()
-                .verify_recipient_set(&KpCertRoster::new(vec![other]).unwrap())
+                .verify_recipients(&KpCertRoster::new(vec![other]).unwrap())
                 .is_err()
         );
     }
@@ -937,7 +929,7 @@ mod tests {
         assert!(
             KpEncryptedShareRoster::new(vec![encrypted_share])
                 .unwrap()
-                .verify_recipient_set(&KpCertRoster::new(vec![recipient]).unwrap())
+                .verify_recipients(&KpCertRoster::new(vec![recipient]).unwrap())
                 .is_err()
         );
     }
@@ -959,10 +951,6 @@ mod tests {
             roster.fingerprints(),
             vec![old.fingerprint().to_hex(), other.fingerprint().to_hex()]
         );
-        assert_eq!(
-            roster.cert_for_share(ShareID::new(2).unwrap()),
-            Some(&other)
-        );
         assert_eq!(roster.cert_for_fingerprint(&old.fingerprint()), Some(&old));
 
         let rotated = roster
@@ -977,9 +965,9 @@ mod tests {
         );
         assert_eq!(rotated.num_kps(), 2);
         assert_eq!(
-            rotated.cert_for_share(ShareID::new(2).unwrap()),
+            rotated.cert_for_fingerprint(&other.fingerprint()),
             Some(&other),
-            "replacing share 1 must leave share 2 unchanged"
+            "replacing one certificate must leave the other unchanged"
         );
 
         let err = roster.replace_cert(&old.fingerprint(), other).unwrap_err();
@@ -1004,7 +992,7 @@ mod tests {
         assert_eq!(
             encrypted_shares.recipient_fingerprints(),
             roster.fingerprints(),
-            "ordered cert position must determine the corresponding share recipient"
+            "fresh dealing must record the recipient assigned to each share"
         );
 
         let mut decrypted_shares = Vec::with_capacity(5);
@@ -1013,7 +1001,14 @@ mod tests {
 
             let mut decryptor = decrypt_with_secret_key(
                 Cursor::new(encrypted_share.armored_ciphertext.clone().into_bytes()),
-                keypairs[index].1.as_bytes(),
+                keypairs
+                    .iter()
+                    .find(|(cert, _)| {
+                        cert.fingerprint().to_hex() == encrypted_share.recipient_fingerprint
+                    })
+                    .unwrap()
+                    .1
+                    .as_bytes(),
             )
             .expect("the matching secret key must open its one ciphertext");
             let mut plaintext = Vec::new();
@@ -1027,7 +1022,13 @@ mod tests {
             commitments.verify_share(&share).unwrap();
             decrypted_shares.push(share);
 
-            let wrong_secret = &keypairs[(index + 1) % keypairs.len()].1;
+            let wrong_secret = &keypairs
+                .iter()
+                .find(|(cert, _)| {
+                    cert.fingerprint().to_hex() != encrypted_share.recipient_fingerprint
+                })
+                .unwrap()
+                .1;
             let wrong_decryption = decrypt_with_secret_key(
                 Cursor::new(encrypted_share.armored_ciphertext.clone().into_bytes()),
                 wrong_secret.as_bytes(),

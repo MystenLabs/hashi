@@ -274,7 +274,7 @@ pub struct CeremonyOperatorInitRequest {
 /// The confirmation also commits to the full deployment configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    /// One ordered KP certificate per secret share.
+    /// One KP certificate per fresh share, in dealing order.
     key_provisioner_certs_roster: KpCertRoster,
     /// The secret-sharing params (n, t).
     params: SecretSharingParams,
@@ -320,7 +320,7 @@ pub struct ProvisionerRotateKpSetRequest {
     expected_session_id: SessionID,
     expected_deployment_config_hash: [u8; 32],
     encrypted_old_share: GuardianEncryptedShare,
-    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// OpenPGP certificates for the new KPs, in fresh-dealing order. Its length equals
     /// `new_params.num_shares()`.
     new_kp_certs_roster: KpCertRoster,
     /// The new secret-sharing params (n, t).

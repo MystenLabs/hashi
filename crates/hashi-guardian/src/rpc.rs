@@ -433,7 +433,7 @@ mod tests {
         let rpc = GuardianGrpc {
             enclave: Enclave::create_operator_initialized_with(OperatorInitTestArgs {
                 s3_logger: logger,
-                ceremony_state: state,
+                ceremony_state: state.clone(),
                 ..Default::default()
             })
             .await,
@@ -444,7 +444,15 @@ mod tests {
             .iter()
             .take(2)
             .map(|share| {
-                let cert = roster.cert_for_share(share.id).unwrap().clone();
+                let recipient = &state
+                    .encrypted_shares
+                    .find_by_id(share.id)
+                    .unwrap()
+                    .recipient_fingerprint;
+                let cert = roster
+                    .cert_for_fingerprint(&recipient.parse().unwrap())
+                    .unwrap()
+                    .clone();
                 let request = ProvisionerInitRequest::build_from_share(
                     rpc.enclave.s3_session_id(),
                     before.config_hash,
@@ -506,7 +514,15 @@ mod tests {
             },
         )
         .unwrap();
-        let cert = roster.cert_for_share(shares[0].id).unwrap().clone();
+        let recipient = &state
+            .encrypted_shares
+            .find_by_id(shares[0].id)
+            .unwrap()
+            .recipient_fingerprint;
+        let cert = roster
+            .cert_for_fingerprint(&recipient.parse().unwrap())
+            .unwrap()
+            .clone();
         let replacement = hashi_types::guardian::test_utils::mock_attested_kp_keypair().0;
         let request = ProvisionerRotateCertRequest::new(
             rpc.enclave.s3_session_id(),
@@ -549,7 +565,15 @@ mod tests {
             .iter()
             .take(2)
             .map(|share| {
-                let cert = roster.cert_for_share(share.id).unwrap().clone();
+                let recipient = &state
+                    .encrypted_shares
+                    .find_by_id(share.id)
+                    .unwrap()
+                    .recipient_fingerprint;
+                let cert = roster
+                    .cert_for_fingerprint(&recipient.parse().unwrap())
+                    .unwrap()
+                    .clone();
                 let request = ProvisionerRotateKpSetRequest::build_from_share(
                     rpc.enclave.s3_session_id(),
                     rpc.enclave.config.deployment().unwrap().digest(),

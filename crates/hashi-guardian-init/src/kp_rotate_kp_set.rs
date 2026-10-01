@@ -60,10 +60,9 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         kp_cert.fingerprint()
     );
     // What this KP is about to authorize. Compare it with the operator's.
-    for (index, fingerprint) in new_certs_roster.fingerprints().iter().enumerate() {
+    for fingerprint in new_certs_roster.fingerprints() {
         info!(
             phase = "proposal",
-            share_id = index + 1,
             recipient_fingerprint = %fingerprint,
             "proposed new KP set entry",
         );
@@ -106,7 +105,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     // 2. This KP's share of the dealt set, from the latest attested logs.
     let state = reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
+    state.encrypted_shares.verify_recipients(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "share read",
