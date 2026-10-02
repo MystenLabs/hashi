@@ -927,6 +927,13 @@ public(package) fun request_in_requests(self: &WithdrawalRequestQueue, id: addre
     self.requests.contains(id)
 }
 
+/// The request a `WithdrawalRequested` event announces, so tests driving the
+/// `request_withdrawal` entry (which returns nothing) can find what it created.
+#[test_only]
+public(package) fun withdrawal_requested_request_id(event: &WithdrawalRequested): address {
+    event.request_id
+}
+
 #[test_only]
 public(package) fun request_in_processed(self: &WithdrawalRequestQueue, id: address): bool {
     self.processed.contains(id)

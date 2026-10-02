@@ -87,6 +87,54 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
 
 // ~~~~~~~ Entry Functions ~~~~~~~
 
+/// Request a withdrawal of BTC from the bridge.
+///
+/// The full BTC amount is stored in the withdrawal request. The miner
+/// fee is deducted later at commitment time.
+///
+/// The user must provide at least `bitcoin_withdrawal_minimum()` sats,
+/// which guarantees the amount covers worst-case miner fees plus dust.
+///
+/// Private `entry` rather than `public` so the signature stays upgradeable;
+/// a `public` signature is frozen at publish. Only other Move packages lose
+/// access, and they gain nothing over a direct PTB call: the request is
+/// owned by the transaction sender, never by a calling package. A PTB can
+/// still feed in a `Balance<BTC>` produced by earlier commands (e.g.
+/// `balance::redeem_funds` or a swap), since `Balance` has `store` and is
+/// therefore never a hot argument under the private-entry rules.
+entry fun request_withdrawal(
+    hashi: &mut Hashi,
+    clock: &Clock,
+    btc: Balance<BTC>,
+    bitcoin_address: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    hashi.versioning().assert_version_enabled();
+    hashi.assert_unpaused();
+
+    assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
+
+    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
+    let addr_len = bitcoin_address.length();
+    assert!(addr_len == 20 || addr_len == 32, EInvalidBitcoinAddress);
+
+    // Create the withdrawal request.
+    let request = hashi::withdrawal_queue::create_withdrawal(
+        btc,
+        bitcoin_address,
+        clock,
+        ctx,
+    );
+    let request_id = request.request_id().to_address();
+    hashi::withdrawal_queue::emit_withdrawal_requested(&request);
+
+    // Insert into the active requests bag.
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
+
+    // Index by sender for client discovery.
+    hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
+}
+
 entry fun approve_request(
     hashi: &mut Hashi,
     request_id: address,
@@ -408,46 +456,6 @@ entry fun cleanup_spent_utxos(hashi: &mut Hashi, utxo_ids: vector<UtxoId>) {
 }
 
 // ~~~~~~~ Public Functions ~~~~~~~
-
-/// Request a withdrawal of BTC from the bridge.
-///
-/// The full BTC amount is stored in the withdrawal request. The miner
-/// fee is deducted later at commitment time.
-///
-/// The user must provide at least `bitcoin_withdrawal_minimum()` sats,
-/// which guarantees the amount covers worst-case miner fees plus dust.
-public fun request_withdrawal(
-    hashi: &mut Hashi,
-    clock: &Clock,
-    btc: Balance<BTC>,
-    bitcoin_address: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    hashi.versioning().assert_version_enabled();
-    hashi.assert_unpaused();
-
-    assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
-
-    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
-    let addr_len = bitcoin_address.length();
-    assert!(addr_len == 20 || addr_len == 32, EInvalidBitcoinAddress);
-
-    // Create the withdrawal request.
-    let request = hashi::withdrawal_queue::create_withdrawal(
-        btc,
-        bitcoin_address,
-        clock,
-        ctx,
-    );
-    let request_id = request.request_id().to_address();
-    hashi::withdrawal_queue::emit_withdrawal_requested(&request);
-
-    // Insert into the active requests bag.
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
-
-    // Index by sender for client discovery.
-    hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
-}
 
 /// Cancel a pending withdrawal request and return the stored BTC to the requester.
 ///
