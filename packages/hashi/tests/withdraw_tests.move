@@ -103,6 +103,150 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
     std::unit_test::destroy(hashi);
 }
 
+// ======== Request entry ========
+
+const P2WPKH_PROGRAM: vector<u8> = x"0101010101010101010101010101010101010101";
+const P2TR_PROGRAM: vector<u8> =
+    x"0202020202020202020202020202020202020202020202020202020202020202";
+
+/// Calls the `request_withdrawal` entry with a fresh `btc_amount` balance and
+/// returns the id of the request it created, read from the
+/// `WithdrawalRequested` event it emitted.
+fun request_via_entry(
+    hashi: &mut hashi::hashi::Hashi,
+    clock: &clock::Clock,
+    btc_amount: u64,
+    bitcoin_address: vector<u8>,
+    ctx: &mut TxContext,
+): address {
+    let btc = sui::balance::create_for_testing<BTC>(btc_amount);
+    hashi::withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address, ctx);
+    let events = sui::event::events_by_type<withdrawal_queue::WithdrawalRequested>();
+    events[events.length() - 1].withdrawal_requested_request_id()
+}
+
+fun withdrawal_minimum(hashi: &hashi::hashi::Hashi): u64 {
+    hashi::btc_config::bitcoin_withdrawal_minimum(hashi.config())
+}
+
+#[test]
+fun test_request_withdrawal_records_request_at_minimum() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let amount = withdrawal_minimum(&hashi);
+
+    let request_id = request_via_entry(&mut hashi, &clock, amount, P2WPKH_PROGRAM, ctx);
+
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.request_in_requests(request_id));
+    let request = queue.borrow_request(request_id);
+    assert!(request.request_sender() == REQUESTER);
+    assert!(request.request_btc_amount() == amount);
+    assert!(request.request_bitcoin_address() == &P2WPKH_PROGRAM);
+    assert!(!request.is_approved());
+    assert!(!request.is_committed());
+    assert!(hashi.bitcoin().user_has_request(REQUESTER, request_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_request_withdrawal_indexes_every_request_of_a_sender() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let amount = withdrawal_minimum(&hashi);
+
+    // The first request creates the sender's index entry; the second (to a
+    // P2TR program) must land in the same entry rather than abort on it.
+    let id1 = request_via_entry(&mut hashi, &clock, amount, P2WPKH_PROGRAM, ctx);
+    let id2 = request_via_entry(&mut hashi, &clock, amount + 1, P2TR_PROGRAM, ctx);
+
+    assert!(id1 != id2);
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.request_in_requests(id1));
+    assert!(queue.request_in_requests(id2));
+    assert!(queue.borrow_request(id2).request_bitcoin_address() == &P2TR_PROGRAM);
+    assert!(hashi.bitcoin().user_has_request(REQUESTER, id1));
+    assert!(hashi.bitcoin().user_has_request(REQUESTER, id2));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::withdraw::EBelowMinimumWithdrawal)]
+fun test_request_withdrawal_below_minimum_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let btc = sui::balance::create_for_testing<BTC>(withdrawal_minimum(&hashi) - 1);
+
+    hashi::withdraw::request_withdrawal(&mut hashi, &clock, btc, P2WPKH_PROGRAM, ctx);
+
+    // Clean up (shouldn't be reached due to expected failure)
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::withdraw::EInvalidBitcoinAddress)]
+fun test_request_withdrawal_rejects_empty_address() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let btc = sui::balance::create_for_testing<BTC>(withdrawal_minimum(&hashi));
+
+    hashi::withdraw::request_withdrawal(&mut hashi, &clock, btc, vector[], ctx);
+
+    // Clean up (shouldn't be reached due to expected failure)
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+/// A full P2WPKH scriptPubKey (`OP_0 OP_PUSHBYTES_20 <program>`) instead of
+/// the bare witness program is the likeliest integrator mistake.
+#[test]
+#[expected_failure(abort_code = hashi::withdraw::EInvalidBitcoinAddress)]
+fun test_request_withdrawal_rejects_script_pubkey() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let btc = sui::balance::create_for_testing<BTC>(withdrawal_minimum(&hashi));
+    let mut script_pubkey = x"0014";
+    script_pubkey.append(P2WPKH_PROGRAM);
+
+    hashi::withdraw::request_withdrawal(&mut hashi, &clock, btc, script_pubkey, ctx);
+
+    // Clean up (shouldn't be reached due to expected failure)
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::hashi::ESystemPaused)]
+fun test_request_withdrawal_while_paused_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    let btc = sui::balance::create_for_testing<BTC>(withdrawal_minimum(&hashi));
+    hashi.config_mut().set_paused(true);
+
+    hashi::withdraw::request_withdrawal(&mut hashi, &clock, btc, P2WPKH_PROGRAM, ctx);
+
+    // Clean up (shouldn't be reached due to expected failure)
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
 // ======== Certificate-based tests ========
 
 /// Helper: build the signing message bytes for a certificate.
