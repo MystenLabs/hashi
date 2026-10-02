@@ -1,6 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+
 use prometheus::HistogramVec;
 use prometheus::IntCounter;
 use prometheus::IntCounterVec;
@@ -2002,18 +2007,68 @@ pub fn uptime_metric(
 }
 
 const METRICS_ROUTE: &str = "/metrics";
+const HEALTH_ROUTE: &str = "/health";
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+// Load delays the heartbeat by seconds, so one this old means the main runtime
+// has stopped running tasks.
+const MAX_HEARTBEAT_AGE: Duration = Duration::from_secs(120);
 
-// Creates a new http server that has as a sole purpose to expose
-// an endpoint that prometheus agent can use to poll for the metrics.
+// Runs on its own thread so a busy main runtime can't fail the liveness probe;
+// /health fails only once the main runtime stops running the heartbeat.
 pub fn start_prometheus_server(
     addr: std::net::SocketAddr,
     registry: Registry,
 ) -> sui_http::ServerHandle {
+    let last_heartbeat = spawn_heartbeat();
     let router = axum::Router::new()
         .route(METRICS_ROUTE, axum::routing::get(metrics))
-        .with_state(registry);
+        .with_state(registry)
+        .route(
+            HEALTH_ROUTE,
+            axum::routing::get(move || health(last_heartbeat.clone())),
+        );
 
-    sui_http::Builder::new().serve(addr, router).unwrap()
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = {
+        let _guard = runtime.enter();
+        sui_http::Builder::new().serve(addr, router).unwrap()
+    };
+    std::thread::Builder::new()
+        .name("metrics-http".to_owned())
+        .spawn(move || runtime.block_on(std::future::pending::<()>()))
+        .unwrap();
+    server
+}
+
+// Spawns onto the caller's runtime, which is the one /health vouches for.
+fn spawn_heartbeat() -> Arc<Mutex<Instant>> {
+    let last_heartbeat = Arc::new(Mutex::new(Instant::now()));
+    let beat = last_heartbeat.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+            *beat.lock().unwrap() = Instant::now();
+        }
+    });
+    last_heartbeat
+}
+
+async fn health(last_heartbeat: Arc<Mutex<Instant>>) -> (http::StatusCode, String) {
+    let age = last_heartbeat.lock().unwrap().elapsed();
+    if age < MAX_HEARTBEAT_AGE {
+        (http::StatusCode::OK, "up".to_owned())
+    } else {
+        (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "main runtime has not run the heartbeat for {}s",
+                age.as_secs()
+            ),
+        )
+    }
 }
 
 async fn metrics(
@@ -2185,5 +2240,67 @@ mod tests {
 
         assert_eq!(metrics.utxo_pool_average_age_blocks.get(), -1);
         assert_eq!(metrics.utxo_pool_oldest_age_blocks.get(), -1);
+    }
+
+    fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
+        use std::io::Read;
+        use std::io::Write;
+
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn metrics_server_answers_while_the_main_runtime_is_blocked() {
+        let server = start_prometheus_server(([127, 0, 0, 1], 0).into(), Registry::new());
+        let addr = *server.local_addr();
+
+        // The test runtime has one thread, so joining blocks it for both requests.
+        let responses = std::thread::spawn(move || {
+            [HEALTH_ROUTE, METRICS_ROUTE].map(|path| http_get(addr, path))
+        })
+        .join()
+        .unwrap();
+
+        for response in responses {
+            assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_stops_while_its_runtime_is_blocked() {
+        let last_heartbeat = spawn_heartbeat();
+        let first = *last_heartbeat.lock().unwrap();
+
+        std::thread::sleep(2 * HEARTBEAT_INTERVAL);
+        assert_eq!(*last_heartbeat.lock().unwrap(), first);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while *last_heartbeat.lock().unwrap() == first {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the heartbeat resumes once its runtime runs tasks again");
+    }
+
+    #[tokio::test]
+    async fn health_fails_once_the_heartbeat_is_too_old() {
+        let fresh = Arc::new(Mutex::new(Instant::now()));
+        assert_eq!(health(fresh).await.0, http::StatusCode::OK);
+
+        let stale = Instant::now().checked_sub(MAX_HEARTBEAT_AGE).unwrap();
+        let (status, body) = health(Arc::new(Mutex::new(stale))).await;
+        assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
     }
 }
