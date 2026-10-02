@@ -69,9 +69,14 @@ public struct CertifiedMessage<T> has copy, drop, store {
     stake_support: u64,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun new_committee_signature(
+/// Build a `CommitteeSignature` inside a PTB: a struct cannot be a pure
+/// transaction input, so certificates reach the entry functions as the
+/// result of this call. Private `entry` rather than `public` so the
+/// signature stays upgradeable; the result has `drop` and `store` and is
+/// therefore never a hot argument to the entry function that consumes it.
+entry fun new_committee_signature(
     epoch: u64,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,

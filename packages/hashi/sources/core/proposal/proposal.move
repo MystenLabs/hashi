@@ -8,6 +8,18 @@
 /// it can be executed exactly once, releasing the payload to the executing
 /// module and archiving the proposal. Proposals expire after seven days, after
 /// which unexecuted ones may be deleted.
+///
+/// Visibility note: every proposal-type module exposes `propose` and
+/// `execute` as private `entry` functions, as are `vote`, `remove_vote` and
+/// `delete_expired` here. A `public` signature is frozen at publish by Sui's
+/// compatible-upgrade check, an `entry` one may change in any later upgrade,
+/// and no other Move package has a use for these: proposals are authorized
+/// by the sender's registration, not by a calling package. PTBs still build
+/// the `VecMap` and `Value` arguments with public calls, whose results have
+/// `drop` and `store` and are therefore never hot arguments under the
+/// private-entry rules. The exceptions are `upgrade::execute` and
+/// `upgrade::finalize_upgrade`, whose signatures are dictated by the
+/// framework's ticket and receipt types.
 module hashi::proposal;
 
 use hashi::{hashi::Hashi, threshold};
@@ -143,9 +155,11 @@ entry fun remove_vote<T: store>(
     });
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
-
-public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
+/// Delete an expired, unexecuted proposal. Permissionless: an expired
+/// proposal can be neither voted nor executed, so nothing is lost. The
+/// payload is returned for the caller to discard; the `drop` bound states
+/// what every proposal payload already has (`execute` requires it too).
+entry fun delete_expired<T: drop + store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
     hashi.versioning().assert_version_enabled();
     // Executed proposals are archived in the executed bag and must
     // never be deletable, even after they expire. Refuse explicitly so
