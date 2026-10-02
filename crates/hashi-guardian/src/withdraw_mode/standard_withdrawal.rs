@@ -29,7 +29,7 @@ pub async fn standard_withdrawal(
     // 0) Validation
     enclave.require_fully_initialized()?;
 
-    // 1) Verify certificate (before acquiring limiter lock)
+    // 1) Verify certificate
     let committee = enclave.state.get_committee()?;
 
     info!("Verifying request certificate.");
@@ -38,10 +38,8 @@ pub async fn standard_withdrawal(
 
     let (request_sign, request) = signed_request.into_parts();
 
-    // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
-    //    The returned guard holds the mutex — no other withdrawal can proceed
-    //    until this one is durably logged or the enclave aborts.
-    //
+    // 2) Rate limits: consume tokens. The control lock keeps this consumption
+    //    exclusive until it is durably logged or the enclave aborts.
     validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
     info!("Checking rate limits.");
@@ -49,17 +47,14 @@ pub async fn standard_withdrawal(
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-    let limiter_guard = enclave
-        .state
-        .consume_from_limiter(
-            request.seq(),
-            request.timestamp_secs(),
-            consumed_amount_sats,
-        )
-        .await?;
+    let post_state = enclave.state.consume_from_limiter(
+        request.seq(),
+        request.timestamp_secs(),
+        consumed_amount_sats,
+    )?;
     info!("Rate limit check passed.");
 
-    // 3) Sign tx (while holding limiter lock)
+    // 3) Sign tx (while holding the control lock)
     info!("Generating BTC signatures.");
     let (txid, signatures) = enclave
         .config
@@ -70,23 +65,20 @@ pub async fn standard_withdrawal(
     };
     info!("BTC signatures generated.");
 
-    // 4) Log while holding the limiter lock, before returning signatures.
+    // 4) Log while holding the control lock, before returning signatures.
     info!("Withdrawal {} processed successfully. Logging to S3.", wid);
     let msg = WithdrawalLogMessage {
         txid,
         request_data: StandardWithdrawalRequestWire::from(request),
         request_sign,
         response: response.clone(),
-        post_state: *limiter_guard.state(),
+        post_state,
     };
     enclave
         .log_withdraw(msg)
         .await
         .expect("S3 logger must be initialized to log a withdrawal");
     info!("Withdrawal {} logged.", wid);
-    // Publish the durable state and release the guard so the next withdrawal
-    // may begin.
-    enclave.state.set_limiter_snapshot(limiter_guard);
     Ok(enclave.sign(response))
 }
 
@@ -223,40 +215,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn limiter_state_is_readable_while_a_withdrawal_holds_the_guard() {
-        let (signed_request, committee) =
-            StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
-                Network::Regtest,
-                WithdrawalID::new([0xac; 32]),
-                now_timestamp_secs(),
-                0,
-            );
-        let amount_sats = signed_request
-            .message()
-            .utxos()
-            .gross_outflow_amount()
-            .to_sat();
-        let (enclave, _captures) =
-            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
-
-        // A withdrawal holds the limiter across its durable log write.
-        let guard = enclave
-            .state
-            .consume_from_limiter(0, now_timestamp_secs(), amount_sats)
-            .await
-            .expect("limiter accepts the first withdrawal");
-
-        // Readable rather than timing out into `None`, and still reporting the
-        // durable state: this consumption is not logged yet.
-        let state = enclave
-            .state
-            .limiter_snapshot()
-            .expect("limiter state stays readable while the guard is held");
-        assert_eq!(state.next_seq, 0);
-        drop(guard);
-    }
-
-    #[tokio::test]
     async fn limiter_state_advances_once_the_withdrawal_is_logged() {
         let (signed_request, committee) =
             StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
@@ -273,11 +231,7 @@ mod tests {
         let (enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
         assert_eq!(
-            enclave
-                .state
-                .limiter_snapshot()
-                .expect("activated")
-                .next_seq,
+            enclave.state.limiter_state().expect("activated").next_seq,
             0
         );
 
@@ -286,11 +240,7 @@ mod tests {
             .expect("withdrawal succeeds");
 
         assert_eq!(
-            enclave
-                .state
-                .limiter_snapshot()
-                .expect("activated")
-                .next_seq,
+            enclave.state.limiter_state().expect("activated").next_seq,
             1
         );
     }
