@@ -405,25 +405,13 @@ impl LeaderService {
         member: &CommitteeMember,
     ) -> Option<MemberSignature> {
         let validator_address = member.validator_address();
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-        let response = rpc_client
-            .sign_committee_transition(proto_request)
-            .await
-            .inspect_err(|e| {
-                error!(
-                    "Failed to get committee transition signature from {validator_address}: {e}"
-                );
-            })
-            .ok()?;
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "committee transition signature",
+            move |mut client| async move { client.sign_committee_transition(proto_request).await },
+        )
+        .await?;
         response
             .into_inner()
             .member_signature
