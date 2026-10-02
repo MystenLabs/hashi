@@ -16,7 +16,6 @@ use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;
 use hpke::Serializable;
-use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
@@ -104,7 +103,7 @@ impl OIWithdrawModeInstall {
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
-    pub fn install_into(self, enclave: &Enclave) {
+    pub fn install_into(self, enclave: &mut Enclave) {
         let config_hash = self.init_config.digest();
         let limiter_config = *self.init_config.limiter_config();
 
@@ -124,6 +123,7 @@ impl OIWithdrawModeInstall {
             );
         }
         enclave
+            .state
             .set_temporary_init_state(TemporaryInitState {
                 ceremony_state: self.ceremony_state,
                 genesis_state: self.genesis_state,
@@ -151,7 +151,7 @@ impl OIWithdrawModeInstall {
 /// Validate and commit operator initialization under the cancellation-safe
 /// control lock so concurrent callers cannot race the check-then-commit.
 pub async fn operator_init(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
@@ -216,7 +216,7 @@ pub async fn operator_init(
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
-    commit_operator_init(&enclave, install).await;
+    commit_operator_init(enclave, install).await;
 
     info!("Operator initialization complete.");
     Ok(())
@@ -226,7 +226,7 @@ pub async fn operator_init(
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and S3 logging
 /// panics on failure rather than returning an error.
-async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
+async fn commit_operator_init(enclave: &mut Enclave, install: OIInstall) {
     let OIInstall {
         deployment,
         attestation,

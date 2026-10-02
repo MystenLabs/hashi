@@ -3,13 +3,11 @@
 
 use anyhow::Result;
 use hashi_guardian::rpc::GuardianGrpc;
-use hashi_guardian::withdraw_mode::heartbeat::HeartbeatWriter;
 use hashi_guardian::Enclave;
-use hashi_guardian::HEARTBEAT_INTERVAL;
+use hashi_guardian::GuardianService;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
-use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
@@ -46,21 +44,14 @@ async fn main() -> Result<()> {
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
+    let service = GuardianService::new(Enclave::new(signing_keys, encryption_keys));
 
     // The StandardWithdrawal idempotency cache now lives out-of-enclave in
     // `hashi-guardian-proxy`; the enclave serves the bare handler.
-    let svc = GuardianGrpc {
-        enclave: enclave.clone(),
-    };
+    let svc = GuardianGrpc { service };
 
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
-
-    // The writer is idle until withdraw operator initialization completes.
-    drop(tokio::spawn(
-        HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
-    ));
 
     Server::builder()
         .add_service(GuardianServiceServer::new(svc))

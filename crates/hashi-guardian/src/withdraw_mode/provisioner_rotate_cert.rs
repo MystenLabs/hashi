@@ -5,8 +5,6 @@
 //! verifies that the caller submitted its currently committed share, then
 //! appends a complete `kp-shares/` snapshot with only that share re-encrypted.
 
-use std::sync::Arc;
-
 use crate::Enclave;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
@@ -22,7 +20,7 @@ use hashi_types::guardian::SessionBoundRequest;
 use tracing::info;
 
 pub async fn provisioner_rotate_cert(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     signed_request: KpSigned<ProvisionerRotateCertRequest>,
 ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
     info!("/provisioner_rotate_cert - Received request.");
@@ -39,11 +37,11 @@ pub async fn provisioner_rotate_cert(
 
     let mut reader = enclave.new_guardian_reader()?;
     let latest_state = reader.read_latest_ceremony_state().await?;
-    apply_cert_rotation(&enclave, signer_fingerprint, request, latest_state).await
+    apply_cert_rotation(enclave, signer_fingerprint, request, latest_state).await
 }
 
 async fn apply_cert_rotation(
-    enclave: &Enclave,
+    enclave: &mut Enclave,
     signer_fingerprint: String,
     request: ProvisionerRotateCertRequest,
     latest_state: CeremonyState,

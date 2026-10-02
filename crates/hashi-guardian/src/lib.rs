@@ -36,7 +36,7 @@ pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor
 pub mod s3_reader; // verified read layer; used by the monitor + init tooling
-pub mod task_spawner;
+pub mod service;
 pub mod withdraw_mode;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -45,6 +45,7 @@ pub mod test_utils;
 pub use enclave::Enclave;
 pub use s3_client::resolve_s3_credentials;
 pub use s3_client::GuardianS3Client;
+pub use service::GuardianService;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::activate_enclave_for_testing;

@@ -9,7 +9,6 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::RuntimeCommittee;
-use std::sync::Arc;
 use tracing::info;
 
 /// Advance the committee to a future epoch with a cert from the outgoing
@@ -18,7 +17,7 @@ use tracing::info;
 /// current one; sequentiality is not enforced.
 /// Idempotent on already-applied or older transitions.
 pub async fn update_committee(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
     enclave.require_fully_initialized()?;
@@ -32,7 +31,7 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed)?;
+    verify_hashi_cert(enclave.hashi_object_id()?, current, &signed)?;
 
     let new_committee = RuntimeCommittee::from_move_with_encryption_key_fallback(
         signed.message().new_committee.clone(),
@@ -58,7 +57,7 @@ pub async fn update_committee(
     enclave
         .state
         .replace_committee(new_committee, current_epoch)
-        .expect("committee initialized at current_epoch under the update lock");
+        .expect("committee initialized at current_epoch under the control lock");
 
     info!(
         from_epoch = current_epoch,
@@ -67,14 +66,13 @@ pub async fn update_committee(
     );
     Ok(proposed_epoch)
 }
-
 pub async fn update_committee_chain(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
 ) -> GuardianResult<u64> {
     let mut current_epoch = enclave.state.get_committee()?.epoch();
     for signed in transitions {
-        current_epoch = update_committee(enclave.clone(), signed).await?;
+        current_epoch = update_committee(enclave, signed).await?;
     }
     Ok(current_epoch)
 }
