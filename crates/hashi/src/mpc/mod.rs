@@ -12,5 +12,6 @@ pub use mpc_except_signing::*;
 pub use service::MpcHandle;
 pub use service::MpcService;
 pub use signing::IdentityInputs;
+pub use signing::RefillRequest;
 pub use signing::SignInput;
 pub use signing::SigningManager;
