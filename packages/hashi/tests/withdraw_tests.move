@@ -103,7 +103,7 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
     std::unit_test::destroy(hashi);
 }
 
-// ======== Request entry ========
+// ======== Request and cancel entries ========
 
 const P2WPKH_PROGRAM: vector<u8> = x"0101010101010101010101010101010101010101";
 const P2TR_PROGRAM: vector<u8> =
@@ -174,6 +174,39 @@ fun test_request_withdrawal_indexes_every_request_of_a_sender() {
     assert!(hashi.bitcoin().user_has_request(REQUESTER, id1));
     assert!(hashi.bitcoin().user_has_request(REQUESTER, id2));
 
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_cancel_withdrawal_deletes_request_and_unindexes_it() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+    let amount = withdrawal_minimum(&hashi);
+    let id1 = request_via_entry(&mut hashi, &clock, amount, P2WPKH_PROGRAM, ctx);
+    let id2 = request_via_entry(&mut hashi, &clock, amount + 1, P2TR_PROGRAM, ctx);
+    clock.set_for_testing(hashi::btc_config::withdrawal_cancellation_cooldown_ms(hashi.config()));
+
+    let refund = hashi::withdraw::cancel_withdrawal(&mut hashi, id1, &clock, ctx);
+
+    // Cancelled requests are deleted outright, never archived, and only the
+    // cancelled one leaves the sender's index.
+    assert!(refund.value() == amount);
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(!queue.request_in_requests(id1));
+    assert!(!queue.request_in_processed(id1));
+    assert!(!hashi.bitcoin().user_has_request(REQUESTER, id1));
+    assert!(hashi.bitcoin().user_has_request(REQUESTER, id2));
+
+    // Cancelling the sender's last request drops their index entry entirely.
+    let refund2 = hashi::withdraw::cancel_withdrawal(&mut hashi, id2, &clock, ctx);
+    assert!(refund2.value() == amount + 1);
+    assert!(!hashi.bitcoin().has_user_requests(REQUESTER));
+
+    refund.destroy_for_testing();
+    refund2.destroy_for_testing();
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
