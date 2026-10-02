@@ -54,6 +54,8 @@ pub use crate::mpc::types::MpcResult;
 use crate::mpc::types::NonceCertTimestamp;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceCollectionWindow;
+use crate::mpc::types::PreviousReconstruction;
+use crate::mpc::types::PreviousSelection;
 pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
@@ -4923,26 +4925,36 @@ impl MpcManager {
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        match certificates.first().map(VerifiedCertificateV1::inner) {
-            Some(CertificateV1::Dkg(_)) | None => {
-                self.reconstruct_previous_dkg_output(certificates, complaint_cache)
+        match self.previous_reconstruction(certificates)? {
+            PreviousReconstruction::Dkg(context) => {
+                self.reconstruct_dkg_output_locally(&context, certificates, complaint_cache)
             }
-            Some(CertificateV1::Rotation(_)) => {
-                self.reconstruct_previous_rotation_output(certificates, complaint_cache)
-            }
-            Some(CertificateV1::NonceGeneration { .. }) => {
-                unreachable!(
-                    "Nonce generation certificates cannot appear as previous certificates for key rotation"
-                )
+            PreviousReconstruction::Rotation(context) => {
+                self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
             }
         }
     }
 
-    fn reconstruct_previous_dkg_output(
+    fn previous_reconstruction(
         &self,
         certificates: &[VerifiedCertificateV1],
-        complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
-    ) -> MpcResult<ReconstructionOutcome> {
+    ) -> MpcResult<PreviousReconstruction<'_>> {
+        match certificates.first().map(VerifiedCertificateV1::inner) {
+            Some(CertificateV1::Dkg(_)) | None => {
+                Ok(PreviousReconstruction::Dkg(self.previous_dkg_context()?))
+            }
+            Some(CertificateV1::Rotation(_)) => Ok(PreviousReconstruction::Rotation(
+                self.previous_rotation_context()?,
+            )),
+            Some(CertificateV1::NonceGeneration { .. }) => Err(MpcError::InvalidCertificate(
+                "Nonce generation certificates cannot appear as previous certificates for key \
+                 rotation"
+                    .into(),
+            )),
+        }
+    }
+
+    fn previous_dkg_context(&self) -> MpcResult<DkgReconstructionContext<'_>> {
         let committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
         })?;
@@ -4963,7 +4975,7 @@ impl MpcManager {
         let encryption_key = self.previous_encryption_key.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous encryption key".into())
         })?;
-        let context = DkgReconstructionContext {
+        Ok(DkgReconstructionContext {
             committee,
             nodes,
             party_id,
@@ -4971,8 +4983,7 @@ impl MpcManager {
             output_threshold,
             output_max_faulty,
             epoch: self.previous_epoch,
-        };
-        self.reconstruct_dkg_output_locally(&context, certificates, complaint_cache)
+        })
     }
 
     pub fn reconstruct_current_dkg_output(
@@ -5116,11 +5127,9 @@ impl MpcManager {
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id = self.base_session_id_for_epoch(context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::AvssOutput> = HashMap::new();
-        let mut dealer_weight_sum = 0u32;
+        let mut selection = context.selection();
         for cert in certificates {
-            // This matches the behavior of `run_as_party` during DKG, which also
-            // stops at threshold.
-            if dealer_weight_sum >= context.output_threshold as u32 {
+            if selection.is_complete() {
                 break;
             }
             let CertificateV1::Dkg(dkg_cert) = cert.inner() else {
@@ -5152,23 +5161,18 @@ impl MpcManager {
                     dealer: dealer_address,
                 });
             }
-            let dealer_party_id =
-                match Self::certified_dealer_party_id(context.committee, &dealer_address) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::warn!("Skipping certified dealer during reconstruction: {e}");
-                        continue;
-                    }
-                };
+            let Some(dealer_party_id) =
+                selection.take(context.committee, context.nodes, &dealer_address)?
+            else {
+                tracing::warn!(
+                    "Skipping certified dealer {dealer_address:?} during reconstruction: not in \
+                     the committee"
+                );
+                continue;
+            };
             let session_id = source_session_id.dealer_session_id(&dealer_address);
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
-                let dealer_weight = context.nodes.weight_of(dealer_party_id).map_err(|_| {
-                    MpcError::InvalidCertificate(format!(
-                        "No reduced weight for certified dealer {dealer_address:?}"
-                    ))
-                })?;
-                dealer_weight_sum += dealer_weight as u32;
                 continue;
             }
             match process_avss_message(
@@ -5194,14 +5198,9 @@ impl MpcManager {
                     });
                 }
             }
-            let dealer_weight = context.nodes.weight_of(dealer_party_id).map_err(|_| {
-                MpcError::InvalidCertificate(format!(
-                    "No reduced weight for certified dealer {dealer_address:?}"
-                ))
-            })?;
-            dealer_weight_sum += dealer_weight as u32;
         }
-        if dealer_weight_sum < context.output_threshold as u32 {
+        let dealer_weight_sum = selection.weight();
+        if !selection.is_complete() {
             return Err(MpcError::NotEnoughApprovals {
                 needed: context.output_threshold as usize,
                 got: dealer_weight_sum as usize,
@@ -5250,11 +5249,7 @@ impl MpcManager {
         }))
     }
 
-    fn reconstruct_previous_rotation_output(
-        &self,
-        certificates: &[VerifiedCertificateV1],
-        complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
-    ) -> MpcResult<ReconstructionOutcome> {
+    fn previous_rotation_context(&self) -> MpcResult<RotationReconstructionContext<'_>> {
         let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
@@ -5284,7 +5279,7 @@ impl MpcManager {
                 "Rotation reconstruction requires previous encryption key".into(),
             )
         })?;
-        let context = RotationReconstructionContext {
+        Ok(RotationReconstructionContext {
             nodes,
             party_id,
             encryption_key,
@@ -5292,8 +5287,7 @@ impl MpcManager {
             output_max_faulty,
             input_threshold,
             epoch: self.previous_epoch,
-        };
-        self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
+        })
     }
 
     /// Makes no peer calls, but `complaint_cache` may hold outputs recovered from peers.
@@ -5308,9 +5302,9 @@ impl MpcManager {
         // Share indices are unique across certified dealers: every honest signer of a
         // rotation cert rejects unowned indices at ack time.
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
-        let mut certified_share_indices = Vec::new();
+        let mut selection = context.selection();
         for cert in certificates {
-            if certified_share_indices.len() >= context.input_threshold as usize {
+            if selection.is_complete() {
                 break;
             }
             let CertificateV1::Rotation(rotation_cert) = cert.inner() else {
@@ -5342,18 +5336,21 @@ impl MpcManager {
                     dealer: dealer_address,
                 });
             }
-            for (share_index, message) in rotation_msgs {
-                if certified_share_indices.len() >= context.input_threshold as usize {
-                    break;
-                }
-                if certified_share_indices.contains(&share_index) {
-                    tracing::warn!(
-                        "reconstruct_rotation: share_index={share_index} was already claimed \
-                         earlier in this certificate set; skipping it for dealer {:?}",
-                        dealer_address,
-                    );
-                    continue;
-                }
+            for share_index in rotation_msgs
+                .keys()
+                .filter(|index| selection.claimed().contains(*index))
+            {
+                tracing::warn!(
+                    "reconstruct_rotation: share_index={share_index} was already claimed \
+                     earlier in this certificate set; skipping it for dealer {:?}",
+                    dealer_address,
+                );
+            }
+            let taken = selection.take(&rotation_msgs);
+            for (share_index, message) in rotation_msgs
+                .into_iter()
+                .filter(|(share_index, _)| taken.contains(share_index))
+            {
                 if let Some(output) =
                     complaint_cache.get(&DealerOutputsKey::Rotation(dealer_address, share_index))
                 {
@@ -5363,7 +5360,6 @@ impl MpcManager {
                         dealer_address,
                     );
                     local_outputs.insert(share_index, output.clone());
-                    certified_share_indices.push(share_index);
                     continue;
                 }
                 let session_id =
@@ -5392,15 +5388,15 @@ impl MpcManager {
                         });
                     }
                 }
-                certified_share_indices.push(share_index);
             }
         }
-        if certified_share_indices.len() < context.input_threshold as usize {
+        if !selection.is_complete() {
             return Err(MpcError::NotEnoughApprovals {
                 needed: context.input_threshold as usize,
-                got: certified_share_indices.len(),
+                got: selection.claimed().len(),
             });
         }
+        let certified_share_indices = selection.into_claimed();
         let indexed_outputs: Vec<IndexedValue<avss::AvssOutput>> = certified_share_indices
             .iter()
             .take(context.input_threshold as usize)
@@ -5797,11 +5793,27 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) {
-        let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-        let mut failed_repairs = 0usize;
+        let (previous_epoch, selection) = {
+            let mgr = mpc_manager.read().unwrap();
+            (
+                mgr.previous_epoch,
+                mgr.previous_reconstruction(previous_certificates)
+                    .map(|reconstruction| PreviousSelection::new(&reconstruction)),
+            )
+        };
+        let mut selection = match selection {
+            Ok(selection) => selection,
+            Err(e) => {
+                tracing::warn!("Not repairing previous epoch {previous_epoch} messages: {e}");
+                return;
+            }
+        };
         for cert in previous_certificates {
-            let (msg, certificate, protocol_type, stored) = match cert.inner() {
-                CertificateV1::Dkg(dkg_cert) => {
+            if selection.is_complete() {
+                break;
+            }
+            let (msg, certificate, protocol_type, stored) = match (cert.inner(), &selection) {
+                (CertificateV1::Dkg(dkg_cert), PreviousSelection::Dkg { .. }) => {
                     let msg = dkg_cert.message();
                     let stored = {
                         let mgr = mpc_manager.read().unwrap();
@@ -5816,7 +5828,7 @@ impl MpcManager {
                         stored,
                     )
                 }
-                CertificateV1::Rotation(rotation_cert) => {
+                (CertificateV1::Rotation(rotation_cert), PreviousSelection::Rotation(_)) => {
                     let msg = rotation_cert.message();
                     let stored = {
                         let mgr = mpc_manager.read().unwrap();
@@ -5831,80 +5843,107 @@ impl MpcManager {
                         stored,
                     )
                 }
-                _ => continue,
+                _ => return,
             };
             let stored_hash = stored
                 .as_ref()
                 .ok()
                 .and_then(|m| m.as_ref())
                 .map(Messages::compute_hash);
-            if stored_hash.as_ref() == Some(&msg.messages_hash) {
-                continue;
-            }
-            match (stored.as_ref().err(), &stored_hash) {
-                (Some(e), _) => {
-                    metrics
-                        .mpc_previous_message_unusable_total
-                        .with_label_values(&[cert.inner().protocol_label()])
-                        .inc();
-                    tracing::warn!(
-                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
-                         {:?} could not be read ({e})",
-                        msg.dealer_address,
-                    )
+            let messages = match stored {
+                Ok(Some(messages)) if stored_hash.as_ref() == Some(&msg.messages_hash) => messages,
+                stored => {
+                    Self::log_unusable_previous_message(
+                        cert,
+                        previous_epoch,
+                        protocol_type,
+                        msg,
+                        stored.as_ref().err(),
+                        stored_hash.as_ref(),
+                        metrics,
+                    );
+                    let repair = Self::retrieve_message_using_previous_committee(
+                        mpc_manager,
+                        msg,
+                        certificate,
+                        protocol_type,
+                        p2p_channel,
+                    );
+                    match tokio::time::timeout(PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT, repair)
+                        .await
+                    {
+                        Ok(Ok(messages)) => messages,
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                "Could not repair previous epoch {previous_epoch} \
+                                 {protocol_type:?} message for dealer {:?}: {e}; reconstruction \
+                                 reads it, so later messages are not repaired",
+                                msg.dealer_address,
+                            );
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "Repair of previous epoch {previous_epoch} {protocol_type:?} \
+                                 message for dealer {:?} timed out after \
+                                 {PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT:?}; reconstruction \
+                                 reads it, so later messages are not repaired",
+                                msg.dealer_address,
+                            );
+                            return;
+                        }
+                    }
                 }
-                (None, None) => tracing::info!(
-                    "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
-                     not in DB",
+            };
+            if let Err(e) = selection.take(&msg.dealer_address, &messages) {
+                tracing::warn!(
+                    "Stopped repairing previous epoch {previous_epoch} messages at dealer {:?}: \
+                     {e}",
                     msg.dealer_address,
-                ),
-                (None, Some(stored_digest)) => {
-                    metrics
-                        .mpc_previous_message_unusable_total
-                        .with_label_values(&[cert.inner().protocol_label()])
-                        .inc();
-                    tracing::warn!(
-                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
-                         {:?} diverges from its certificate (stored {stored_digest}, certified \
-                         {})",
-                        msg.dealer_address,
-                        msg.messages_hash,
-                    )
-                }
-            }
-            let repair = Self::retrieve_message_using_previous_committee(
-                mpc_manager,
-                msg,
-                certificate,
-                protocol_type,
-                p2p_channel,
-            );
-            match tokio::time::timeout(PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT, repair).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    failed_repairs += 1;
-                    tracing::warn!(
-                        "Could not repair previous epoch {previous_epoch} {protocol_type:?} \
-                         message for dealer {:?}: {e}",
-                        msg.dealer_address,
-                    )
-                }
-                Err(_) => {
-                    failed_repairs += 1;
-                    tracing::warn!(
-                        "Repair of previous epoch {previous_epoch} {protocol_type:?} message for \
-                         dealer {:?} timed out after {PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT:?}",
-                        msg.dealer_address,
-                    )
-                }
+                );
+                return;
             }
         }
-        if failed_repairs > 0 {
-            tracing::warn!(
-                "Could not repair {failed_repairs} previous epoch {previous_epoch} message(s); \
-                 reconstruction may fall back to the new-member path, leaving this node unable \
-                 to deal in the rotation",
-            );
+    }
+
+    fn log_unusable_previous_message(
+        cert: &VerifiedCertificateV1,
+        previous_epoch: u64,
+        protocol_type: ProtocolTypeIndicator,
+        msg: &DealerMessagesHash,
+        read_error: Option<&anyhow::Error>,
+        stored_hash: Option<&MessagesHash>,
+        metrics: &Metrics,
+    ) {
+        match (read_error, stored_hash) {
+            (Some(e), _) => {
+                metrics
+                    .mpc_previous_message_unusable_total
+                    .with_label_values(&[cert.inner().protocol_label()])
+                    .inc();
+                tracing::warn!(
+                    "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
+                     could not be read ({e})",
+                    msg.dealer_address,
+                )
+            }
+            (None, None) => tracing::info!(
+                "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} not in \
+                 DB",
+                msg.dealer_address,
+            ),
+            (None, Some(stored_digest)) => {
+                metrics
+                    .mpc_previous_message_unusable_total
+                    .with_label_values(&[cert.inner().protocol_label()])
+                    .inc();
+                tracing::warn!(
+                    "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
+                     diverges from its certificate (stored {stored_digest}, certified {})",
+                    msg.dealer_address,
+                    msg.messages_hash,
+                )
+            }
         }
     }
 
@@ -5914,7 +5953,7 @@ impl MpcManager {
         certificate: &DealerCertificate,
         protocol_type: ProtocolTypeIndicator,
         p2p_channel: &impl P2PChannel,
-    ) -> MpcResult<()> {
+    ) -> MpcResult<Messages> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             let previous_committee = mgr.previous_committee.as_ref().ok_or_else(|| {
@@ -5965,7 +6004,7 @@ impl MpcManager {
                 )));
             }
         }
-        Ok(())
+        Ok(messages)
     }
 
     fn current_session_id(&self) -> SessionId {

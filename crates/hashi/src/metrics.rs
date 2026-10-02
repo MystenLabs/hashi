@@ -1477,7 +1477,8 @@ impl Metrics {
             .unwrap(),
             mpc_previous_message_unusable_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_previous_message_unusable_total",
-                "Previous-epoch dealer messages whose local copy was unusable during reconfig.",
+                "Previous-epoch dealer messages reconstruction reads whose local copy could not \
+                 be read or did not match its certificate.",
                 &["protocol"],
                 registry,
             )

@@ -8410,6 +8410,106 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 }
 
 #[tokio::test]
+async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_prefix() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut dealer_rotation_messages: HashMap<Address, RotationMessages> = HashMap::new();
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        dealer_rotation_messages.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let past_prefix = rotation_setup.setup.address(dealer_indices[2]);
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    for (dealer, msgs) in &dealer_rotation_messages {
+        if *dealer != past_prefix {
+            test_manager
+                .persist_and_cache_rotation_messages(epoch, *dealer, msgs)
+                .unwrap();
+        }
+    }
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let (previous_output, _) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+        RotationRole::DealerAndParty,
+    )
+    .await
+    .expect("the stored prefix is enough to reconstruct");
+
+    assert_eq!(previous_output.public_key, test_dkg_output.public_key);
+    assert!(!previous_output.key_shares.shares.is_empty());
+    assert_eq!(
+        mock_p2p.retrieve_calls(),
+        0,
+        "a message past the reconstruction prefix must not be fetched",
+    );
+}
+
+#[tokio::test]
 async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
@@ -8646,7 +8746,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
 }
 
 #[tokio::test]
-async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
+async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_dealer() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
 
@@ -8703,7 +8803,7 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
     }
 
     let unrepairable = rotation_setup.setup.address(dealer_indices[0]);
-    let repairable = rotation_setup.setup.address(dealer_indices[2]);
+    let repairable = rotation_setup.setup.address(dealer_indices[1]);
 
     for d in dealers.iter_mut() {
         d.1.current_rotation_messages.remove(&unrepairable);
@@ -8711,8 +8811,8 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
 
     let out_first = dealers[0].2.clone();
     let diverged_first = dealers[0].1.create_rotation_messages(&out_first, &mut rng);
-    let out_later = dealers[2].2.clone();
-    let diverged_later = dealers[2].1.create_rotation_messages(&out_later, &mut rng);
+    let out_later = dealers[1].2.clone();
+    let diverged_later = dealers[1].1.create_rotation_messages(&out_later, &mut rng);
     let repairable_certified_hash =
         Messages::Rotation(certified[&repairable].clone()).compute_hash();
     assert_ne!(
@@ -8760,10 +8860,10 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         .get_rotation_messages(epoch, &repairable)
         .unwrap()
         .expect("the later dealer's message is still present");
-    assert_eq!(
+    assert_ne!(
         Messages::Rotation(stored_later).compute_hash(),
         repairable_certified_hash,
-        "a failed repair must not skip the dealers certified after it",
+        "reconstruction fails on the unrepairable dealer first, so the walk must stop there",
     );
 }
 
@@ -10063,9 +10163,6 @@ fn test_party_restart_uses_stored_rotation_messages() {
     );
 }
 
-/// Tests that `reconstruct_previous_dkg_output` uses the previous committee's
-/// parameters (nodes, party_id, threshold) to decrypt DKG messages, not the target
-/// committee's.
 #[test]
 fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
@@ -10203,7 +10300,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     // if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -10371,7 +10468,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     // and produces key_threshold.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -10502,7 +10599,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     .unwrap();
     let reconstructed = unwrap_reconstruction_success(
         manager_with_prev
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
     assert_eq!(
@@ -10530,8 +10627,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         &test_metrics(),
     )
     .unwrap();
-    let result =
-        manager_without_prev.reconstruct_previous_dkg_output(&certificates, &HashMap::new());
+    let result = manager_without_prev.reconstruct_previous_output(&certificates, &HashMap::new());
     let Err(err) = result else {
         panic!("missing previous_encryption_key must error, got Ok");
     };
@@ -10830,8 +10926,6 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     );
 }
 
-/// Tests that `reconstruct_previous_rotation_output` uses the previous committee's
-/// parameters to decrypt rotation messages.
 #[test]
 fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
@@ -11066,7 +11160,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_rotation_output(&rotation_certificates, &HashMap::new())
+            .reconstruct_previous_output(&rotation_certificates, &HashMap::new())
             .unwrap(),
     );
 

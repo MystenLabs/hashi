@@ -2636,7 +2636,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_second_rotation_retrieves_missing_previous_rotation_message() -> Result<()> {
+    async fn test_second_rotation_after_losing_a_previous_rotation_message() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -2686,7 +2686,6 @@ mod tests {
         }
 
         // Start node 0 and trigger a second rotation.
-        // prepare_previous_output should retrieve the missing messages from peers.
         test_networks.hashi_network_mut().nodes_mut()[0]
             .start()
             .await?;
