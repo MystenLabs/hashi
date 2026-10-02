@@ -36,7 +36,7 @@ pub struct Config {
     /// (`METRICS_LISTEN_ADDR`, default `0.0.0.0:9184`).
     pub metrics_listen_addr: SocketAddr,
     /// TTL for the single-slot `/info` response cache
-    /// (`INFO_CACHE_TTL_MS`, default 1000).
+    /// (`INFO_CACHE_TTL_MS`, default 30000).
     pub info_cache_ttl: Duration,
     /// TCP connect timeout to the backend
     /// (`GUARDIAN_CONNECT_TIMEOUT_SECS`, default 5).
@@ -86,7 +86,7 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:9184".to_string())
             .parse()
             .context("METRICS_LISTEN_ADDR must be a valid socket address")?;
-        let info_cache_ttl = Duration::from_millis(parse_env_u64("INFO_CACHE_TTL_MS", 1000)?);
+        let info_cache_ttl = Duration::from_millis(parse_env_u64("INFO_CACHE_TTL_MS", 30_000)?);
         let connect_timeout =
             Duration::from_secs(parse_env_u64("GUARDIAN_CONNECT_TIMEOUT_SECS", 5)?);
         let keepalive_interval = Duration::from_secs(parse_env_u64("GUARDIAN_KEEPALIVE_SECS", 5)?);
