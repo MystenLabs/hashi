@@ -86,6 +86,8 @@ fn validate_request_timestamp(
     request_timestamp_secs: u64,
     guardian_now: u64,
 ) -> GuardianResult<()> {
+    // Ensure that a compromised hashi committee cannot set an arbitrary time
+    // in the future, which in turn allows bypassing the limiter completely.
     if request_timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
         return Err(InvalidInputs(format!(
             "request timestamp {} is too far in the future (guardian clock: {})",
@@ -93,6 +95,9 @@ fn validate_request_timestamp(
         )));
     }
 
+    // This check is useful for situations where there is a big time gap between
+    // consecutive withdrawals. A compromised hashi committee can exploit that
+    // gap by carefully choosing timestamps until gap * refill_rate is extracted.
     if guardian_now.saturating_sub(request_timestamp_secs) > MAX_REQUEST_AGE_SECS {
         return Err(InvalidInputs(format!(
             "request timestamp {} is too old (guardian clock: {}, maximum age: {} seconds)",
