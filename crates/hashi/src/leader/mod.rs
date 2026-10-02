@@ -232,43 +232,28 @@ impl LeaderService {
         }
     }
 
-    /// Invoke a peer's bridge-service signing RPC, retrying on transient
-    /// transport failures. `call` is handed a freshly-fetched client each
-    /// attempt so the retry reconnects (tonic reconnects lazily) rather than
-    /// reusing the connection the peer just tore down. Returns `None` once
-    /// attempts are exhausted or on a non-transport error.
+    /// [`retry_peer_call`] against the peer's bridge-service client, logging
+    /// the final error. Returns `None` once attempts are exhausted or on a
+    /// non-transport error.
     async fn call_peer_with_retry<Resp, F, Fut>(
         inner: &Arc<Hashi>,
         validator: Address,
         what: &str,
-        mut call: F,
+        call: F,
     ) -> Option<tonic::Response<Resp>>
     where
         F: FnMut(BridgeServiceClient<BoxedChannel>) -> Fut,
         Fut: Future<Output = Result<tonic::Response<Resp>, tonic::Status>>,
     {
-        const MAX_ATTEMPTS: u32 = 3;
-        for attempt in 1..=MAX_ATTEMPTS {
-            let Some(client) = inner.onchain_state().bridge_service_client(&validator) else {
-                error!("Cannot find bridge-service client for validator: {validator:?}");
-                return None;
-            };
-            match call(client).await {
-                Ok(response) => return Some(response),
-                Err(status) if attempt < MAX_ATTEMPTS && is_retriable_transport(&status) => {
-                    warn!(
-                        "Failed to get {what} from {validator} (attempt {attempt}/{MAX_ATTEMPTS}): \
-                         {status}; retrying on a fresh connection"
-                    );
-                    tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
-                }
-                Err(status) => {
-                    error!("Failed to get {what} from {validator}: {status}");
-                    return None;
-                }
-            }
-        }
-        None
+        retry_peer_call(
+            validator,
+            what,
+            || inner.onchain_state().bridge_service_client(&validator),
+            call,
+        )
+        .await
+        .inspect_err(|status| error!("Failed to get {what} from {validator}: {status}"))
+        .ok()
     }
 
     /// Start the leader service and return a `Service` for lifecycle management.
@@ -597,6 +582,42 @@ fn parse_member_signature(
     Ok(MemberSignature::new(epoch, address, signature))
 }
 
+/// Invoke a peer's signing RPC, retrying on transient transport failures, and
+/// hand back the peer's final status otherwise. `call` gets a freshly fetched
+/// client each attempt so the retry reconnects (tonic reconnects lazily)
+/// rather than reusing the connection the peer just tore down.
+async fn retry_peer_call<C, Resp, F, Fut>(
+    validator: Address,
+    what: &str,
+    mut client: impl FnMut() -> Option<C>,
+    mut call: F,
+) -> Result<tonic::Response<Resp>, tonic::Status>
+where
+    F: FnMut(C) -> Fut,
+    Fut: Future<Output = Result<tonic::Response<Resp>, tonic::Status>>,
+{
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    loop {
+        let Some(client) = client() else {
+            return Err(tonic::Status::unavailable(format!(
+                "no bridge-service client for validator {validator}"
+            )));
+        };
+        match call(client).await {
+            Err(status) if attempt < MAX_ATTEMPTS && is_retriable_transport(&status) => {
+                warn!(
+                    "Failed to get {what} from {validator} (attempt {attempt}/{MAX_ATTEMPTS}): \
+                     {status}; retrying on a fresh connection"
+                );
+                tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Whether a failed peer RPC is worth retrying. Under sustained load a peer's
 /// HTTP/2 server tears the whole multiplexed connection down — `GoAway`
 /// (surfaced as `Internal`), broken pipe (`Unknown`), or the usual
@@ -617,8 +638,73 @@ fn is_retriable_transport(status: &tonic::Status) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_retriable_transport;
+    use super::retry_peer_call;
+    use sui_sdk_types::Address;
     use tonic::Code;
+    use tonic::Response;
     use tonic::Status;
+
+    /// Runs `retry_peer_call` against a peer that answers attempt `n` (from 1)
+    /// with `reply(n)`; returns the result and how many clients were fetched.
+    async fn call_peer(
+        reply: impl Fn(u32) -> Result<Response<()>, Status>,
+    ) -> (Result<Response<()>, Status>, u32) {
+        let mut clients = 0;
+        let mut attempts = 0;
+        let result = retry_peer_call(
+            Address::ZERO,
+            "test signature",
+            || {
+                clients += 1;
+                Some(())
+            },
+            |()| {
+                attempts += 1;
+                std::future::ready(reply(attempts))
+            },
+        )
+        .await;
+        (result, clients)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_transport_errors_on_a_fresh_client() {
+        let (result, clients) = call_peer(|attempt| match attempt {
+            1 => Err(Status::internal("h2 protocol error: http2 error")),
+            2 => Err(Status::cancelled("operation was canceled")),
+            _ => Ok(Response::new(())),
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(clients, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hands_back_a_refusal_without_retrying() {
+        let (result, clients) =
+            call_peer(|_| Err(Status::already_exists("already approved"))).await;
+        assert_eq!(result.unwrap_err().code(), Code::AlreadyExists);
+        assert_eq!(clients, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hands_back_the_last_transport_error_once_attempts_run_out() {
+        let (result, clients) = call_peer(|_| Err(Status::unavailable("tls handshake eof"))).await;
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+        assert_eq!(clients, 3);
+    }
+
+    #[tokio::test]
+    async fn fails_without_calling_when_the_peer_has_no_client() {
+        let result: Result<Response<()>, Status> = retry_peer_call(
+            Address::ZERO,
+            "test signature",
+            || None::<()>,
+            |()| async { unreachable!("no client, so nothing to call") },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code(), Code::Unavailable);
+    }
 
     #[test]
     fn classifies_transport_errors_as_retriable() {
