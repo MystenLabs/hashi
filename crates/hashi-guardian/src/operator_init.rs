@@ -12,7 +12,7 @@ use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
 use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
+use hashi_types::guardian::InitLogMessage::OIAttestation;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;
 use hpke::Serializable;
@@ -278,10 +278,10 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     }
 
     // Log to S3!
-    // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
+    // 1) Attest the session key that signs this record and all subsequent logs.
     let signing_pk = enclave.signing_pubkey();
     enclave
-        .log_init(OIAttestationUnsigned {
+        .log_init(OIAttestation {
             attestation,
             signing_public_key: signing_pk,
         })
@@ -488,7 +488,7 @@ mod tests {
         assert!(matches!(
             attestation.message(),
             VersionedLogMessage::V1(LogMessageV1::Init(message))
-                if matches!(message.as_ref(), OIAttestationUnsigned { .. })
+                if matches!(message.as_ref(), OIAttestation { .. })
         ));
 
         let guardian_info: VerifiableLogEntry = serde_json::from_slice(&captured[1].1).unwrap();
@@ -519,9 +519,7 @@ mod tests {
             assert_eq!(Some(withdraw.hashi_object_id), live_info.hashi_object_id);
             assert_eq!(Some(withdraw.mpc_master_g), live_info.mpc_master_g);
         }
-        guardian_info
-            .validate(Some(&enclave.signing_pubkey()))
-            .unwrap();
+        guardian_info.validate(&enclave.signing_pubkey()).unwrap();
     }
 
     #[tokio::test]

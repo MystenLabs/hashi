@@ -196,18 +196,6 @@ impl VersionedLogMessage {
         }
     }
 
-    pub fn as_attestation_log(&self) -> Option<&InitLogMessage> {
-        let init = match self {
-            Self::V1(LogMessageV1::Init(init)) => init.as_ref(),
-            Self::V1(_) => return None,
-        };
-        matches!(init, InitLogMessage::OIAttestationUnsigned { .. }).then_some(init)
-    }
-
-    pub fn is_unsigned(&self) -> bool {
-        self.as_attestation_log().is_some()
-    }
-
     pub fn log_type(&self) -> LogType {
         match self {
             Self::V1(message) => message.log_type(),

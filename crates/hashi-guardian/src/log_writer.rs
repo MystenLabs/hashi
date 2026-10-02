@@ -214,14 +214,14 @@ mod tests {
         LogMessage::Heartbeat(HeartbeatLogMessage::new(seq))
     }
 
-    fn first_init(signing_key: &GuardianSignKeyPair) -> LogMessage {
-        LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+    fn oi_attestation(signing_key: &GuardianSignKeyPair) -> LogMessage {
+        LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
             attestation: NitroAttestation::new(vec![]),
             signing_public_key: signing_key.verification_key(),
         }))
     }
 
-    fn signed_init() -> LogMessage {
+    fn oi_info() -> LogMessage {
         LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
             OperatorInitInfo::mock_for_testing(),
         ))))
@@ -232,7 +232,7 @@ mod tests {
         let put_flaky = mock!(Client::put_object)
             .match_requests(|req| {
                 req.key()
-                    .is_some_and(|key| key.ends_with("01-oi-attestation-unsigned.json"))
+                    .is_some_and(|key| key.ends_with("01-oi-attestation.json"))
             })
             .sequence()
             .http_status(500, None)
@@ -248,7 +248,7 @@ mod tests {
             .write(
                 &s3,
                 session_id(&signing_key),
-                first_init(&signing_key),
+                oi_attestation(&signing_key),
                 &signing_key,
             )
             .await;
@@ -274,7 +274,7 @@ mod tests {
             .write(&s3, session_id(&signing_key), heartbeat(1), &signing_key)
             .await;
         writer
-            .write(&s3, session_id(&signing_key), signed_init(), &signing_key)
+            .write(&s3, session_id(&signing_key), oi_info(), &signing_key)
             .await;
 
         assert_eq!(put_flaky.num_calls(), 5);
@@ -298,7 +298,7 @@ mod tests {
                     .write(
                         &s3,
                         session_id(&signing_key),
-                        first_init(&signing_key),
+                        oi_attestation(&signing_key),
                         &signing_key,
                     )
                     .await
@@ -329,7 +329,7 @@ mod tests {
                 .write(
                     &s3,
                     session_id(&signing_key),
-                    first_init(&signing_key),
+                    oi_attestation(&signing_key),
                     &signing_key,
                 )
                 .await
@@ -363,7 +363,7 @@ mod tests {
             let signing_key = signing_key.clone();
             tokio::spawn(async move {
                 writer
-                    .write(&s3, session_id(&signing_key), signed_init(), &signing_key)
+                    .write(&s3, session_id(&signing_key), oi_info(), &signing_key)
                     .await
             })
         };
@@ -385,7 +385,7 @@ mod tests {
             .await;
         tokio::time::advance(Duration::from_mins(3)).await;
         writer
-            .write(&s3, session_id(&signing_key), signed_init(), &signing_key)
+            .write(&s3, session_id(&signing_key), oi_info(), &signing_key)
             .await;
         tokio::time::advance(Duration::from_mins(1)).await;
 
@@ -416,7 +416,7 @@ mod tests {
             .await;
         tokio::time::advance(Duration::from_mins(3)).await;
         writer
-            .write(&s3, session_id(&signing_key), signed_init(), &signing_key)
+            .write(&s3, session_id(&signing_key), oi_info(), &signing_key)
             .await;
 
         assert_eq!(put_ok.num_calls(), 3);

@@ -101,29 +101,23 @@ pub(crate) mod guardian_pubkey {
     }
 }
 
-pub(crate) mod option_guardian_signature {
+pub(crate) mod guardian_signature {
     use super::*;
 
-    pub fn serialize<S>(value: &Option<GuardianSignature>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &GuardianSignature, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        value
-            .as_ref()
-            .map(|signature| hex::encode(signature.to_bytes()))
-            .serialize(serializer)
+        serializer.serialize_str(&hex::encode(value.to_bytes()))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<GuardianSignature>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<GuardianSignature, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Option::<String>::deserialize(deserializer)?
-            .map(|encoded| {
-                decode_lower_hex_array::<64, D::Error>(&encoded, "guardian signature")
-                    .map(GuardianSignature::from)
-            })
-            .transpose()
+        let encoded = String::deserialize(deserializer)?;
+        decode_lower_hex_array::<64, D::Error>(&encoded, "guardian signature")
+            .map(GuardianSignature::from)
     }
 }
 
