@@ -583,9 +583,9 @@ fn parse_member_signature(
 }
 
 /// Invoke a peer's signing RPC, retrying on transient transport failures, and
-/// hand back the peer's final status otherwise. `call` gets a freshly fetched
-/// client each attempt so the retry reconnects (tonic reconnects lazily)
-/// rather than reusing the connection the peer just tore down.
+/// hand back the peer's final status otherwise. A retry goes out on a new
+/// connection because the peer's shared tonic channel reconnects lazily once
+/// the old one is torn down.
 async fn retry_peer_call<C, Resp, F, Fut>(
     validator: Address,
     what: &str,
