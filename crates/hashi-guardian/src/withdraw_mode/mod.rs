@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Withdraw-mode flows (selected by operator initialization): standard withdrawal,
-//! committee updates, provisioner init, and heartbeats. `verify_hashi_cert` is
+//! committee updates, and provisioner init. `verify_hashi_cert` is
 //! the committee-certificate check shared by `standard_withdrawal` and
 //! `committee_update`.
 
 pub mod committee_update;
-pub mod heartbeat;
 pub mod operator_activate;
 pub mod provisioner_init;
 pub mod provisioner_rotate_cert;

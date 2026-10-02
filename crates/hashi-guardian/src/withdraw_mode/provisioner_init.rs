@@ -11,7 +11,6 @@ use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
 use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
 use hashi_types::guardian::*;
-use std::sync::Arc;
 use tracing::info;
 
 /// Validated provisioner-init state ready for its fail-stop commit.
@@ -31,6 +30,7 @@ impl PIInstall {
         request: BatchProvisionerInitRequest,
     ) -> GuardianResult<Self> {
         let initialization = enclave
+            .state
             .temporary_init_state()
             .expect("temporary initialization state should be set after operator_init");
         let ceremony_state = &initialization.ceremony_state;
@@ -71,8 +71,8 @@ impl PIInstall {
 
         Ok(Self {
             enclave_btc_keypair,
-            genesis_log: genesis_state.map(|state| {
-                let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
+            genesis_log: genesis_state.map(|genesis| {
+                let (committee, hashi_object_id, mpc_master_g) = genesis.into_parts();
                 GenesisLogMessage {
                     committee,
                     hashi_object_id,
@@ -106,7 +106,7 @@ async fn ensure_no_serving_committee(enclave: &Enclave) -> GuardianResult<()> {
 /// each signature and session/config binding before decrypting and
 /// commitment-checking any share.
 pub async fn provisioner_init(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
@@ -116,11 +116,11 @@ pub async fn provisioner_init(
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
-    let install = PIInstall::from_request(&enclave, request).await?;
+    let install = PIInstall::from_request(enclave, request).await?;
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing enclave BTC keypair.");
-    commit_provisioner_init(&enclave, install).await;
+    commit_provisioner_init(enclave, install).await;
 
     info!("Provisioner initialization complete.");
     Ok(())
@@ -128,7 +128,7 @@ pub async fn provisioner_init(
 
 /// Install the prepared key, durably mark PI complete, and then expose the new
 /// lifecycle. This fail-stop phase never returns an error after mutation begins.
-async fn commit_provisioner_init(enclave: &Enclave, install: PIInstall) {
+async fn commit_provisioner_init(enclave: &mut Enclave, install: PIInstall) {
     enclave
         .config
         .set_btc_keypair(install.enclave_btc_keypair)

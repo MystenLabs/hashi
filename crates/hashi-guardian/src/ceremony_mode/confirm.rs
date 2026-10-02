@@ -9,22 +9,22 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::SessionBoundRequest;
-use std::sync::Arc;
 use tracing::info;
 
 pub async fn confirm_ceremony(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     signed: KpSigned<CeremonyConfirmationRequest>,
 ) -> GuardianResult<CeremonyConfirmationResponse> {
     // Once completed, KPs verify the committed ceremony from S3 instead.
     enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
 
-    let pending = enclave.pending_ceremony()?;
+    let session_id = enclave.s3_session_id();
+    let pending = enclave.state.pending_ceremony_mut()?;
     let signer_fingerprint = signed.signer_fingerprint().to_hex();
     let request = signed
         .verify_signature()
         .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
-    request.validate_session(&enclave.s3_session_id())?;
+    request.validate_session(&session_id)?;
     let (share_id, already_confirmed) =
         pending.validate_confirmation(&signer_fingerprint, request.ceremony_artifacts_digest())?;
     if already_confirmed {
@@ -41,7 +41,7 @@ pub async fn confirm_ceremony(
     );
 
     if status.completed {
-        enclave.publish_pending_ceremony(pending).await?;
+        enclave.publish_pending_ceremony().await?;
         enclave
             .advance_lifecycle_into(CeremonyStage::Completed.into())
             .expect("all KP confirmations should complete the ceremony lifecycle");
