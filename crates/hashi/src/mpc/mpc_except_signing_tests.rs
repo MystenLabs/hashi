@@ -10163,9 +10163,6 @@ fn test_party_restart_uses_stored_rotation_messages() {
     );
 }
 
-/// Tests that `reconstruct_previous_dkg_output` uses the previous committee's
-/// parameters (nodes, party_id, threshold) to decrypt DKG messages, not the target
-/// committee's.
 #[test]
 fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
@@ -10303,7 +10300,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     // if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -10471,7 +10468,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     // and produces key_threshold.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -10602,7 +10599,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     .unwrap();
     let reconstructed = unwrap_reconstruction_success(
         manager_with_prev
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_output(&certificates, &HashMap::new())
             .unwrap(),
     );
     assert_eq!(
@@ -10630,8 +10627,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         &test_metrics(),
     )
     .unwrap();
-    let result =
-        manager_without_prev.reconstruct_previous_dkg_output(&certificates, &HashMap::new());
+    let result = manager_without_prev.reconstruct_previous_output(&certificates, &HashMap::new());
     let Err(err) = result else {
         panic!("missing previous_encryption_key must error, got Ok");
     };
@@ -10930,8 +10926,6 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     );
 }
 
-/// Tests that `reconstruct_previous_rotation_output` uses the previous committee's
-/// parameters to decrypt rotation messages.
 #[test]
 fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
@@ -11166,7 +11160,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_rotation_output(&rotation_certificates, &HashMap::new())
+            .reconstruct_previous_output(&rotation_certificates, &HashMap::new())
             .unwrap(),
     );
 

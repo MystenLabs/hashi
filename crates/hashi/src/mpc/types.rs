@@ -433,6 +433,145 @@ pub(crate) struct RotationReconstructionContext<'a> {
     pub epoch: u64,
 }
 
+pub(crate) struct DkgDealerSelection {
+    threshold: u16,
+    weight: u32,
+}
+
+impl DkgDealerSelection {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.weight >= u32::from(self.threshold)
+    }
+
+    pub(crate) fn weight(&self) -> u32 {
+        self.weight
+    }
+
+    pub(crate) fn take(
+        &mut self,
+        committee: &RuntimeCommittee,
+        nodes: &Nodes<EncryptionGroupElement>,
+        dealer: &Address,
+    ) -> MpcResult<Option<PartyId>> {
+        let Some(party_id) = committee.index_of(dealer).map(|i| i as PartyId) else {
+            return Ok(None);
+        };
+        let weight = nodes.weight_of(party_id).map_err(|_| {
+            MpcError::InvalidCertificate(format!(
+                "No reduced weight for certified dealer {dealer:?}"
+            ))
+        })?;
+        self.weight += u32::from(weight);
+        Ok(Some(party_id))
+    }
+}
+
+pub(crate) struct RotationShareSelection {
+    threshold: u16,
+    claimed: Vec<ShareIndex>,
+}
+
+impl RotationShareSelection {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.claimed.len() >= usize::from(self.threshold)
+    }
+
+    pub(crate) fn claimed(&self) -> &[ShareIndex] {
+        &self.claimed
+    }
+
+    pub(crate) fn into_claimed(self) -> Vec<ShareIndex> {
+        self.claimed
+    }
+
+    pub(crate) fn take(&mut self, messages: &RotationMessages) -> Vec<ShareIndex> {
+        let taken: Vec<ShareIndex> = messages
+            .keys()
+            .copied()
+            .filter(|index| !self.claimed.contains(index))
+            .take(usize::from(self.threshold).saturating_sub(self.claimed.len()))
+            .collect();
+        self.claimed.extend(&taken);
+        taken
+    }
+}
+
+impl DkgReconstructionContext<'_> {
+    pub(crate) fn selection(&self) -> DkgDealerSelection {
+        DkgDealerSelection {
+            threshold: self.output_threshold,
+            weight: 0,
+        }
+    }
+}
+
+impl RotationReconstructionContext<'_> {
+    pub(crate) fn selection(&self) -> RotationShareSelection {
+        RotationShareSelection {
+            threshold: self.input_threshold,
+            claimed: Vec::new(),
+        }
+    }
+}
+
+pub(crate) enum PreviousReconstruction<'a> {
+    Dkg(DkgReconstructionContext<'a>),
+    Rotation(RotationReconstructionContext<'a>),
+}
+
+pub(crate) enum PreviousSelection {
+    Dkg {
+        committee: RuntimeCommittee,
+        nodes: Nodes<EncryptionGroupElement>,
+        selection: DkgDealerSelection,
+    },
+    Rotation(RotationShareSelection),
+}
+
+impl PreviousSelection {
+    pub(crate) fn new(reconstruction: &PreviousReconstruction<'_>) -> Self {
+        match reconstruction {
+            PreviousReconstruction::Dkg(context) => Self::Dkg {
+                committee: context.committee.clone(),
+                nodes: context.nodes.clone(),
+                selection: context.selection(),
+            },
+            PreviousReconstruction::Rotation(context) => Self::Rotation(context.selection()),
+        }
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        match self {
+            Self::Dkg { selection, .. } => selection.is_complete(),
+            Self::Rotation(selection) => selection.is_complete(),
+        }
+    }
+
+    pub(crate) fn take(&mut self, dealer: &Address, messages: &Messages) -> MpcResult<()> {
+        match (self, messages) {
+            (
+                Self::Dkg {
+                    committee,
+                    nodes,
+                    selection,
+                },
+                Messages::Dkg(_),
+            ) => {
+                selection.take(committee, nodes, dealer)?;
+            }
+            (Self::Rotation(selection), Messages::Rotation(messages)) => {
+                selection.take(messages);
+            }
+            _ => {
+                return Err(MpcError::InvalidCertificate(
+                    "Certified message kind does not match its certificate".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum ProtocolComplaint {
