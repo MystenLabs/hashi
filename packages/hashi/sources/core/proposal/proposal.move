@@ -17,9 +17,10 @@
 /// by the sender's registration, not by a calling package. PTBs still build
 /// the `VecMap` and `Value` arguments with public calls, whose results have
 /// `drop` and `store` and are therefore never hot arguments under the
-/// private-entry rules. The exceptions are `upgrade::execute` and
-/// `upgrade::finalize_upgrade`, whose signatures are dictated by the
-/// framework's ticket and receipt types.
+/// private-entry rules. `upgrade::execute` hands back an `UpgradeTicket`
+/// and a hot potato that the same PTB's `Upgrade` command and
+/// `finalize_upgrade` consume; until then no other private entry may take
+/// `Hashi` in that PTB, which the upgrade PTB never does.
 module hashi::proposal;
 
 use hashi::{hashi::Hashi, threshold};

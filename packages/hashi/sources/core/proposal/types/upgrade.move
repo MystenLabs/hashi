@@ -67,15 +67,13 @@ entry fun propose(
     )
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
-
 /// Execute an approved proposal and bind its version policy to the ticket.
 ///
-/// Deliberately `public`, the one exception among proposal-type functions
-/// (see `hashi::proposal`): the PTB's `Upgrade` command and `finalize_upgrade`
-/// consume its results, and the signature is dictated by the framework's
-/// `UpgradeTicket`, so freezing it costs nothing.
-public fun execute(
+/// Private `entry` like every proposal-type function (see `hashi::proposal`).
+/// Its results are consumed by the same PTB's `Upgrade` command and
+/// `finalize_upgrade`; while they are live, no other private entry may take
+/// `Hashi` in that PTB, which the upgrade PTB never does.
+entry fun execute(
     hashi: &mut Hashi,
     proposal_id: ID,
     clock: &Clock,
@@ -86,8 +84,7 @@ public fun execute(
 }
 
 /// Commit the package and its approved version policy atomically.
-/// Deliberately `public` for the same reason as `execute`.
-public fun finalize_upgrade(
+entry fun finalize_upgrade(
     hashi: &mut Hashi,
     receipt: UpgradeReceipt,
     authorization: UpgradeAuthorization,
