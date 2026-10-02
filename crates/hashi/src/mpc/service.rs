@@ -1614,6 +1614,7 @@ impl MpcService {
             Ok(())
         };
         loop {
+            metrics.task_heartbeat("mpc_service");
             bail_if_superseded()?;
             let certs = match onchain_state.tob_certs(
                 epoch,

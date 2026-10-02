@@ -60,9 +60,8 @@ groups:
         annotations:
           summary: "task loop {{ $labels.task }} wedged"
           description: >-
-            The {{ $labels.task }} loop has not iterated in 10 minutes; all
-            heartbeat-labeled loops iterate at least every 15 seconds. A
-            task inside the process has panicked or deadlocked.
+            The {{ $labels.task }} loop has not recorded a heartbeat in 10
+            minutes. It has deadlocked or is stuck; check its logs.
 
       - alert: HashiReconfigNotTracking
         expr: changes(hashi_epoch[3h]) == 0
