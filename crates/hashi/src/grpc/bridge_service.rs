@@ -383,7 +383,7 @@ pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
 }
 
 /// `AlreadyExists` tells the leader the request is already approved or
-/// committed, so it can stop collecting signatures for it instead of retrying.
+/// committed, so it can stop collecting signatures for it.
 pub(crate) fn withdrawal_approval_refusal_status(err: WithdrawalApprovalError) -> Status {
     match err {
         WithdrawalApprovalError::AlreadyApproved(_) => Status::already_exists(err.to_string()),
