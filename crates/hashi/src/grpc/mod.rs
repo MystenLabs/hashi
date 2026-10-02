@@ -163,17 +163,7 @@ impl HttpService {
         );
         let local_addr = *server_handle.local_addr();
 
-        let guard = ServerHandleGuard(server_handle.clone());
-        let service = Service::new()
-            .spawn_aborting(async move {
-                guard.0.wait_for_shutdown().await;
-                Ok(())
-            })
-            .with_shutdown_signal(async move {
-                server_handle.trigger_shutdown();
-            });
-
-        (local_addr, service)
+        (local_addr, supervise(server_handle))
     }
 
     pub fn mpc_manager(
@@ -207,6 +197,16 @@ impl HttpService {
         self.inner
             .get_presig_completed_signature(epoch, batch_index)
     }
+}
+
+// A server that stops without a shutdown signal has crashed (one HTTP/1 handler
+// panic ends sui-http's accept loop), so fail rather than run on without it.
+fn supervise(server_handle: Arc<ServerHandle>) -> Service {
+    let guard = ServerHandleGuard(server_handle);
+    Service::new().spawn_aborting(async move {
+        guard.0.wait_for_shutdown().await;
+        anyhow::bail!("HTTP server stopped unexpectedly")
+    })
 }
 
 async fn health() -> impl axum::response::IntoResponse {
@@ -361,4 +361,44 @@ fn lookup_validator_address<B>(
         .committees
         .lookup_address_by_tls_public_key(&tls_public_key)
         .ok_or(RefusalReason::NotRegistered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server() -> Arc<ServerHandle> {
+        Arc::new(
+            sui_http::Builder::new()
+                .serve(("127.0.0.1", 0), axum::Router::new())
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_service_fails_when_the_server_stops_without_a_shutdown_signal() {
+        let server = server();
+        let mut service = supervise(server.clone());
+
+        server.trigger_shutdown();
+
+        service
+            .join()
+            .await
+            .expect_err("a server that stopped on its own must fail the service");
+    }
+
+    #[tokio::test]
+    async fn a_requested_shutdown_stops_the_server_and_the_service_cleanly() {
+        let server = server();
+
+        supervise(server.clone()).shutdown().await.unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            server.wait_for_shutdown(),
+        )
+        .await
+        .expect("a requested shutdown must stop the server");
+    }
 }

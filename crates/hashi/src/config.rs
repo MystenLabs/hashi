@@ -64,7 +64,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
 
-    /// Configure the address to listen on for http metrics
+    /// Configure the address to listen on for http metrics, which also serves
+    /// `/health` for liveness probes.
     ///
     /// Defaults to `127.0.0.1:9180` if not specified.
     #[serde(skip_serializing_if = "Option::is_none")]

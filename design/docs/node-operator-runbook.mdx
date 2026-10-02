@@ -601,13 +601,19 @@ The port is configurable through `listen-address`. It must be publicly reachable
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
 > - **Bitcoin RPC:** the node broadcasts withdrawals through `sendrawtransaction`, so the RPC user/whitelist must permit it, not only read calls.
 
-### 4.3 Metrics (localhost only)
+### 4.3 Metrics and liveness (not public)
 
 | Port | Protocol | Bind | Purpose |
 |------|----------|------|---------|
-| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics` |
+| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics`, and `/health` for liveness probes |
 
 Not exposed externally by default. Scrape from localhost or through a reverse proxy with access controls.
+
+Point a liveness probe at `/health` on this port rather than on 443, once your node runs a release that serves it (older releases answer 404, which would restart the node in a loop):
+
+- It answers from its own thread rather than the node's busy async runtime, and fails only once that runtime has stopped running tasks for two minutes.
+- A probe with `periodSeconds: 10`, `timeoutSeconds: 5` and `failureThreshold: 3` restarts a wedged node within about 2.5 minutes.
+- In Kubernetes, bind `metrics-http-address` to `0.0.0.0:9180` so the kubelet can reach it, but keep the port off public Services and host networking: anyone who can reach it can slow the probe.
 
 ### 4.4 TLS
 
