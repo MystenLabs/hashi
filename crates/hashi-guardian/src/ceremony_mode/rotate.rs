@@ -267,7 +267,7 @@ mod tests {
     const TEST_T: usize = 3;
 
     async fn rotate_kp_set_with_state(
-        enclave: Arc<Enclave>,
+        enclave: &mut Enclave,
         request: BatchProvisionerRotateKpSetRequest,
         latest_s3_state: CeremonyState,
     ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
@@ -278,7 +278,7 @@ mod tests {
             &enclave.config.deployment()?.digest(),
         )?;
         let new_sharing_seq = latest_s3_state.secret_sharing_instance.sharing_seq() + 1;
-        complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
+        complete_rotation(enclave, proposal, latest_s3_state, new_sharing_seq).await
     }
 
     struct TestContext {
@@ -290,7 +290,7 @@ mod tests {
         kp_keys: Vec<(AttestedKpCert, String)>,
         alternate_kp_key: (AttestedKpCert, String),
         captures: CapturedPuts,
-        enclave: Arc<Enclave>,
+        enclave: Enclave,
     }
 
     async fn setup_rotation_enclave() -> TestContext {
@@ -417,12 +417,12 @@ mod tests {
         context.deployment.retention_environment = S3RetentionEnvironment::Devnet;
         let (roster, _) = context.build_roster_with_secrets(3);
         let request = context.request(&context.shares[..2], roster, 2).unwrap();
-        let error = rotate_kp_set(context.enclave.clone(), request)
+        let error = rotate_kp_set(&mut context.enclave, request)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("KP-approved deployment differs"));
         assert_eq!(
-            context.enclave.lifecycle(),
+            context.enclave.state.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
         assert!(context.captures.lock().unwrap().is_empty());
@@ -430,13 +430,13 @@ mod tests {
 
     /// Run one rotation and return its verified response.
     async fn rotate_and_verify(
-        context: &TestContext,
+        context: &mut TestContext,
         req: BatchProvisionerRotateKpSetRequest,
     ) -> RotateKpSetResponse {
-        let signed =
-            rotate_kp_set_with_state(context.enclave.clone(), req, context.latest_s3_state())
-                .await
-                .expect("ok");
+        let latest = context.latest_s3_state();
+        let signed = rotate_kp_set_with_state(&mut context.enclave, req, latest)
+            .await
+            .expect("ok");
         signed
             .verify_into_data(&context.enclave.signing_pubkey())
             .expect("response signed by enclave")
@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotation_proposal_and_response_preserve_a_sequence_gap() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let (roster, _) = ctx.build_roster_with_secrets(TEST_N);
         let req = ctx.request(&ctx.shares[..TEST_T], roster, TEST_T).unwrap();
         let proposal = verify_signed_submissions(
@@ -522,7 +522,8 @@ mod tests {
             &ctx.deployment.digest(),
         )
         .unwrap();
-        let signed = complete_rotation(&ctx.enclave, proposal, ctx.latest_s3_state(), 3)
+        let latest = ctx.latest_s3_state();
+        let signed = complete_rotation(&mut ctx.enclave, proposal, latest, 3)
             .await
             .unwrap();
         let response = signed
@@ -542,13 +543,13 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_threshold_reached() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let (roster, secret_keys) = ctx.build_roster_with_secrets(TEST_N);
         let req = ctx.request(&ctx.shares[..TEST_T], roster, TEST_T).unwrap();
-        let response = rotate_and_verify(&ctx, req).await;
+        let response = rotate_and_verify(&mut ctx, req).await;
         assert_rotation_output(&ctx.captures, &response, &secret_keys, TEST_N, TEST_T);
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave.state.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
     }
@@ -556,30 +557,34 @@ mod tests {
     #[tokio::test]
     async fn happy_path_asymmetric_n_t() {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let (roster, secret_keys) = ctx.build_roster_with_secrets(3);
         let req = ctx.request(&ctx.shares[..TEST_T], roster, 2).unwrap();
-        let response = rotate_and_verify(&ctx, req).await;
+        let response = rotate_and_verify(&mut ctx, req).await;
         assert_rotation_output(&ctx.captures, &response, &secret_keys, 3, 2);
     }
 
     #[tokio::test]
     async fn rejects_second_call_while_awaiting_confirmations() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
 
         // First call reaches threshold, re-splits, and awaits the new KPs.
         let req = ctx
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap();
-        rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
-            .await
-            .expect("ok");
+        {
+            let latest = ctx.latest_s3_state();
+            rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
+        }
+        .await
+        .expect("ok");
 
         // A second call is rejected outright — no re-split.
         let req2 = ctx
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req2, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req2, latest)
             .await
             .expect_err("should reject");
         assert!(matches!(err, LifecycleMismatch { .. }));
@@ -591,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_duplicate_share_id_in_batch() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         // Two submissions from the same KP (same share id).
         let first = ctx.signed_submission(
@@ -613,7 +618,8 @@ mod tests {
             ),
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("duplicate share id should fail");
         assert!(matches!(&err, InvalidInputs(_)));
@@ -622,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_below_threshold() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         // Only T-1 submissions.
         let req = ctx
             .request(
@@ -631,7 +637,8 @@ mod tests {
                 TEST_T,
             )
             .unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("below-threshold shares should fail");
         assert!(matches!(&err, InvalidInputs(_)));
@@ -640,7 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_more_shares_than_old_instance() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let mut submissions = ctx
             .shares
@@ -658,7 +665,8 @@ mod tests {
         submissions.push(submissions[0].clone());
 
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("too many shares should fail");
         assert!(matches!(&err, InvalidInputs(_)));
@@ -667,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_id_outside_old_instance() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let out_of_range_share = Share {
             id: ShareID::new((TEST_N + 1) as u16).unwrap(),
@@ -697,7 +705,8 @@ mod tests {
             ),
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(&err, InvalidInputs(message) if message.contains("assigned share id")));
@@ -705,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_submissions_for_different_proposals() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster1 = mock_kp_certs_roster(TEST_N);
         let roster2 = mock_kp_certs_roster(TEST_N);
         assert_ne!(roster1, roster2);
@@ -735,7 +744,9 @@ mod tests {
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(
@@ -746,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_mismatched_session() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let submissions = ctx.shares[..TEST_T]
             .iter()
@@ -762,7 +773,9 @@ mod tests {
             .collect();
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(
@@ -773,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_signature() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let mut submissions = ctx
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap()
@@ -781,7 +794,9 @@ mod tests {
         submissions[0].signature = "invalid signature".into();
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(err, Unauthenticated(_)));
@@ -789,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_signer_not_assigned_to_share() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let submissions = vec![
             ctx.signed_submission(
@@ -816,7 +831,9 @@ mod tests {
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(&err, InvalidInputs(message) if message.contains("assigned share id")));
@@ -824,7 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_alternate_cert_for_rostered_share() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let submissions = vec![
             ctx.signed_submission_with_key(
@@ -851,7 +868,9 @@ mod tests {
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("an alternate certificate must not authorize the rostered share");
         assert!(matches!(
@@ -862,7 +881,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let bogus_share = Share {
             id: ShareID::new(1).unwrap(),
@@ -892,7 +911,8 @@ mod tests {
             ),
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let latest = ctx.latest_s3_state();
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest)
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -900,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_reconstructed_key_not_matching_latest_ceremony() {
-        let ctx = setup_rotation_enclave().await;
+        let mut ctx = setup_rotation_enclave().await;
         let req = ctx
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap();
@@ -908,7 +928,7 @@ mod tests {
         latest_s3_state.btc_master_pubkey =
             k256_sk_to_btc_xonly_pubkey(&SecretKey::random(&mut rand::thread_rng()));
 
-        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, latest_s3_state)
+        let err = rotate_kp_set_with_state(&mut ctx.enclave, req, latest_s3_state)
             .await
             .expect_err("latest ceremony BTC pubkey must match reconstructed key");
         assert!(
@@ -927,8 +947,10 @@ mod tests {
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap();
         // No operator_init. The call must reject before inspecting the request.
-        let enclave = Enclave::create_with_random_keys();
-        let err = rotate_kp_set(enclave, req).await.expect_err("should fail");
+        let mut enclave = Enclave::create_with_random_keys();
+        let err = rotate_kp_set(&mut enclave, req)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, LifecycleMismatch { .. }));
     }
 }
