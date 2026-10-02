@@ -136,7 +136,7 @@ pub struct Metrics {
     /// the chain upgrades, so only this gauge can count how much of the fleet
     /// already runs a build that implements the next version.
     package_version_supported_max: IntGauge,
-    /// Unix seconds of each long-running task loop's last iteration. A stale
+    /// Unix seconds of each long-running task's last heartbeat. A stale
     /// entry means that task is wedged or dead inside a process whose other
     /// metrics still look alive.
     task_last_iteration_timestamp_seconds: IntGaugeVec,
@@ -925,7 +925,7 @@ impl Metrics {
             .unwrap(),
             task_last_iteration_timestamp_seconds: register_int_gauge_vec_with_registry!(
                 "hashi_task_last_iteration_timestamp_seconds",
-                "unix seconds of each task loop's last iteration; stale = task wedged",
+                "unix seconds of each task's last heartbeat; stale = task wedged",
                 &["task"],
                 registry,
             )
