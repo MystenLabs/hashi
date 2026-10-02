@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::crypto::combine_shares;
@@ -29,11 +30,12 @@ struct VerifiedRotationProposal {
 /// enclave awaiting confirmation from every new KP.
 pub async fn rotate_kp_set(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     request: BatchProvisionerRotateKpSetRequest,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     info!("/rotate_kp_set - Received request.");
 
-    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
+    state.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let deployment = enclave.config.deployment()?;
     let proposal = verify_signed_submissions(
@@ -45,11 +47,12 @@ pub async fn rotate_kp_set(
     let latest_s3_state = reader.read_latest_ceremony_state().await?;
 
     let new_sharing_seq = reader.next_sharing_seq().await?;
-    complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
+    complete_rotation(&enclave, state, proposal, latest_s3_state, new_sharing_seq).await
 }
 
 async fn complete_rotation(
     enclave: &Arc<Enclave>,
+    state: &mut EnclaveState,
     proposal: VerifiedRotationProposal,
     latest_s3_state: CeremonyState,
     new_sharing_seq: u64,
@@ -76,16 +79,19 @@ async fn complete_rotation(
 
     let response = finalize_rotation(
         enclave,
+        state,
         &old_shares,
         &old_instance,
         btc_master_pubkey,
-        proposal.new_kp_certs_roster,
-        proposal.new_params,
+        proposal,
         new_sharing_seq,
     )
     .await?;
-    enclave
-        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())
+    state
+        .advance_lifecycle_into(
+            &enclave.config,
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into(),
+        )
         .expect("rotate_kp_set should await new key provisioner confirmations");
     Ok(response)
 }
@@ -175,13 +181,18 @@ fn authorize_share_submissions(
 
 async fn finalize_rotation(
     enclave: &Arc<Enclave>,
+    state: &mut EnclaveState,
     old_shares: &[Share],
     old_instance: &SecretSharingInstance,
     expected_btc_master_pubkey: BitcoinPubkey,
-    new_certs_roster: KpCertRoster,
-    new_params: SecretSharingParams,
+    proposal: VerifiedRotationProposal,
     new_sharing_seq: u64,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
+    let VerifiedRotationProposal {
+        new_kp_certs_roster: new_certs_roster,
+        new_params,
+        ..
+    } = proposal;
     info!("Threshold reached, reconstructing BTC key.");
 
     let k256_sk =
@@ -237,7 +248,7 @@ async fn finalize_rotation(
         encrypted_shares,
         new_instance,
     };
-    enclave.install_pending_ceremony(proposal)?;
+    state.install_pending_ceremony(enclave.config.deployment()?, proposal)?;
     Ok(enclave.sign(response))
 }
 
@@ -245,6 +256,7 @@ async fn finalize_rotation(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
+    use crate::task_spawner::rotate_kp_set;
     use crate::test_utils::decrypt_kp_shares;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::CapturedPuts;
@@ -270,14 +282,22 @@ mod tests {
         request: BatchProvisionerRotateKpSetRequest,
         latest_s3_state: CeremonyState,
     ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
-        enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
+        let mut state = enclave.state.lock().await;
+        state.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
         let proposal = verify_signed_submissions(
             request.submissions(),
             &enclave.s3_session_id(),
             &enclave.config.deployment()?.digest(),
         )?;
         let new_sharing_seq = latest_s3_state.secret_sharing_instance.sharing_seq() + 1;
-        complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
+        complete_rotation(
+            &enclave,
+            &mut state,
+            proposal,
+            latest_s3_state,
+            new_sharing_seq,
+        )
+        .await
     }
 
     struct TestContext {
@@ -321,7 +341,7 @@ mod tests {
         )
         .unwrap();
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
         TestContext {
             shares,
             old_instance,
@@ -421,7 +441,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("KP-approved deployment differs"));
         assert_eq!(
-            context.enclave.lifecycle(),
+            context.enclave.state.lock().await.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
         assert!(context.captures.lock().unwrap().is_empty());
@@ -521,9 +541,15 @@ mod tests {
             &ctx.deployment.digest(),
         )
         .unwrap();
-        let signed = complete_rotation(&ctx.enclave, proposal, ctx.latest_s3_state(), 3)
-            .await
-            .unwrap();
+        let signed = complete_rotation(
+            &ctx.enclave,
+            &mut *ctx.enclave.state.lock().await,
+            proposal,
+            ctx.latest_s3_state(),
+            3,
+        )
+        .await
+        .unwrap();
         let response = signed
             .verify_into_data(&ctx.enclave.signing_pubkey())
             .unwrap()
@@ -547,7 +573,7 @@ mod tests {
         let response = rotate_and_verify(&ctx, req).await;
         assert_rotation_output(&ctx.captures, &response, &secret_keys, TEST_N, TEST_T);
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave.state.lock().await.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
     }

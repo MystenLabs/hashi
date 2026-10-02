@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
@@ -15,11 +16,12 @@ use tracing::info;
 ///     3. KPs fetch the proposed ceremony state from `kp-shares/proposed/`
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
 
-    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
+    state.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let ceremony_keys = enclave
         .config
@@ -87,11 +89,14 @@ pub async fn setup_new_key(
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
     };
-    enclave.install_pending_ceremony(proposal)?;
+    state.install_pending_ceremony(enclave.config.deployment()?, proposal)?;
     let response = enclave.sign(response);
 
-    enclave
-        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())
+    state
+        .advance_lifecycle_into(
+            &enclave.config,
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into(),
+        )
         .expect("setup_new_key should await key provisioner confirmations");
     info!("Setup complete; awaiting every key provisioner's confirmation.");
     Ok(response)
@@ -101,6 +106,7 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
+    use crate::task_spawner::setup_new_key;
     use crate::test_utils::decrypt_kp_shares;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use hashi_types::guardian::crypto::combine_shares;
@@ -125,16 +131,16 @@ mod tests {
             let logger = crate::test_utils::mock_logger_with_layout([format!(
                 "ceremony/{sharing_seq:020}.json"
             )]);
-            let enclave = Enclave::create_operator_initialized_ceremony(logger);
+            let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
             let (request, _) = mock_setup_new_key_request();
             let error = setup_new_key(enclave.clone(), request).await.unwrap_err();
             assert!(matches!(error, GuardianError::InvalidInputs(message)
                 if message.contains("completed ceremony already exists")));
             assert_eq!(
-                enclave.lifecycle(),
+                enclave.state.lock().await.lifecycle(),
                 CeremonyStage::OperatorInitialized.into()
             );
-            assert!(enclave.pending_ceremony().is_err());
+            assert!(enclave.state.lock().await.pending_ceremony().is_err());
         }
     }
 
@@ -143,7 +149,7 @@ mod tests {
         let logger = crate::test_utils::mock_logger_with_layout([
             "kp-shares/00000000000000000000/00000000000000000000.json".to_string(),
         ]);
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
         let (request, _) = mock_setup_new_key_request();
         let response = setup_new_key(enclave.clone(), request)
             .await
@@ -157,13 +163,13 @@ mod tests {
     #[tokio::test]
     async fn test_setup_new_key() {
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
         let verification_key = &enclave.signing_pubkey();
         let (request, secret_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify_into_data(verification_key).unwrap().response;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lock().await.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
 

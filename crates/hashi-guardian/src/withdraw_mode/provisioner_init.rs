@@ -5,6 +5,7 @@
 //! submissions and reconstructs the BTC key once threshold shares are present.
 //! Runs after the shared `crate::operator_init`.
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
@@ -28,9 +29,10 @@ struct PIInstall {
 impl PIInstall {
     async fn from_request(
         enclave: &Enclave,
+        state: &EnclaveState,
         request: BatchProvisionerInitRequest,
     ) -> GuardianResult<Self> {
-        let initialization = enclave
+        let initialization = state
             .temporary_init_state()
             .expect("temporary initialization state should be set after operator_init");
         let ceremony_state = &initialization.ceremony_state;
@@ -107,20 +109,21 @@ async fn ensure_no_serving_committee(enclave: &Enclave) -> GuardianResult<()> {
 /// commitment-checking any share.
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
-    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
+    state.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
-    let install = PIInstall::from_request(&enclave, request).await?;
+    let install = PIInstall::from_request(&enclave, state, request).await?;
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing enclave BTC keypair.");
-    commit_provisioner_init(&enclave, install).await;
+    commit_provisioner_init(&enclave, state, install).await;
 
     info!("Provisioner initialization complete.");
     Ok(())
@@ -128,7 +131,7 @@ pub async fn provisioner_init(
 
 /// Install the prepared key, durably mark PI complete, and then expose the new
 /// lifecycle. This fail-stop phase never returns an error after mutation begins.
-async fn commit_provisioner_init(enclave: &Enclave, install: PIInstall) {
+async fn commit_provisioner_init(enclave: &Enclave, state: &mut EnclaveState, install: PIInstall) {
     enclave
         .config
         .set_btc_keypair(install.enclave_btc_keypair)
@@ -149,8 +152,11 @@ async fn commit_provisioner_init(enclave: &Enclave, install: PIInstall) {
         .await
         .expect("Unable to log EnclaveFullyInitialized");
 
-    enclave
-        .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+    state
+        .advance_lifecycle_into(
+            &enclave.config,
+            WithdrawStage::ProvisionerInitialized.into(),
+        )
         .expect("provisioner_init should advance an operator-initialized enclave");
 }
 
@@ -202,6 +208,7 @@ fn verify_signed_submissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_spawner::provisioner_init;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
@@ -275,6 +282,9 @@ mod tests {
     impl TestContext {
         fn config_hash(&self) -> [u8; 32] {
             self.enclave
+                .state
+                .try_lock()
+                .expect("test request construction has exclusive access")
                 .temporary_init_state()
                 .expect("test enclave should retain temporary initialization state")
                 .config_hash
@@ -293,6 +303,9 @@ mod tests {
                 expected_session_id,
                 expected_config_hash,
                 self.enclave
+                    .state
+                    .try_lock()
+                    .expect("test request construction has exclusive access")
                     .temporary_init_state()
                     .expect("test enclave should retain temporary initialization state")
                     .genesis_state
@@ -314,6 +327,9 @@ mod tests {
                 expected_session_id,
                 expected_config_hash,
                 self.enclave
+                    .state
+                    .try_lock()
+                    .expect("test request construction has exclusive access")
                     .temporary_init_state()
                     .expect("test enclave should retain temporary initialization state")
                     .genesis_state
@@ -393,7 +409,11 @@ mod tests {
             "Bitcoin key should be set after threshold"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave
+                .state
+                .try_lock()
+                .expect("test request construction has exclusive access")
+                .lifecycle(),
             WithdrawStage::ProvisionerInitialized.into(),
             "provisioner init complete"
         );
@@ -514,7 +534,11 @@ mod tests {
             "Bitcoin key should not be set below threshold"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave
+                .state
+                .try_lock()
+                .expect("test request construction has exclusive access")
+                .lifecycle(),
             WithdrawStage::OperatorInitialized.into(),
             "failed preparation should not advance the lifecycle"
         );
@@ -544,7 +568,11 @@ mod tests {
             "mismatched Bitcoin key should not be installed"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave
+                .state
+                .try_lock()
+                .expect("test request construction has exclusive access")
+                .lifecycle(),
             WithdrawStage::OperatorInitialized.into(),
             "failed preparation should not advance the lifecycle"
         );

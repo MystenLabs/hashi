@@ -7,6 +7,7 @@
 //! `withdraw::provisioner_init`.
 
 use crate::attestation::get_attestation;
+use crate::enclave::EnclaveState;
 use crate::enclave::TemporaryInitState;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
@@ -104,7 +105,7 @@ impl OIWithdrawModeInstall {
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
-    pub fn install_into(self, enclave: &Enclave) {
+    pub fn install_into(self, enclave: &Enclave, state: &mut EnclaveState) {
         let config_hash = self.init_config.digest();
         let limiter_config = *self.init_config.limiter_config();
 
@@ -123,7 +124,7 @@ impl OIWithdrawModeInstall {
                 "Storing genesis state."
             );
         }
-        enclave
+        state
             .set_temporary_init_state(TemporaryInitState {
                 ceremony_state: self.ceremony_state,
                 genesis_state: self.genesis_state,
@@ -152,11 +153,12 @@ impl OIWithdrawModeInstall {
 /// control lock so concurrent callers cannot race the check-then-commit.
 pub async fn operator_init(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
-    enclave.require_lifecycle(None)?;
+    state.require_lifecycle(None)?;
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
@@ -216,7 +218,7 @@ pub async fn operator_init(
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
-    commit_operator_init(&enclave, install).await;
+    commit_operator_init(&enclave, state, install).await;
 
     info!("Operator initialization complete.");
     Ok(())
@@ -226,7 +228,7 @@ pub async fn operator_init(
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and S3 logging
 /// panics on failure rather than returning an error.
-async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
+async fn commit_operator_init(enclave: &Enclave, state: &mut EnclaveState, install: OIInstall) {
     let OIInstall {
         deployment,
         attestation,
@@ -268,7 +270,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
 
     // A ceremony enclave has no withdraw-mode arming state.
     if let Some(withdraw_mode) = withdraw_mode {
-        withdraw_mode.install_into(enclave);
+        withdraw_mode.install_into(enclave, state);
     }
 
     // Log to S3!
@@ -290,8 +292,8 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         .await
         .expect("S3 logger must be initialized to log operator initialization");
 
-    enclave
-        .advance_lifecycle_into(initialized)
+    state
+        .advance_lifecycle_into(&enclave.config, initialized)
         .expect("operator_init should advance an uninitialized enclave");
 }
 
@@ -351,7 +353,7 @@ mod tests {
             crate::test_utils::mock_logger(),
             Some(install),
         );
-        commit_operator_init(&enclave, install).await;
+        commit_operator_init(&enclave, &mut *enclave.state.lock().await, install).await;
         let info = enclave.info().await;
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
@@ -382,7 +384,7 @@ mod tests {
             crate::test_utils::mock_logger(),
             Some(install),
         );
-        commit_operator_init(&enclave, install).await;
+        commit_operator_init(&enclave, &mut *enclave.state.lock().await, install).await;
         let info = enclave.info().await;
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
@@ -456,7 +458,7 @@ mod tests {
 
         let attestation = get_attestation(&enclave.signing_pubkey()).unwrap();
         let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
-        commit_operator_init(&enclave, install).await;
+        commit_operator_init(&enclave, &mut *enclave.state.lock().await, install).await;
         (enclave, captures)
     }
 
@@ -466,6 +468,7 @@ mod tests {
         expected_mode: EnclaveMode,
     ) {
         let live_info = enclave.info().await;
+        let temporary_init_state = enclave.state.lock().await.temporary_init_state().ok();
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 2, "operator init should write two records");
         let session_id = enclave.s3_session_id();
@@ -499,7 +502,7 @@ mod tests {
             enclave.encryption_public_key().to_bytes().to_vec()
         );
         if let OperatorInitMode::Withdraw(withdraw) = &info.mode {
-            let state = enclave.temporary_init_state().unwrap();
+            let state = temporary_init_state.unwrap();
             assert_eq!(
                 withdraw.secret_sharing_instance,
                 state.ceremony_state.secret_sharing_instance
@@ -522,7 +525,7 @@ mod tests {
     async fn commit_marks_operator_init_complete_withdraw_mode() {
         let (enclave, captures) = commit_for_mode(EnclaveMode::Withdraw).await;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lock().await.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
         assert_operator_init_logs(&enclave, &captures, EnclaveMode::Withdraw).await;
@@ -532,7 +535,7 @@ mod tests {
     async fn commit_marks_operator_init_complete_ceremony_mode() {
         let (enclave, captures) = commit_for_mode(EnclaveMode::Ceremony).await;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lock().await.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
         assert_operator_init_logs(&enclave, &captures, EnclaveMode::Ceremony).await;
@@ -572,16 +575,21 @@ mod tests {
         let (resume_tx, resume_rx) = oneshot::channel();
         let initializing = tokio::spawn(enclave.clone().spawn_control_task(
             (),
-            move |enclave, ()| async move {
-                enclave
-                    .config
-                    .set_deployment(DeploymentConfig::mock_for_testing())?;
-                enclave
-                    .config
-                    .set_s3_logger(crate::test_utils::mock_logger())?;
-                installed_tx.send(()).unwrap();
-                resume_rx.await.unwrap();
-                enclave.advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            move |enclave, state, ()| {
+                Box::pin(async move {
+                    enclave
+                        .config
+                        .set_deployment(DeploymentConfig::mock_for_testing())?;
+                    enclave
+                        .config
+                        .set_s3_logger(crate::test_utils::mock_logger())?;
+                    installed_tx.send(()).unwrap();
+                    resume_rx.await.unwrap();
+                    state.advance_lifecycle_into(
+                        &enclave.config,
+                        CeremonyStage::OperatorInitialized.into(),
+                    )
+                })
             },
         ));
         installed_rx.await.unwrap();

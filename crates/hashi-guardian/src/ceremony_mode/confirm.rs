@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
@@ -14,12 +15,13 @@ use tracing::info;
 
 pub async fn confirm_ceremony(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     signed: KpSigned<CeremonyConfirmationRequest>,
 ) -> GuardianResult<CeremonyConfirmationResponse> {
     // Once completed, KPs verify the committed ceremony from S3 instead.
-    enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
+    state.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
 
-    let pending = enclave.pending_ceremony()?;
+    let pending = state.pending_ceremony()?;
     let signer_fingerprint = signed.signer_fingerprint().to_hex();
     let request = signed
         .verify_signature()
@@ -42,8 +44,8 @@ pub async fn confirm_ceremony(
 
     if status.completed {
         enclave.publish_pending_ceremony(pending).await?;
-        enclave
-            .advance_lifecycle_into(CeremonyStage::Completed.into())
+        state
+            .advance_lifecycle_into(&enclave.config, CeremonyStage::Completed.into())
             .expect("all KP confirmations should complete the ceremony lifecycle");
         info!("Every key provisioner confirmed the ceremony; ceremony complete.");
     }
@@ -54,8 +56,9 @@ pub async fn confirm_ceremony(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ceremony_mode::setup::setup_new_key;
     use crate::mock_logger_capturing;
+    use crate::task_spawner::confirm_ceremony;
+    use crate::task_spawner::setup_new_key;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
@@ -81,7 +84,7 @@ mod tests {
     async fn setup_context() -> TestContext {
         let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
         let response = setup_new_key(
             enclave.clone(),
             SetupNewKeyRequest::new(roster.clone(), TEST_N, TEST_T).unwrap(),
@@ -146,7 +149,7 @@ mod tests {
     async fn requires_every_kp_confirmation() {
         let context = setup_context().await;
         assert_eq!(
-            context.enclave.lifecycle(),
+            context.enclave.state.lock().await.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
         assert_eq!(context.captures.lock().unwrap().len(), 1);
@@ -171,7 +174,10 @@ mod tests {
             assert_eq!(status.need as usize, TEST_N);
             assert_eq!(status.completed, index + 1 == TEST_N);
         }
-        assert_eq!(context.enclave.lifecycle(), CeremonyStage::Completed.into());
+        assert_eq!(
+            context.enclave.state.lock().await.lifecycle(),
+            CeremonyStage::Completed.into()
+        );
         {
             let captured = context.captures.lock().unwrap();
             assert_eq!(captured.len(), 3);

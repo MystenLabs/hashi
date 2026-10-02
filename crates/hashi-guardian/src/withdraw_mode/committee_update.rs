@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::enclave::EnclaveState;
 use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::CommitteeTransitionRequest;
@@ -19,11 +20,12 @@ use tracing::info;
 /// Idempotent on already-applied or older transitions.
 pub async fn update_committee(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
-    enclave.require_fully_initialized()?;
+    state.require_fully_initialized()?;
 
-    let current = enclave.state.get_committee()?;
+    let current = state.get_committee()?;
     let current_epoch = current.epoch();
     let proposed_epoch = signed.message().new_committee.epoch;
 
@@ -55,8 +57,7 @@ pub async fn update_committee(
             request_sign,
         })
         .await?;
-    enclave
-        .state
+    state
         .replace_committee(new_committee, current_epoch)
         .expect("committee initialized at current_epoch under the update lock");
 
@@ -70,11 +71,12 @@ pub async fn update_committee(
 
 pub async fn update_committee_chain(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
 ) -> GuardianResult<u64> {
-    let mut current_epoch = enclave.state.get_committee()?.epoch();
+    let mut current_epoch = state.get_committee()?.epoch();
     for signed in transitions {
-        current_epoch = update_committee(enclave.clone(), signed).await?;
+        current_epoch = update_committee(enclave.clone(), state, signed).await?;
     }
     Ok(current_epoch)
 }
@@ -82,6 +84,8 @@ pub async fn update_committee_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_spawner::update_committee;
+    use crate::task_spawner::update_committee_chain;
     use crate::test_utils::create_fully_initialized_enclave;
     use crate::test_utils::FullyInitializedArgs;
     use bitcoin::Network;
@@ -174,7 +178,10 @@ mod tests {
 
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
         assert_eq!(new_epoch, 6);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 6);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            6
+        );
     }
 
     #[tokio::test]
@@ -211,7 +218,10 @@ mod tests {
 
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
         assert_eq!(new_epoch, 5);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            5
+        );
     }
 
     #[tokio::test]
@@ -224,7 +234,10 @@ mod tests {
 
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
         assert_eq!(new_epoch, 7);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            7
+        );
     }
 
     #[tokio::test]
@@ -240,7 +253,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(new_epoch, 9);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 9);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            9
+        );
     }
 
     #[tokio::test]
@@ -259,7 +275,10 @@ mod tests {
             matches!(err, GuardianError::Unauthenticated(_)),
             "expected Unauthenticated, got {err:?}"
         );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            7
+        );
     }
 
     #[tokio::test]
@@ -274,7 +293,10 @@ mod tests {
             matches!(err, GuardianError::Unauthenticated(_)),
             "expected Unauthenticated, got {err:?}"
         );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            5
+        );
     }
 
     #[tokio::test]
@@ -283,12 +305,17 @@ mod tests {
 
         let err = enclave
             .state
+            .lock()
+            .await
             .replace_committee(committee_at(6).into(), 4)
             .expect_err("stale expected_current_epoch must error");
         assert!(
             matches!(err, GuardianError::InvalidInputs(_)),
             "expected InvalidInputs, got {err:?}"
         );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+        assert_eq!(
+            enclave.state.lock().await.get_committee().unwrap().epoch(),
+            5
+        );
     }
 }

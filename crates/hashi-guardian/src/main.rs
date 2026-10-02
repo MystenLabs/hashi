@@ -3,9 +3,7 @@
 
 use anyhow::Result;
 use hashi_guardian::rpc::GuardianGrpc;
-use hashi_guardian::withdraw_mode::heartbeat::HeartbeatWriter;
 use hashi_guardian::Enclave;
-use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -56,11 +54,6 @@ async fn main() -> Result<()> {
 
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
-
-    // The writer is idle until withdraw operator initialization completes.
-    drop(tokio::spawn(
-        HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
-    ));
 
     Server::builder()
         .add_service(GuardianServiceServer::new(svc))

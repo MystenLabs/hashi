@@ -302,8 +302,8 @@ mod tests {
     ) {
         let (roster, secrets) = mock_kp_certs_roster_with_secrets(3);
         let (logger, puts) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
-        let response = crate::ceremony_mode::setup::setup_new_key(
+        let enclave = Enclave::create_operator_initialized_ceremony(logger).await;
+        let response = crate::task_spawner::setup_new_key(
             enclave.clone(),
             SetupNewKeyRequest::new(roster.clone(), 3, 2).unwrap(),
         )
@@ -364,7 +364,7 @@ mod tests {
     async fn setup_rpc_rejects_missing_attestation_without_starting_ceremony() {
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_ceremony(logger),
+            enclave: Enclave::create_operator_initialized_ceremony(logger).await,
         };
         let before_puts = puts.lock().unwrap().clone();
         let mut request = proto_conversions::setup_new_key_request_to_pb(
@@ -375,7 +375,7 @@ mod tests {
         let error = rpc.setup_new_key(Request::new(request)).await.unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert!(rpc.enclave.state.lock().await.pending_ceremony().is_err());
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 
@@ -402,13 +402,21 @@ mod tests {
             &secrets[&previous_cert.fingerprint().to_hex()],
             &KpSigned::signed_bytes(&request),
         );
-        crate::ceremony_mode::confirm::confirm_ceremony(
+        crate::task_spawner::confirm_ceremony(
             rpc.enclave.clone(),
             KpSigned::from_parts(request, previous_cert, previous_signature),
         )
         .await
         .unwrap();
-        let before = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        let before = rpc
+            .enclave
+            .state
+            .lock()
+            .await
+            .pending_ceremony()
+            .unwrap()
+            .status()
+            .unwrap();
         let before_puts = puts.lock().unwrap().clone();
 
         let error = rpc
@@ -417,7 +425,15 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        let after = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        let after = rpc
+            .enclave
+            .state
+            .lock()
+            .await
+            .pending_ceremony()
+            .unwrap()
+            .status()
+            .unwrap();
         assert_eq!(
             (after.have, after.need, after.completed),
             (before.have, before.need, before.completed)
@@ -438,7 +454,13 @@ mod tests {
             })
             .await,
         };
-        let before = rpc.enclave.temporary_init_state().unwrap();
+        let before = rpc
+            .enclave
+            .state
+            .lock()
+            .await
+            .temporary_init_state()
+            .unwrap();
         let before_puts = puts.lock().unwrap().clone();
         let submissions = shares
             .iter()
@@ -497,7 +519,7 @@ mod tests {
             })
             .await,
         };
-        finalize_enclave(&rpc.enclave).unwrap();
+        finalize_enclave(&rpc.enclave).await.unwrap();
         let (_, committee) = StandardWithdrawalRequest::mock_signed_and_committee_for_testing(
             bitcoin::Network::Regtest,
         );
@@ -514,6 +536,7 @@ mod tests {
                 next_seq: 0,
             },
         )
+        .await
         .unwrap();
         let recipient = &state
             .encrypted_shares
@@ -540,7 +563,7 @@ mod tests {
         );
         let signed = KpSigned::from_parts(request, cert, signature);
         signed.verify_signature().unwrap();
-        let lifecycle = rpc.enclave.lifecycle();
+        let lifecycle = rpc.enclave.state.lock().await.lifecycle();
         let before_puts = puts.lock().unwrap().clone();
 
         // Replacement decoding precedes signer decoding; this does not exercise
@@ -551,7 +574,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert_eq!(rpc.enclave.lifecycle(), lifecycle);
+        assert_eq!(rpc.enclave.state.lock().await.lifecycle(), lifecycle);
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 
@@ -561,7 +584,7 @@ mod tests {
         let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_ceremony(logger),
+            enclave: Enclave::create_operator_initialized_ceremony(logger).await,
         };
         let submissions = shares
             .iter()
@@ -608,7 +631,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert!(rpc.enclave.state.lock().await.pending_ceremony().is_err());
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 

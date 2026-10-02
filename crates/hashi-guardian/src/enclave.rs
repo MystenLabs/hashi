@@ -23,9 +23,9 @@ use hashi_types::guardian::*;
 use hpke::Serializable;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::RwLock;
 use tracing::info;
 
 use crate::log_writer::LogWriter;
@@ -37,14 +37,8 @@ use hashi_types::guardian::RuntimeCommittee;
 pub struct Enclave {
     /// Immutable config (set once during init)
     pub config: EnclaveConfig,
-    /// Mutable state
-    pub state: EnclaveState,
-    /// Temporary state retained until operator activation commits.
-    temporary_init_state: RwLock<Option<TemporaryInitState>>,
-    /// Serializes all state-touching RPCs, both writes and reads.
-    control_lock: tokio::sync::Mutex<()>,
-    /// Ceremony state retained until every KP confirms successful share recovery.
-    pending_ceremony: OnceLock<PendingCeremony>,
+    /// Owns and serializes all mutable control state, including info reads.
+    pub state: tokio::sync::Mutex<EnclaveState>,
     /// Serializes and fences every S3 log write from this enclave session.
     log_writer: LogWriter,
 }
@@ -74,15 +68,20 @@ pub struct EnclaveConfig {
 }
 
 /// Mutable state that changes during operation.
-/// Committee + rate limiter are installed during operator_activate.
+/// Committee and rate limiter are installed during operator activation.
+/// Access is provided by the outer control-state mutex; fields need no inner locks.
+#[derive(Default)]
 pub struct EnclaveState {
     /// Authoritative mode-specific lifecycle, absent until operator init commits.
-    lifecycle: RwLock<Option<EnclaveLifecycle>>,
+    lifecycle: Option<EnclaveLifecycle>,
     /// Current Hashi committee.
-    committee: RwLock<Option<Arc<RuntimeCommittee>>>,
+    committee: Option<Arc<RuntimeCommittee>>,
     /// Rate limiter. Set once during operator_activate.
-    /// Only touched under the control lock.
-    rate_limiter: OnceLock<std::sync::Mutex<RateLimiter>>,
+    rate_limiter: Option<RateLimiter>,
+    /// Retained until operator activation commits.
+    temporary_init_state: Option<TemporaryInitState>,
+    /// Retained until every KP confirms successful share recovery.
+    pending_ceremony: Option<PendingCeremony>,
 }
 
 /// Inputs needed only between operator initialization and activation.
@@ -97,7 +96,7 @@ pub struct TemporaryInitState {
 pub(crate) struct PendingCeremony {
     proposal: CeremonyProposalLogMessage,
     ceremony_artifacts_digest: [u8; 32],
-    confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
+    confirmed_share_ids: BTreeSet<ShareID>,
 }
 
 impl PendingCeremony {
@@ -112,7 +111,7 @@ impl PendingCeremony {
         Ok(Self {
             proposal,
             ceremony_artifacts_digest: artifacts.digest(),
-            confirmed_share_ids: RwLock::new(BTreeSet::new()),
+            confirmed_share_ids: BTreeSet::new(),
         })
     }
 
@@ -135,35 +134,24 @@ impl PendingCeremony {
                     "KP fingerprint {signer_fingerprint} is not present in the pending ceremony roster"
                 ))
             })?;
-        let confirmed = self
-            .confirmed_share_ids
-            .read()
-            .expect("pending ceremony lock poisoned")
-            .contains(&share.id);
+        let confirmed = self.confirmed_share_ids.contains(&share.id);
         Ok((share.id, confirmed))
     }
 
     pub(crate) fn record_confirmation(
-        &self,
+        &mut self,
         share_id: ShareID,
     ) -> GuardianResult<CeremonyConfirmationResponse> {
-        let mut confirmed = self
-            .confirmed_share_ids
-            .write()
-            .expect("pending ceremony lock poisoned");
-        confirmed.insert(share_id);
+        self.confirmed_share_ids.insert(share_id);
         CeremonyConfirmationResponse::new(
-            confirmed.len(),
+            self.confirmed_share_ids.len(),
             self.proposal.encrypted_shares.share_count(),
         )
     }
 
     pub(crate) fn status(&self) -> GuardianResult<CeremonyConfirmationResponse> {
         CeremonyConfirmationResponse::new(
-            self.confirmed_share_ids
-                .read()
-                .expect("pending ceremony lock poisoned")
-                .len(),
+            self.confirmed_share_ids.len(),
             self.proposal.encrypted_shares.share_count(),
         )
     }
@@ -264,74 +252,47 @@ impl EnclaveConfig {
 }
 
 impl EnclaveState {
-    // ========================================================================
-    // Activation State Installation
-    // ========================================================================
-
-    /// Install the activation-derived committee + rate limiter. Called from operator_activate.
+    /// Install the activation-derived committee and limiter.
     pub fn init(
-        &self,
+        &mut self,
         committee: RuntimeCommittee,
         rate_limiter: RateLimiter,
     ) -> GuardianResult<()> {
         self.set_committee(committee)?;
-        self.set_rate_limiter(rate_limiter)?;
-        Ok(())
+        self.set_rate_limiter(rate_limiter)
     }
-
-    // ========================================================================
-    // Committee Management
-    // ========================================================================
 
     /// Get the current committee.
     pub fn get_committee(&self) -> GuardianResult<Arc<RuntimeCommittee>> {
-        let guard = self
-            .committee
-            .read()
-            .expect("rwlock should never throw an error");
-        guard
-            .as_ref()
-            .cloned()
+        self.committee
+            .clone()
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Whether the committee is installed, without cloning the `Arc`.
+    /// Whether the committee is installed, without cloning its Arc.
     fn has_committee(&self) -> bool {
-        self.committee
-            .read()
-            .expect("rwlock should never throw an error")
-            .is_some()
+        self.committee.is_some()
     }
 
-    /// Set committee. Called only from `init` during operator activation.
-    fn set_committee(&self, committee: RuntimeCommittee) -> GuardianResult<()> {
+    /// Called only from activation state installation.
+    fn set_committee(&mut self, committee: RuntimeCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
-
-        let mut guard = self
-            .committee
-            .write()
-            .expect("rwlock should never throw an error");
-        if guard.is_some() {
+        if self.committee.is_some() {
             return Err(InvalidInputs("committee already initialized".into()));
         }
-        *guard = Some(Arc::new(committee));
+        self.committee = Some(Arc::new(committee));
         Ok(())
     }
 
-    /// Replace an already-initialized committee. Rejects the swap unless
-    /// the in-memory epoch matches `expected_current_epoch`.
+    /// Replace the committee only if the current epoch matches the expected epoch.
     pub fn replace_committee(
-        &self,
+        &mut self,
         committee: RuntimeCommittee,
         expected_current_epoch: u64,
     ) -> GuardianResult<()> {
         info!("Replacing committee for epoch {}.", committee.epoch());
-
-        let mut guard = self
+        let current_epoch = self
             .committee
-            .write()
-            .expect("rwlock should never throw an error");
-        let current_epoch = guard
             .as_ref()
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))?
             .epoch();
@@ -340,46 +301,182 @@ impl EnclaveState {
                 "committee epoch mismatch: expected {expected_current_epoch}, actual {current_epoch}"
             )));
         }
-        *guard = Some(Arc::new(committee));
+        self.committee = Some(Arc::new(committee));
         Ok(())
     }
 
-    // ========================================================================
-    // Rate Limiter Management
-    // ========================================================================
-
-    fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
+    fn set_rate_limiter(&mut self, limiter: RateLimiter) -> GuardianResult<()> {
         info!("Setting rate limiter.");
-
-        self.rate_limiter
-            .set(std::sync::Mutex::new(limiter))
-            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))
+        if self.rate_limiter.is_some() {
+            return Err(InvalidInputs("rate_limiter already initialized".into()));
+        }
+        self.rate_limiter = Some(limiter);
+        Ok(())
     }
 
-    /// Consume tokens under the control lock and return the post-consume state.
+    /// Consume tokens and return the post-consume state.
     pub fn consume_from_limiter(
-        &self,
+        &mut self,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
     ) -> GuardianResult<LimiterState> {
-        let rate_limiter = self
+        let limiter = self
             .rate_limiter
-            .get()
+            .as_mut()
             .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
-        let mut limiter = rate_limiter.lock().expect("rate limiter lock poisoned");
         limiter.consume(seq, timestamp, amount_sats)?;
         Ok(*limiter.state())
     }
 
-    /// Read the limiter state under the control lock. `None` means it is not initialized.
+    /// The current limiter state, absent until activation installs it.
     pub fn limiter_state(&self) -> Option<LimiterState> {
-        let limiter = self
-            .rate_limiter
-            .get()?
-            .lock()
-            .expect("rate limiter lock poisoned");
-        Some(*limiter.state())
+        self.rate_limiter.as_ref().map(|limiter| *limiter.state())
+    }
+
+    /// Which flows this enclave serves after operator initialization.
+    pub fn mode(&self) -> Option<EnclaveMode> {
+        self.lifecycle().map(EnclaveLifecycle::mode)
+    }
+
+    pub fn lifecycle(&self) -> Option<EnclaveLifecycle> {
+        self.lifecycle
+    }
+
+    /// Require an exact mode and lifecycle stage.
+    pub fn require_lifecycle(&self, expected: Option<EnclaveLifecycle>) -> GuardianResult<()> {
+        let actual = self.lifecycle();
+        if actual != expected {
+            return Err(LifecycleMismatch { expected, actual });
+        }
+        Ok(())
+    }
+
+    /// Transition after the operation's durable log succeeds. The lifecycle is
+    /// the single source of completion state.
+    pub fn advance_lifecycle_into(
+        &mut self,
+        config: &EnclaveConfig,
+        next: EnclaveLifecycle,
+    ) -> GuardianResult<()> {
+        let expected = next.predecessor();
+        if self.lifecycle != expected {
+            return Err(LifecycleMismatch {
+                expected,
+                actual: self.lifecycle,
+            });
+        }
+        self.assert_state_installed_for(config, next);
+        self.lifecycle = Some(next);
+        Ok(())
+    }
+
+    fn assert_state_installed_for(&self, config: &EnclaveConfig, next: EnclaveLifecycle) {
+        let installed = match next {
+            EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
+                self.operator_init_state_installed(config, EnclaveMode::Ceremony)
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
+                self.pending_ceremony.is_some()
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => self
+                .pending_ceremony
+                .as_ref()
+                .is_some_and(PendingCeremony::is_complete),
+            EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
+                self.operator_init_state_installed(config, EnclaveMode::Withdraw)
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
+                config.is_enclave_btc_keypair_set() && self.temporary_init_state_is_available()
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
+                self.has_committee()
+                    && self.rate_limiter.is_some()
+                    && !self.temporary_init_state_is_available()
+            }
+        };
+        assert!(
+            installed,
+            "cannot advance lifecycle to {next:?}: state is incomplete"
+        );
+    }
+
+    /// Whether every field operator_init installs is present (mode-aware).
+    fn operator_init_state_installed(&self, config: &EnclaveConfig, mode: EnclaveMode) -> bool {
+        // Both modes install S3 and the shared deployment policy.
+        if config.s3_logger.get().is_none() || config.deployment.get().is_none() {
+            return false;
+        }
+        match mode {
+            EnclaveMode::Ceremony => true,
+            // Withdraw enclaves additionally install their stable configuration.
+            EnclaveMode::Withdraw => {
+                config.limiter_config.get().is_some()
+                    && self.temporary_init_state_is_available()
+                    && config.hashi_btc_master_pubkey.get().is_some()
+                    && config.hashi_object_id.get().is_some()
+            }
+        }
+    }
+
+    /// Require the activated withdraw lifecycle.
+    pub fn require_fully_initialized(&self) -> GuardianResult<()> {
+        self.require_lifecycle(WithdrawStage::Activated.into())
+    }
+
+    pub(crate) fn install_pending_ceremony(
+        &mut self,
+        deployment: &DeploymentConfig,
+        proposal: CeremonyProposalLogMessage,
+    ) -> GuardianResult<()> {
+        let pending = PendingCeremony::new(proposal, deployment)?;
+        if self.pending_ceremony.is_some() {
+            return Err(InvalidInputs("Pending ceremony state already set".into()));
+        }
+        self.pending_ceremony = Some(pending);
+        Ok(())
+    }
+
+    pub(crate) fn pending_ceremony(&mut self) -> GuardianResult<&mut PendingCeremony> {
+        self.pending_ceremony
+            .as_mut()
+            .ok_or_else(|| InvalidInputs("Pending ceremony state not set".into()))
+    }
+
+    // ========================================================================
+    // Temporary Initialization State
+    // ========================================================================
+
+    /// Return an owned initialization snapshot. Activation takes the stored
+    /// value, so this capability is unavailable once the enclave is active.
+    /// Keep this as the only accessor for `TemporaryInitState`. Its readers are
+    /// restricted to provisioner initialization, operator activation, and
+    /// status reporting; active request handlers must not depend on it.
+    pub fn temporary_init_state(&self) -> GuardianResult<TemporaryInitState> {
+        self.temporary_init_state
+            .clone()
+            .ok_or_else(|| InvalidInputs("Temporary initialization state not set".into()))
+    }
+
+    /// Operator initialization is the sole installer of temporary state.
+    pub fn set_temporary_init_state(&mut self, state: TemporaryInitState) -> GuardianResult<()> {
+        if self.temporary_init_state.is_some() {
+            return Err(InvalidInputs(
+                "Temporary initialization state already set".into(),
+            ));
+        }
+        self.temporary_init_state = Some(state);
+        Ok(())
+    }
+
+    fn temporary_init_state_is_available(&self) -> bool {
+        self.temporary_init_state.is_some()
+    }
+
+    pub fn clear_temporary_init_state(&mut self) {
+        self.temporary_init_state
+            .take()
+            .expect("temporary initialization state must exist before activation");
     }
 }
 
@@ -391,14 +488,7 @@ impl Enclave {
     pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
-            state: EnclaveState {
-                lifecycle: RwLock::new(None),
-                committee: RwLock::new(None),
-                rate_limiter: OnceLock::new(),
-            },
-            temporary_init_state: RwLock::new(None),
-            pending_ceremony: OnceLock::new(),
-            control_lock: tokio::sync::Mutex::new(()),
+            state: tokio::sync::Mutex::new(EnclaveState::default()),
             log_writer: LogWriter::new(),
         }
     }
@@ -429,7 +519,10 @@ impl Enclave {
     /// Spawn a root-owned Tokio task that holds the control lock while running.
     /// Use this for all state-touching RPCs so shared-state checks, mutations,
     /// and durable logging cannot interleave with another control task.
-    pub async fn spawn_control_task<Input, Output, Task, Fut>(
+    /// The callback borrows state for its whole future; helpers reuse that borrow
+    /// rather than acquiring the mutex again. Logging may acquire the log-writer
+    /// mutex, but the log writer and heartbeat loop never acquire control state.
+    pub async fn spawn_control_task<Input, Output, Task>(
         self: Arc<Self>,
         input: Input,
         task: Task,
@@ -437,114 +530,21 @@ impl Enclave {
     where
         Input: Send + 'static,
         Output: Send + 'static,
-        Task: FnOnce(Arc<Self>, Input) -> Fut + Send + 'static,
-        Fut: Future<Output = GuardianResult<Output>> + Send + 'static,
+        Task: for<'a> FnOnce(
+                Arc<Self>,
+                &'a mut EnclaveState,
+                Input,
+            )
+                -> Pin<Box<dyn Future<Output = GuardianResult<Output>> + Send + 'a>>
+            + Send
+            + 'static,
     {
         self.spawn_task(input, move |enclave, input| async move {
             let task_enclave = enclave.clone();
-            let _guard = enclave.control_lock.lock().await;
-            task(task_enclave, input).await
+            let mut state = enclave.state.lock().await;
+            task(task_enclave, &mut state, input).await
         })
         .await
-    }
-
-    // ========================================================================
-    // Lifecycle
-    // ========================================================================
-
-    /// Which flows this enclave serves after operator initialization.
-    pub fn mode(&self) -> Option<EnclaveMode> {
-        self.lifecycle().map(EnclaveLifecycle::mode)
-    }
-
-    pub fn lifecycle(&self) -> Option<EnclaveLifecycle> {
-        *self
-            .state
-            .lifecycle
-            .read()
-            .expect("lifecycle lock poisoned")
-    }
-
-    /// Require an exact mode and lifecycle stage.
-    pub fn require_lifecycle(&self, expected: Option<EnclaveLifecycle>) -> GuardianResult<()> {
-        let actual = self.lifecycle();
-        if actual != expected {
-            return Err(LifecycleMismatch { expected, actual });
-        }
-        Ok(())
-    }
-
-    /// Transition after the operation's durable log succeeds. The lifecycle is
-    /// the single source of completion state.
-    pub fn advance_lifecycle_into(&self, next: EnclaveLifecycle) -> GuardianResult<()> {
-        let expected = next.predecessor();
-        let mut lifecycle = self
-            .state
-            .lifecycle
-            .write()
-            .expect("lifecycle lock poisoned");
-        if *lifecycle != expected {
-            return Err(LifecycleMismatch {
-                expected,
-                actual: *lifecycle,
-            });
-        }
-        self.assert_state_installed_for(next);
-        *lifecycle = Some(next);
-        Ok(())
-    }
-
-    fn assert_state_installed_for(&self, next: EnclaveLifecycle) {
-        let installed = match next {
-            EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
-                self.operator_init_state_installed(EnclaveMode::Ceremony)
-            }
-            EnclaveLifecycle::Ceremony(CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
-                self.pending_ceremony.get().is_some()
-            }
-            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => self
-                .pending_ceremony
-                .get()
-                .is_some_and(PendingCeremony::is_complete),
-            EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
-                self.operator_init_state_installed(EnclaveMode::Withdraw)
-            }
-            EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
-                self.config.is_enclave_btc_keypair_set() && self.temporary_init_state_is_available()
-            }
-            EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
-                self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()
-                    && !self.temporary_init_state_is_available()
-            }
-        };
-        assert!(
-            installed,
-            "cannot advance lifecycle to {next:?}: state is incomplete"
-        );
-    }
-
-    /// Whether every field operator_init installs is present (mode-aware).
-    fn operator_init_state_installed(&self, mode: EnclaveMode) -> bool {
-        // Both modes install S3 and the shared deployment policy.
-        if self.config.s3_logger.get().is_none() || self.config.deployment.get().is_none() {
-            return false;
-        }
-        match mode {
-            EnclaveMode::Ceremony => true,
-            // Withdraw enclaves additionally install their stable configuration.
-            EnclaveMode::Withdraw => {
-                self.config.limiter_config.get().is_some()
-                    && self.temporary_init_state_is_available()
-                    && self.config.hashi_btc_master_pubkey.get().is_some()
-                    && self.config.hashi_object_id.get().is_some()
-            }
-        }
-    }
-
-    /// Require the activated withdraw lifecycle.
-    pub fn require_fully_initialized(&self) -> GuardianResult<()> {
-        self.require_lifecycle(WithdrawStage::Activated.into())
     }
 
     // ========================================================================
@@ -579,10 +579,15 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    /// Collect status; the RPC caller holds the control lock while reading it.
+    /// Collect status for callers outside a control task.
     pub async fn info(&self) -> GuardianInfo {
-        let lifecycle = self.lifecycle();
-        let temporary_init_state = self.temporary_init_state().ok();
+        self.info_with_state(&*self.state.lock().await)
+    }
+
+    /// Collect status using the state already held by a control task.
+    pub fn info_with_state(&self, state: &EnclaveState) -> GuardianInfo {
+        let lifecycle = state.lifecycle();
+        let temporary_init_state = state.temporary_init_state().ok();
         GuardianInfo {
             signing_pub_key: self.signing_pubkey(),
             lifecycle,
@@ -596,9 +601,9 @@ impl Enclave {
                 .as_ref()
                 .and_then(|state| state.genesis_state.as_ref().map(GenesisState::digest)),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
-            limiter_state: self.state.limiter_state(),
+            limiter_state: state.limiter_state(),
             limiter_config: self.limiter_config().ok(),
-            current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
+            current_committee_epoch: state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().copied(),
             hashi_object_id: self.config.hashi_object_id.get().copied(),
         }
@@ -638,12 +643,8 @@ impl Enclave {
         self.write_log(LogMessage::Genesis(Box::new(msg))).await
     }
 
-    pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
-        assert_eq!(
-            self.mode(),
-            Some(EnclaveMode::Withdraw),
-            "heartbeats are only supported in withdraw mode"
-        );
+    /// Used by the heartbeat loop started after durable withdraw operator initialization.
+    pub(crate) async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
         self.write_log(LogMessage::Heartbeat(msg)).await
     }
 
@@ -690,73 +691,6 @@ impl Enclave {
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
         )))
         .await
-    }
-
-    // ========================================================================
-    // Pending Ceremony State
-    // ========================================================================
-
-    pub(crate) fn install_pending_ceremony(
-        &self,
-        proposal: CeremonyProposalLogMessage,
-    ) -> GuardianResult<()> {
-        let pending = PendingCeremony::new(proposal, self.config.deployment()?)?;
-        self.pending_ceremony
-            .set(pending)
-            .map_err(|_| InvalidInputs("Pending ceremony state already set".into()))
-    }
-
-    pub(crate) fn pending_ceremony(&self) -> GuardianResult<&PendingCeremony> {
-        self.pending_ceremony
-            .get()
-            .ok_or_else(|| InvalidInputs("Pending ceremony state not set".into()))
-    }
-
-    // ========================================================================
-    // Temporary Initialization State
-    // ========================================================================
-
-    /// Return an owned initialization snapshot. Activation takes the stored
-    /// value, so this capability is unavailable once the enclave is active.
-    /// Keep this as the only accessor for `TemporaryInitState`. Its readers are
-    /// restricted to provisioner initialization, operator activation, and
-    /// status reporting; active request handlers must not depend on it.
-    pub fn temporary_init_state(&self) -> GuardianResult<TemporaryInitState> {
-        self.temporary_init_state
-            .read()
-            .expect("temporary initialization lock poisoned")
-            .clone()
-            .ok_or_else(|| InvalidInputs("Temporary initialization state not set".into()))
-    }
-
-    /// Operator initialization is the sole installer of temporary state.
-    pub fn set_temporary_init_state(&self, state: TemporaryInitState) -> GuardianResult<()> {
-        let mut slot = self
-            .temporary_init_state
-            .write()
-            .expect("temporary initialization lock poisoned");
-        if slot.is_some() {
-            return Err(InvalidInputs(
-                "Temporary initialization state already set".into(),
-            ));
-        }
-        *slot = Some(state);
-        Ok(())
-    }
-
-    fn temporary_init_state_is_available(&self) -> bool {
-        self.temporary_init_state
-            .read()
-            .expect("temporary initialization lock poisoned")
-            .is_some()
-    }
-
-    pub fn clear_temporary_init_state(&self) {
-        self.temporary_init_state
-            .write()
-            .expect("temporary initialization lock poisoned")
-            .take()
-            .expect("temporary initialization state must exist before activation");
     }
 
     // ========================================================================

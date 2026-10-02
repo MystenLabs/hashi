@@ -2,17 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HeartbeatLogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Stateful heartbeat writer.
-pub struct HeartbeatWriter {
-    pub enclave: Arc<Enclave>,
+/// Stateful heartbeat writer started only after durable withdraw operator initialization.
+pub(crate) struct HeartbeatWriter {
+    enclave: Arc<Enclave>,
     /// the next sequence number used in s3 logs
-    pub next_seq: u64,
+    next_seq: u64,
 }
 
 impl HeartbeatWriter {
@@ -25,15 +24,9 @@ impl HeartbeatWriter {
 
     /// Attempt to send one heartbeat.
     ///
-    /// - If operator init is not complete, this is a no-op.
-    ///
     /// The shared S3 writer retries failures and aborts the process on a
     /// terminal retry or heartbeat-fence failure.
     pub async fn tick(&mut self) -> GuardianResult<()> {
-        if self.enclave.mode() != Some(EnclaveMode::Withdraw) {
-            return Ok(());
-        }
-
         self.enclave
             .log_heartbeat(HeartbeatLogMessage::new(self.next_seq))
             .await?;
@@ -63,13 +56,6 @@ mod tests {
     use hashi_types::guardian::VersionedLogMessage;
 
     #[tokio::test]
-    async fn heartbeat_is_a_noop_before_operator_init() {
-        let mut writer = HeartbeatWriter::new(Enclave::create_with_random_keys());
-        writer.tick().await.unwrap();
-        assert_eq!(writer.next_seq, 0);
-    }
-
-    #[tokio::test]
     async fn heartbeat_advances_after_durable_write() {
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_with(
@@ -91,20 +77,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "heartbeats are only supported in withdraw mode")]
-    async fn ceremony_mode_rejects_heartbeats() {
-        Enclave::create_operator_initialized_ceremony(crate::test_utils::mock_logger())
-            .log_heartbeat(HeartbeatLogMessage::new(0))
-            .await
-            .unwrap();
-    }
-    #[tokio::test]
-    async fn heartbeat_writer_stays_idle_in_ceremony_mode() {
+    async fn heartbeat_progresses_while_control_state_is_locked() {
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let mut writer =
-            HeartbeatWriter::new(Enclave::create_operator_initialized_ceremony(logger));
-        writer.tick().await.unwrap();
-        assert_eq!(writer.next_seq, 0);
-        assert!(captures.lock().unwrap().is_empty());
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default().with_s3_logger(logger),
+        )
+        .await;
+        let _state = enclave.state.lock().await;
+        let mut writer = HeartbeatWriter::new(enclave.clone());
+
+        // A long control operation must not prevent independent heartbeat logging.
+        tokio::time::timeout(Duration::from_secs(1), writer.tick())
+            .await
+            .expect("heartbeat must not acquire control state")
+            .unwrap();
+        assert_eq!(writer.next_seq, 1);
+        assert_eq!(captures.lock().unwrap().len(), 1);
     }
 }

@@ -16,17 +16,20 @@ use crate::ceremony_mode::setup;
 use crate::info;
 use crate::operator_init as operator_init_domain;
 use crate::withdraw_mode::committee_update;
+use crate::withdraw_mode::heartbeat::HeartbeatWriter;
 use crate::withdraw_mode::operator_activate as operator_activate_domain;
 use crate::withdraw_mode::provisioner_init as provisioner_init_domain;
 use crate::withdraw_mode::provisioner_rotate_cert as provisioner_rotate_cert_domain;
 use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
+use crate::HEARTBEAT_INTERVAL;
 use hashi_types::guardian::AttestedGuardianInfo;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResponse;
 use hashi_types::guardian::GuardianResult;
@@ -51,7 +54,9 @@ pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
 ) -> GuardianResult<GuardianResponse<GuardianInfo>> {
     enclave
-        .spawn_control_task((), info::get_guardian_info)
+        .spawn_control_task((), |enclave, state, input| {
+            Box::pin(info::get_guardian_info(enclave, state, input))
+        })
         .await
 }
 
@@ -60,7 +65,9 @@ pub async fn get_attested_guardian_info(
     enclave: Arc<Enclave>,
 ) -> GuardianResult<AttestedGuardianInfo> {
     enclave
-        .spawn_control_task((), info::get_attested_guardian_info)
+        .spawn_control_task((), |enclave, state, input| {
+            Box::pin(info::get_attested_guardian_info(enclave, state, input))
+        })
         .await
 }
 
@@ -69,7 +76,9 @@ pub async fn setup_new_key(
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
     enclave
-        .spawn_control_task(request, setup::setup_new_key)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(setup::setup_new_key(enclave, state, input))
+        })
         .await
 }
 
@@ -78,7 +87,9 @@ pub async fn rotate_kp_set(
     request: BatchProvisionerRotateKpSetRequest,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     enclave
-        .spawn_control_task(request, rotate::rotate_kp_set)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(rotate::rotate_kp_set(enclave, state, input))
+        })
         .await
 }
 
@@ -87,7 +98,9 @@ pub async fn confirm_ceremony(
     signed: KpSigned<CeremonyConfirmationRequest>,
 ) -> GuardianResult<CeremonyConfirmationResponse> {
     enclave
-        .spawn_control_task(signed, confirm::confirm_ceremony)
+        .spawn_control_task(signed, |enclave, state, input| {
+            Box::pin(confirm::confirm_ceremony(enclave, state, input))
+        })
         .await
 }
 
@@ -96,7 +109,19 @@ pub async fn operator_init(
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     enclave
-        .spawn_control_task(request, operator_init_domain::operator_init)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(async move {
+                operator_init_domain::operator_init(enclave.clone(), state, input).await?;
+                // Initialization commits once under this guard. Start the independent
+                // writer here so caller cancellation cannot skip heartbeat startup.
+                if state.mode() == Some(EnclaveMode::Withdraw) {
+                    drop(tokio::spawn(
+                        HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
+                    ));
+                }
+                Ok(())
+            })
+        })
         .await
 }
 
@@ -105,7 +130,11 @@ pub async fn provisioner_init(
     request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     enclave
-        .spawn_control_task(request, provisioner_init_domain::provisioner_init)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(provisioner_init_domain::provisioner_init(
+                enclave, state, input,
+            ))
+        })
         .await
 }
 
@@ -114,7 +143,11 @@ pub async fn operator_activate(
     request: OperatorActivateRequest,
 ) -> GuardianResult<()> {
     enclave
-        .spawn_control_task(request, operator_activate_domain::operator_activate)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(operator_activate_domain::operator_activate(
+                enclave, state, input,
+            ))
+        })
         .await
 }
 
@@ -123,10 +156,11 @@ pub async fn provisioner_rotate_cert(
     signed_request: KpSigned<ProvisionerRotateCertRequest>,
 ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
     enclave
-        .spawn_control_task(
-            signed_request,
-            provisioner_rotate_cert_domain::provisioner_rotate_cert,
-        )
+        .spawn_control_task(signed_request, |enclave, state, input| {
+            Box::pin(provisioner_rotate_cert_domain::provisioner_rotate_cert(
+                enclave, state, input,
+            ))
+        })
         .await
 }
 
@@ -135,7 +169,11 @@ pub async fn standard_withdrawal(
     request: HashiSigned<StandardWithdrawalRequest>,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     enclave
-        .spawn_control_task(request, standard_withdrawal_domain::standard_withdrawal)
+        .spawn_control_task(request, |enclave, state, input| {
+            Box::pin(standard_withdrawal_domain::standard_withdrawal(
+                enclave, state, input,
+            ))
+        })
         .await
 }
 
@@ -144,7 +182,9 @@ pub async fn update_committee(
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
     enclave
-        .spawn_control_task(signed, committee_update::update_committee)
+        .spawn_control_task(signed, |enclave, state, input| {
+            Box::pin(committee_update::update_committee(enclave, state, input))
+        })
         .await
 }
 
@@ -153,7 +193,11 @@ pub async fn update_committee_chain(
     transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
 ) -> GuardianResult<u64> {
     enclave
-        .spawn_control_task(transitions, committee_update::update_committee_chain)
+        .spawn_control_task(transitions, |enclave, state, input| {
+            Box::pin(committee_update::update_committee_chain(
+                enclave, state, input,
+            ))
+        })
         .await
 }
 
@@ -243,14 +287,18 @@ mod tests {
                 resume: first_resume_rx,
                 finished: first_finished_tx,
             },
-            pause_after_start,
+            |enclave, _state, task| Box::pin(pause_after_start(enclave, task)),
         ));
         first_started_rx.await.unwrap();
 
         // A second control task is accepted and spawned, but must wait for the
         // first task to release the control lock.
         let (second_started_tx, mut second_started_rx) = oneshot::channel();
-        let second = tokio::spawn(enclave.spawn_control_task(second_started_tx, signal_started));
+        let second = tokio::spawn(
+            enclave.spawn_control_task(second_started_tx, |enclave, _state, started| {
+                Box::pin(signal_started(enclave, started))
+            }),
+        );
         // Yield this test task to give Tokio an opportunity to poll the second
         // task and let it reach the control lock. This is a scheduling hint,
         // not proof that the second task reached the lock-waiting point.
@@ -267,5 +315,52 @@ mod tests {
         second_started_rx.await.unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_task_retains_state_after_caller_cancellation() {
+        use hashi_types::guardian::CeremonyStage;
+        use hashi_types::guardian::DeploymentConfig;
+
+        let enclave = test_enclave();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let caller = tokio::spawn(enclave.clone().spawn_control_task(
+            (),
+            move |enclave, state, ()| {
+                Box::pin(async move {
+                    enclave
+                        .config
+                        .set_deployment(DeploymentConfig::mock_for_testing())?;
+                    enclave
+                        .config
+                        .set_s3_logger(crate::test_utils::mock_logger())?;
+                    started_tx.send(()).unwrap();
+                    resume_rx.await.unwrap();
+                    state.advance_lifecycle_into(
+                        &enclave.config,
+                        CeremonyStage::OperatorInitialized.into(),
+                    )
+                })
+            },
+        ));
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        // Cancellation must neither release the state nor expose the partial install.
+        let mut info = std::pin::pin!(get_guardian_info(enclave));
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut info)
+            .await
+            .is_err());
+        resume_tx.send(()).unwrap();
+        let info = tokio::time::timeout(Duration::from_secs(1), info)
+            .await
+            .expect("accepted control task must finish")
+            .unwrap();
+        assert_eq!(
+            info.response.lifecycle,
+            CeremonyStage::OperatorInitialized.into()
+        );
     }
 }

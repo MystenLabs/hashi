@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::verify_hashi_cert;
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -21,16 +22,17 @@ const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
 pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
     let wid = *signed_request.message().wid();
     // 0) Validation
-    enclave.require_fully_initialized()?;
+    state.require_fully_initialized()?;
 
     // 1) Verify certificate
-    let committee = enclave.state.get_committee()?;
+    let committee = state.get_committee()?;
 
     info!("Verifying request certificate.");
     verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
@@ -47,7 +49,7 @@ pub async fn standard_withdrawal(
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-    let post_state = enclave.state.consume_from_limiter(
+    let post_state = state.consume_from_limiter(
         request.seq(),
         request.timestamp_secs(),
         consumed_amount_sats,
@@ -112,6 +114,7 @@ fn validate_request_timestamp(
 mod tests {
     use super::*;
     use crate::activate_enclave_for_testing;
+    use crate::task_spawner::standard_withdrawal;
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
     use hashi_types::bitcoin::BitcoinKeypair;
@@ -174,12 +177,24 @@ mod tests {
             .unwrap();
 
         enclave
-            .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+            .state
+            .lock()
+            .await
+            .advance_lifecycle_into(
+                &enclave.config,
+                WithdrawStage::ProvisionerInitialized.into(),
+            )
             .expect("test setup should advance provisioner init lifecycle");
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
+            .await
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
-        assert!(enclave.require_fully_initialized().is_ok());
+        assert!(enclave
+            .state
+            .lock()
+            .await
+            .require_fully_initialized()
+            .is_ok());
         (enclave, captures)
     }
 
@@ -236,7 +251,13 @@ mod tests {
         let (enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
         assert_eq!(
-            enclave.state.limiter_state().expect("activated").next_seq,
+            enclave
+                .state
+                .lock()
+                .await
+                .limiter_state()
+                .expect("activated")
+                .next_seq,
             0
         );
 
@@ -245,7 +266,13 @@ mod tests {
             .expect("withdrawal succeeds");
 
         assert_eq!(
-            enclave.state.limiter_state().expect("activated").next_seq,
+            enclave
+                .state
+                .lock()
+                .await
+                .limiter_state()
+                .expect("activated")
+                .next_seq,
             1
         );
     }

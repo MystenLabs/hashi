@@ -87,18 +87,27 @@ impl GuardianHarness {
         hashi_object_id: sui_sdk_types::Address,
     ) -> Result<()> {
         let config = InitConfig::from_parts_for_testing(limiter_config, self.network);
-        self.enclave.install_operator_init_for_testing(
-            OperatorInitTestArgs::default()
-                .with_config(config)
-                .with_genesis_bindings(hashi_object_id, master_pubkey),
-        );
+        self.enclave
+            .install_operator_init_for_testing(
+                OperatorInitTestArgs::default()
+                    .with_config(config)
+                    .with_genesis_bindings(hashi_object_id, master_pubkey),
+            )
+            .await;
         hashi_guardian::test_utils::finalize_enclave(&self.enclave)
+            .await
             .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
         activate_enclave_for_testing(&self.enclave, committee, limiter_config, limiter_state)
+            .await
             .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
-            self.enclave.require_fully_initialized().is_ok(),
+            self.enclave
+                .state
+                .lock()
+                .await
+                .require_fully_initialized()
+                .is_ok(),
             "guardian did not reach active state"
         );
         Ok(())

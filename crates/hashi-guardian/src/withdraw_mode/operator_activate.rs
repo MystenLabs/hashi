@@ -5,6 +5,7 @@
 //! withdrawal enclave by deriving live serving state from S3 logs and checking the
 //! operator-pinned `ActivationState` hash.
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -32,10 +33,11 @@ struct OAInstall {
 impl OAInstall {
     async fn from_request(
         enclave: &Enclave,
+        state: &EnclaveState,
         request: OperatorActivateRequest,
     ) -> GuardianResult<Self> {
         let limiter_config = enclave.limiter_config()?;
-        let initialization = enclave
+        let initialization = state
             .temporary_init_state()
             .map_err(|_| InvalidInputs("temporary initialization state not set".into()))?;
         let config_hash = initialization.config_hash;
@@ -90,20 +92,21 @@ impl OAInstall {
 
 pub async fn operator_activate(
     enclave: Arc<Enclave>,
+    state: &mut EnclaveState,
     request: OperatorActivateRequest,
 ) -> GuardianResult<()> {
     info!("/operator_activate - Received request.");
 
-    enclave.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
+    state.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
-    let install = OAInstall::from_request(&enclave, request).await?;
+    let install = OAInstall::from_request(&enclave, state, request).await?;
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing committee and rate limiter.");
-    commit_operator_activate(&enclave, install).await;
+    commit_operator_activate(&enclave, state, install).await;
 
     info!("Operator activation complete.");
     Ok(())
@@ -112,9 +115,8 @@ pub async fn operator_activate(
 /// Install the prepared serving state, durably mark OA complete, clear stale
 /// initialization inputs, and then expose the active lifecycle. This fail-stop
 /// phase never returns an error after mutation begins.
-async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
-    enclave
-        .state
+async fn commit_operator_activate(enclave: &Enclave, state: &mut EnclaveState, install: OAInstall) {
+    state
         .init(install.committee, install.rate_limiter)
         .expect("Unable to init activation state");
 
@@ -123,9 +125,9 @@ async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
         .await
         .expect("Unable to log operator activation");
 
-    enclave.clear_temporary_init_state();
+    state.clear_temporary_init_state();
 
-    enclave
-        .advance_lifecycle_into(WithdrawStage::Activated.into())
+    state
+        .advance_lifecycle_into(&enclave.config, WithdrawStage::Activated.into())
         .expect("operator_activate should advance a provisioner-initialized enclave");
 }

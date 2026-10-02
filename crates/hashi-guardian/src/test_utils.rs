@@ -402,9 +402,9 @@ impl Enclave {
 
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
-        enclave.install_operator_init_for_testing(args);
+        enclave.install_operator_init_for_testing(args).await;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lock().await.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
         enclave
@@ -412,7 +412,8 @@ impl Enclave {
 
     /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`'s
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
-    pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+    pub async fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+        let mut state = self.state.lock().await;
         self.config
             .set_deployment(args.config.deployment().clone())
             .unwrap();
@@ -424,12 +425,13 @@ impl Enclave {
             args.hashi_object_id,
             args.mpc_master_g,
         )
-        .install_into(self);
-        self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
+        .install_into(self, &mut state);
+        state
+            .advance_lifecycle_into(&self.config, WithdrawStage::OperatorInitialized.into())
             .expect("operator init test setup should advance lifecycle");
     }
 
-    pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
+    pub async fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
         enclave
             .config
@@ -437,7 +439,10 @@ impl Enclave {
             .unwrap();
         enclave.config.set_s3_logger(s3_logger).unwrap();
         enclave
-            .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            .state
+            .lock()
+            .await
+            .advance_lifecycle_into(&enclave.config, CeremonyStage::OperatorInitialized.into())
             .expect("ceremony operator init test setup should advance lifecycle");
         enclave
     }
@@ -480,14 +485,18 @@ pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<B
 /// BTC keypair. The live serving state is installed separately by OA helpers. The
 /// keypair may already exist from an earlier [`set_or_get_enclave_btc_pubkey`]
 /// (idempotent).
-pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
+pub async fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
+    let mut state = enclave.state.lock().await;
     let _ = set_or_get_enclave_btc_pubkey(enclave)?;
-    enclave.advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())?;
+    state.advance_lifecycle_into(
+        &enclave.config,
+        WithdrawStage::ProvisionerInitialized.into(),
+    )?;
     Ok(())
 }
 
 /// Install activation-derived live state for tests that need normal operation.
-pub fn activate_enclave_for_testing(
+pub async fn activate_enclave_for_testing(
     enclave: &Arc<Enclave>,
     committee: impl Into<RuntimeCommittee>,
     limiter_config: LimiterConfig,
@@ -495,9 +504,10 @@ pub fn activate_enclave_for_testing(
 ) -> GuardianResult<()> {
     let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
-    enclave.state.init(committee.into(), rate_limiter)?;
-    enclave.clear_temporary_init_state();
-    enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
+    let mut state = enclave.state.lock().await;
+    state.init(committee.into(), rate_limiter)?;
+    state.clear_temporary_init_state();
+    state.advance_lifecycle_into(&enclave.config, WithdrawStage::Activated.into())?;
     Ok(())
 }
 
@@ -522,15 +532,18 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
     )
     .await;
 
-    finalize_enclave(&enclave).expect("finalize_enclave should succeed on a fresh enclave");
+    finalize_enclave(&enclave)
+        .await
+        .expect("finalize_enclave should succeed on a fresh enclave");
     activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
+        .await
         .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
     assert_eq!(
-        enclave.lifecycle(),
+        enclave.state.lock().await.lifecycle(),
         WithdrawStage::Activated.into(),
         "test activation should reach the activated lifecycle"
     );
-    assert!(enclave.temporary_init_state().is_err());
+    assert!(enclave.state.lock().await.temporary_init_state().is_err());
     enclave
 }

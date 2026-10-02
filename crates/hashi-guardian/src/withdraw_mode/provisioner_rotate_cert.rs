@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::enclave::EnclaveState;
 use crate::Enclave;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
@@ -23,11 +24,12 @@ use tracing::info;
 
 pub async fn provisioner_rotate_cert(
     enclave: Arc<Enclave>,
+    state: &EnclaveState,
     signed_request: KpSigned<ProvisionerRotateCertRequest>,
 ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
     info!("/provisioner_rotate_cert - Received request.");
 
-    enclave.require_fully_initialized()?;
+    state.require_fully_initialized()?;
 
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request
@@ -112,6 +114,7 @@ async fn apply_cert_rotation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_spawner::provisioner_rotate_cert;
     use crate::test_utils::decrypt_kp_shares;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::mock_logger_capturing;
