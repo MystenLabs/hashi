@@ -8,17 +8,17 @@ use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_guardian::s3_reader::VerifiedLogRecord;
+use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
 use tracing::debug;
 
-impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
+impl TryFrom<VerifiedLogEntry> for MonitorWithdrawalEvent {
     type Error = anyhow::Error;
 
-    fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
+    fn try_from(log: VerifiedLogEntry) -> Result<Self, Self::Error> {
         let entry = log.into_entry();
         let timestamp_ms = entry.timestamp_ms();
         let withdrawal = entry
@@ -56,7 +56,7 @@ impl GuardianWithdrawalsPoller {
             hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
         Ok(Self {
             reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
-            cursor: S3HourDirectory::withdraw(start),
+            cursor: S3HourDirectory::withdraw(start)?,
         })
     }
 
@@ -76,7 +76,7 @@ impl GuardianWithdrawalsPoller {
         }
 
         let start = self.cursor.to_unix_seconds();
-        let next_cursor = self.cursor.next_dir();
+        let next_cursor = self.cursor.next_dir()?;
         let end = next_cursor.to_unix_seconds();
         let verified_logs = self.reader.read_logs_in_dir(&self.cursor).await?;
         // Withdrawal polling may replay historical buckets during an upgrade, so
@@ -106,7 +106,7 @@ impl GuardianWithdrawalsPoller {
     pub(crate) fn for_tests(config: &Config, start: UnixSeconds) -> Self {
         Self {
             reader: hashi_guardian::test_utils::mock_reader(config.deployment.clone()),
-            cursor: S3HourDirectory::withdraw(start),
+            cursor: S3HourDirectory::withdraw(start).expect("valid test timestamp"),
         }
     }
 }

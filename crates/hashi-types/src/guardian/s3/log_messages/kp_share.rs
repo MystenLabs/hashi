@@ -58,7 +58,12 @@ impl KpShareStateLogMessage {
 
     /// `kp-shares/{sharing_seq:020}/{cert_seq:020}.json` — the
     /// object key for one written KP share state.
-    pub fn object_key(sharing_seq: u64, cert_seq: u64) -> String {
+    pub fn object_key(&self) -> String {
+        Self::object_key_for_sequences(self.sharing_seq, self.cert_seq)
+    }
+
+    /// Construct the object key from sequence numbers before fetching the message.
+    pub fn object_key_for_sequences(sharing_seq: u64, cert_seq: u64) -> String {
         format!("{}{:020}.json", Self::object_key_dir(sharing_seq), cert_seq)
     }
 }

@@ -22,11 +22,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-/// Durable facts established by completed operator initialization. This schema
-/// is independent of the live GuardianInfo response and its lifecycle.
+/// Configuration recorded when operator initialization completes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorInitInfo {
-    /// Full installed policy, including current and historical PCR pins.
+    /// Installed deployment policy, including PCR pins.
     pub deployment: DeploymentConfig,
     /// KPs use this key to encrypt shares for the initialized session.
     #[serde(with = "hex::serde")]
@@ -40,19 +39,20 @@ pub enum OperatorInitMode {
     Withdraw(Box<WithdrawOperatorInitInfo>),
 }
 
-/// Withdraw-mode arming data, installed before the OI record is written.
+/// Withdraw configuration installed during OI.
+/// The Hashi object ID and MPC master come from persisted or supplied genesis state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WithdrawOperatorInitInfo {
     pub secret_sharing_instance: SecretSharingInstance,
     #[serde(with = "hex::serde")]
     pub config_hash: [u8; 32],
     pub limiter_config: LimiterConfig,
-    /// Immutable binding loaded from genesis or pinned for bootstrap authorization.
+    /// Hashi shared object this guardian serves.
     pub hashi_object_id: sui_sdk_types::Address,
-    /// MPC derivation master from the same genesis source.
+    /// MPC committee verifying key used for Bitcoin key derivation.
     pub mpc_master_g: HashiMasterG,
-    /// Present when OI supplies bootstrap genesis for KP authorization; absent
-    /// when immutable bindings are loaded from an established genesis record.
+    /// Supplied genesis digest for KP authorization during PI.
+    /// Absent when using the persisted genesis record.
     #[serde(with = "crate::guardian::serde::option_hex_32")]
     pub genesis_state_hash: Option<[u8; 32]>,
 }
@@ -65,8 +65,7 @@ impl OperatorInitInfo {
         }
     }
 
-    /// Compare completed OI facts with the live response immediately after OI.
-    /// Later-stage fields are checked on the live response, not stored in the log.
+    /// Check that live GuardianInfo matches this record and is at the post-OI stage.
     pub fn match_post_oi_guardian_info(&self, live_info: &GuardianInfo) -> anyhow::Result<()> {
         let expected_lifecycle = match &self.mode {
             OperatorInitMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
@@ -134,28 +133,25 @@ impl OperatorInitInfo {
     }
 }
 
-/// OI: operator_init
-/// PI: provisioner_init
-/// Init messages are expected to be logged in the following order:
-/// OIAttestationUnsigned -> OIGuardianInfo -> PIEnclaveFullyInitialized -> OAActivated.
+/// Initialization logs in order: OI attestation, OI completion, PI completion,
+/// then operator activation (OA). Ceremony mode stops after OI.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
-    /// Attestation and signing public key posted in /operator_init
+    /// Attestation and signing public key recorded during operator initialization (OI).
     OIAttestationUnsigned {
         attestation: NitroAttestation,
         #[serde(with = "crate::guardian::serde::guardian_pubkey")]
         signing_public_key: GuardianPubKey,
     },
-    /// Signed completion record for /operator_init. The signing key is bound
-    /// by the preceding attestation record; later PI/OA state is logged separately.
+    /// OI completion, signed by the key in the preceding attestation record.
     OIGuardianInfo(Box<OperatorInitInfo>),
-    /// Threshold reached — enclave BTC key reconstructed (happens once).
+    /// Provisioner initialization (PI) reconstructed the enclave BTC key.
     PIEnclaveFullyInitialized {
         sharing_seq: u64,
         share_ids: Vec<ShareID>,
         enclave_btc_pubkey: BitcoinPubkey,
     },
-    /// Operator activation succeeded and installed live serving state.
+    /// Operator activation installed serving state.
     OAActivated {
         #[serde(with = "hex::serde")]
         state_hash: [u8; 32],

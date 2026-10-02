@@ -95,30 +95,31 @@ pub struct S3HourDirectory {
 }
 
 impl S3HourDirectory {
-    pub fn new(prefix: &str, t: UnixSeconds) -> Self {
-        let unix_seconds = i64::try_from(t).expect("timestamp should fit i64");
-        let datetime =
-            OffsetDateTime::from_unix_timestamp(unix_seconds).expect("timestamp should be valid");
-        Self {
+    /// Return an error if `t` is outside the supported calendar range.
+    pub fn new(prefix: &str, t: UnixSeconds) -> anyhow::Result<Self> {
+        let unix_seconds = i64::try_from(t).context("timestamp exceeds i64 range")?;
+        let datetime = OffsetDateTime::from_unix_timestamp(unix_seconds)
+            .context("timestamp outside supported calendar range")?;
+        Ok(Self {
             prefix: prefix.to_string(),
             year: datetime.year(),
             month: u8::from(datetime.month()),
             day: datetime.day(),
             hour: datetime.hour(),
-        }
+        })
     }
 
     /// Construct the withdrawal-log directory containing `t`.
-    pub fn withdraw(t: UnixSeconds) -> Self {
+    pub fn withdraw(t: UnixSeconds) -> anyhow::Result<Self> {
         Self::new(S3_DIR_WITHDRAW, t)
     }
 
     /// Construct the heartbeat-log directory containing `t`.
-    pub fn heartbeat(t: UnixSeconds) -> Self {
+    pub fn heartbeat(t: UnixSeconds) -> anyhow::Result<Self> {
         Self::new(S3_DIR_HEARTBEAT, t)
     }
 
-    pub fn next_dir(&self) -> Self {
+    pub fn next_dir(&self) -> anyhow::Result<Self> {
         Self::new(
             &self.prefix,
             self.to_unix_seconds().saturating_add(SECONDS_PER_HOUR),
@@ -131,13 +132,14 @@ impl S3HourDirectory {
             &self.prefix,
             self.to_unix_seconds().saturating_sub(SECONDS_PER_HOUR),
         )
+        .expect("previous hour is within the validated calendar range")
     }
 
     /// The time at which writes to current S3 directory finish.
     /// DIR_WRITES_COMPLETION_DELAY accounts for any in-flight retries and clock skew.
     pub fn write_completion_time(&self) -> UnixSeconds {
-        self.next_dir()
-            .to_unix_seconds()
+        self.to_unix_seconds()
+            .saturating_add(SECONDS_PER_HOUR)
             .saturating_add(DIR_WRITES_COMPLETION_DELAY.as_secs())
     }
 
@@ -167,6 +169,7 @@ impl TryFrom<S3NumericDirectory> for S3HourDirectory {
             anyhow::bail!("expected a complete YYYY/MM/DD/HH directory, got {dir}");
         };
         let year = Year::try_from(*year).context("year out of range")?;
+        anyhow::ensure!(year >= 1970, "directory predates the Unix epoch: {dir}");
         let month = Month::try_from(*month).context("month out of range")?;
         let day = Day::try_from(*day).context("day out of range")?;
         let hour = Hour::try_from(*hour).context("hour out of range")?;
@@ -305,25 +308,44 @@ mod tests {
 
     #[test]
     fn test_epoch_directory_format() {
-        let dir = S3HourDirectory::new("heartbeat", 0);
+        let dir = S3HourDirectory::new("heartbeat", 0).unwrap();
         assert_eq!(dir.to_string(), "heartbeat/1970/01/01/00/");
     }
 
     #[test]
+    fn rejects_out_of_range_timestamps() {
+        for timestamp in [i64::MAX as u64, u64::MAX] {
+            assert!(S3HourDirectory::new("heartbeat", timestamp).is_err());
+        }
+        let max_timestamp = time::Date::MAX
+            .with_hms(23, 59, 59)
+            .unwrap()
+            .assume_utc()
+            .unix_timestamp() as u64;
+        let last_hour = S3HourDirectory::withdraw(max_timestamp).unwrap();
+        assert!(S3HourDirectory::withdraw(max_timestamp + 1).is_err());
+        assert!(last_hour.next_dir().is_err());
+        assert_eq!(
+            last_hour.write_completion_time(),
+            max_timestamp + 1 + DIR_WRITES_COMPLETION_DELAY.as_secs()
+        );
+    }
+
+    #[test]
     fn test_hour_and_day_rollover_format() {
-        let before_hour_boundary = S3HourDirectory::new("withdraw", 3_599);
+        let before_hour_boundary = S3HourDirectory::new("withdraw", 3_599).unwrap();
         assert_eq!(before_hour_boundary.to_string(), "withdraw/1970/01/01/00/");
 
-        let next_hour = S3HourDirectory::new("withdraw", 3_600);
+        let next_hour = S3HourDirectory::new("withdraw", 3_600).unwrap();
         assert_eq!(next_hour.to_string(), "withdraw/1970/01/01/01/");
 
-        let next_day = S3HourDirectory::new("withdraw", 86_400);
+        let next_day = S3HourDirectory::new("withdraw", 86_400).unwrap();
         assert_eq!(next_day.to_string(), "withdraw/1970/01/02/00/");
     }
 
     #[test]
     fn test_prev_dir_walks_back_and_saturates_at_epoch() {
-        let mut dir = S3HourDirectory::new("withdraw", 86_400 + 3_600);
+        let mut dir = S3HourDirectory::new("withdraw", 86_400 + 3_600).unwrap();
         assert_eq!(dir.to_string(), "withdraw/1970/01/02/01/");
         dir = dir.prev_dir();
         assert_eq!(dir.to_string(), "withdraw/1970/01/02/00/");
@@ -331,13 +353,13 @@ mod tests {
         assert_eq!(dir.to_string(), "withdraw/1970/01/01/23/");
 
         // Saturates at epoch.
-        let epoch = S3HourDirectory::new("withdraw", 0);
+        let epoch = S3HourDirectory::new("withdraw", 0).unwrap();
         assert_eq!(epoch.prev_dir(), epoch);
     }
 
     #[test]
     fn test_from_path_roundtrips_with_display() {
-        let dir = S3HourDirectory::new("withdraw", 1_700_000_000);
+        let dir = S3HourDirectory::new("withdraw", 1_700_000_000).unwrap();
         let displayed = dir.to_string();
         let parsed = S3HourDirectory::from_path(&displayed).expect("roundtrip");
         assert_eq!(parsed, dir);
@@ -349,6 +371,7 @@ mod tests {
 
     #[test]
     fn test_from_path_rejects_wrong_shape() {
+        assert!(S3HourDirectory::from_path("withdraw/1969/12/31/23/").is_err());
         assert!(S3HourDirectory::from_path("withdraw/2024/03/15/").is_err()); // missing hour
         assert!(S3HourDirectory::from_path("withdraw/2024/03/15/14/extra/").is_err()); // too many parts
         assert!(S3HourDirectory::from_path("withdraw/2024/13/15/14/").is_err()); // invalid month
@@ -381,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_next_dir_and_completion_time() {
-        let mut dir = S3HourDirectory::new("withdraw", 3_599);
+        let mut dir = S3HourDirectory::new("withdraw", 3_599).unwrap();
         assert_eq!(dir.to_string(), "withdraw/1970/01/01/00/");
         assert_eq!(dir.to_unix_seconds(), 0);
         assert_eq!(
@@ -391,7 +414,7 @@ mod tests {
 
         for i in 0..24 {
             assert_eq!(dir.to_string(), format!("withdraw/1970/01/01/{:02}/", i));
-            dir = dir.next_dir();
+            dir = dir.next_dir().unwrap();
         }
         assert_eq!(dir.to_string(), "withdraw/1970/01/02/00/");
     }

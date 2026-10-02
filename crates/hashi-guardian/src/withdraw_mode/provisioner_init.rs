@@ -403,7 +403,7 @@ mod tests {
             1,
             "provisioner init should write one record"
         );
-        let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        let record: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::Init(message)) = record.message() else {
             panic!("expected V1 init record");
         };
@@ -452,7 +452,7 @@ mod tests {
             .iter()
             .find(|(key, _)| key == &GenesisLogMessage::object_key())
             .expect("genesis provisioner init should write the genesis record");
-        let record: LogRecord = serde_json::from_slice(body).unwrap();
+        let record: VerifiableLogEntry = serde_json::from_slice(body).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::Genesis(message)) = record.message() else {
             panic!("expected V1 genesis record");
         };

@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The versioned `LogMessage` family the enclave emits. The `LogRecord` wrapper
+//! The versioned `LogMessage` family the enclave emits. The `VerifiableLogEntry` wrapper
 //! that carries these to S3 lives in `super::log_record`.
 
 use super::config::S3ObjectLockPolicy;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 
-/// The wire message stored in a [`crate::guardian::log::LogRecord`]. Its version is serialized
+/// The wire message stored in a [`crate::guardian::log::VerifiableLogEntry`]. Its version is serialized
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
 ///
@@ -109,19 +109,17 @@ impl LogMessageV1 {
         }
     }
 
-    fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
-        match self {
-            Self::Heartbeat(message) => message.object_key(session_id, timestamp_ms),
+    fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> anyhow::Result<String> {
+        Ok(match self {
+            Self::Heartbeat(message) => message.object_key(session_id, timestamp_ms)?,
             Self::Init(message) => message.object_key(session_id),
-            Self::Withdrawal(message) => message.object_key(timestamp_ms),
+            Self::Withdrawal(message) => message.object_key(timestamp_ms)?,
             Self::Ceremony(message) => message.object_key(),
-            Self::KpShareState(message) => {
-                KpShareStateLogMessage::object_key(message.sharing_seq, message.cert_seq)
-            }
+            Self::KpShareState(message) => message.object_key(),
             Self::CommitteeUpdate(message) => message.object_key(),
             Self::Genesis(_) => GenesisLogMessage::object_key(),
             Self::CeremonyProposal(_) => CeremonyProposalLogMessage::object_key(session_id),
-        }
+        })
     }
 }
 
@@ -216,7 +214,11 @@ impl VersionedLogMessage {
         }
     }
 
-    pub(super) fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
+    pub(super) fn object_key(
+        &self,
+        session_id: &str,
+        timestamp_ms: UnixMillis,
+    ) -> anyhow::Result<String> {
         match self {
             Self::V1(message) => message.object_key(session_id, timestamp_ms),
         }

@@ -3,7 +3,7 @@
 
 //! S3 log-record wire format and validation.
 //!
-//! A [`LogRecord`] carries a [`VersionedLogMessage`] and its S3 routing
+//! A [`VerifiableLogEntry`] carries a [`VersionedLogMessage`] and its S3 routing
 //! context. Signed records carry a Guardian signature over their [`LogEntry`].
 //! The one permitted unsigned entry carries the OI attestation that establishes
 //! the Guardian signing key and must be authenticated separately. Deserialization
@@ -31,7 +31,7 @@ use serde_json::Value;
 use std::time::Duration;
 use std::time::SystemTime;
 
-/// Routing context and versioned payload carried by a [`LogRecord`].
+/// Routing context and versioned payload carried by a [`VerifiableLogEntry`].
 ///
 /// For signed records, field order defines the BCS signing format.
 #[derive(Debug, Serialize)]
@@ -56,7 +56,7 @@ pub struct LogEntry {
 /// routing context is canonical. The record remains unauthenticated until its
 /// applicable signature and attestation checks have been performed.
 #[derive(Debug)]
-pub enum LogRecord {
+pub enum VerifiableLogEntry {
     /// An entry carrying a Guardian signature.
     Signed(GuardianSigned<LogEntry>),
     /// The OI-attestation entry, which is authenticated separately.
@@ -64,7 +64,7 @@ pub enum LogRecord {
 }
 
 #[derive(Deserialize)]
-struct LogRecordWire {
+struct VerifiableLogEntryWire {
     schema_version: u64,
     object_key: String,
     session_id: SessionID,
@@ -75,7 +75,7 @@ struct LogRecordWire {
 }
 
 #[derive(Serialize)]
-struct LogRecordWireRef<'a> {
+struct VerifiableLogEntryWireRef<'a> {
     schema_version: u64,
     object_key: &'a str,
     session_id: &'a SessionID,
@@ -85,7 +85,7 @@ struct LogRecordWireRef<'a> {
     signature: Option<GuardianSignature>,
 }
 
-impl Serialize for LogRecord {
+impl Serialize for VerifiableLogEntry {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -95,7 +95,7 @@ impl Serialize for LogRecord {
             Self::Unsigned(unsigned) => (unsigned, None),
         };
 
-        LogRecordWireRef {
+        VerifiableLogEntryWireRef {
             schema_version: data.schema_version,
             object_key: &data.object_key,
             session_id: &data.session_id,
@@ -107,12 +107,12 @@ impl Serialize for LogRecord {
     }
 }
 
-impl<'de> Deserialize<'de> for LogRecord {
+impl<'de> Deserialize<'de> for VerifiableLogEntry {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = LogRecordWire::deserialize(deserializer)?;
+        let raw = VerifiableLogEntryWire::deserialize(deserializer)?;
         Self::try_from_wire(raw).map_err(D::Error::custom)
     }
 }
@@ -172,7 +172,15 @@ impl LogEntry {
     }
 
     fn validate_object_key(&self) -> GuardianResult<()> {
-        let expected = self.message.object_key(&self.session_id, self.timestamp_ms);
+        let expected = self
+            .message
+            .object_key(&self.session_id, self.timestamp_ms)
+            .map_err(|e| {
+                InvalidS3Log(format!(
+                    "invalid log timestamp {}: {e:#}",
+                    self.timestamp_ms
+                ))
+            })?;
         if self.object_key != expected {
             return Err(InvalidS3Log(format!(
                 "non-canonical S3 object key: got {}, expected {expected}",
@@ -208,7 +216,7 @@ impl LogEntry {
     }
 }
 
-impl LogRecord {
+impl VerifiableLogEntry {
     /// Construct a current-schema record using the current time.
     ///
     /// The OI-attestation message is emitted unsigned; every other message is
@@ -232,7 +240,9 @@ impl LogRecord {
         timestamp_ms: UnixMillis,
     ) -> Self {
         let message = VersionedLogMessage::V1(message);
-        let object_key = message.object_key(&session_id, timestamp_ms);
+        let object_key = message
+            .object_key(&session_id, timestamp_ms)
+            .expect("writer timestamp must be within the supported calendar range");
         let is_unsigned = message.is_unsigned();
         let data = LogEntry::new(session_id, object_key, message, timestamp_ms)
             .expect("writer-constructed log entry must be intrinsically valid");
@@ -244,7 +254,7 @@ impl LogRecord {
     }
 
     /// Validate and construct a record from its untrusted flat wire format.
-    fn try_from_wire(raw: LogRecordWire) -> GuardianResult<Self> {
+    fn try_from_wire(raw: VerifiableLogEntryWire) -> GuardianResult<Self> {
         let message = match raw.schema_version {
             VersionedLogMessage::SCHEMA_VERSION_V1 => {
                 serde_json::from_value::<LogMessageV1>(raw.message)
@@ -417,9 +427,11 @@ mod tests {
         SessionID::from_signing_pubkey(&GuardianSignKeyPair::from([13u8; 32]).verification_key())
     }
 
-    fn signed_heartbeat(timestamp_ms: UnixMillis) -> (String, LogRecord, GuardianSignKeyPair) {
+    fn signed_heartbeat(
+        timestamp_ms: UnixMillis,
+    ) -> (String, VerifiableLogEntry, GuardianSignKeyPair) {
         let signing_key = GuardianSignKeyPair::from([13u8; 32]);
-        let record = LogRecord::new_at_timestamp(
+        let record = VerifiableLogEntry::new_at_timestamp(
             heartbeat_session_id(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
@@ -600,10 +612,10 @@ mod tests {
         GuardianSignKeyPair::from([21u8; 32])
     }
 
-    fn dummy_log_record(message: LogMessage) -> LogRecord {
+    fn dummy_log_record(message: LogMessage) -> VerifiableLogEntry {
         let signing_key = fixture_signing_key();
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        LogRecord::new_at_timestamp(session_id, message, &signing_key, 1_700_000_000_000)
+        VerifiableLogEntry::new_at_timestamp(session_id, message, &signing_key, 1_700_000_000_000)
     }
 
     fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -627,13 +639,32 @@ mod tests {
     }
 
     #[test]
+    fn hourly_log_deserialization_rejects_out_of_range_timestamps() {
+        for message in dummy_log_messages() {
+            if !matches!(
+                &message,
+                LogMessage::Heartbeat(_) | LogMessage::Withdrawal(_)
+            ) {
+                continue;
+            }
+            let mut json = serde_json::to_value(dummy_log_record(message)).unwrap();
+            json["timestamp_ms"] = serde_json::json!(u64::MAX);
+            let error = serde_json::from_value::<VerifiableLogEntry>(json).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid log timestamp"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn dummy_log_fixtures_round_trip_and_verify() {
         let signing_key = fixture_signing_key();
         for message in dummy_log_messages() {
             let name = fixture_name(&message);
             let expected = dummy_log_record(message);
             let json = std::fs::read_to_string(fixture_path(name)).unwrap();
-            let decoded: LogRecord = serde_json::from_str(&json)
+            let decoded: VerifiableLogEntry = serde_json::from_str(&json)
                 .unwrap_or_else(|error| panic!("{name} failed to deserialize: {error}"));
             assert_eq!(decoded.data().schema_version(), 1, "{name}");
             assert_eq!(
@@ -660,7 +691,7 @@ mod tests {
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         for message in dummy_log_messages() {
             let name = fixture_name(&message);
-            let record = LogRecord::new_at_timestamp(
+            let record = VerifiableLogEntry::new_at_timestamp(
                 session_id.clone(),
                 message,
                 &signing_key,
@@ -668,7 +699,7 @@ mod tests {
             );
             let object_key = record.object_key().to_owned();
             let json = serde_json::to_vec(&record).unwrap();
-            let decoded: LogRecord = serde_json::from_slice(&json)
+            let decoded: VerifiableLogEntry = serde_json::from_slice(&json)
                 .unwrap_or_else(|error| panic!("{name} failed to deserialize: {error}"));
 
             assert_eq!(
@@ -703,7 +734,7 @@ mod tests {
             armored_ciphertext: "ciphertext".into(),
         }])
         .unwrap();
-        let record = LogRecord::new_at_timestamp(
+        let record = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
@@ -724,7 +755,7 @@ mod tests {
             })
         );
 
-        let decoded: LogRecord = serde_json::from_value(json).unwrap();
+        let decoded: VerifiableLogEntry = serde_json::from_value(json).unwrap();
         assert!(matches!(
             decoded.message(),
             VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
@@ -744,7 +775,7 @@ mod tests {
             armored_ciphertext: "ciphertext".into(),
         }])
         .unwrap();
-        let record = LogRecord::new_at_timestamp(
+        let record = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
@@ -762,7 +793,7 @@ mod tests {
             },
         });
 
-        assert!(serde_json::from_value::<LogRecord>(json).is_err());
+        assert!(serde_json::from_value::<VerifiableLogEntry>(json).is_err());
     }
 
     #[test]
@@ -794,9 +825,9 @@ mod tests {
         );
         let mut malformed = json.clone();
         malformed["signature"] = "00".into();
-        assert!(serde_json::from_value::<LogRecord>(malformed).is_err());
+        assert!(serde_json::from_value::<VerifiableLogEntry>(malformed).is_err());
 
-        let from_s3: LogRecord = serde_json::from_value(json).unwrap();
+        let from_s3: VerifiableLogEntry = serde_json::from_value(json).unwrap();
         from_s3
             .validate(Some(&signing_key.verification_key()))
             .expect("serialized object key should be covered by the signature");
@@ -826,7 +857,7 @@ mod tests {
             data.timestamp_ms,
         ))
         .unwrap();
-        let LogRecord::Signed(signed) = log else {
+        let VerifiableLogEntry::Signed(signed) = log else {
             panic!("heartbeat must be signed");
         };
 
@@ -839,7 +870,7 @@ mod tests {
         let mut json = serde_json::to_value(log).unwrap();
         for version in [0, 2, 3] {
             json["schema_version"] = serde_json::json!(version);
-            let err = serde_json::from_value::<LogRecord>(json.clone()).unwrap_err();
+            let err = serde_json::from_value::<VerifiableLogEntry>(json.clone()).unwrap_err();
             assert!(
                 err.to_string()
                     .contains(&format!("unsupported log schema version: {version}"))
@@ -853,7 +884,7 @@ mod tests {
         let mut json = serde_json::to_value(log).unwrap();
         json["signature"] = serde_json::Value::Null;
 
-        let err = serde_json::from_value::<LogRecord>(json).unwrap_err();
+        let err = serde_json::from_value::<VerifiableLogEntry>(json).unwrap_err();
         assert!(err.to_string().contains("missing log signature"), "{err}");
     }
 
@@ -861,7 +892,7 @@ mod tests {
     fn unsigned_message_with_signature_is_rejected_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let unsigned = LogRecord::new_at_timestamp(
+        let unsigned = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -875,7 +906,7 @@ mod tests {
         let mut json = serde_json::to_value(unsigned).unwrap();
         json["signature"] = signature;
 
-        let err = serde_json::from_value::<LogRecord>(json).unwrap_err();
+        let err = serde_json::from_value::<VerifiableLogEntry>(json).unwrap_err();
         assert!(
             err.to_string()
                 .contains("unsigned log record must not contain a signature"),
@@ -886,7 +917,7 @@ mod tests {
     #[test]
     fn signed_log_rejects_tampered_key_derivation_fields() {
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
-        let mut tampered: LogRecord =
+        let mut tampered: VerifiableLogEntry =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         tampered.data_mut().message = LogMessage::Heartbeat(HeartbeatLogMessage::new(43)).into();
         tampered.data_mut().object_key = format!(
@@ -905,7 +936,7 @@ mod tests {
     fn signed_log_binds_session_even_when_key_does_not_contain_it() {
         let signing_key = GuardianSignKeyPair::from([19u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee: crate::move_types::Committee {
@@ -920,7 +951,7 @@ mod tests {
             &signing_key,
             1_700_000_000_000,
         );
-        let mut aliased: LogRecord =
+        let mut aliased: VerifiableLogEntry =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         aliased.data_mut().session_id = "aliased-session".into();
         aliased.data_mut().object_key = GenesisLogMessage::object_key();
@@ -936,7 +967,7 @@ mod tests {
     fn unsigned_log_rejects_replay_at_another_s3_key_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -948,7 +979,7 @@ mod tests {
 
         let mut json = serde_json::to_value(log).unwrap();
         json["object_key"] = "init/copied-attestation.json".into();
-        let err = serde_json::from_value::<LogRecord>(json)
+        let err = serde_json::from_value::<VerifiableLogEntry>(json)
             .expect_err("unsigned record copied to another S3 key must be rejected");
 
         assert!(format!("{err:?}").contains("non-canonical S3 object key"));
@@ -958,7 +989,7 @@ mod tests {
     fn unsigned_attestation_rejects_session_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([15u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -970,7 +1001,7 @@ mod tests {
         let mut json = serde_json::to_value(log).unwrap();
         json["session_id"] = "forged-session".into();
         json["object_key"] = "init/forged-session/01-oi-attestation-unsigned.json".into();
-        let err = serde_json::from_value::<LogRecord>(json)
+        let err = serde_json::from_value::<VerifiableLogEntry>(json)
             .expect_err("attestation session ID must come from its signing public key");
 
         assert!(format!("{err:?}").contains("session ID mismatch"));
@@ -980,7 +1011,7 @@ mod tests {
     fn object_key_for_init_attestation_unsigned() {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -1002,7 +1033,7 @@ mod tests {
             message["signing_public_key"],
             hex::encode(signing_key.verification_key().as_bytes())
         );
-        let from_json: LogRecord = serde_json::from_value(json).unwrap();
+        let from_json: VerifiableLogEntry = serde_json::from_value(json).unwrap();
         assert_eq!(from_json.object_key(), log.object_key());
     }
 
@@ -1010,7 +1041,7 @@ mod tests {
     fn operator_activation_json_encodes_hashes_as_hex() {
         let signing_key = GuardianSignKeyPair::from([20u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [0xab; 32],
@@ -1032,7 +1063,7 @@ mod tests {
         assert_eq!(message["state_hash"], hex::encode([0xab; 32]));
         assert_eq!(message["config_hash"], hex::encode([0xcd; 32]));
 
-        let from_json: LogRecord = serde_json::from_value(json).unwrap();
+        let from_json: VerifiableLogEntry = serde_json::from_value(json).unwrap();
         from_json
             .validate(Some(&signing_key.verification_key()))
             .unwrap();
@@ -1045,7 +1076,7 @@ mod tests {
         let seq = 42_u64;
         let timestamp_ms = 1_700_000_000_000;
 
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id.clone(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(seq)),
             &signing_key,
@@ -1062,7 +1093,7 @@ mod tests {
     fn object_key_and_lock_for_kp_share_state() {
         let session_id: SessionID = "session-d".into();
         let signing_key = GuardianSignKeyPair::from([10u8; 32]);
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
@@ -1101,7 +1132,7 @@ mod tests {
             },
             RotateKpSetResponse::mock_for_testing().encrypted_shares,
         );
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::CeremonyProposal(Box::new(proposal)),
             &signing_key,
@@ -1121,7 +1152,7 @@ mod tests {
     fn object_key_and_lock_for_genesis_is_fixed() {
         let session_id: SessionID = "session-g".into();
         let signing_key = GuardianSignKeyPair::from([12u8; 32]);
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee: crate::move_types::Committee {
@@ -1159,7 +1190,7 @@ mod tests {
         let request_data: StandardWithdrawalRequestWire = request_data.into();
         let seq = request_data.seq;
 
-        let log = LogRecord::new_at_timestamp(
+        let log = VerifiableLogEntry::new_at_timestamp(
             session_id.clone(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
