@@ -4,6 +4,7 @@
 use super::LEADER_TASK_TIMEOUT;
 use super::LeaderService;
 use super::parse_member_signature;
+use super::retry_peer_call;
 use crate::Hashi;
 use crate::deposits::ApprovedDepositError;
 use crate::deposits::UnapprovedDepositError;
@@ -621,18 +622,21 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting deposit confirmation signature");
 
-        let Some(mut rpc_client) = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-        else {
-            error!(
-                "Cannot find client for validator address: {:?}",
-                validator_address
-            );
-            return Err(NoSignature::Failed);
-        };
-
-        let response = match rpc_client.sign_deposit_confirmation(proto_request).await {
+        let response = match retry_peer_call(
+            validator_address,
+            "deposit confirmation signature",
+            || {
+                inner
+                    .onchain_state()
+                    .bridge_service_client(&validator_address)
+            },
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_deposit_confirmation(request).await }
+            },
+        )
+        .await
+        {
             Ok(response) => response,
             Err(status) if is_already_approved_refusal(&status) => {
                 debug!("{validator_address} reports the deposit already approved");
