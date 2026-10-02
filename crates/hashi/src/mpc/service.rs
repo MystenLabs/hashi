@@ -414,11 +414,6 @@ impl MpcService {
     /// path, a manual abort observed from inside `handle_reconfig`, or a
     /// completion that itself overran the boundary).
     async fn drive_reconfig(&self, epoch: u64) {
-        // An abort keeps the epoch: stagger again rather than fire every
-        // overdue seal at once.
-        if self.get_pending_epoch_change().is_some() {
-            self.pending_seals.lock().unwrap().clear_schedule();
-        }
         if !self.reconfig_window_closed(epoch) {
             info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;

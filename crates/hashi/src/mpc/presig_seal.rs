@@ -29,6 +29,7 @@ const SUBMIT_STAGGER: Duration = Duration::from_secs(5);
 const SEAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(90);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const OVERDUE_LIMIT: Duration = Duration::from_secs(30);
 
 type SealKey = (u64, u32);
 
@@ -58,7 +59,7 @@ enum Outcome {
 }
 
 impl PendingSeals {
-    pub(crate) fn insert_if_absent(
+    fn insert_if_absent(
         &mut self,
         message: PresigDealerSetMessage,
         signer: Address,
@@ -75,22 +76,20 @@ impl PendingSeals {
             });
     }
 
-    pub(crate) fn clear_schedule(&mut self) {
-        for seal in self.entries.values_mut() {
-            seal.next_attempt = None;
-            seal.backoff = INITIAL_BACKOFF;
-        }
-    }
-
     fn prune(&mut self, epoch: u64) {
         self.entries
             .retain(|(entry_epoch, _), _| *entry_epoch >= epoch);
     }
 
-    fn has_open(&self, epoch: u64) -> bool {
+    fn has_due(&self, epoch: u64, now: Instant) -> bool {
         self.entries
             .range((epoch, 0)..=(epoch, u32::MAX))
-            .any(|(_, seal)| !seal.done)
+            .any(|(_, seal)| {
+                !seal.done
+                    && seal
+                        .next_attempt
+                        .is_none_or(|next_attempt| next_attempt <= now)
+            })
     }
 
     fn select_due(
@@ -110,6 +109,13 @@ impl PendingSeals {
                 seal.done = true;
                 seal.signatures.clear();
                 continue;
+            }
+            if seal
+                .next_attempt
+                .is_some_and(|next_attempt| now > next_attempt + OVERDUE_LIMIT)
+            {
+                seal.next_attempt = None;
+                seal.backoff = INITIAL_BACKOFF;
             }
             let next_attempt = *seal
                 .next_attempt
@@ -209,10 +215,11 @@ fn sign(
 pub(crate) async fn seal_due(inner: &Arc<Hashi>, pending: &Mutex<PendingSeals>) {
     let onchain_state = inner.onchain_state();
     let epoch = onchain_state.epoch();
+    let now = Instant::now();
     {
-        let mut pending = pending.lock().unwrap();
-        pending.prune(epoch);
-        if !pending.has_open(epoch) {
+        let mut seals = pending.lock().unwrap();
+        seals.prune(epoch);
+        if !seals.has_due(epoch, now) {
             return;
         }
     }
@@ -231,7 +238,7 @@ pub(crate) async fn seal_due(inner: &Arc<Hashi>, pending: &Mutex<PendingSeals>) 
     let due = pending
         .lock()
         .unwrap()
-        .select_due(epoch, Instant::now(), &chain_seals, stagger);
+        .select_due(epoch, now, &chain_seals, stagger);
     let Some(due) = due else {
         return;
     };
@@ -267,10 +274,16 @@ async fn attempt(
     let (epoch, batch_index) = (message.epoch, message.batch_index);
     let mut aggregator =
         committee.signature_aggregator(inner.config.hashi_ids().hashi_object_id, message.clone());
-    let collected: HashSet<Address> = due.signatures.iter().map(|(signer, _)| *signer).collect();
+    let mut collected = HashSet::new();
     for (signer, signature) in due.signatures {
-        if let Err(e) = aggregator.add_signature_from(signer, signature) {
-            debug!("Kept PresigDealerSet signature from {signer} no longer verifies: {e}");
+        match aggregator.add_signature_from(signer, signature) {
+            Ok(()) => {
+                collected.insert(signer);
+            }
+            Err(e) => warn!(
+                "Kept PresigDealerSet signature from {signer} for epoch {epoch} batch \
+                 {batch_index} was not accepted: {e}"
+            ),
         }
     }
     let required = certificate_threshold(committee.total_weight());
@@ -305,7 +318,7 @@ async fn attempt(
                 });
             match added {
                 Ok(signature) => accepted.push((address, signature)),
-                Err(_) => rejected.push(address),
+                Err(reason) => rejected.push((address, reason)),
             }
         }
         let reached = aggregator.weight();
@@ -313,10 +326,16 @@ async fn attempt(
             .lock()
             .unwrap()
             .add_signatures((epoch, batch_index), accepted);
+        if !rejected.is_empty() {
+            info!(
+                "Rejected PresigDealerSet signatures for epoch {epoch} batch {batch_index}: \
+                 {rejected:?}"
+            );
+        }
         if reached < required {
             info!(
                 "Presig batch {batch_index} of epoch {epoch} is not sealed yet: signatures reach \
-                 weight {reached} of {required}; rejected from {rejected:?}"
+                 weight {reached} of {required}"
             );
             return Outcome::Failed;
         }
@@ -482,6 +501,8 @@ mod tests {
                 .select_due(5, t0 + secs(9), &no_seals, stagger)
                 .is_none()
         );
+        assert!(!pending.has_due(5, t0 + secs(9)));
+        assert!(pending.has_due(5, t0 + secs(10)));
 
         let due = pending
             .select_due(5, t0 + secs(10), &no_seals, stagger)
@@ -535,18 +556,19 @@ mod tests {
                 .select_due(5, t0 + secs(60), &sealed(1), stagger)
                 .is_none()
         );
-        assert!(!pending.has_open(5));
+        assert!(!pending.has_due(5, t0 + secs(1000)));
         assert!(pending.entries[&(5, 1)].signatures.is_empty());
 
         pending.prune(6);
         assert!(pending.entries.keys().all(|(epoch, _)| *epoch == 7));
-        assert!(!pending.has_open(6));
+        assert!(!pending.has_due(6, t0 + secs(1000)));
         assert!(
             pending
                 .select_due(6, t0 + secs(100), &no_seals, stagger)
                 .is_none()
         );
         assert!(pending.entries[&(7, 0)].next_attempt.is_none());
+        assert!(pending.has_due(7, t0 + secs(100)));
         assert!(
             pending
                 .select_due(7, t0 + secs(100), &no_seals, stagger)
@@ -560,29 +582,46 @@ mod tests {
     }
 
     #[test]
-    fn clear_schedule_staggers_again() {
+    fn overdue_entry_staggers_again() {
         let stagger = |_| secs(10);
         let no_seals = BTreeMap::new();
         let mut pending = PendingSeals::default();
         pending.insert_if_absent(message(5, 0), Address::new([1; 32]), signature());
         let t0 = Instant::now();
         assert!(pending.select_due(5, t0, &no_seals, stagger).is_none());
-        pending.finish((5, 0), Outcome::FailedInFlight, t0, secs(10));
+        assert!(
+            pending
+                .select_due(5, t0 + secs(40), &no_seals, stagger)
+                .is_some()
+        );
+        pending.finish((5, 0), Outcome::FailedInFlight, t0 + secs(40), secs(10));
+        assert!(
+            pending
+                .select_due(5, t0 + secs(79), &no_seals, stagger)
+                .is_none()
+        );
 
-        pending.clear_schedule();
         assert!(
             pending
-                .select_due(5, t0 + secs(100), &no_seals, stagger)
+                .select_due(5, t0 + secs(200), &no_seals, stagger)
                 .is_none()
         );
         assert!(
             pending
-                .select_due(5, t0 + secs(109), &no_seals, stagger)
+                .select_due(5, t0 + secs(209), &no_seals, stagger)
+                .is_none()
+        );
+        let due = pending.select_due(5, t0 + secs(210), &no_seals, stagger);
+        assert!(due.is_some());
+        pending.finish((5, 0), Outcome::Failed, t0 + secs(210), secs(10));
+        assert!(
+            pending
+                .select_due(5, t0 + secs(220), &no_seals, stagger)
                 .is_none()
         );
         assert!(
             pending
-                .select_due(5, t0 + secs(110), &no_seals, stagger)
+                .select_due(5, t0 + secs(221), &no_seals, stagger)
                 .is_some()
         );
     }
