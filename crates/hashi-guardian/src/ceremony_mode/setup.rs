@@ -126,16 +126,16 @@ mod tests {
             let logger = crate::test_utils::mock_logger_with_layout([format!(
                 "ceremony/{sharing_seq:020}.json"
             )]);
-            let enclave = Enclave::create_operator_initialized_ceremony(logger);
+            let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
             let (request, _) = mock_setup_new_key_request();
-            let error = setup_new_key(enclave.clone(), request).await.unwrap_err();
+            let error = setup_new_key(&mut enclave, request).await.unwrap_err();
             assert!(matches!(error, GuardianError::InvalidInputs(message)
                 if message.contains("completed ceremony already exists")));
             assert_eq!(
-                enclave.lifecycle(),
+                enclave.state.lifecycle(),
                 CeremonyStage::OperatorInitialized.into()
             );
-            assert!(enclave.pending_ceremony().is_err());
+            assert!(enclave.state.pending_ceremony().is_err());
         }
     }
 
@@ -144,9 +144,9 @@ mod tests {
         let logger = crate::test_utils::mock_logger_with_layout([
             "kp-shares/00000000000000000000/00000000000000000000.json".to_string(),
         ]);
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
         let (request, _) = mock_setup_new_key_request();
-        let response = setup_new_key(enclave.clone(), request)
+        let response = setup_new_key(&mut enclave, request)
             .await
             .unwrap()
             .verify_into_data(&enclave.signing_pubkey())
@@ -158,13 +158,13 @@ mod tests {
     #[tokio::test]
     async fn test_setup_new_key() {
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
         let verification_key = &enclave.signing_pubkey();
         let (request, secret_keys) = mock_setup_new_key_request();
-        let resp = setup_new_key(enclave.clone(), request).await.unwrap();
+        let resp = setup_new_key(&mut enclave, request).await.unwrap();
         let validated_resp = resp.verify_into_data(verification_key).unwrap().response;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
 

@@ -139,7 +139,7 @@ mod tests {
     const INITIAL_CERT_SEQ: u64 = 7;
 
     fn signed_rotate_request(
-        enclave: &Arc<Enclave>,
+        enclave: &Enclave,
         new_cert: AttestedKpCert,
         share: &Share,
         signer_cert: &AttestedKpCert,
@@ -158,7 +158,7 @@ mod tests {
     }
 
     async fn initialized_rotation_context() -> (
-        Arc<Enclave>,
+        Enclave,
         Vec<Share>,
         CeremonyState,
         crate::test_utils::MockKpSecretKeys,
@@ -181,12 +181,11 @@ mod tests {
         };
 
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(OperatorInitTestArgs {
+        let mut enclave = Enclave::create_operator_initialized_with(OperatorInitTestArgs {
             s3_logger: logger,
             ceremony_state: ceremony_state.clone(),
             ..Default::default()
-        })
-        .await;
+        });
         enclave
             .config
             .set_btc_keypair(
@@ -207,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotates_only_authenticated_signers_share_and_rejects_another_share() {
-        let (enclave, shares, ceremony_state, mut secret_keys, captures, cert_roster) =
+        let (mut enclave, shares, ceremony_state, mut secret_keys, captures, cert_roster) =
             initialized_rotation_context().await;
         let old_encrypted_shares = ceremony_state.encrypted_shares.clone();
         let original_commitments = ceremony_state.secret_sharing_instance.commitments().clone();
@@ -237,7 +236,7 @@ mod tests {
             .verify_into_data()
             .expect("old certificate should authenticate the request");
         let error = apply_cert_rotation(
-            &enclave,
+            &mut enclave,
             wrong_signer_fingerprint,
             wrong_share_request,
             ceremony_state.clone(),
@@ -253,10 +252,14 @@ mod tests {
         let request = signed_request
             .verify_into_data()
             .expect("old certificate should authenticate the request");
-        let signed_response =
-            apply_cert_rotation(&enclave, authenticated_fingerprint, request, ceremony_state)
-                .await
-                .expect("the committed recipient should rotate its sole certificate");
+        let signed_response = apply_cert_rotation(
+            &mut enclave,
+            authenticated_fingerprint,
+            request,
+            ceremony_state,
+        )
+        .await
+        .expect("the committed recipient should rotate its sole certificate");
         let response = signed_response
             .verify_into_data(&enclave.signing_pubkey())
             .expect("rotation response should be signed by the enclave")
@@ -314,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_wrong_lifecycle_before_verifying_signature() {
-        let enclave = Enclave::create_with_random_keys();
+        let mut enclave = Enclave::create_with_random_keys();
         let request = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
             "mock-session".into(),
             0,
@@ -333,7 +336,7 @@ mod tests {
             "invalid signature".into(),
         );
 
-        let err = provisioner_rotate_cert(enclave, signed_request)
+        let err = provisioner_rotate_cert(&mut enclave, signed_request)
             .await
             .expect_err("wrong lifecycle should be rejected first");
 
