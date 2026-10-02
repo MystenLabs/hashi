@@ -129,7 +129,7 @@ pub struct MpcService {
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
-    presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
+    pending_seals: Mutex<presig_seal::PendingSeals>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,7 +195,7 @@ impl MpcService {
             next_manager_restore: Mutex::new(None),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
-            presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
+            pending_seals: Mutex::new(presig_seal::PendingSeals::default()),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -282,6 +282,7 @@ impl MpcService {
                 self.drive_reconfig(epoch).await;
                 continue;
             }
+            presig_seal::seal_due(&self.inner, &self.pending_seals).await;
             tokio::select! {
                 notification = notifications.recv() => {
                     match notification {
@@ -808,9 +809,9 @@ impl MpcService {
             return Err(admitted.below_floor_error(batch_index, metrics).into());
         }
         let dealer_set_digest = admitted.dealer_set_digest();
-        presig_seal::start(
+        presig_seal::record(
             &self.inner,
-            &self.presig_seal_tasks,
+            &self.pending_seals,
             epoch,
             batch_index,
             dealer_set_digest,
@@ -1747,9 +1748,9 @@ impl MpcService {
                     .into());
             }
             let dealer_set_digest = admitted.dealer_set_digest();
-            presig_seal::start(
+            presig_seal::record(
                 &self.inner,
-                &self.presig_seal_tasks,
+                &self.pending_seals,
                 epoch,
                 batch_index,
                 dealer_set_digest,

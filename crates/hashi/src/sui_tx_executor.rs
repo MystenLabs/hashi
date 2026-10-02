@@ -1691,7 +1691,7 @@ impl SuiTxExecutor {
         &mut self,
         message: &PresigDealerSetMessage,
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), SubmitCertError> {
         let mut builder = TransactionBuilder::new();
         let package_id = self.active_call_package_id();
         let hashi_arg = builder.object(
@@ -1715,12 +1715,13 @@ impl SuiTxExecutor {
             ),
             vec![hashi_arg, batch_index_arg, digest_arg, cert_arg, random_arg],
         );
-        let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "submit_presig_dealer_set failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let response = self
+            .execute(builder)
+            .await
+            .map_err(SubmitCertError::classify)?;
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(SubmitCertError::Rejected(Box::new(status.clone())));
         }
         Ok(())
     }
