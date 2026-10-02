@@ -4851,6 +4851,11 @@ pub struct CommitteeMember {
     pub encryption_public_key: ::core::option::Option<::prost::bytes::Bytes>,
     #[prost(uint64, optional, tag = "4")]
     pub weight: ::core::option::Option<u64>,
+    /// BCS-encoded VecMap\<String, config_value::Value>: the member's on-chain
+    /// extension slot, empty today. Carried verbatim, like Committee.config, so
+    /// the committee's signed BCS bytes survive this hop without reconstruction.
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub extra_fields: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MemberSignature {

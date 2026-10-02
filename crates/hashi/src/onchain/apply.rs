@@ -2709,6 +2709,7 @@ mod tests {
                 public_key: fastcrypto::traits::ToFromBytes::as_bytes(keypair.public()).to_vec(),
                 encryption_public_key: junk_key.clone(),
                 weight: 1,
+                extra_fields: move_types::Config::from_entries(vec![]),
             }],
             total_weight: 1,
             config: move_types::Config::from_entries(vec![]),

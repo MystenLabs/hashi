@@ -322,6 +322,11 @@ pub struct CommitteeMember {
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
     pub encryption_public_key: Vec<u8>,
     pub weight: u64,
+    /// Open-ended per-member extension slot, BCS-mirroring the Move
+    /// `CommitteeMember.extra_fields: Config`. Always empty today; carried
+    /// verbatim like `Committee::config` so a populated slot can never
+    /// silently change a committee's signed bytes.
+    pub extra_fields: Config,
 }
 
 /// This represents a BLS signing committee for a given epoch.
@@ -1860,6 +1865,10 @@ impl From<&crate::committee::CommitteeMember> for CommitteeMember {
             public_key: bls_public_key_to_uncompressed_g1_bytes(m.public_key()),
             encryption_public_key: m.encryption_public_key().to_bcs().expect("should not fail"),
             weight: m.weight(),
+            // The runtime member carries no extension data, so this rebuild
+            // matches the chain only while the slot is unpopulated, which is
+            // why signing paths use the raw on-chain committee instead.
+            extra_fields: Config::default(),
         }
     }
 }

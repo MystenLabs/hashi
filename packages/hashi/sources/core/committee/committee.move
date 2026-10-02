@@ -9,7 +9,7 @@
 /// payload in a `CertifiedMessage` as proof of committee approval.
 module hashi::committee;
 
-use hashi::config::Config;
+use hashi::config::{Self, Config};
 use sui::{
     bcs,
     bls12381::{Self, bls12381_min_pk_verify, UncompressedG1},
@@ -35,6 +35,12 @@ public struct CommitteeMember has copy, drop, store {
     public_key: Element<UncompressedG1>,
     encryption_public_key: vector<u8>,
     weight: u64,
+    /// Open-ended per-member extension slot; lets a future upgrade pin new
+    /// per-epoch member data (e.g. a key registered through
+    /// `MemberInfo.extra_fields`) onto the committee without a
+    /// `CommitteeV2` migration once the layout freezes at mainnet. Always
+    /// empty today: committee formation copies nothing into it.
+    extra_fields: Config,
 }
 
 /// This represents a BLS signing committee for a given epoch.
@@ -116,6 +122,7 @@ public(package) fun new_committee_member(
         public_key,
         encryption_public_key,
         weight,
+        extra_fields: config::empty(),
     }
 }
 

@@ -1596,11 +1596,18 @@ impl TryFrom<pb::CommitteeMember> for crate::move_types::CommitteeMember {
 
         let weight = m.weight.ok_or_else(|| missing("weight"))?;
 
+        // Carried verbatim as BCS bytes, like the committee's config, so the
+        // member's signed bytes survive the wire without reconstruction.
+        let extra_fields_bytes = m.extra_fields.ok_or_else(|| missing("extra_fields"))?;
+        let extra_fields: Config = bcs::from_bytes(&extra_fields_bytes)
+            .map_err(|e| InvalidInputs(format!("invalid extra_fields: {e}")))?;
+
         Ok(Self {
             validator_address,
             public_key: public_key.to_vec(),
             encryption_public_key: encryption_public_key.to_vec(),
             weight,
+            extra_fields,
         })
     }
 }
@@ -1803,6 +1810,11 @@ fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
                 public_key: Some(m.public_key.clone().into()),
                 encryption_public_key: Some(m.encryption_public_key.clone().into()),
                 weight: Some(m.weight),
+                extra_fields: Some(
+                    bcs::to_bytes(&m.extra_fields)
+                        .expect("Config serializes")
+                        .into(),
+                ),
             })
             .collect(),
         total_weight: Some(c.total_weight),
@@ -2135,6 +2147,7 @@ mod tests {
                 public_key: sk.public_key().as_ref().to_vec(),
                 encryption_public_key: junk_key.clone(),
                 weight: 10,
+                extra_fields: crate::move_types::Config::from_entries(vec![]),
             }],
             total_weight: 10,
             config: crate::move_types::Config::from_entries(vec![]),
@@ -2149,6 +2162,68 @@ mod tests {
         assert_eq!(
             back.new_committee.members[0].encryption_public_key,
             junk_key
+        );
+    }
+
+    /// A one-member committee whose member carries `extra_fields`.
+    fn committee_with_member_extra_fields(
+        extra_fields: crate::move_types::Config,
+    ) -> crate::move_types::Committee {
+        crate::move_types::Committee {
+            epoch: 6,
+            members: vec![crate::move_types::CommitteeMember {
+                validator_address: sui_sdk_types::Address::new([7u8; 32]),
+                public_key: vec![0x11; 96],
+                encryption_public_key: vec![0x22; 32],
+                weight: 10,
+                extra_fields,
+            }],
+            total_weight: 10,
+            config: crate::move_types::Config::from_entries(vec![]),
+        }
+    }
+
+    /// The member extension slot is empty on chain today, but once a future
+    /// upgrade populates it the guardian must still verify transition certs
+    /// over the exact bytes the members signed, so a populated slot has to
+    /// cross the wire verbatim rather than be dropped or rebuilt.
+    #[test]
+    fn committee_transition_carries_member_extra_fields_verbatim() {
+        let extra_fields = crate::move_types::Config::from_entries(vec![(
+            "future_member_key".to_string(),
+            crate::move_types::ConfigValue::Bytes(vec![0xAB; 33]),
+        )]);
+        let transition = CommitteeTransitionRequest {
+            new_committee: committee_with_member_extra_fields(extra_fields),
+        };
+
+        let pb = committee_transition_to_pb(&transition);
+        let back = CommitteeTransitionRequest::try_from(pb).expect("verbatim decode");
+        assert_eq!(back, transition);
+        assert_eq!(
+            bcs::to_bytes(&back).expect("serialize"),
+            bcs::to_bytes(&transition).expect("serialize"),
+        );
+    }
+
+    /// An absent slot is not the same as an empty one: substituting a default
+    /// would make the guardian verify over bytes nobody signed if the slot
+    /// were populated, so the decode refuses instead.
+    #[test]
+    fn committee_member_without_extra_fields_is_rejected() {
+        let mut pb = committee_transition_to_pb(&CommitteeTransitionRequest {
+            new_committee: committee_with_member_extra_fields(crate::move_types::Config::default()),
+        });
+        pb.new_committee
+            .as_mut()
+            .expect("committee present")
+            .members[0]
+            .extra_fields = None;
+
+        let err = CommitteeTransitionRequest::try_from(pb).expect_err("missing extra_fields");
+        assert!(
+            matches!(&err, InvalidInputs(msg) if msg == "missing extra_fields"),
+            "{err:?}"
         );
     }
 }
