@@ -22,9 +22,10 @@ public struct DisableVersion has copy, drop, store {
     version: u64,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun propose(
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     version: u64,
@@ -44,7 +45,8 @@ public fun propose(
     )
 }
 
-public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let DisableVersion { version } = proposal::execute(hashi, proposal_id, clock);
     hashi.versioning_mut().disable_version(version);
 }

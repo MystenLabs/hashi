@@ -43,9 +43,10 @@ public struct PackageUpgraded has copy, drop {
     version: u64,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun propose(
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     digest: vector<u8>,
@@ -67,7 +68,12 @@ public fun propose(
 }
 
 /// Execute an approved proposal and bind its version policy to the ticket.
-public fun execute(
+///
+/// Private `entry` like every proposal-type function (see `hashi::proposal`).
+/// Its results are consumed by the same PTB's `Upgrade` command and
+/// `finalize_upgrade`; while they are live, no other private entry may take
+/// `Hashi` in that PTB, which the upgrade PTB never does.
+entry fun execute(
     hashi: &mut Hashi,
     proposal_id: ID,
     clock: &Clock,
@@ -78,7 +84,7 @@ public fun execute(
 }
 
 /// Commit the package and its approved version policy atomically.
-public fun finalize_upgrade(
+entry fun finalize_upgrade(
     hashi: &mut Hashi,
     receipt: UpgradeReceipt,
     authorization: UpgradeAuthorization,

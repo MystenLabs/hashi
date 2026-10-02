@@ -17,9 +17,10 @@ public struct EmergencyPause has copy, drop, store {
     pause: bool,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun propose(
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     pause: bool,
@@ -44,7 +45,8 @@ public fun propose(
     )
 }
 
-public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     hashi.versioning().assert_version_enabled();
     let EmergencyPause { pause } = proposal::execute(hashi, proposal_id, clock);
     hashi.config_mut().set_paused(pause);

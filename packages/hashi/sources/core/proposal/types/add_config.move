@@ -57,9 +57,10 @@ public struct AddConfig has copy, drop, store {
     entries: VecMap<String, Value>,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun propose(
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     epoch: bool,
@@ -83,7 +84,8 @@ public fun propose(
     )
 }
 
-public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     hashi.versioning().assert_version_enabled();
     let AddConfig { epoch, entries } = proposal::execute(hashi, proposal_id, clock);
     assert_valid_entries(hashi, epoch, &entries);

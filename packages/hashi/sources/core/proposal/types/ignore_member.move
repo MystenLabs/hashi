@@ -52,9 +52,10 @@ public struct IgnoreMember has copy, drop, store {
     ignored: bool,
 }
 
-// ~~~~~~~ Public Functions ~~~~~~~
+// ~~~~~~~ Entry Functions ~~~~~~~
 
-public fun propose(
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     target_validator_address: address,
@@ -81,7 +82,8 @@ public fun propose(
     )
 }
 
-public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
+/// Private `entry`: see the visibility note in `hashi::proposal`.
+entry fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     hashi.versioning().assert_version_enabled();
     let IgnoreMember { validator_address, ignored } = proposal::execute(hashi, proposal_id, clock);
     // Registered-ness is re-asserted inside the setter (state may have
