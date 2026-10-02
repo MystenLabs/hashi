@@ -310,23 +310,23 @@ fun submit_one_nonce_cert(
     );
 }
 
-fun presig_completed_cert(
+fun presig_dealer_set_cert(
     hashi: &hashi::hashi::Hashi,
     epoch: u64,
     digest: vector<u8>,
 ): hashi::committee::CommitteeSignature {
-    let message = hashi::cert_submission::new_presig_completed_message(epoch, 0, digest);
+    let message = hashi::cert_submission::new_presig_dealer_set_message(epoch, 0, digest);
     let bytes = build_cert_message(
         object::id_address(hashi),
         epoch,
-        hashi::intent::presig_completed(),
+        hashi::intent::presig_dealer_set(),
         &message,
     );
     test_utils::sign_certificate(epoch, &bytes, 3)
 }
 
 #[test]
-fun test_only_the_first_presig_completed_seals_the_batch() {
+fun test_only_the_first_presig_dealer_set_seals_the_batch() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
@@ -334,16 +334,16 @@ fun test_only_the_first_presig_completed_seals_the_batch() {
     let clock = sui::clock::create_for_testing(ctx);
     submit_one_nonce_cert(&mut hashi, epoch, &clock, ctx);
 
-    let first = presig_completed_cert(&hashi, epoch, DIGEST);
-    hashi::cert_submission::submit_presig_completed_for_testing(
+    let first = presig_dealer_set_cert(&hashi, epoch, DIGEST);
+    hashi::cert_submission::submit_presig_dealer_set_for_testing(
         &mut hashi,
         0,
         DIGEST,
         first,
         SEED_1,
     );
-    let second = presig_completed_cert(&hashi, epoch, OTHER_DIGEST);
-    hashi::cert_submission::submit_presig_completed_for_testing(
+    let second = presig_dealer_set_cert(&hashi, epoch, OTHER_DIGEST);
+    hashi::cert_submission::submit_presig_dealer_set_for_testing(
         &mut hashi,
         0,
         OTHER_DIGEST,
@@ -363,7 +363,7 @@ fun test_only_the_first_presig_completed_seals_the_batch() {
 
 #[test]
 #[expected_failure(abort_code = hashi::committee::ESigVerification)]
-fun test_presig_completed_with_a_bad_certificate_aborts() {
+fun test_presig_dealer_set_with_a_bad_certificate_aborts() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
@@ -372,7 +372,7 @@ fun test_presig_completed_with_a_bad_certificate_aborts() {
     submit_one_nonce_cert(&mut hashi, epoch, &clock, ctx);
 
     let wrong = test_utils::sign_certificate(epoch, &bcs::to_bytes(&epoch), 3);
-    hashi::cert_submission::submit_presig_completed_for_testing(
+    hashi::cert_submission::submit_presig_dealer_set_for_testing(
         &mut hashi,
         0,
         DIGEST,
@@ -385,7 +385,7 @@ fun test_presig_completed_with_a_bad_certificate_aborts() {
 }
 
 #[test]
-fun test_submit_presig_completed_draws_randomness() {
+fun test_submit_presig_dealer_set_draws_randomness() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let mut scenario = sui::test_scenario::begin(@0x0);
     sui::random::create_for_testing(scenario.ctx());
@@ -398,8 +398,8 @@ fun test_submit_presig_completed_draws_randomness() {
     let clock = sui::clock::create_for_testing(scenario.ctx());
     submit_one_nonce_cert(&mut hashi, epoch, &clock, scenario.ctx());
 
-    let cert = presig_completed_cert(&hashi, epoch, DIGEST);
-    hashi::cert_submission::submit_presig_completed(
+    let cert = presig_dealer_set_cert(&hashi, epoch, DIGEST);
+    hashi::cert_submission::submit_presig_dealer_set(
         &mut hashi,
         0,
         DIGEST,

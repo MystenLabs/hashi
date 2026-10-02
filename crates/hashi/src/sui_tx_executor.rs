@@ -39,7 +39,7 @@ use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequested;
-use hashi_types::move_types::PresigCompletedMessage;
+use hashi_types::move_types::PresigDealerSetMessage;
 use hashi_types::move_types::WithdrawalRequested;
 
 /// Construct a `CommitteeSignature` via a Move call in the PTB.
@@ -1687,9 +1687,9 @@ impl SuiTxExecutor {
         skip_all,
         fields(epoch = message.epoch, batch_index = message.batch_index),
     )]
-    pub async fn execute_submit_presig_completed(
+    pub async fn execute_submit_presig_dealer_set(
         &mut self,
-        message: &PresigCompletedMessage,
+        message: &PresigDealerSetMessage,
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
@@ -1711,14 +1711,14 @@ impl SuiTxExecutor {
             Function::new(
                 package_id,
                 Identifier::from_static("cert_submission"),
-                Identifier::from_static("submit_presig_completed"),
+                Identifier::from_static("submit_presig_dealer_set"),
             ),
             vec![hashi_arg, batch_index_arg, digest_arg, cert_arg, random_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "submit_presig_completed failed: {:?}",
+                "submit_presig_dealer_set failed: {:?}",
                 response.transaction().effects().status()
             );
         }

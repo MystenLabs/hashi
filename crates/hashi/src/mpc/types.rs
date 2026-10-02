@@ -1279,7 +1279,7 @@ pub enum SigningError {
     )]
     RequestChanged { signing_id: Address },
 
-    #[error("Presig batch {batch_index} has no PresigCompleted seal yet")]
+    #[error("Presig batch {batch_index} is not sealed yet")]
     PresigBatchNotSealed { batch_index: u32 },
 
     #[error("Presig batch {batch_index} was sealed over a dealer set this node did not build")]

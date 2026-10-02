@@ -42,7 +42,7 @@ const ENoNonceBucket: vector<u8> = b"No nonce cert bucket exists for this batch"
 
 // ~~~~~~~ Structs ~~~~~~~
 
-public struct PresigCompletedMessage has copy, drop, store {
+public struct PresigDealerSetMessage has copy, drop, store {
     epoch: u64,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
@@ -94,7 +94,7 @@ entry fun submit_nonce_cert(
     submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
-entry fun submit_presig_completed(
+entry fun submit_presig_dealer_set(
     hashi: &mut Hashi,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
@@ -104,7 +104,7 @@ entry fun submit_presig_completed(
 ) {
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(32);
-    submit_presig_completed_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
+    submit_presig_dealer_set_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
 }
 
 /// Destroy the key-generation (DKG or rotation) cert buckets of `epoch`.
@@ -162,7 +162,7 @@ entry fun destroy_nonce_certs(hashi: &mut Hashi, epoch: u64, batch_index: u32) {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
-fun submit_presig_completed_internal(
+fun submit_presig_dealer_set_internal(
     hashi: &mut Hashi,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
@@ -172,8 +172,8 @@ fun submit_presig_completed_internal(
     hashi.versioning().assert_version_enabled();
     let epoch = hashi.committee_set().epoch();
     hashi.verify(
-        hashi::intent::presig_completed(),
-        PresigCompletedMessage { epoch, batch_index, dealer_set_digest: copy dealer_set_digest },
+        hashi::intent::presig_dealer_set(),
+        PresigDealerSetMessage { epoch, batch_index, dealer_set_digest: copy dealer_set_digest },
         cert,
     );
     let key = hashi::tob::tob_key(
@@ -232,7 +232,7 @@ fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContex
 }
 
 #[test_only]
-public fun submit_presig_completed_for_testing(
+public fun submit_presig_dealer_set_for_testing(
     hashi: &mut Hashi,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
@@ -241,14 +241,14 @@ public fun submit_presig_completed_for_testing(
 ) {
     let mut rng = sui::random::new_generator_from_seed_for_testing(seed);
     let randomness = rng.generate_bytes(32);
-    submit_presig_completed_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
+    submit_presig_dealer_set_internal(hashi, batch_index, dealer_set_digest, cert, randomness);
 }
 
 #[test_only]
-public fun new_presig_completed_message(
+public fun new_presig_dealer_set_message(
     epoch: u64,
     batch_index: u32,
     dealer_set_digest: vector<u8>,
-): PresigCompletedMessage {
-    PresigCompletedMessage { epoch, batch_index, dealer_set_digest }
+): PresigDealerSetMessage {
+    PresigDealerSetMessage { epoch, batch_index, dealer_set_digest }
 }

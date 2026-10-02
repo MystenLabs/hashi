@@ -17,7 +17,7 @@ use sui_http::middleware::callback::CallbackLayer;
 use crate::grpc::metrics_layer::RpcMetricsMakeCallbackHandler;
 use crate::metrics::Metrics;
 use crate::tls::make_client_config_no_verification;
-use hashi_types::proto::GetPresigCompletedSignatureRequest;
+use hashi_types::proto::GetPresigDealerSetSignatureRequest;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
@@ -179,18 +179,18 @@ impl Client {
         Ok(response.into_inner().signature.map(|b| b.to_vec()))
     }
 
-    pub async fn get_presig_completed_signature(
+    pub async fn get_presig_dealer_set_signature(
         &self,
         epoch: u64,
         batch_index: u32,
     ) -> Result<Option<Vec<u8>>> {
-        let request = GetPresigCompletedSignatureRequest {
+        let request = GetPresigDealerSetSignatureRequest {
             epoch: Some(epoch),
             batch_index: Some(batch_index),
         };
         let response = self
             .mpc_service_client()
-            .get_presig_completed_signature(request)
+            .get_presig_dealer_set_signature(request)
             .await?;
         Ok(response.into_inner().signature.map(|b| b.to_vec()))
     }

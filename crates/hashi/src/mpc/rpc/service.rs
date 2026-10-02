@@ -13,8 +13,8 @@ use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;
 use hashi_types::proto::GetPartialSignaturesResponse;
-use hashi_types::proto::GetPresigCompletedSignatureRequest;
-use hashi_types::proto::GetPresigCompletedSignatureResponse;
+use hashi_types::proto::GetPresigDealerSetSignatureRequest;
+use hashi_types::proto::GetPresigDealerSetSignatureResponse;
 use hashi_types::proto::GetPublicMpcOutputRequest;
 use hashi_types::proto::GetPublicMpcOutputResponse;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
@@ -194,10 +194,10 @@ impl MpcService for HttpService {
     }
 
     #[tracing::instrument(skip(self, request))]
-    async fn get_presig_completed_signature(
+    async fn get_presig_dealer_set_signature(
         &self,
-        request: tonic::Request<GetPresigCompletedSignatureRequest>,
-    ) -> Result<tonic::Response<GetPresigCompletedSignatureResponse>, Status> {
+        request: tonic::Request<GetPresigDealerSetSignatureRequest>,
+    ) -> Result<tonic::Response<GetPresigDealerSetSignatureResponse>, Status> {
         authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let epoch = external_request
@@ -210,7 +210,7 @@ impl MpcService for HttpService {
         let signature = self
             .get_presig_seal_signature(epoch, batch_index)
             .map(Into::into);
-        Ok(tonic::Response::new(GetPresigCompletedSignatureResponse {
+        Ok(tonic::Response::new(GetPresigDealerSetSignatureResponse {
             signature,
         }))
     }
