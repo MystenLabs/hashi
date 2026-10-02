@@ -19,7 +19,6 @@ use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::LifecycleMismatch;
 use hashi_types::guardian::GuardianError::Unauthenticated;
-use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use std::collections::BTreeSet;
@@ -27,8 +26,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::time::Duration;
-use tokio::sync::OwnedMutexGuard;
 use tracing::info;
 
 use crate::log_writer::LogWriter;
@@ -44,8 +41,7 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Temporary state retained until operator activation commits.
     temporary_init_state: RwLock<Option<TemporaryInitState>>,
-    /// Serializes lifecycle and control-plane transitions so concurrent
-    /// operations cannot race a check-then-set.
+    /// Serializes all state-touching RPCs, both writes and reads.
     control_lock: tokio::sync::Mutex<()>,
     /// Ceremony state retained until every KP confirms successful share recovery.
     pending_ceremony: OnceLock<PendingCeremony>,
@@ -85,11 +81,8 @@ pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<RuntimeCommittee>>>,
     /// Rate limiter. Set once during operator_activate.
-    /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
-    rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
-    /// Mirrors the limiter's state so status reads never wait on the limiter
-    /// lock, which a withdrawal holds across its durable log write.
-    limiter_snapshot: RwLock<Option<LimiterState>>,
+    /// Only touched under the control lock.
+    rate_limiter: OnceLock<std::sync::Mutex<RateLimiter>>,
 }
 
 /// Inputs needed only between operator initialization and activation.
@@ -358,57 +351,35 @@ impl EnclaveState {
     fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
         info!("Setting rate limiter.");
 
-        let state = *limiter.state();
         self.rate_limiter
-            .set(Arc::new(tokio::sync::Mutex::new(limiter)))
-            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))?;
-        *self.limiter_snapshot.write().unwrap() = Some(state);
-        Ok(())
+            .set(std::sync::Mutex::new(limiter))
+            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))
     }
 
-    /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
-    /// takes longer than this, callers bail rather than wait indefinitely.
-    const LIMITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// Acquire exclusive access to the limiter, bounded by
-    /// `LIMITER_LOCK_TIMEOUT`.
-    async fn lock_limiter(&self) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let rate_limiter = self
-            .rate_limiter
-            .get()
-            .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
-        tokio::time::timeout(
-            Self::LIMITER_LOCK_TIMEOUT,
-            rate_limiter.clone().lock_owned(),
-        )
-        .await
-        .map_err(|_| Unavailable("timed out waiting for rate limiter lock".into()))
-    }
-
-    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
-    /// The guard is held through signing and durable logging so no other withdrawal
-    /// can start until this one is durably logged or the enclave aborts.
-    pub async fn consume_from_limiter(
+    /// Consume tokens under the control lock and return the post-consume state.
+    pub fn consume_from_limiter(
         &self,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
-    ) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let mut guard = self.lock_limiter().await?;
-        guard.consume(seq, timestamp, amount_sats)?;
-        Ok(guard)
+    ) -> GuardianResult<LimiterState> {
+        let rate_limiter = self
+            .rate_limiter
+            .get()
+            .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
+        let mut limiter = rate_limiter.lock().expect("rate limiter lock poisoned");
+        limiter.consume(seq, timestamp, amount_sats)?;
+        Ok(*limiter.state())
     }
 
-    /// Record the consumption a withdrawal has just made durable, then release
-    /// the limiter. Consuming the guard orders the record before the release.
-    pub fn set_limiter_snapshot(&self, guard: OwnedMutexGuard<RateLimiter>) {
-        *self.limiter_snapshot.write().unwrap() = Some(*guard.state());
-    }
-
-    /// The limiter state as of the last durably logged withdrawal. `None` means
-    /// no limiter exists; it never reports absence for a limiter that is busy.
-    pub fn limiter_snapshot(&self) -> Option<LimiterState> {
-        *self.limiter_snapshot.read().unwrap()
+    /// Read the limiter state under the control lock. `None` means it is not initialized.
+    pub fn limiter_state(&self) -> Option<LimiterState> {
+        let limiter = self
+            .rate_limiter
+            .get()?
+            .lock()
+            .expect("rate limiter lock poisoned");
+        Some(*limiter.state())
     }
 }
 
@@ -424,7 +395,6 @@ impl Enclave {
                 lifecycle: RwLock::new(None),
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
-                limiter_snapshot: RwLock::new(None),
             },
             temporary_init_state: RwLock::new(None),
             pending_ceremony: OnceLock::new(),
@@ -438,9 +408,8 @@ impl Enclave {
     // ========================================================================
 
     /// Spawn a root-owned Tokio task so caller cancellation only detaches the
-    /// waiter and does not cancel accepted work. Use this when the task needs
-    /// no serialization or owns a narrower lock for the state it mutates.
-    /// E.g., used in `standard_withdrawal` that owns a separate serialization lock inside.
+    /// waiter and does not cancel accepted work. Used by `spawn_control_task`
+    /// and tests; RPCs use `spawn_control_task` for serialization.
     pub async fn spawn_task<Input, Output, Task, Fut>(
         self: Arc<Self>,
         input: Input,
@@ -458,8 +427,8 @@ impl Enclave {
     }
 
     /// Spawn a root-owned Tokio task that holds the control lock while running.
-    /// Use this for lifecycle and control-plane transitions whose shared-state
-    /// checks and mutations must not interleave with another control task.
+    /// Use this for all state-touching RPCs so shared-state checks, mutations,
+    /// and durable logging cannot interleave with another control task.
     pub async fn spawn_control_task<Input, Output, Task, Fut>(
         self: Arc<Self>,
         input: Input,
@@ -627,7 +596,7 @@ impl Enclave {
                 .as_ref()
                 .and_then(|state| state.genesis_state.as_ref().map(GenesisState::digest)),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
-            limiter_state: self.state.limiter_snapshot(),
+            limiter_state: self.state.limiter_state(),
             limiter_config: self.limiter_config().ok(),
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().copied(),

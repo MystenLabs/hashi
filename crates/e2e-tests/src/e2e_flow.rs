@@ -950,7 +950,7 @@ mod tests {
             .expect("harness present after 2-of-2 cutover")
             .enclave()
             .state
-            .limiter_snapshot()
+            .limiter_state()
             .expect("guardian limiter state present after a successful withdrawal");
         assert_eq!(guardian_state.next_seq, 1);
         let local_state = hashi

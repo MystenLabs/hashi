@@ -7,12 +7,8 @@
 //! This module routes each request through the enclave's appropriate
 //! cancellation-safe execution policy.
 //!
-//! Control-plane mutations use `spawn_control_task` because they share enclave
-//! lifecycle and configuration state. GuardianInfo reads use the same lock.
-//! Standard withdrawal uses `spawn_task`
-//! because its limiter guard is the narrower serialization boundary: requests
-//! may validate concurrently, but limiter mutation through durable logging is
-//! still exclusive.
+//! All state-touching RPCs, including withdrawals and GuardianInfo reads, use
+//! `spawn_control_task` to share the control lock.
 
 use crate::ceremony_mode::confirm;
 use crate::ceremony_mode::rotate;
@@ -51,7 +47,6 @@ use std::sync::Arc;
 /// Control operations install fields before their S3 records are durable and the
 /// lifecycle advances. Serialize status requests with those operations so info
 /// responses cannot expose partially committed state, without per-stage masking.
-/// Withdrawals publish their limiter snapshot separately after durable logging.
 pub async fn get_guardian_info(
     enclave: Arc<Enclave>,
 ) -> GuardianResult<GuardianResponse<GuardianInfo>> {
@@ -140,7 +135,7 @@ pub async fn standard_withdrawal(
     request: HashiSigned<StandardWithdrawalRequest>,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     enclave
-        .spawn_task(request, standard_withdrawal_domain::standard_withdrawal)
+        .spawn_control_task(request, standard_withdrawal_domain::standard_withdrawal)
         .await
 }
 
