@@ -989,6 +989,98 @@ mod tests {
         Ok(())
     }
 
+    /// Cancel a withdrawal through the same PTB the CLI builds. Pins that the
+    /// chain accepts `cancel_withdrawal` as a private `entry` returning a
+    /// `Balance<BTC>` (no `drop`) that a later `balance::send_funds` command
+    /// consumes, and that the refund lands back in the address balance.
+    #[tokio::test]
+    async fn test_withdrawal_cancellation_refunds_hbtc() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Withdrawal Cancellation E2E Test ===");
+
+        // A batching delay far beyond the test's runtime keeps the leader from
+        // committing the request (which would burn its hBTC and make it
+        // uncancellable), and a zero cooldown lets the requester cancel at once.
+        let builder = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(600_000)
+            .with_onchain_config(
+                "withdrawal_cancellation_cooldown_ms",
+                hashi_types::move_types::ConfigValue::U64(0),
+            );
+        let mut networks = setup_test_networks(builder).await?;
+        let package_id = networks.hashi_network.ids().package_id;
+
+        let deposit_amount_sats = 100_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+        wait_for_hbtc_balance(
+            &mut networks.sui_network.client,
+            package_id,
+            hbtc_recipient,
+            deposit_amount_sats,
+        )
+        .await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap();
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone().into());
+
+        let withdrawal_amount_sats = 30_000u64;
+        let request_id = executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!("Withdrawal request created: {request_id}");
+        wait_for_hbtc_balance(
+            &mut networks.sui_network.client,
+            package_id,
+            hbtc_recipient,
+            deposit_amount_sats - withdrawal_amount_sats,
+        )
+        .await?;
+
+        executor.execute_cancel_withdrawal(&request_id).await?;
+        info!("Withdrawal request cancelled: {request_id}");
+        wait_for_hbtc_balance(
+            &mut networks.sui_network.client,
+            package_id,
+            hbtc_recipient,
+            deposit_amount_sats,
+        )
+        .await?;
+
+        info!("=== Withdrawal Cancellation E2E Test Passed ===");
+        Ok(())
+    }
+
+    /// Poll until `owner`'s hBTC balance reads `expected`. Address balances
+    /// settle at checkpoint boundaries, so a read taken right after execution
+    /// can trail the transaction.
+    async fn wait_for_hbtc_balance(
+        client: &mut sui_rpc::Client,
+        package_id: Address,
+        owner: Address,
+        expected: u64,
+    ) -> Result<()> {
+        let timeout = Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let balance = get_hbtc_balance(client, package_id, owner).await?;
+            if balance == expected {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "hBTC balance of {owner} is {balance} sats after {timeout:?}, expected \
+                     {expected}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     async fn wait_for_presig_seal(
         networks: &TestNetworks,
         epoch: u64,
