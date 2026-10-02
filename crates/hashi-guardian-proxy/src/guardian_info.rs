@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tonic::Request;
 use tonic::Status;
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(30);
 
 struct CachedInfo {
     at: Instant,
