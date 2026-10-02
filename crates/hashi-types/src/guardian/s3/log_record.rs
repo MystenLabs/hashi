@@ -187,9 +187,7 @@ impl LogEntry {
 }
 
 impl VerifiableLogEntry {
-    /// Construct a current-schema record using the current time.
-    ///
-    /// Every message is signed by `signing_key`.
+    /// Sign a current-schema record using the current time.
     pub fn new(
         session_id: SessionID,
         message: LogMessage,
@@ -198,9 +196,7 @@ impl VerifiableLogEntry {
         Self::new_at_timestamp(session_id, message, signing_key, now_timestamp_ms())
     }
 
-    /// Construct a current-schema record using an explicit timestamp.
-    ///
-    /// Every message is signed by `signing_key`.
+    /// Sign a current-schema record using an explicit timestamp.
     pub fn new_at_timestamp(
         session_id: SessionID,
         message: LogMessage,
@@ -291,8 +287,8 @@ impl VerifiableLogEntry {
 
     /// Consume the record and extract its entry without validation.
     ///
-    /// This bypasses signed-record session binding, Guardian signature
-    /// verification, and Nitro attestation authentication.
+    /// This skips session binding and signature verification; the caller must
+    /// establish trust independently.
     pub fn into_entry_unchecked(self) -> LogEntry {
         self.0.into_data_unchecked()
     }

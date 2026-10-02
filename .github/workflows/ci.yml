@@ -101,7 +101,7 @@ jobs:
 
       - name: Verify Guardian log attestation trust
         # --all-features enables non-enclave-dev, which bypasses Nitro verification.
-        run: cargo test -p hashi-guardian valid_log_signature_does_not_replace_attestation_verification
+        run: cargo test -p hashi-guardian attestation_is_verified_before_log_signatures
 
       - name: Detect TRM client changes
         uses: dorny/paths-filter@v3

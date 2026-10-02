@@ -226,9 +226,9 @@ impl BuildPcrs {
 ///
 /// `current_build` is the current/live build. `prev_builds` contains older
 /// builds that may still appear in persisted logs during an upgrade or replay.
-/// Verification matches the signature-verified deployment revision to one
-/// entry, then checks PCR0 against that entry. Callers use the resolved
-/// `BuildPcrs` to enforce the policy for their context.
+/// The reported deployment revision selects an entry; Nitro verification checks
+/// its PCR0 and signing key before log signatures are trusted. Callers use the
+/// resolved `BuildPcrs` to enforce the policy for their context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PcrAllowlist {
     current_build: BuildPcrs,

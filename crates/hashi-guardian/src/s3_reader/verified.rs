@@ -95,7 +95,7 @@ impl VerifiedSessionInfo {
         let InitLogMessage::OIAttestation {
             attestation,
             signing_public_key: signing_pubkey,
-        } = Self::init_message(&attestation_record)?
+        } = Self::unverified_init_message(&attestation_record)?
         else {
             return Err(InvalidS3Log(format!(
                 "expected OIAttestation at key {att_key}"
@@ -105,7 +105,8 @@ impl VerifiedSessionInfo {
         // The unverified OI info selects a build from the reader's own allowlist.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = s3.get_log_record(&info_key).await?;
-        let InitLogMessage::OIGuardianInfo(info) = Self::init_message(&info_record)? else {
+        let InitLogMessage::OIGuardianInfo(info) = Self::unverified_init_message(&info_record)?
+        else {
             return Err(InvalidS3Log(format!(
                 "expected OIGuardianInfo at key {info_key}"
             )));
@@ -122,7 +123,7 @@ impl VerifiedSessionInfo {
 
         Ok(Self {
             signing_pubkey: *signing_pubkey,
-            info: *info.clone(),
+            info: info.as_ref().clone(),
             build_pcrs,
             verified_init_checkpoint: InitCheckpoint::OperatorInitialized,
         })
@@ -160,10 +161,12 @@ impl VerifiedSessionInfo {
             }
             InitCheckpoint::OperatorActivated => {
                 let pi_key = InitLogMessage::pi_fully_initialized_object_key(session_id);
-                let pi_message = Self::read_init_log(s3, &pi_key, &self.signing_pubkey).await?;
+                let pi_message =
+                    Self::read_verified_init_log(s3, &pi_key, &self.signing_pubkey).await?;
 
                 let oa_key = InitLogMessage::oa_activated_object_key(session_id);
-                let oa_message = Self::read_init_log(s3, &oa_key, &self.signing_pubkey).await?;
+                let oa_message =
+                    Self::read_verified_init_log(s3, &oa_key, &self.signing_pubkey).await?;
                 InitLogMessage::verify_oi_pi_consistency(&self.info, &pi_message)?;
                 InitLogMessage::verify_oi_oa_consistency(&self.info, &oa_message)?;
                 InitLogMessage::verify_pi_oa_consistency(&pi_message, &oa_message)?;
@@ -174,7 +177,7 @@ impl VerifiedSessionInfo {
         Ok(())
     }
 
-    fn init_message(record: &VerifiableLogEntry) -> GuardianResult<&InitLogMessage> {
+    fn unverified_init_message(record: &VerifiableLogEntry) -> GuardianResult<&InitLogMessage> {
         match record.message() {
             VersionedLogMessage::V1(LogMessage::Init(message)) => Ok(message),
             _ => Err(InvalidS3Log(format!(
@@ -185,7 +188,7 @@ impl VerifiedSessionInfo {
     }
 
     /// Read an init log and validate it with the authenticated signing key.
-    async fn read_init_log(
+    async fn read_verified_init_log(
         s3: &GuardianS3Client,
         key: &str,
         signing_pubkey: &GuardianPubKey,
@@ -211,10 +214,8 @@ impl VerifiedSessionInfo {
     }
 }
 
-/// Authenticate deployment identity separately from build selection: historical
-/// sessions may use older allowlisted builds, but must serve the same deployment.
-/// The logged policy records what the writer trusted. Only the reader's own
-/// allowlist authorizes the writing build and supplies its attestation PCR pin.
+/// Check the reported deployment and resolve its build using the reader's allowlist.
+/// The selected PCR pin must still be verified against the Nitro attestation.
 fn verify_deployment_info(
     session_id: &str,
     reported: &DeploymentConfig,
@@ -376,58 +377,67 @@ mod tests {
     // The non-enclave-dev feature bypasses Nitro verification.
     #[cfg(not(feature = "non-enclave-dev"))]
     #[tokio::test]
-    async fn valid_log_signature_does_not_replace_attestation_verification() {
-        let signing_key = GuardianSignKeyPair::from([8u8; 32]);
-        let signing_pubkey = signing_key.verification_key();
-        let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
-        let attestation = hashi_types::guardian::NitroAttestation::new(vec![1, 2, 3]);
-        let info = OperatorInitInfo::mock_for_testing();
-        let deployment = info.deployment.clone();
-        assert!(attestation
-            .verify_replay(&signing_pubkey, deployment.pcr_allowlist.current_build())
-            .is_err());
-        let attestation_record = VerifiableLogEntry::new(
-            session_id.clone(),
-            LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
-                attestation,
-                signing_public_key: signing_pubkey,
-            })),
-            &signing_key,
-        );
-        // The attacker knows this key, so the log signature alone is valid.
-        attestation_record.validate(&signing_pubkey).unwrap();
-        let info_record = VerifiableLogEntry::new(
-            session_id.clone(),
-            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(info)))),
-            &signing_key,
-        );
-        let att_key = attestation_record.object_key().to_owned();
-        let info_key = info_record.object_key().to_owned();
-        let policy = S3ObjectLockPolicy::for_environment(deployment.retention_environment);
-        let list_logs = mock!(Client::list_object_versions)
-            .sequence()
-            .output(move || listed_record(att_key.clone()))
-            .output(move || listed_record(info_key.clone()))
-            .build();
-        let get_logs = mock!(Client::get_object)
-            .sequence()
-            .output(move || locked_record(&attestation_record, policy))
-            .output(move || locked_record(&info_record, policy))
-            .build();
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
-        let s3 = GuardianS3Client::from_client(
-            deployment.bucket_info.clone(),
-            deployment.retention_environment,
-            client,
-        );
-        let error = VerifiedSessionInfo::read_from_s3(&s3, &session_id, &deployment)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, InvalidS3Log(message) if message.contains("attestation parse failed"))
-        );
-        assert_eq!(list_logs.num_calls(), 2);
-        assert_eq!(get_logs.num_calls(), 2);
+    async fn attestation_is_verified_before_log_signatures() {
+        // Both cases must fail on attestation, before either signature is checked.
+        for tamper_signature in [false, true] {
+            let signing_key = GuardianSignKeyPair::from([8u8; 32]);
+            let signing_pubkey = signing_key.verification_key();
+            let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
+            let attestation = hashi_types::guardian::NitroAttestation::new(vec![1, 2, 3]);
+            let info = OperatorInitInfo::mock_for_testing();
+            let deployment = info.deployment.clone();
+            assert!(attestation
+                .verify_replay(&signing_pubkey, deployment.pcr_allowlist.current_build())
+                .is_err());
+            let mut attestation_record = VerifiableLogEntry::new(
+                session_id.clone(),
+                LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
+                    attestation,
+                    signing_public_key: signing_pubkey,
+                })),
+                &signing_key,
+            );
+            // The attacker knows this key, so the log signature alone is valid.
+            attestation_record.validate(&signing_pubkey).unwrap();
+            if tamper_signature {
+                let mut json = serde_json::to_value(attestation_record).unwrap();
+                json["signature"] = serde_json::json!("00".repeat(64));
+                attestation_record = serde_json::from_value(json).unwrap();
+                assert!(attestation_record.validate(&signing_pubkey).is_err());
+            }
+            let info_record = VerifiableLogEntry::new(
+                session_id.clone(),
+                LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(info)))),
+                &signing_key,
+            );
+            let att_key = attestation_record.object_key().to_owned();
+            let info_key = info_record.object_key().to_owned();
+            let policy = S3ObjectLockPolicy::for_environment(deployment.retention_environment);
+            let list_logs = mock!(Client::list_object_versions)
+                .sequence()
+                .output(move || listed_record(att_key.clone()))
+                .output(move || listed_record(info_key.clone()))
+                .build();
+            let get_logs = mock!(Client::get_object)
+                .sequence()
+                .output(move || locked_record(&attestation_record, policy))
+                .output(move || locked_record(&info_record, policy))
+                .build();
+            let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
+            let s3 = GuardianS3Client::from_client(
+                deployment.bucket_info.clone(),
+                deployment.retention_environment,
+                client,
+            );
+            let error = VerifiedSessionInfo::read_from_s3(&s3, &session_id, &deployment)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, InvalidS3Log(message) if message.contains("attestation parse failed"))
+            );
+            assert_eq!(list_logs.num_calls(), 2);
+            assert_eq!(get_logs.num_calls(), 2);
+        }
     }
 
     #[test]

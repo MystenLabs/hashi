@@ -278,7 +278,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     }
 
     // Log to S3!
-    // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
+    // 1) Attest the session key that signs this record and all subsequent logs.
     let signing_pk = enclave.signing_pubkey();
     enclave
         .log_init(OIAttestation {
