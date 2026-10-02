@@ -155,10 +155,16 @@ struct PrefetchedBatch {
     identity: PresigBatchIdentity,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RefillRequest {
+    pub epoch: u64,
+    pub batch_index: u32,
+}
+
 pub struct SigningManager {
     config: Arc<SigningEpochConfig>,
     state: RwLock<SigningPoolState>,
-    refill_tx: Arc<watch::Sender<u32>>,
+    refill_tx: Arc<watch::Sender<RefillRequest>>,
     peer_cooldowns: PeerCooldowns,
 }
 
@@ -294,7 +300,7 @@ impl SigningManager {
         batch_index: u32,
         batch_start_index: u64,
         refill_divisor: usize,
-        refill_tx: Arc<watch::Sender<u32>>,
+        refill_tx: Arc<watch::Sender<RefillRequest>>,
         identity_inputs: IdentityInputs,
     ) -> (Self, PresigBatchIdentity) {
         let generated: Vec<(Vec<S>, G)> = presignatures.collect();
@@ -347,7 +353,7 @@ impl SigningManager {
         num_consumed: u64,
         pending: &HashSet<u64>,
         refill_divisor: usize,
-        refill_tx: Arc<watch::Sender<u32>>,
+        refill_tx: Arc<watch::Sender<RefillRequest>>,
         identity_inputs: IdentityInputs,
     ) -> anyhow::Result<(Self, Vec<(u32, PresigBatchIdentity)>)> {
         let mut batches = Vec::with_capacity(retained.len());
@@ -523,8 +529,29 @@ impl SigningManager {
     }
 
     pub fn trigger_refill(&self) {
-        let next = self.batch_index() + 1;
-        let _ = self.refill_tx.send(next);
+        self.request_refill(self.batch_index() + 1);
+    }
+
+    fn request_refill(&self, batch_index: u32) {
+        let _ = self.refill_tx.send(RefillRequest {
+            epoch: self.epoch(),
+            batch_index,
+        });
+    }
+
+    pub(crate) fn refill_skip_reason(&self, request: RefillRequest) -> Option<String> {
+        let epoch = self.epoch();
+        if request.epoch != epoch {
+            return Some(format!("the signing manager is for epoch {epoch}"));
+        }
+        let expected = self.batch_index() + 1;
+        if request.batch_index != expected {
+            return Some(format!("the next installable batch is {expected}"));
+        }
+        if self.prefetched_batch_index() == Some(request.batch_index) {
+            return Some("it is already staged for installation".to_string());
+        }
+        None
     }
 
     pub fn epoch(&self) -> u64 {
@@ -917,7 +944,7 @@ impl SigningManager {
                                 if next.batch_index < next_batch_index {
                                     state.next_batch = None;
                                 } else {
-                                    let _ = self.refill_tx.send(next_batch_index);
+                                    self.request_refill(next_batch_index);
                                 }
                             }
                             None => {}
@@ -933,7 +960,7 @@ impl SigningManager {
                     } else {
                         if state.next_batch.is_none() {
                             let next = state.batches.last().map_or(0, |b| b.batch_index) + 1;
-                            let _ = self.refill_tx.send(next);
+                            self.request_refill(next);
                         }
                         tracing::error!(
                             "Presig index {global_presig_index} not found in any \
@@ -992,7 +1019,7 @@ impl SigningManager {
                     let remaining = latest.remaining();
                     let refill_at = latest.pool.len() / config.refill_divisor;
                     if remaining <= refill_at {
-                        let _ = self.refill_tx.send(latest.batch_index + 1);
+                        self.request_refill(latest.batch_index + 1);
                     }
                 }
                 // Prune fully-consumed batches, but always keep the last
@@ -1974,7 +2001,7 @@ pub(crate) mod tests {
     pub(crate) struct SigningTestSetup {
         pub(crate) managers: Vec<Arc<SigningManager>>,
         verifying_key: G,
-        refill_rx: watch::Receiver<u32>,
+        refill_rx: watch::Receiver<RefillRequest>,
         n: u16,
         f: u16,
         t: u16,
@@ -2033,7 +2060,7 @@ pub(crate) mod tests {
                 })
                 .collect();
 
-            let (refill_tx, refill_rx) = watch::channel(0u32);
+            let (refill_tx, refill_rx) = watch::channel(RefillRequest::default());
             let refill_tx = Arc::new(refill_tx);
 
             let managers: Vec<_> = (0..n as usize)
@@ -2428,7 +2455,7 @@ pub(crate) mod tests {
 
         let num_consumed = size0 + 5;
         let pending: HashSet<u64> = HashSet::from([3u64]);
-        let (refill_tx, _rx) = watch::channel(0u32);
+        let (refill_tx, _rx) = watch::channel(RefillRequest::default());
         let mgr = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
@@ -2451,7 +2478,7 @@ pub(crate) mod tests {
         .unwrap();
         let (mgr, identities) = (mgr.0, mgr.1);
 
-        let (fresh_refill_tx, _fresh_rx) = watch::channel(0u32);
+        let (fresh_refill_tx, _fresh_rx) = watch::channel(RefillRequest::default());
         let (_, unmasked) = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
@@ -2519,7 +2546,7 @@ pub(crate) mod tests {
             );
         }
 
-        let (refill_tx2, _rx2) = watch::channel(0u32);
+        let (refill_tx2, _rx2) = watch::channel(RefillRequest::default());
         let err = SigningManager::new_recovered(
             test_address(0),
             committee,
@@ -4589,7 +4616,7 @@ pub(crate) mod tests {
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
         assert!(!setup.managers[0].has_next_batch());
         assert!(setup.refill_rx.has_changed().unwrap());
-        assert_eq!(*setup.refill_rx.borrow(), 1);
+        assert_eq!(setup.refill_rx.borrow().batch_index, 1);
     }
 
     #[tokio::test]
@@ -4622,7 +4649,7 @@ pub(crate) mod tests {
         assert!(matches!(result, Err(SigningError::PoolExhausted)));
         assert!(setup.managers[0].has_next_batch());
         assert!(setup.refill_rx.has_changed().unwrap());
-        assert_eq!(*setup.refill_rx.borrow(), 1);
+        assert_eq!(setup.refill_rx.borrow().batch_index, 1);
     }
 
     #[test]
@@ -4702,7 +4729,8 @@ pub(crate) mod tests {
             setup.refill_rx.has_changed().unwrap(),
             "refill signal should have been sent on pool miss"
         );
-        assert_eq!(*setup.refill_rx.borrow(), 1); // batch_index 0 + 1
+        assert_eq!(setup.refill_rx.borrow().batch_index, 1); // batch_index 0 + 1
+        assert_eq!(setup.refill_rx.borrow().epoch, setup.managers[0].epoch());
     }
 
     #[test]
@@ -4733,12 +4761,34 @@ pub(crate) mod tests {
             let remaining = latest.remaining();
             let threshold = latest.pool.len() / mgr.config.refill_divisor;
             if remaining <= threshold {
-                let _ = mgr.refill_tx.send(latest.batch_index + 1);
+                mgr.request_refill(latest.batch_index + 1);
             }
         }
 
         assert!(setup.refill_rx.has_changed().unwrap());
-        assert_eq!(*setup.refill_rx.borrow(), 1);
+        assert_eq!(setup.refill_rx.borrow().batch_index, 1);
+    }
+
+    #[test]
+    fn test_refill_request_from_an_earlier_epoch_is_skipped() {
+        let setup = SigningTestSetup::new(4);
+        let manager = &setup.managers[0];
+        let epoch = manager.epoch();
+        assert!(
+            manager
+                .refill_skip_reason(RefillRequest {
+                    epoch: epoch - 1,
+                    batch_index: 1,
+                })
+                .is_some()
+        );
+        assert_eq!(
+            manager.refill_skip_reason(RefillRequest {
+                epoch,
+                batch_index: 1,
+            }),
+            None
+        );
     }
 
     #[tokio::test]

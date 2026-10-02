@@ -33,6 +33,7 @@ use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
+use crate::mpc::RefillRequest;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
@@ -120,8 +121,8 @@ impl MpcHandle {
 pub struct MpcService {
     inner: Arc<Hashi>,
     key_ready_tx: watch::Sender<Option<G>>,
-    refill_tx: Arc<watch::Sender<u32>>,
-    refill_rx: watch::Receiver<u32>,
+    refill_tx: Arc<watch::Sender<RefillRequest>>,
+    refill_rx: watch::Receiver<RefillRequest>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     next_batch_repair: Mutex<Option<(u64, u32, tokio::time::Instant)>>,
     /// Earliest next attempt to restore the current epoch's `MpcManager`
@@ -184,7 +185,7 @@ enum Backup {
 impl MpcService {
     pub fn new(hashi: Arc<Hashi>, backup_handle: crate::backup::BackupHandle) -> (Self, MpcHandle) {
         let (key_ready_tx, key_ready_rx) = watch::channel(None);
-        let (refill_tx, refill_rx) = watch::channel(0u32);
+        let (refill_tx, refill_rx) = watch::channel(RefillRequest::default());
         let service = Self {
             inner: hashi,
             key_ready_tx,
@@ -316,26 +317,27 @@ impl MpcService {
                     self.sync_if_stale().await;
                 }
                 Ok(()) = self.refill_rx.changed() => {
-                    let next_batch = *self.refill_rx.borrow();
-                    self.refill_with_retries(next_batch).await;
+                    let request = *self.refill_rx.borrow();
+                    self.refill_with_retries(request).await;
                 }
             }
         }
     }
 
-    async fn refill_with_retries(&self, next_batch: u32) {
+    async fn refill_with_retries(&self, request: RefillRequest) {
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             if let Err(e) = self.bail_if_reconfig_pending() {
                 info!("presignature refill stopped: {e}");
                 return;
             }
-            match self.refill_presignatures(next_batch).await {
+            match self.refill_presignatures(request).await {
                 Ok(()) => break,
                 Err(e) => {
                     error!(
                         "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
                     );
-                    if attempt < MAX_PROTOCOL_ATTEMPTS {
+                    if attempt < MAX_PROTOCOL_ATTEMPTS && self.get_pending_epoch_change().is_none()
+                    {
                         tokio::time::sleep(RETRY_INTERVAL).await;
                     }
                 }
@@ -1538,33 +1540,27 @@ impl MpcService {
         );
     }
 
-    async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
+    async fn refill_presignatures(&self, request: RefillRequest) -> anyhow::Result<()> {
         let epoch = self.inner.onchain_state().epoch();
-        let signing_manager = self
-            .inner
-            .signing_manager_for(epoch)
-            .ok_or_else(|| anyhow::anyhow!("SigningManager not available for epoch {epoch}"))?;
-        // Refill requests arrive via a coalescing channel that outlives
-        // manager rebuilds and epoch changes, so a replayed value can name a
-        // batch that is already installed, already staged, or not contiguous
-        // with the installed range. Only the immediately-next batch is
-        // actionable; anything else is skipped before spending generation
-        // work, and the trigger paths re-request the right index on demand.
-        let expected = signing_manager.batch_index() + 1;
-        if batch_index != expected {
+        let Some(signing_manager) = self.inner.signing_manager_for(epoch) else {
+            if request.epoch == epoch {
+                anyhow::bail!("SigningManager not available for epoch {epoch}");
+            }
             info!(
-                "Skipping presignature refill for batch {batch_index}: \
-                 the next installable batch is {expected}"
+                "Skipping presignature refill for batch {} of epoch {}: \
+                 the current epoch is {epoch}",
+                request.batch_index, request.epoch,
+            );
+            return Ok(());
+        };
+        if let Some(reason) = signing_manager.refill_skip_reason(request) {
+            info!(
+                "Skipping presignature refill for batch {} of epoch {}: {reason}",
+                request.batch_index, request.epoch,
             );
             return Ok(());
         }
-        if signing_manager.prefetched_batch_index() == Some(batch_index) {
-            info!(
-                "Skipping presignature refill for batch {batch_index}: \
-                 it is already staged for installation"
-            );
-            return Ok(());
-        }
+        let batch_index = request.batch_index;
         let (_, presignatures, batch_size_per_weight, _, dealer_set_digest) =
             self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {

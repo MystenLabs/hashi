@@ -1142,7 +1142,7 @@ mod tests {
                 mgr.committee.clone()
             };
             let epoch = committee.epoch();
-            let (refill_tx, _) = tokio::sync::watch::channel(0u32);
+            let (refill_tx, _) = tokio::sync::watch::channel(hashi::mpc::RefillRequest::default());
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
