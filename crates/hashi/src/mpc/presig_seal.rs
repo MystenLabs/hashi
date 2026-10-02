@@ -12,7 +12,7 @@ use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
-use hashi_types::move_types::PresigCompletedMessage;
+use hashi_types::move_types::PresigDealerSetMessage;
 use sui_sdk_types::Address;
 use tokio::task::JoinSet;
 use tracing::info;
@@ -32,7 +32,7 @@ pub(crate) fn start(
     batch_index: u32,
     dealer_set_digest: [u8; 32],
 ) {
-    let message = PresigCompletedMessage {
+    let message = PresigDealerSetMessage {
         epoch,
         batch_index,
         dealer_set_digest: dealer_set_digest.to_vec(),
@@ -40,11 +40,11 @@ pub(crate) fn start(
     let signature = match sign(inner, &message) {
         Ok(signature) => signature,
         Err(e) => {
-            warn!("Cannot sign PresigCompleted for epoch {epoch} batch {batch_index}: {e:#}");
+            warn!("Cannot sign PresigDealerSet for epoch {epoch} batch {batch_index}: {e:#}");
             return;
         }
     };
-    if !inner.store_presig_completed_signature_if_absent(
+    if !inner.store_presig_dealer_set_signature_if_absent(
         epoch,
         batch_index,
         signature.as_bytes().to_vec(),
@@ -57,7 +57,7 @@ pub(crate) fn start(
     tasks.spawn(async move { seal(&inner, &message, signature).await });
 }
 
-fn sign(inner: &Hashi, message: &PresigCompletedMessage) -> anyhow::Result<BLS12381Signature> {
+fn sign(inner: &Hashi, message: &PresigDealerSetMessage) -> anyhow::Result<BLS12381Signature> {
     let committee = inner.committee_for_epoch(message.epoch)?;
     let my_address = inner.config.validator_address()?;
     let key = inner.find_signing_key_for_committee(&committee, my_address, message.epoch)?;
@@ -72,7 +72,7 @@ fn sign(inner: &Hashi, message: &PresigCompletedMessage) -> anyhow::Result<BLS12
         .clone())
 }
 
-async fn seal(inner: &Arc<Hashi>, message: &PresigCompletedMessage, signature: BLS12381Signature) {
+async fn seal(inner: &Arc<Hashi>, message: &PresigDealerSetMessage, signature: BLS12381Signature) {
     let (epoch, batch_index) = (message.epoch, message.batch_index);
     let mut retry_interval = POLL_INTERVAL;
     while let Err(e) = try_seal(inner, message, &signature).await {
@@ -84,7 +84,7 @@ async fn seal(inner: &Arc<Hashi>, message: &PresigCompletedMessage, signature: B
 
 async fn try_seal(
     inner: &Arc<Hashi>,
-    message: &PresigCompletedMessage,
+    message: &PresigDealerSetMessage,
     signature: &BLS12381Signature,
 ) -> anyhow::Result<()> {
     if done_or_not_relevant(inner, message) {
@@ -101,16 +101,16 @@ async fn try_seal(
     }
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::from_hashi(Arc::clone(inner))?;
     executor
-        .execute_submit_presig_completed(message, cert.committee_signature())
+        .execute_submit_presig_dealer_set(message, cert.committee_signature())
         .await?;
     info!(
-        "Submitted PresigCompleted for epoch {} batch {}",
+        "Submitted PresigDealerSet for epoch {} batch {}",
         message.epoch, message.batch_index
     );
     Ok(())
 }
 
-fn done_or_not_relevant(inner: &Hashi, message: &PresigCompletedMessage) -> bool {
+fn done_or_not_relevant(inner: &Hashi, message: &PresigDealerSetMessage) -> bool {
     let onchain_state = inner.onchain_state();
     if onchain_state.epoch() > message.epoch {
         return true;
@@ -136,9 +136,9 @@ fn done_or_not_relevant(inner: &Hashi, message: &PresigCompletedMessage) -> bool
 async fn collect(
     inner: &Hashi,
     committee: &RuntimeCommittee,
-    message: &PresigCompletedMessage,
+    message: &PresigDealerSetMessage,
     signature: &BLS12381Signature,
-) -> anyhow::Result<Option<SignedMessage<PresigCompletedMessage>>> {
+) -> anyhow::Result<Option<SignedMessage<PresigDealerSetMessage>>> {
     let my_address = inner.config.validator_address()?;
     let mut aggregator =
         committee.signature_aggregator(inner.config.hashi_ids().hashi_object_id, message.clone());
@@ -167,7 +167,7 @@ async fn collect(
                     .committees
                     .client(&address)?;
                 client
-                    .get_presig_completed_signature(message.epoch, message.batch_index)
+                    .get_presig_dealer_set_signature(message.epoch, message.batch_index)
                     .await
                     .ok()
                     .flatten()
@@ -194,7 +194,7 @@ async fn collect(
                 }
                 Err(e) => {
                     if rejected.insert(address) {
-                        info!("PresigCompleted signature from {address} rejected: {e}");
+                        info!("PresigDealerSet signature from {address} rejected: {e}");
                     }
                 }
             }
@@ -207,7 +207,7 @@ async fn collect(
     aggregator
         .finish()
         .map(Some)
-        .map_err(|e| anyhow::anyhow!("failed to finalize PresigCompleted certificate: {e}"))
+        .map_err(|e| anyhow::anyhow!("failed to finalize PresigDealerSet certificate: {e}"))
 }
 
 fn submit_delay(committee: &RuntimeCommittee, my_address: Address, batch_index: u32) -> Duration {

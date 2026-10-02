@@ -74,8 +74,8 @@ pub struct Hashi {
     guardian_pacing: RwLock<guardian_limiter::FinalizePacing>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
-    /// This node's `PresigCompleted` signatures by (epoch, batch index).
-    presig_completed_signatures: RwLock<HashMap<(u64, u32), Vec<u8>>>,
+    /// This node's `PresigDealerSet` signatures by (epoch, batch index).
+    presig_dealer_set_signatures: RwLock<HashMap<(u64, u32), Vec<u8>>>,
     reported_registration_aborts: RwLock<HashSet<String>>,
 }
 
@@ -111,7 +111,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            presig_completed_signatures: RwLock::new(HashMap::new()),
+            presig_dealer_set_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
     }
@@ -148,7 +148,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_pacing: RwLock::new(guardian_limiter::FinalizePacing::default()),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            presig_completed_signatures: RwLock::new(HashMap::new()),
+            presig_dealer_set_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
     }
@@ -265,13 +265,13 @@ impl Hashi {
             .cloned()
     }
 
-    pub fn store_presig_completed_signature_if_absent(
+    pub fn store_presig_dealer_set_signature_if_absent(
         &self,
         epoch: u64,
         batch_index: u32,
         signature: Vec<u8>,
     ) -> bool {
-        let mut signatures = self.presig_completed_signatures.write().unwrap();
+        let mut signatures = self.presig_dealer_set_signatures.write().unwrap();
         signatures.retain(|(e, _), _| *e >= epoch);
         match signatures.entry((epoch, batch_index)) {
             std::collections::hash_map::Entry::Occupied(_) => false,
@@ -282,8 +282,8 @@ impl Hashi {
         }
     }
 
-    pub fn get_presig_completed_signature(&self, epoch: u64, batch_index: u32) -> Option<Vec<u8>> {
-        self.presig_completed_signatures
+    pub fn get_presig_dealer_set_signature(&self, epoch: u64, batch_index: u32) -> Option<Vec<u8>> {
+        self.presig_dealer_set_signatures
             .read()
             .unwrap()
             .get(&(epoch, batch_index))

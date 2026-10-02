@@ -21,7 +21,7 @@ service MpcService {
   rpc GetReconfigCompletionSignature(GetReconfigCompletionSignatureRequest) returns (GetReconfigCompletionSignatureResponse);
 
   // Get a validator's signature attesting that a presig batch's dealer set is final.
-  rpc GetPresigCompletedSignature(GetPresigCompletedSignatureRequest) returns (GetPresigCompletedSignatureResponse);
+  rpc GetPresigDealerSetSignature(GetPresigDealerSetSignatureRequest) returns (GetPresigDealerSetSignatureResponse);
 
   // Pull partial signatures from another party.
   rpc GetPartialSignatures(GetPartialSignaturesRequest) returns (GetPartialSignaturesResponse);
@@ -199,7 +199,7 @@ message GetReconfigCompletionSignatureResponse {
   optional bytes signature = 1;
 }
 
-message GetPresigCompletedSignatureRequest {
+message GetPresigDealerSetSignatureRequest {
   // The epoch of the presig batch.
   optional uint64 epoch = 1;
 
@@ -207,8 +207,8 @@ message GetPresigCompletedSignatureRequest {
   optional uint32 batch_index = 2;
 }
 
-message GetPresigCompletedSignatureResponse {
-  // The validator's BLS signature on the presig batch's completion message.
+message GetPresigDealerSetSignatureResponse {
+  // The validator's BLS signature on the presig batch's dealer set message.
   optional bytes signature = 1;
 }
 

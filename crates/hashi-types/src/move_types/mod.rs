@@ -1076,16 +1076,16 @@ pub struct PresigSealV1 {
 }
 
 /// Rust version of the Move struct
-/// `hashi::cert_submission::PresigCompletedMessage`.
+/// `hashi::cert_submission::PresigDealerSetMessage`.
 #[derive(Clone, Debug, PartialEq, Eq, serde_derive::Serialize, serde_derive::Deserialize)]
-pub struct PresigCompletedMessage {
+pub struct PresigDealerSetMessage {
     pub epoch: u64,
     pub batch_index: u32,
     pub dealer_set_digest: Vec<u8>,
 }
 
-impl crate::intent::IntentMessage for PresigCompletedMessage {
-    const INTENT: crate::intent::Intent = crate::intent::Intent::PresigCompleted;
+impl crate::intent::IntentMessage for PresigDealerSetMessage {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::PresigDealerSet;
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.

@@ -195,7 +195,7 @@ impl HttpService {
 
     pub fn get_presig_seal_signature(&self, epoch: u64, batch_index: u32) -> Option<Vec<u8>> {
         self.inner
-            .get_presig_completed_signature(epoch, batch_index)
+            .get_presig_dealer_set_signature(epoch, batch_index)
     }
 }
 
