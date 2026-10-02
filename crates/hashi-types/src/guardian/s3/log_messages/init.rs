@@ -137,8 +137,8 @@ impl OperatorInitInfo {
 /// then operator activation (OA). Ceremony mode stops after OI.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
-    /// Attestation and signing public key recorded during operator initialization (OI).
-    OIAttestationUnsigned {
+    /// OI attestation record, signed by the session key it attests.
+    OIAttestation {
         attestation: NitroAttestation,
         #[serde(with = "crate::guardian::serde::guardian_pubkey")]
         signing_public_key: GuardianPubKey,
@@ -164,14 +164,14 @@ pub enum InitLogMessage {
 }
 
 impl InitLogMessage {
-    pub const OI_ATTEST_UNSIGNED: &'static str = "01-oi-attestation-unsigned";
+    pub const OI_ATTESTATION: &'static str = "01-oi-attestation";
     pub const OI_GUARDIAN_INFO: &'static str = "02-oi-guardian-info";
     pub const PI_FULLY_INITIALIZED: &'static str = "03-pi-enclave-fully-initialized";
     pub const OA_ACTIVATED: &'static str = "04-oa-activated";
 
     pub fn object_key(&self, session_id: &str) -> String {
         let suffix = match self {
-            InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED,
+            InitLogMessage::OIAttestation { .. } => Self::OI_ATTESTATION,
             InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO,
             InitLogMessage::PIEnclaveFullyInitialized { .. } => Self::PI_FULLY_INITIALIZED,
             InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED,
@@ -181,7 +181,7 @@ impl InitLogMessage {
     }
 
     pub fn attestation_object_key(session_id: &str) -> String {
-        Self::object_key_for_suffix(session_id, Self::OI_ATTEST_UNSIGNED)
+        Self::object_key_for_suffix(session_id, Self::OI_ATTESTATION)
     }
 
     pub fn guardian_info_object_key(session_id: &str) -> String {

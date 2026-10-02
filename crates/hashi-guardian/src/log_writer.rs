@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn first_init(signing_key: &GuardianSignKeyPair) -> LogMessage {
-        LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+        LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
             attestation: NitroAttestation::new(vec![]),
             signing_public_key: signing_key.verification_key(),
         }))
@@ -232,7 +232,7 @@ mod tests {
         let put_flaky = mock!(Client::put_object)
             .match_requests(|req| {
                 req.key()
-                    .is_some_and(|key| key.ends_with("01-oi-attestation-unsigned.json"))
+                    .is_some_and(|key| key.ends_with("01-oi-attestation.json"))
             })
             .sequence()
             .http_status(500, None)

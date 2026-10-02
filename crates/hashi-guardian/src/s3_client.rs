@@ -878,7 +878,7 @@ mod tests {
         let expiry_time = DateTime::from(SystemTime::now() + Duration::from_mins(5));
         let error = logger
             .write_at_key_once(
-                "init/session/01-oi-attestation-unsigned.json",
+                "init/session/01-oi-attestation.json",
                 &TestPayload { a: 1 },
                 expiry_time,
             )
@@ -947,7 +947,7 @@ mod tests {
         for (message, retention_days) in [
             (LogMessage::Heartbeat(HeartbeatLogMessage::new(42)), 30),
             (
-                LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
                     attestation: NitroAttestation::new(vec![1, 2, 3]),
                     signing_public_key: signing_key.verification_key(),
                 })),
@@ -1054,12 +1054,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsigned_log_replay_is_rejected_during_deserialization() {
+    async fn attestation_log_replay_is_rejected_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let record = VerifiableLogEntry::new_at_timestamp(
             session_id,
-            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),
             })),

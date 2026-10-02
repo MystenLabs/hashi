@@ -6,8 +6,9 @@ The S3 bucket operator is untrusted. Log signatures bind the intent, schema
 version, session ID, timestamp, intended object key, and event. Readers compare
 the signed key in JSON with the actual S3 key and reject relocated or
 non-canonical records. All object keys are deterministic.
-Unsigned OI attestations bind placement through their Nitro-authenticated
-signing key and derived session ID.
+Every record is signed, including the OI attestation record, which is signed by
+the session key it attests. Readers verify the attestation before trusting that
+key to verify log signatures.
 
 Guardians emit and read a single log schema, with `schema_version: 1` reset
 for the testnet wipe. Pre-wipe records are no longer supported. KP-share records
@@ -80,7 +81,7 @@ and sequence numbers are scoped to that bucket, as is the singleton genesis reco
 
 Canonical key layout:
 
-- `init/{session_id}/01-oi-attestation-unsigned.json`
+- `init/{session_id}/01-oi-attestation.json`
 - `init/{session_id}/02-oi-guardian-info.json`
 - `init/{session_id}/03-pi-enclave-fully-initialized.json`
 - `init/{session_id}/04-oa-activated.json`

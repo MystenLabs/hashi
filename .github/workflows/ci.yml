@@ -99,6 +99,10 @@ jobs:
           cargo insta test --workspace --all-features --test-runner nextest --nextest-profile ci --check --unreferenced reject --disable-nextest-doctest
           cargo test --workspace --all-features --doc
 
+      - name: Verify Guardian log attestation trust
+        # --all-features enables non-enclave-dev, which bypasses Nitro verification.
+        run: cargo test -p hashi-guardian valid_log_signature_does_not_replace_attestation_verification
+
       - name: Detect TRM client changes
         uses: dorny/paths-filter@v3
         id: trm-filter

@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "object_key": "init/d54207da194977dc/01-oi-attestation-unsigned.json",
+  "object_key": "init/d54207da194977dc/01-oi-attestation.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
     "Init": {
-      "OIAttestationUnsigned": {
+      "OIAttestation": {
         "attestation": "AQID",
         "signing_public_key": "d54207da194977dcf46adbfec2bc2e75b52d5a8a42184fedfdc00024f0e3e8da"
       }
     }
   },
-  "signature": null
+  "signature": "8fdfddefc5e40d78ee75ad067d66ab80eade929556eeb5618b46b2fab9d7a3ac63d7dee6b7f1e8a68a3afbe8f9dfbcce15cabf73d7a5a5db47693b918452a409"
 }
