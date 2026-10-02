@@ -202,19 +202,11 @@ impl HttpService {
 // A server that stops without a shutdown signal has crashed (one HTTP/1 handler
 // panic ends sui-http's accept loop), so fail rather than run on without it.
 fn supervise(server_handle: Arc<ServerHandle>) -> Service {
-    let shutdown = tokio_util::sync::CancellationToken::new();
-    let requested = shutdown.clone();
-    let guard = ServerHandleGuard(server_handle.clone());
-    Service::new()
-        .spawn_aborting(async move {
-            guard.0.wait_for_shutdown().await;
-            anyhow::ensure!(requested.is_cancelled(), "HTTP server stopped unexpectedly");
-            Ok(())
-        })
-        .with_shutdown_signal(async move {
-            shutdown.cancel();
-            server_handle.trigger_shutdown();
-        })
+    let guard = ServerHandleGuard(server_handle);
+    Service::new().spawn_aborting(async move {
+        guard.0.wait_for_shutdown().await;
+        anyhow::bail!("HTTP server stopped unexpectedly")
+    })
 }
 
 async fn health() -> impl axum::response::IntoResponse {
@@ -397,7 +389,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_requested_shutdown_stops_the_service_cleanly() {
-        supervise(server()).shutdown().await.unwrap();
+    async fn a_requested_shutdown_stops_the_server_and_the_service_cleanly() {
+        let server = server();
+
+        supervise(server.clone()).shutdown().await.unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            server.wait_for_shutdown(),
+        )
+        .await
+        .expect("a requested shutdown must stop the server");
     }
 }

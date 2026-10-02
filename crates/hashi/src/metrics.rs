@@ -2013,8 +2013,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 // has stopped running tasks.
 const MAX_HEARTBEAT_AGE: Duration = Duration::from_secs(120);
 
-// Runs on its own thread so a busy main runtime can't fail the liveness probe;
-// /health fails only once the main runtime stops running the heartbeat.
+// Runs on its own thread so a busy main runtime can't fail the liveness probe.
 pub fn start_prometheus_server(
     addr: std::net::SocketAddr,
     registry: Registry,
