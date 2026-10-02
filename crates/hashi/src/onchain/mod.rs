@@ -2492,6 +2492,7 @@ mod tests {
             public_key: signing_keypair.public().as_bytes().to_owned(),
             encryption_public_key: encryption_public_key.as_element().to_byte_array().into(),
             weight: 1,
+            extra_fields: move_types::Config::default(),
         };
         let committee = convert_move_committee(one_member_committee(move_committee_member));
         let committee_member = &committee.members()[0];

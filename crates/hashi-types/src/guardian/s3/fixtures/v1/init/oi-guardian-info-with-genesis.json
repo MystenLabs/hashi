@@ -50,11 +50,11 @@
             },
             "hashi_object_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "mpc_master_g": "jwfd1en1F5z/GUhgNBge12UFuqrVPl2ZQGQSe1bFhBuA",
-            "genesis_state_hash": "c8a720f0cb545886a903096006dc5b2b0f56580de49efccbf1b134dd8c6423f1"
+            "genesis_state_hash": "a8b2275efd4299ebe9600757629b9fee27da8516a0deadf4e636bdef0e978fe2"
           }
         }
       }
     }
   },
-  "signature": "a6e7595d6fa8dd34237aa40fee2409732ede8d4b0972257aba8cfac821ae6e322b3e1d91f7c6227820b9f387e5d977646dbf233bb183be58b27eadc570857c0d"
+  "signature": "71763e8ac994aa25e99e9e120bc38fdbc793bd698fbd82d00795a163314336d9529395cbae98b046d56f273a947e8b92157c6bd24b5dff780f3033fa28becc09"
 }

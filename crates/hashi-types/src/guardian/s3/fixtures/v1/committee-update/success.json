@@ -143,7 +143,8 @@
               220,
               16
             ],
-            "weight": 10
+            "weight": 10,
+            "extra_fields": []
           }
         ],
         "total_weight": 10,
@@ -179,5 +180,5 @@
       }
     }
   },
-  "signature": "e64e60fc22eb7ea2f606320fa5f720f5ea19f5efa4ea1974e29caba13b9c35edbba4c5c7175b943e54fb9bfb66100647c69af773bb3a636581ae3ffdbbe4c801"
+  "signature": "aab5a9aa5c9ea4fb5df1d86a508d94f4e06e748065177a476abf96ba931d0b4999dfdb90f727cbed6cebdff34449a13da5fda8dbd5b4365a746d46fab2889804"
 }

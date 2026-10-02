@@ -22,6 +22,10 @@ message CommitteeMember {
   optional bytes public_key = 2;
   optional bytes encryption_public_key = 3;
   optional uint64 weight = 4;
+  // BCS-encoded VecMap<String, config_value::Value>: the member's on-chain
+  // extension slot, empty today. Carried verbatim, like Committee.config, so
+  // the committee's signed BCS bytes survive this hop without reconstruction.
+  optional bytes extra_fields = 5;
 }
 
 message MemberSignature {

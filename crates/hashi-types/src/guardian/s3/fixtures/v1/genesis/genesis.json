@@ -142,7 +142,8 @@
               220,
               16
             ],
-            "weight": 10
+            "weight": 10,
+            "extra_fields": []
           }
         ],
         "total_weight": 10,
@@ -171,5 +172,5 @@
       "mpc_master_g": "mBf4FluB8lnZKM4t2/ybAgcLh86VYqBVrLvc+X5mvnkA"
     }
   },
-  "signature": "7a6788b107d66584a47cdfd413edeb928c156643d76b105f4d605ca2a698d2fcf9508d96ecec81d4fb4a27073fa845b034120532da10aeb5d430517e7da84401"
+  "signature": "05cf362d0f36b74d5c4a9520744cd6751c42ea1175c814e586356d7b4720216f7afd13a198282279a1717e1b631cb2cc67af0ef6fa1afa6b24e03cce318b8c09"
 }
