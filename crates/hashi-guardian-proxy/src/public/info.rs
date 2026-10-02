@@ -138,7 +138,7 @@ impl InfoSource for GrpcInfoSource {
 /// burst of public hits collapses to a single backend call.
 struct InfoCache {
     slot: Mutex<Option<(Instant, GuardianInfoView)>>,
-    refresh: tokio::sync::Mutex<()>,
+    refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Backend source plus its single-slot TTL cache, so a burst of public `/info`
@@ -160,7 +160,7 @@ impl InfoState {
             source,
             cache: Arc::new(InfoCache {
                 slot: Mutex::new(None),
-                refresh: tokio::sync::Mutex::new(()),
+                refresh: Arc::new(tokio::sync::Mutex::new(())),
             }),
             ttl,
         }
@@ -177,16 +177,21 @@ impl InfoState {
         // Elect a single refresher. Concurrent callers serve the last good view
         // rather than pile onto the enclave; on a cold cache (nothing to serve)
         // they instead wait for that one refresh.
-        let refreshed = match self.cache.refresh.try_lock() {
-            Ok(_leader) => self.refresh_locked().await,
+        let leader = match self.cache.refresh.clone().try_lock_owned() {
+            Ok(leader) => leader,
             Err(_) => match self.last_good() {
                 Some(view) => return Json(view).into_response(),
-                None => {
-                    let _leader = self.cache.refresh.lock().await;
-                    self.refresh_locked().await
-                }
+                None => self.cache.refresh.clone().lock_owned().await,
             },
         };
+        // Detached, so a caller that disconnects can't cancel the refresh.
+        let state = self.clone();
+        let refreshed = tokio::spawn(async move {
+            let _leader = leader;
+            state.refresh_locked().await
+        })
+        .await
+        .expect("info refresh task failed");
 
         match refreshed {
             Ok(view) => Json(view).into_response(),
@@ -480,6 +485,22 @@ mod tests {
             1,
             "a burst must collapse to one GetGuardianInfo"
         );
+    }
+
+    #[tokio::test]
+    async fn the_refresh_outlives_a_caller_that_gives_up() {
+        let fake = FakeSource::new(Duration::from_millis(200));
+        let state = state_with(&fake, Duration::from_secs(10));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), state.serve())
+                .await
+                .is_err()
+        );
+
+        // The refresh still completes and fills the cache for the next caller.
+        assert_eq!(state.serve().await.status(), StatusCode::OK);
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
