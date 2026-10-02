@@ -524,13 +524,13 @@ impl Hashi {
                 ))
             })?;
         if request.is_committed() {
-            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+            return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
                 "Withdrawal request {} is already committed to a withdrawal transaction",
                 approval.request_id
             )));
         }
         if request.is_approved() {
-            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+            return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
                 "Withdrawal request {} is already approved",
                 approval.request_id
             )));
@@ -1773,6 +1773,7 @@ impl Hashi {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalApprovalErrorKind {
+    AlreadyApproved,
     AmlServiceError,
     FailedQuorum,
     SubmitFailed,
@@ -1784,7 +1785,8 @@ pub enum WithdrawalApprovalErrorKind {
 impl RetryPolicy for WithdrawalApprovalErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
         match self {
-            Self::AmlServiceError
+            Self::AlreadyApproved
+            | Self::AmlServiceError
             | Self::FailedQuorum
             | Self::SubmitFailed
             | Self::TaskFailed
@@ -1799,7 +1801,8 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
     fn max_retries(self) -> u32 {
         match self {
-            Self::AmlServiceError
+            Self::AlreadyApproved
+            | Self::AmlServiceError
             | Self::FailedQuorum
             | Self::SubmitFailed
             | Self::TaskFailed
@@ -1811,6 +1814,9 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
 #[derive(Debug, Error)]
 pub enum WithdrawalApprovalError {
+    #[error("Already approved: {0}")]
+    AlreadyApproved(#[source] anyhow::Error),
+
     #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
@@ -1821,6 +1827,7 @@ pub enum WithdrawalApprovalError {
 impl WithdrawalApprovalError {
     pub fn kind(&self) -> WithdrawalApprovalErrorKind {
         match self {
+            Self::AlreadyApproved(_) => WithdrawalApprovalErrorKind::AlreadyApproved,
             Self::AmlServiceError(_) => WithdrawalApprovalErrorKind::AmlServiceError,
             Self::NeverRetry(_) => WithdrawalApprovalErrorKind::NeverRetry,
         }

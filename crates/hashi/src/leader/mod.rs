@@ -27,7 +27,10 @@ use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::OptionFuture;
+use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::MemberSignature;
+use hashi_types::committee::certificate_threshold;
+use hashi_types::intent::IntentMessage;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -618,6 +621,66 @@ where
     }
 }
 
+enum NoSignature {
+    AlreadyApproved,
+    Failed,
+}
+
+/// Peers refuse a request their mirror shows already approved with
+/// `AlreadyExists` (`deposit_refusal_status`, `withdrawal_approval_refusal_status`).
+fn is_already_approved_refusal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::AlreadyExists
+}
+
+enum NoQuorum {
+    AlreadyApproved,
+    Short { weight: u64, required_weight: u64 },
+}
+
+/// Add each member's signature to `aggregator` until it reaches a certificate
+/// quorum, stopping early once members reporting the request already approved
+/// rule a quorum out.
+async fn collect_signatures<T: IntentMessage + Clone>(
+    sig_tasks: &mut JoinSet<(u64, Result<MemberSignature, NoSignature>)>,
+    aggregator: &mut BlsSignatureAggregator<'_, T>,
+    total_weight: u64,
+) -> Result<(), NoQuorum> {
+    let required_weight = certificate_threshold(total_weight);
+    let mut already_approved_weight = 0;
+    while let Some(result) = sig_tasks.join_next().await {
+        let Ok((weight, reply)) = result else {
+            continue;
+        };
+        match reply {
+            Ok(sig) => {
+                if let Err(e) = aggregator.add_signature(sig) {
+                    error!("Failed to add member signature: {e}");
+                }
+            }
+            Err(NoSignature::AlreadyApproved) => {
+                already_approved_weight += weight;
+                // Past `total - required`, quorum is out of reach, and that is more weight
+                // than faulty members can hold, so an approval really landed.
+                if already_approved_weight > total_weight.saturating_sub(required_weight) {
+                    return Err(NoQuorum::AlreadyApproved);
+                }
+            }
+            Err(NoSignature::Failed) => {}
+        }
+        if aggregator.weight() >= required_weight {
+            break;
+        }
+    }
+
+    if aggregator.weight() < required_weight {
+        return Err(NoQuorum::Short {
+            weight: aggregator.weight(),
+            required_weight,
+        });
+    }
+    Ok(())
+}
+
 /// Whether a failed peer RPC is worth retrying. Under sustained load a peer's
 /// HTTP/2 server tears the whole multiplexed connection down — `GoAway`
 /// (surfaced as `Internal`), broken pipe (`Unknown`), or the usual
@@ -637,12 +700,83 @@ fn is_retriable_transport(status: &tonic::Status) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::NoQuorum;
+    use super::NoSignature;
+    use super::collect_signatures;
+    use super::is_already_approved_refusal;
     use super::is_retriable_transport;
     use super::retry_peer_call;
+    use crate::withdrawals::WithdrawalApprovalError;
+    use crate::withdrawals::WithdrawalRequestApproval;
+    use hashi_types::committee::BlsSignatureAggregator;
+    use hashi_types::committee::Committee;
     use sui_sdk_types::Address;
+    use tokio::task::JoinSet;
     use tonic::Code;
     use tonic::Response;
     use tonic::Status;
+
+    #[test]
+    fn tells_withdrawal_already_approved_refusals_from_other_refusals() {
+        let refusal = crate::grpc::bridge_service::withdrawal_approval_refusal_status;
+        assert!(is_already_approved_refusal(&refusal(
+            WithdrawalApprovalError::AlreadyApproved(anyhow::anyhow!("already committed"))
+        )));
+        for err in [
+            WithdrawalApprovalError::NeverRetry(anyhow::anyhow!("not found in queue")),
+            WithdrawalApprovalError::AmlServiceError(anyhow::anyhow!("TRM unavailable")),
+        ] {
+            assert!(!is_already_approved_refusal(&refusal(err)));
+        }
+        // Older peers send the same refusal as `failed_precondition`.
+        assert!(!is_already_approved_refusal(&Status::failed_precondition(
+            "Never retry: Withdrawal request 0x1 is already approved"
+        )));
+    }
+
+    fn aggregator(committee: &Committee) -> BlsSignatureAggregator<'_, WithdrawalRequestApproval> {
+        let message = WithdrawalRequestApproval {
+            request_id: Address::ZERO,
+        };
+        BlsSignatureAggregator::new(Address::ZERO, committee, message)
+    }
+
+    #[tokio::test]
+    async fn stops_collecting_once_already_approved_weight_rules_out_quorum() {
+        let committee = Committee::new(vec![], 0, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_334, Err(NoSignature::AlreadyApproved)) });
+        sig_tasks.spawn(std::future::pending());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_signatures(&mut sig_tasks, &mut aggregator, 10_000),
+        )
+        .await
+        .expect("should stop without waiting for the member that never answers");
+
+        assert!(matches!(result, Err(NoQuorum::AlreadyApproved)));
+    }
+
+    #[tokio::test]
+    async fn keeps_collecting_while_already_approved_weight_leaves_quorum_reachable() {
+        let committee = Committee::new(vec![], 0, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_333, Err(NoSignature::AlreadyApproved)) });
+        sig_tasks.spawn(async { (6_667, Err(NoSignature::Failed)) });
+
+        let result = collect_signatures(&mut sig_tasks, &mut aggregator, 10_000).await;
+
+        assert!(matches!(
+            result,
+            Err(NoQuorum::Short {
+                weight: 0,
+                required_weight: 6_667,
+            })
+        ));
+    }
 
     /// Runs `retry_peer_call` against a peer that answers attempt `n` (from 1)
     /// with `reply(n)`; returns the result and how many clients were fetched.

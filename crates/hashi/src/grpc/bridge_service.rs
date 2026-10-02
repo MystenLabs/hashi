@@ -12,6 +12,7 @@ use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::withdrawals::MpcInputSignaturesMessage;
+use crate::withdrawals::WithdrawalApprovalError;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
@@ -109,7 +110,7 @@ impl BridgeService for HttpService {
             .inner
             .validate_and_sign_withdrawal_request_approval(&approval)
             .await
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(withdrawal_approval_refusal_status)?;
         tracing::info!("Signed withdrawal request approval");
         Ok(Response::new(SignWithdrawalRequestApprovalResponse {
             member_signature: Some(member_signature),
@@ -377,6 +378,15 @@ impl HttpService {
 pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
     match err {
         UnapprovedDepositError::AlreadyApprovedThisEpoch => Status::already_exists(err.to_string()),
+        err => Status::failed_precondition(err.to_string()),
+    }
+}
+
+/// `AlreadyExists` tells the leader the request is already approved or
+/// committed, so it can stop collecting signatures for it.
+pub(crate) fn withdrawal_approval_refusal_status(err: WithdrawalApprovalError) -> Status {
+    match err {
+        WithdrawalApprovalError::AlreadyApproved(_) => Status::already_exists(err.to_string()),
         err => Status::failed_precondition(err.to_string()),
     }
 }

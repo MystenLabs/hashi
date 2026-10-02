@@ -3,7 +3,12 @@
 
 use super::LEADER_TASK_TIMEOUT;
 use super::LeaderService;
+use super::NoQuorum;
+use super::NoSignature;
+use super::collect_signatures;
+use super::is_already_approved_refusal;
 use super::parse_member_signature;
+use super::retry_peer_call;
 use crate::Hashi;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
@@ -225,7 +230,6 @@ impl LeaderService {
         };
 
         let proto_request = approval.to_proto();
-        let required_weight = certificate_threshold(committee.total_weight());
 
         let mut aggregator =
             committee.signature_aggregator(inner.config.hashi_ids().hashi_object_id, approval);
@@ -243,34 +247,35 @@ impl LeaderService {
             let proto_request = proto_request.clone();
             let member = member.clone();
             sig_tasks.spawn(async move {
-                Self::request_withdrawal_approval_signature(&inner, proto_request, &member).await
+                let reply =
+                    Self::request_withdrawal_approval_signature(&inner, proto_request, &member)
+                        .await;
+                (member.weight(), reply)
             });
         }
 
-        // Collect signatures, stopping once we reach quorum.
-        while let Some(result) = sig_tasks.join_next().await {
-            let Ok(Some(sig)) = result else { continue };
-            if let Err(e) = aggregator.add_signature(sig) {
-                error!("Failed to add approval signature: {e}");
-            }
-            if aggregator.weight() >= required_weight {
-                break;
-            }
-        }
-
-        let weight = aggregator.weight();
-        if weight < required_weight {
+        if let Err(no_quorum) =
+            collect_signatures(&mut sig_tasks, &mut aggregator, committee.total_weight()).await
+        {
+            let kind = match no_quorum {
+                NoQuorum::AlreadyApproved => {
+                    debug!("Peers report the withdrawal request already approved");
+                    WithdrawalApprovalErrorKind::AlreadyApproved
+                }
+                NoQuorum::Short {
+                    weight,
+                    required_weight,
+                } => {
+                    error!("Insufficient approval signatures: weight {weight} < {required_weight}");
+                    WithdrawalApprovalErrorKind::FailedQuorum
+                }
+            };
             inner
                 .metrics
                 .leader_retries_total
-                .with_label_values(&["withdrawal_approval", "FailedQuorum"])
+                .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
                 .inc();
-            retry_tracker.record_failure(
-                WithdrawalApprovalErrorKind::FailedQuorum,
-                request.id,
-                checkpoint_timestamp_ms,
-            );
-            error!("Insufficient approval signatures: weight {weight} < {required_weight}");
+            retry_tracker.record_failure(kind, request.id, checkpoint_timestamp_ms);
             return Ok(());
         }
 
@@ -331,20 +336,37 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalRequestApprovalRequest,
         member: &CommitteeMember,
-    ) -> Option<MemberSignature> {
+    ) -> Result<MemberSignature, NoSignature> {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal request approval signature");
 
-        let response = Self::call_peer_with_retry(
-            inner,
+        let response = match retry_peer_call(
             validator_address,
             "withdrawal request approval signature",
+            || {
+                inner
+                    .onchain_state()
+                    .bridge_service_client(&validator_address)
+            },
             move |mut client| {
                 let request = proto_request.clone();
                 async move { client.sign_withdrawal_request_approval(request).await }
             },
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(status) if is_already_approved_refusal(&status) => {
+                debug!("{validator_address} reports the withdrawal request already approved");
+                return Err(NoSignature::AlreadyApproved);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to get withdrawal request approval signature from {validator_address}: {e}"
+                );
+                return Err(NoSignature::Failed);
+            }
+        };
 
         trace!(
             "Retrieved withdrawal request approval signature from {}",
@@ -362,7 +384,7 @@ impl LeaderService {
                     validator_address
                 );
             })
-            .ok()
+            .map_err(|_| NoSignature::Failed)
     }
 
     // ========================================================================
