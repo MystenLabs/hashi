@@ -82,6 +82,12 @@ impl OIWithdrawModeInstall {
         // Subsequent enclaves recover them from the verified immutable record.
         let (hashi_object_id, mpc_master_g) = match &genesis_state {
             Some(state) => {
+                if reader.read_latest_committee().await?.is_some() {
+                    return Err(InvalidInputs(
+                        "genesis bootstrap is rejected after a committee-update or genesis record exists"
+                            .into(),
+                    ));
+                }
                 let (_, hashi_object_id, mpc_master_g) = state.clone().into_parts();
                 (hashi_object_id, mpc_master_g)
             }
@@ -300,9 +306,9 @@ mod tests {
     use super::*;
     use crate::test_utils::CapturedPuts;
 
-    fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> LogRecord {
+    fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> VerifiableLogEntry {
         let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
-        LogRecord::new(
+        VerifiableLogEntry::new(
             SessionID::from_signing_pubkey(&key.verification_key()),
             LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee,
@@ -360,10 +366,10 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_installs_supplied_genesis_bindings_and_authorization_hash() {
-        // This logger cannot service reads: bootstrap must use the supplied state.
         let args = crate::test_utils::OperatorInitTestArgs::default();
+        let key = GuardianSignKeyPair::from([42; 32]);
         let mut reader =
-            GuardianReader::from_s3_client(args.s3_logger, args.config.deployment().clone());
+            crate::s3_reader::reader_with_record_for_test(None, key.verification_key(), vec![]);
         let genesis = GenesisState::mock_for_testing();
         let expected_hash = genesis.digest();
         let (_, object_id, master_g) = genesis.clone().into_parts();
@@ -478,14 +484,14 @@ mod tests {
             InitLogMessage::guardian_info_object_key(&session_id)
         );
 
-        let attestation: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        let attestation: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         assert!(matches!(
             attestation.message(),
             VersionedLogMessage::V1(LogMessageV1::Init(message))
                 if matches!(message.as_ref(), OIAttestationUnsigned { .. })
         ));
 
-        let guardian_info: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
+        let guardian_info: VerifiableLogEntry = serde_json::from_slice(&captured[1].1).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::Init(message)) = guardian_info.message() else {
             panic!("expected V1 init record");
         };

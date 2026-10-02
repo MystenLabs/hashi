@@ -20,9 +20,9 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
-use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
+use hashi_types::guardian::VerifiableLogEntry;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -31,7 +31,7 @@ mod heartbeat_checks;
 mod limiter_recovery;
 mod verified;
 
-pub use verified::VerifiedLogRecord;
+pub use verified::VerifiedLogEntry;
 pub use verified::VerifiedSessionInfo;
 
 /// Verified reader over the guardian's S3 logs.
@@ -86,7 +86,10 @@ impl GuardianReader {
     }
 
     /// Verify a record and the initialization checkpoint required to emit it.
-    async fn verify_record(&mut self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
+    async fn verify_record(
+        &mut self,
+        record: VerifiableLogEntry,
+    ) -> GuardianResult<VerifiedLogEntry> {
         self.ensure_session_info_loaded(record.session_id()).await?;
         let session_info = self
             .sessions
@@ -96,7 +99,7 @@ impl GuardianReader {
     }
 
     /// Read an immutable S3 record and verify it against its writing session.
-    async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogRecord> {
+    async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogEntry> {
         let record = self.s3.get_log_record(key).await?;
         self.verify_record(record).await
     }
@@ -108,7 +111,7 @@ impl GuardianReader {
     pub async fn read_logs_in_dir(
         &mut self,
         dir: &S3HourDirectory,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+    ) -> GuardianResult<Vec<VerifiedLogEntry>> {
         let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
@@ -237,7 +240,7 @@ impl GuardianReader {
         sharing_seq: u64,
         cert_seq: u64,
     ) -> GuardianResult<KpShareStateLogMessage> {
-        let key = KpShareStateLogMessage::object_key(sharing_seq, cert_seq);
+        let key = KpShareStateLogMessage::object_key_for_sequences(sharing_seq, cert_seq);
         self.read_kp_share_state_log_at_key(&key, true).await
     }
 
@@ -417,7 +420,7 @@ fn log_verified_read(key: &str, session_id: &SessionID) {
 
 #[cfg(test)]
 pub(crate) fn reader_with_record_for_test(
-    record: Option<LogRecord>,
+    record: Option<VerifiableLogEntry>,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
 ) -> GuardianReader {
@@ -541,7 +544,7 @@ mod tests {
         )
         .unwrap();
         let signing_key = GuardianSignKeyPair::from([42; 32]);
-        let record = LogRecord::new(
+        let record = VerifiableLogEntry::new(
             SessionID::from_signing_pubkey(&signing_key.verification_key()),
             LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                 instance,

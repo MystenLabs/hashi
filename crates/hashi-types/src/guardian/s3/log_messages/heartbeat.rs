@@ -17,11 +17,11 @@ impl HeartbeatLogMessage {
         Self { seq }
     }
 
-    pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
-        format!(
+    pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> anyhow::Result<String> {
+        Ok(format!(
             "{}{session_id}-{:020}.json",
-            S3HourDirectory::heartbeat(unix_millis_to_seconds(timestamp_ms)),
+            S3HourDirectory::heartbeat(unix_millis_to_seconds(timestamp_ms))?,
             self.seq,
-        )
+        ))
     }
 }

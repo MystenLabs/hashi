@@ -126,11 +126,11 @@ mod tests {
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::LogMessageV1;
-    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::SecretSharingParams;
     use hashi_types::guardian::Share;
     use hashi_types::guardian::ShareCommitments;
+    use hashi_types::guardian::VerifiableLogEntry;
     use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use k256::SecretKey;
@@ -281,7 +281,7 @@ mod tests {
             captured[0].0,
             "kp-shares/00000000000000000000/00000000000000000008.json"
         );
-        let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        let record: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::KpShareState(persisted)) = record.message()
         else {
             panic!("certificate rotation should persist a V1 KP-share snapshot");

@@ -9,9 +9,9 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::LogType;
 use hashi_types::guardian::SessionID;
+use hashi_types::guardian::VerifiableLogEntry;
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -72,7 +72,7 @@ impl LogWriter {
     ) {
         let mut state = self.state.lock().await;
         let write_started_at = Instant::now();
-        let record = LogRecord::new(session_id, message, signing_key);
+        let record = VerifiableLogEntry::new(session_id, message, signing_key);
         let deadline = state.next_write_deadline();
 
         write_with_retries(s3, &record, deadline).await;
@@ -84,7 +84,7 @@ impl LogWriter {
 
 async fn write_with_retries(
     s3: &GuardianS3Client,
-    record: &LogRecord,
+    record: &VerifiableLogEntry,
     absolute_deadline: Option<Instant>,
 ) {
     let key = record.object_key();

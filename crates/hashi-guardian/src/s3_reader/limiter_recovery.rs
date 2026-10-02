@@ -25,7 +25,7 @@
 //! read-after-write consistency to cover the old session's final writes.
 
 use super::GuardianReader;
-use super::VerifiedLogRecord;
+use super::VerifiedLogEntry;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::s3::S3NumericDirectory;
@@ -125,7 +125,7 @@ async fn list_subdirs_desc(
     Ok(dirs.into_iter().map(|dir| dir.to_string()).collect())
 }
 
-fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
+fn bucket_max_post_state(logs: Vec<VerifiedLogEntry>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| log.into_entry().into_message().into_withdrawal())
         .map(|withdrawal| withdrawal.post_state)
@@ -152,10 +152,10 @@ mod tests {
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::LogMessage;
-    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
+    use hashi_types::guardian::VerifiableLogEntry;
     use hashi_types::guardian::WithdrawalLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
@@ -170,7 +170,7 @@ mod tests {
         }
     }
 
-    fn withdrawal_log(next_seq: u64) -> VerifiedLogRecord {
+    fn withdrawal_log(next_seq: u64) -> VerifiedLogEntry {
         let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed.into_parts();
         let msg = WithdrawalLogMessage {
@@ -181,14 +181,14 @@ mod tests {
             post_state: state_with_seq(next_seq),
         };
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
-        let entry = LogRecord::new_at_timestamp(
+        let entry = VerifiableLogEntry::new_at_timestamp(
             "test-session".into(),
             LogMessage::Withdrawal(Box::new(msg)),
             &signing_key,
             0,
         )
         .into_entry_unchecked();
-        VerifiedLogRecord::new_for_test(entry, build_pcrs())
+        VerifiedLogEntry::new_for_test(entry, build_pcrs())
     }
 
     #[test]

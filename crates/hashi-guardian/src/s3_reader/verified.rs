@@ -10,9 +10,9 @@ use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
-use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::LogType;
 use hashi_types::guardian::OperatorInitInfo;
+use hashi_types::guardian::VerifiableLogEntry;
 
 /// Initialization checkpoint required by or verified for a session.
 ///
@@ -40,7 +40,7 @@ pub struct VerifiedSessionInfo {
 /// versioned entry is retained so callers can choose which schema versions they
 /// accept and how to interpret them.
 #[derive(Debug)]
-pub struct VerifiedLogRecord {
+pub struct VerifiedLogEntry {
     entry: LogEntry,
     build_pcrs: BuildPcrs,
 }
@@ -132,13 +132,13 @@ impl VerifiedSessionInfo {
     pub(super) async fn verify_record(
         &mut self,
         s3: &GuardianS3Client,
-        record: LogRecord,
-    ) -> GuardianResult<VerifiedLogRecord> {
+        record: VerifiableLogEntry,
+    ) -> GuardianResult<VerifiedLogEntry> {
         let entry = record.validate_into_entry(Some(&self.signing_pubkey))?;
         let required = InitCheckpoint::required_for(entry.log_type(), self.info.mode())?;
         self.ensure_init_checkpoint(s3, entry.session_id(), required)
             .await?;
-        Ok(VerifiedLogRecord {
+        Ok(VerifiedLogEntry {
             entry,
             build_pcrs: self.build_pcrs.clone(),
         })
@@ -236,7 +236,7 @@ fn verify_deployment_info(
         .cloned()
 }
 
-impl VerifiedLogRecord {
+impl VerifiedLogEntry {
     #[cfg(test)]
     pub(super) fn new_for_test(entry: LogEntry, build_pcrs: BuildPcrs) -> Self {
         Self { entry, build_pcrs }
@@ -357,7 +357,7 @@ mod tests {
             .build()
     }
 
-    fn locked_record(record: &LogRecord, policy: S3ObjectLockPolicy) -> GetObjectOutput {
+    fn locked_record(record: &VerifiableLogEntry, policy: S3ObjectLockPolicy) -> GetObjectOutput {
         GetObjectOutput::builder()
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
@@ -408,7 +408,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([8u8; 32]);
         let signing_pubkey = signing_key.verification_key();
         let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
-        let pi_log = LogRecord::new(
+        let pi_log = VerifiableLogEntry::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -423,7 +423,7 @@ mod tests {
             })),
             &signing_key,
         );
-        let oa_log = LogRecord::new(
+        let oa_log = VerifiableLogEntry::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [1; 32],

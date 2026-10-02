@@ -20,8 +20,8 @@
 use crate::log_store::LogStore;
 use crate::metrics::ProxyMetrics;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
-use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::StandardWithdrawalResponse;
+use hashi_types::guardian::VerifiableLogEntry;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use tracing::warn;
@@ -146,7 +146,7 @@ fn parse_withdrawal_seq(key: &str) -> Option<u64> {
 }
 
 fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundWithdrawal> {
-    let record: LogRecord = serde_json::from_slice(bytes)?;
+    let record: VerifiableLogEntry = serde_json::from_slice(bytes)?;
     let entry = record.into_entry_unchecked();
     let timestamp_ms = entry.timestamp_ms();
     let message = entry
@@ -178,12 +178,12 @@ pub(crate) mod test_utils {
     use bitcoin::Network;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::LogMessage;
-    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
+    use hashi_types::guardian::VerifiableLogEntry;
 
-    /// A genuine withdrawal `LogRecord`, serialized exactly as the enclave
-    /// writes it, keyed by `LogRecord::object_key()`.
+    /// A genuine withdrawal `VerifiableLogEntry`, serialized exactly as the enclave
+    /// writes it, keyed by `VerifiableLogEntry::object_key()`.
     pub(crate) fn withdrawal_record_json(
         wid: WithdrawalID,
         seq: u64,
@@ -197,7 +197,7 @@ pub(crate) mod test_utils {
         request_data.seq = seq;
 
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
-        let record = LogRecord::new_at_timestamp(
+        let record = VerifiableLogEntry::new_at_timestamp(
             "test-session".into(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),

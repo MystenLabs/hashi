@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::GuardianReader;
-use super::VerifiedLogRecord;
+use super::VerifiedLogEntry;
 use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
@@ -98,22 +98,25 @@ impl GuardianReader {
     async fn read_recent_heartbeat_logs(
         &mut self,
         reference_time: UnixMillis,
-    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+    ) -> GuardianResult<Vec<VerifiedLogEntry>> {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = unix_millis_to_seconds(reference_time).saturating_sub(60 * 60);
-        let mut cursor = S3HourDirectory::heartbeat(one_hour_ago);
+        let mut cursor = S3HourDirectory::heartbeat(one_hour_ago)
+            .map_err(|e| InvalidS3Log(format!("invalid heartbeat scan timestamp: {e:#}")))?;
         let mut logs = Vec::new();
         for _ in 0..3 {
             logs.extend(self.read_logs_in_dir(&cursor).await?);
-            cursor = cursor.next_dir();
+            cursor = cursor
+                .next_dir()
+                .map_err(|e| InvalidS3Log(format!("invalid heartbeat scan directory: {e:#}")))?;
         }
         Ok(logs)
     }
 }
 
 fn summarize_heartbeats_by_session(
-    logs: Vec<VerifiedLogRecord>,
+    logs: Vec<VerifiedLogEntry>,
 ) -> GuardianResult<Vec<GuardianSessionInfo>> {
     let mut map: BTreeMap<SessionID, (UnixMillis, UnixMillis)> = BTreeMap::new();
 
@@ -206,7 +209,7 @@ mod tests {
         BuildPcrs::mock_for_testing("current", 1)
     }
 
-    fn heartbeat_log(session_id: &str, timestamp_ms: UnixMillis) -> VerifiedLogRecord {
+    fn heartbeat_log(session_id: &str, timestamp_ms: UnixMillis) -> VerifiedLogEntry {
         verified_log(
             session_id,
             timestamp_ms,
@@ -214,7 +217,7 @@ mod tests {
         )
     }
 
-    fn non_heartbeat_log() -> VerifiedLogRecord {
+    fn non_heartbeat_log() -> VerifiedLogEntry {
         verified_log(
             "test-session",
             0,
@@ -232,16 +235,16 @@ mod tests {
         )
     }
 
-    fn verified_log(session_id: &str, timestamp_ms: u64, message: LogMessage) -> VerifiedLogRecord {
+    fn verified_log(session_id: &str, timestamp_ms: u64, message: LogMessage) -> VerifiedLogEntry {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
-        let entry = hashi_types::guardian::LogRecord::new_at_timestamp(
+        let entry = hashi_types::guardian::VerifiableLogEntry::new_at_timestamp(
             session_id.into(),
             message,
             &signing_key,
             timestamp_ms,
         )
         .into_entry_unchecked();
-        VerifiedLogRecord::new_for_test(entry, build_pcrs())
+        VerifiedLogEntry::new_for_test(entry, build_pcrs())
     }
 
     #[test]
