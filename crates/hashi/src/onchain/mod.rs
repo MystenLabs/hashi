@@ -190,8 +190,7 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
-        let deadline = tokio::time::Instant::now() + BOOT_SCRAPE_RETRY_WINDOW;
-        let (state, seed) = retry_boot_scrape(deadline, || {
+        let (state, seed) = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
             Self::scrape_into_state(
                 sui_rpc_url,
                 ids,
@@ -1175,13 +1174,14 @@ impl State {
     }
 }
 
-/// No retry starts past `deadline`, but an attempt in flight is never cut
-/// short: a large scrape can legitimately outlast it.
-async fn retry_boot_scrape<T, F, Fut>(deadline: tokio::time::Instant, mut scrape: F) -> Result<T>
+/// `window` opens at the first retryable failure, since a full scrape can take
+/// tens of minutes. It bounds when a retry may start, never a running attempt.
+async fn retry_boot_scrape<T, F, Fut>(window: Duration, mut scrape: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    let mut deadline = None;
     let mut backoff = BOOT_SCRAPE_MIN_BACKOFF;
     let mut attempt = 1u32;
     loop {
@@ -1192,7 +1192,8 @@ where
         if !is_retryable_scrape_error(&error) {
             return Err(error);
         }
-        if tokio::time::Instant::now() + backoff >= deadline {
+        let now = tokio::time::Instant::now();
+        if now + backoff >= *deadline.get_or_insert(now + window) {
             return Err(error.context(format!(
                 "giving up on the on-chain scrape after attempt {attempt}"
             )));
@@ -2815,7 +2816,7 @@ mod boot_scrape_retry_tests {
     async fn a_raced_scrape_is_retried_from_scratch_until_it_succeeds() {
         let start = Instant::now();
         let mut attempts = 0;
-        let scraped = retry_boot_scrape(start + BOOT_SCRAPE_RETRY_WINDOW, || {
+        let scraped = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
             attempts += 1;
             std::future::ready(if attempts < 3 {
                 Err(raced())
@@ -2832,7 +2833,7 @@ mod boot_scrape_retry_tests {
     #[tokio::test(start_paused = true)]
     async fn a_decode_error_fails_without_a_retry() {
         let mut attempts = 0;
-        let err = retry_boot_scrape(Instant::now() + BOOT_SCRAPE_RETRY_WINDOW, || {
+        let err = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
             attempts += 1;
             std::future::ready(Err::<(), _>(anyhow!(
                 "failed to deserialize ObjectBag child: invalid bool"
@@ -2845,18 +2846,44 @@ mod boot_scrape_retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn retries_stop_before_one_would_start_past_the_deadline() {
-        let deadline = Instant::now() + BOOT_SCRAPE_RETRY_WINDOW;
+    async fn a_long_first_attempt_that_fails_late_is_still_retried() {
+        let mut attempts = 0;
+        retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            let first = attempts == 1;
+            async move {
+                if first {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 4).await;
+                    Err(raced())
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_stop_once_the_window_from_the_first_failure_closes() {
+        let boot = Instant::now();
         let mut starts = Vec::new();
-        let err = retry_boot_scrape(deadline, || {
+        let err = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
             starts.push(Instant::now());
-            std::future::ready(Err::<(), _>(
-                tonic::Status::unavailable("tcp connect error").into(),
-            ))
+            let first = starts.len() == 1;
+            async move {
+                if first {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 2).await;
+                }
+                Err::<(), _>(tonic::Status::unavailable("tcp connect error").into())
+            }
         })
         .await
         .unwrap_err();
-        assert!(starts.len() > 1);
+        let first_failure = boot + BOOT_SCRAPE_RETRY_WINDOW * 2;
+        let deadline = first_failure + BOOT_SCRAPE_RETRY_WINDOW;
+        assert!(starts.len() > 2);
         assert!(starts.iter().all(|start| *start < deadline));
         assert!(Instant::now() < deadline);
         assert!(format!("{err:#}").contains("giving up"), "{err:#}");
@@ -2866,12 +2893,22 @@ mod boot_scrape_retry_tests {
     #[tokio::test(start_paused = true)]
     async fn an_attempt_running_past_the_deadline_is_not_cut_short() {
         let deadline = Instant::now() + BOOT_SCRAPE_RETRY_WINDOW;
-        retry_boot_scrape(deadline, || async {
-            tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 2).await;
-            Ok(())
+        let mut attempts = 0;
+        retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            let first = attempts == 1;
+            async move {
+                if first {
+                    Err(raced())
+                } else {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 2).await;
+                    Ok(())
+                }
+            }
         })
         .await
         .unwrap();
+        assert_eq!(attempts, 2);
         assert!(Instant::now() > deadline);
     }
 }
