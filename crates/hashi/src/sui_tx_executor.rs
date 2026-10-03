@@ -361,9 +361,8 @@ pub enum TxFailure {
 impl SubmitCertError {
     fn classify(e: anyhow::Error) -> Self {
         match e.downcast_ref::<TxFailure>() {
-            // Untagged errors are treated as pre-submit: every path in `sign_and_submit` that
-            // runs after the submit call tags itself, so an untagged error can only come from
-            // before it.
+            // Untagged errors are treated as pre-submit: every path in `execute` that runs after
+            // the submit call tags itself, so an untagged error can only come from before it.
             Some(TxFailure::NotSubmitted(_)) | None => Self::NotSubmitted(e),
             Some(TxFailure::Rejected { status, .. }) => Self::Rejected(status.clone()),
             Some(TxFailure::Submit(inner)) => match **inner {
@@ -394,8 +393,8 @@ impl TransactionExecutionError {
 }
 
 /// The SDK build error behind `e`, if `e` is a [`TxFailure::NotSubmitted`]
-/// wrapping one. [`finalize`] wraps when it executes, and the
-/// validator-registration path wraps its own build; an unwrapped build error
+/// wrapping one. [`sign_and_submit`] wraps its build, and the
+/// validator-registration path wraps its own; an unwrapped build error
 /// (such as `finalize`'s serialize-unsigned and dry-run modes produce) is
 /// invisible here.
 fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
@@ -3206,8 +3205,8 @@ mod tests {
 
         // The simulate RPC failing (as opposed to the simulated execution
         // failing) is a build failure, not a size signal. Wrapped exactly as
-        // `finalize` wraps SDK build errors, and the intermediate downcast is
-        // asserted separately: `SimulationFailure` cannot be constructed
+        // `sign_and_submit` wraps SDK build errors, and the intermediate downcast
+        // is asserted separately: `SimulationFailure` cannot be constructed
         // outside the SDK, so this is what proves the classifier can reach
         // the SDK error at all (a silently failing downcast would mean
         // "never split", wedging the sweep on a genuinely over-limit chunk).
@@ -3382,5 +3381,145 @@ mod tests {
         let err: anyhow::Error = ensure_success(&executed(failed)).unwrap_err().into();
         assert!(err.to_string().contains("FailedTxDigest"), "{err}");
         assert_eq!(transaction_execution_error(&err), Some(&error));
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_failed_effects_that_execute_returns() {
+        use sui_rpc::proto::sui::rpc::v2::Checkpoint;
+        use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
+        use sui_rpc::proto::sui::rpc::v2::SimulateTransactionRequest;
+        use sui_rpc::proto::sui::rpc::v2::SimulateTransactionResponse;
+        use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+        use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsResponse;
+        use sui_rpc::proto::sui::rpc::v2::TransactionEffects;
+        use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionService;
+        use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionServiceServer;
+        use sui_rpc::proto::sui::rpc::v2::transaction_execution_service_server::TransactionExecutionService;
+        use sui_rpc::proto::sui::rpc::v2::transaction_execution_service_server::TransactionExecutionServiceServer;
+
+        /// A fullnode that simulates every transaction as `transaction`, then
+        /// executes and checkpoints it with `status`.
+        #[derive(Clone)]
+        struct Fullnode {
+            transaction: Transaction,
+            status: ExecutionStatus,
+        }
+
+        impl Fullnode {
+            fn executed(&self, status: ExecutionStatus) -> ExecutedTransaction {
+                ExecutedTransaction::default()
+                    .with_digest(self.transaction.digest().to_string())
+                    .with_transaction(self.transaction.clone())
+                    .with_effects(TransactionEffects::default().with_status(status))
+            }
+        }
+
+        #[tonic::async_trait]
+        impl TransactionExecutionService for Fullnode {
+            async fn simulate_transaction(
+                &self,
+                _request: tonic::Request<SimulateTransactionRequest>,
+            ) -> Result<tonic::Response<SimulateTransactionResponse>, tonic::Status> {
+                let simulated = self.executed(ExecutionStatus::default().with_success(true));
+                Ok(tonic::Response::new(
+                    SimulateTransactionResponse::default().with_transaction(simulated),
+                ))
+            }
+
+            async fn execute_transaction(
+                &self,
+                _request: tonic::Request<ExecuteTransactionRequest>,
+            ) -> Result<tonic::Response<ExecuteTransactionResponse>, tonic::Status> {
+                Ok(tonic::Response::new(
+                    ExecuteTransactionResponse::default()
+                        .with_transaction(self.executed(self.status.clone())),
+                ))
+            }
+        }
+
+        #[tonic::async_trait]
+        impl SubscriptionService for Fullnode {
+            async fn subscribe_checkpoints(
+                &self,
+                _request: tonic::Request<SubscribeCheckpointsRequest>,
+            ) -> Result<
+                tonic::Response<tonic::codegen::BoxStream<SubscribeCheckpointsResponse>>,
+                tonic::Status,
+            > {
+                let checkpoint = Checkpoint::default()
+                    .with_sequence_number(1)
+                    .with_transactions(vec![
+                        ExecutedTransaction::default()
+                            .with_digest(self.transaction.digest().to_string()),
+                    ]);
+                let frame = SubscribeCheckpointsResponse::default()
+                    .with_cursor(1)
+                    .with_checkpoint(checkpoint);
+                let frames = futures::stream::iter([Ok(frame)]);
+                Ok(tonic::Response::new(Box::pin(frames)))
+            }
+        }
+
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(Address::ZERO);
+        builder.set_gas_budget(1);
+        builder.set_gas_price(1);
+        builder.add_gas_objects([ObjectInput::owned(
+            Address::from_static("0x1"),
+            1,
+            sui_sdk_types::Digest::ZERO,
+        )]);
+        let transaction = builder.try_build().expect("offline PTB must build");
+        let digest = transaction.digest().to_string();
+        let fullnode = Fullnode {
+            transaction,
+            status: ExecutionStatus::default().with_success(false),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(TransactionExecutionServiceServer::new(fullnode.clone()))
+                .add_service(SubscriptionServiceServer::new(fullnode))
+                .serve_with_incoming(incoming),
+        );
+        let mut client = Client::new(format!("http://{addr}").as_str()).unwrap();
+        let signer = SimpleKeypair::from(sui_crypto::ed25519::Ed25519PrivateKey::new([7; 32]));
+
+        let Err(err) = finalize(
+            &mut client,
+            Some(&signer),
+            TransactionBuilder::new(),
+            None,
+            &GasOverrides::default(),
+            TxMode::Execute,
+            Duration::from_secs(5),
+        )
+        .await
+        else {
+            panic!("finalize reported a failed transaction as executed");
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<TxFailure>(),
+                Some(TxFailure::Rejected { digest: rejected, .. }) if *rejected == digest
+            ),
+            "{err:#}"
+        );
+
+        let hashi_ids = HashiIds {
+            package_id: Address::ZERO,
+            hashi_object_id: Address::ZERO,
+        };
+        let response = SuiTxExecutor::new(client, signer, hashi_ids)
+            .execute(TransactionBuilder::new())
+            .await
+            .unwrap();
+        assert!(!response.transaction().effects().status().success());
     }
 }
