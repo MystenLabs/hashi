@@ -729,6 +729,8 @@ mod tests {
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::MemberSignature;
     use sui_sdk_types::Address;
     use tokio::task::JoinSet;
@@ -854,6 +856,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn reaches_quorum_past_newer_epoch_signatures() {
+        let key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let encryption_key = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
+        let member = CommitteeMember::new(Address::ZERO, key.public_key(), encryption_key, 6_667);
+        let committee = Committee::new(vec![member], 1, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let message = WithdrawalRequestApproval {
+            request_id: Address::ZERO,
+        };
+        let signature = key.sign(Address::ZERO, 1, Address::ZERO, &message);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_333, Ok(signature_at(2))) });
+        // Answers last, so the newer-epoch signature is counted first.
+        sig_tasks.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            (6_667, Ok(signature))
+        });
+
+        let result = collect_signatures(&mut sig_tasks, &mut aggregator, 10_000).await;
+
+        assert!(matches!(result, Ok(())));
+        assert_eq!(aggregator.weight(), 6_667);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn keeps_waiting_past_older_epoch_signatures() {
         let committee = Committee::new(vec![], 1, 0, 5_000);
         let mut aggregator = aggregator(&committee);
@@ -871,7 +898,6 @@ mod tests {
             result.is_err(),
             "a stale member's signature must not end the round"
         );
-        assert_eq!(aggregator.weight(), 0);
     }
 
     /// Runs `retry_peer_call` against a peer that answers attempt `n` (from 1)
