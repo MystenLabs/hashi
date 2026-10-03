@@ -32,8 +32,9 @@ questions:
   - What is the user experience for Hashi deposits?
   - Is there a HASHI token?
 answer: >-
-  Hashi has two main user flows: deposits (send BTC to an MPC-controlled
-  Taproot address to receive hBTC on Sui) and withdrawals (burn hBTC to
+  Hashi has two main user flows: deposits (send BTC to a Taproot address
+  controlled by the MPC committee and the Guardian to receive hBTC on Sui) and
+  withdrawals (burn hBTC to
   receive native BTC at a specified Bitcoin address). There is no HASHI
   governance or utility token — the committee governs by voting with
   validator stake weight.
@@ -53,7 +54,8 @@ or airdrop as an imitation.
 ## Deposit flow
 
 To use `BTC` on Sui (for example, as collateral for a loan), you must
-deposit your `BTC` to a Hashi MPC-controlled Bitcoin address.
+deposit your `BTC` to a Hashi Bitcoin address, spendable by the MPC committee
+together with the Guardian.
 
 <div style={{zoom: 1.5}}>
 
@@ -98,8 +100,12 @@ Hashi.
 1. Hashi nodes query Bitcoin and watch for confirmation of the deposit
    transaction.
 1. Hashi nodes communicate, waiting until a quorum has confirmed the deposit
-   (after X block confirmations).
-1. Hashi confirms the deposit onchain, minting the equivalent amount of
+   (after
+   [`bitcoin_confirmation_threshold`](config.mdx#bitcoin_confirmation_threshold)
+   block confirmations).
+1. After the
+   [`bitcoin_deposit_time_delay_ms`](config.mdx#bitcoin_deposit_time_delay_ms)
+   window, Hashi confirms the deposit onchain, minting the equivalent amount of
    `hBTC` and transferring it to your Sui address. You can then immediately
    use the `hBTC` to interact with a DeFi protocol. For example, you can use
    the `hBTC` as collateral for a loan in `USDC`.
@@ -120,7 +126,7 @@ Commonly used public faucets for the default Signet network include [signetfauce
 Your own Signet node cannot create spendable coins for you. A central authority signs Signet blocks, so a faucet is the normal way to get test BTC.
 :::
 
-Once you hold Signet BTC, run the deposit loop described above through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)):
+Once you hold Signet BTC, run the deposit loop described above through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)). Set `network = "signet"` under `[bitcoin]` in `hashi-cli.toml` (or pass `--btc-network signet`); the CLI otherwise assumes regtest and derives a `bcrt1` address:
 
 ```bash
 # 1. Get the deposit address derived from your Sui address
@@ -129,15 +135,16 @@ hashi deposit -c hashi-cli.toml generate-address --recipient 0x<sui-address>
 # 2. Send Signet BTC to that address from your wallet or the faucet,
 #    then note the resulting Bitcoin txid.
 
-# 3. Notify Hashi of the deposit
-hashi deposit -c hashi-cli.toml request --txid <btc-txid> --recipient 0x<sui-address>
+# 3. Notify Hashi of the deposit. Without --outputs, the CLI looks the
+#    transaction up over the [bitcoin] RPC in hashi-cli.toml.
+hashi deposit -c hashi-cli.toml request --txid <btc-txid> --outputs '[[<vout>, <amount-sats>]]' --recipient 0x<sui-address>
 
 # 4. Track it until hBTC is minted
 hashi deposit -c hashi-cli.toml status <request-id>
 hashi balance -c hashi-cli.toml 0x<sui-address>
 ```
 
-The deposit must meet Bitcoin's dust minimum, and Hashi waits for a confirmation threshold before minting, so expect to wait for several Signet blocks between steps 3 and 4. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
+The deposit must meet the [`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum), and Hashi waits for a confirmation threshold and then the deposit time delay before minting, so expect to wait for several Signet blocks between steps 3 and 4. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
 
 ## Withdraw flow
 
@@ -161,7 +168,7 @@ sequenceDiagram
     participant Bitcoin
 
     User    ->>     Hashi:   Request withdrawal
-    Hashi   ->>     Hashi:   Craft and sign Bitcoin transaction using MPC
+    Hashi   ->>     Hashi:   Craft and sign Bitcoin transaction (MPC and Guardian)
     Hashi   ->>     Bitcoin: Broadcast transaction
 ```
 
@@ -170,10 +177,12 @@ sequenceDiagram
 ### Withdraw
 
 1. You send a transaction to Sui with the amount of `hBTC` you want to
-   withdraw and the Bitcoin address you want to withdraw to.
+   withdraw (at least
+   [`bitcoin_withdrawal_minimum`](config.mdx#bitcoin_withdrawal_minimum)) and
+   the P2WPKH or P2TR Bitcoin address you want to withdraw to.
 1. Hashi picks up the withdrawal request and crafts a Bitcoin transaction
    that sends the requested `BTC` (minus fees) to the provided Bitcoin
-   address, then uses MPC to sign the transaction.
+   address, then signs it with the MPC committee and the Guardian.
 1. The transaction is broadcast to the Bitcoin network.
 
 For a detailed breakdown of each phase, see [Withdraw](withdraw.mdx).
