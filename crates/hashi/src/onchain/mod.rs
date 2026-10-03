@@ -2784,7 +2784,21 @@ mod boot_scrape_retry_tests {
         assert_eq!(value, 7);
     }
 
-    #[derive(Clone)]
+    async fn spawn_state_service(service: impl StateService) -> Client {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(StateServiceServer::new(service))
+                .serve_with_incoming(incoming),
+        );
+        Client::new(format!("http://{addr}").as_str()).unwrap()
+    }
+
     struct VanishedFieldListing;
 
     #[tonic::async_trait]
@@ -2807,20 +2821,40 @@ mod boot_scrape_retry_tests {
         }
     }
 
+    struct HungListing;
+
+    #[tonic::async_trait]
+    impl StateService for HungListing {
+        async fn list_dynamic_fields(
+            &self,
+            _request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_or_hung_fullnode_is_retried() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let refused = Client::new(format!("http://{closed}").as_str()).unwrap();
+        // The deadline layer `new_sui_rpc_client` installs, shortened.
+        let hung = spawn_state_service(HungListing).await.request_layer(
+            tower::timeout::TimeoutLayer::new(Duration::from_millis(200)),
+        );
+        for client in [refused, hung] {
+            let err = scrape_utxo_records(client, Address::ZERO, None)
+                .await
+                .unwrap_err();
+            assert!(is_retryable_scrape_error(&err), "{err:#}");
+        }
+    }
+
     #[tokio::test]
     async fn guarded_scrapes_report_a_vanished_field_as_an_inconsistent_listing() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let incoming = futures::stream::unfold(listener, |listener| async move {
-            let result = listener.accept().await.map(|(stream, _)| stream);
-            Some((result, listener))
-        });
-        tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(StateServiceServer::new(VanishedFieldListing))
-                .serve_with_incoming(incoming),
-        );
-        let client = Client::new(format!("http://{addr}").as_str()).unwrap();
+        let client = spawn_state_service(VanishedFieldListing).await;
 
         let errors = [
             scrape_all_member_info(client.clone(), Address::ZERO, None)
