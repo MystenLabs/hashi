@@ -2238,6 +2238,52 @@ mod test {
         //         }
     }
 
+    #[tokio::test]
+    async fn a_peer_that_cancels_every_open_rpc_at_once_keeps_its_connection() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let (address, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
+
+        let mut tls_config = crate::tls::make_client_config_no_verification();
+        tls_config.alpn_protocols = vec![b"h2".to_vec()];
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config))
+            .connect(address.ip().into(), tcp)
+            .await
+            .unwrap();
+        let (client, connection) = h2::client::handshake(tls).await.unwrap();
+        tokio::spawn(connection);
+        let health = format!("https://{address}/health");
+
+        let mut client = client.ready().await.unwrap();
+        let (response, _) = client
+            .send_request(http::Request::get(&health).body(()).unwrap(), true)
+            .unwrap();
+        assert_eq!(response.await.unwrap().status(), http::StatusCode::OK);
+
+        // The runtime is single-threaded and nothing here yields, so the server reads
+        // every HEADERS and RST_STREAM before it accepts any of these streams.
+        let mut cancelled = Vec::new();
+        for _ in 0..crate::config::DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT {
+            client = client.ready().await.unwrap();
+            let (_, stream) = client
+                .send_request(http::Request::post(&health).body(()).unwrap(), false)
+                .unwrap();
+            cancelled.push(stream);
+        }
+        for stream in &mut cancelled {
+            stream.send_reset(h2::Reason::CANCEL);
+        }
+
+        client = client.ready().await.unwrap();
+        let (response, _) = client
+            .send_request(http::Request::get(&health).body(()).unwrap(), true)
+            .unwrap();
+        let response = response
+            .await
+            .expect("the server must keep the connection after the cancellations");
+        assert_eq!(response.status(), http::StatusCode::OK);
+    }
+
     // --- guardian /info pubkey verification ---
 
     fn fresh_metrics() -> std::sync::Arc<crate::metrics::Metrics> {
