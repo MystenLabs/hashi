@@ -153,6 +153,10 @@ impl HttpService {
                 .config(
                     sui_http::Config::default()
                         .max_concurrent_streams(crate::config::DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT)
+                        // Peers may cancel all their open RPCs at once; h2's default trips at 20.
+                        .http2_max_pending_accept_reset_streams(Some(
+                            crate::config::DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT as usize,
+                        ))
                         .max_connection_age(std::time::Duration::from_secs(120))
                         .max_connection_age_grace(std::time::Duration::from_secs(120))
                         .http2_keepalive_interval(Some(std::time::Duration::from_secs(30))),
