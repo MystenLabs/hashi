@@ -1028,14 +1028,10 @@ mod tests {
 
         assert!(leader.inflight_deposits.is_empty());
         assert!(leader.never_retry_deposit_ids.contains(&confirmation.id));
-        // Not leading, so the completions start no new work.
-        assert!(leader.pending_unapproved_deposit_requests.is_empty());
-        assert!(leader.unapproved_deposit_tasks.is_empty());
-        assert!(leader.approved_deposit_tasks.is_empty());
     }
 
     #[tokio::test]
-    async fn halt_aborts_deposit_tasks_left_from_an_earlier_turn() {
+    async fn stop_deposit_processing_aborts_tasks_kept_from_an_earlier_turn() {
         let (mut leader, _tmpdir) = leader_service();
         leader.set_leadership(true);
         leader
@@ -1046,6 +1042,8 @@ mod tests {
             .inflight_deposits
             .extend([deposit_request(1, 1).id, deposit_request(2, 2).id]);
         leader.set_leadership(false);
+        assert_eq!(leader.unapproved_deposit_tasks.len(), 1);
+        assert_eq!(leader.approved_deposit_tasks.len(), 1);
 
         leader.stop_deposit_processing();
 
