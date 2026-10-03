@@ -687,7 +687,7 @@ async fn collect_signatures<T: IntentMessage + Clone>(
 /// `Unavailable` — failing every in-flight request to that peer at once. The
 /// peer signing RPCs are idempotent, so retrying these transport-class codes is
 /// safe and lets the request land on a fresh connection.
-fn is_retriable_transport(status: &tonic::Status) -> bool {
+pub(crate) fn is_retriable_transport(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable
