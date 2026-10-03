@@ -958,11 +958,9 @@ impl Hashi {
                 )
             })?;
 
-        anyhow::ensure!(
-            !txn.is_fully_signed(),
-            "WithdrawalTransaction {} is already finalized",
-            message.withdrawal_id
-        );
+        if txn.is_fully_signed() {
+            return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
+        }
 
         anyhow::ensure!(
             message.signatures.len() == txn.inputs.len(),
@@ -1101,11 +1099,9 @@ impl Hashi {
                 )
             })?;
 
-        anyhow::ensure!(
-            !txn.is_fully_signed(),
-            "WithdrawalTransaction {} is already finalized",
-            message.withdrawal_id
-        );
+        if txn.is_fully_signed() {
+            return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
+        }
         anyhow::ensure!(
             message.indices.len() == message.signatures.len(),
             "Chunk indices ({}) and signatures ({}) length mismatch for WithdrawalTransaction {}",
@@ -1833,6 +1829,10 @@ impl WithdrawalApprovalError {
         }
     }
 }
+
+#[derive(Debug, Error)]
+#[error("WithdrawalTransaction {0} is already finalized")]
+pub struct WithdrawalAlreadyFinalized(pub Address);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
