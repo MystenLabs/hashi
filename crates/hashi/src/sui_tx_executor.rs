@@ -470,6 +470,10 @@ pub(crate) fn move_abort_name(err: &anyhow::Error) -> Option<String> {
 fn is_execution_failure(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TransactionExecutionError>().is_some()
         || matches!(
+            e.downcast_ref::<TxFailure>(),
+            Some(TxFailure::Rejected { .. })
+        )
+        || matches!(
             builder_error(e),
             Some(sui_transaction_builder::Error::SimulationFailure(_))
         )
@@ -3202,6 +3206,12 @@ mod tests {
         }
         .into();
         assert!(is_execution_failure(&on_chain));
+        let rejected: anyhow::Error = TxFailure::Rejected {
+            digest: "digest".to_owned(),
+            status: Box::default(),
+        }
+        .into();
+        assert!(is_execution_failure(&rejected));
 
         // The simulate RPC failing (as opposed to the simulated execution
         // failing) is a build failure, not a size signal. Wrapped exactly as
