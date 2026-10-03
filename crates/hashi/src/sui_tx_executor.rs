@@ -312,7 +312,7 @@ impl GasOverrides {
 
 /// The result of [`finalize`], depending on the [`TxMode`].
 pub enum TxOutcome {
-    /// `Execute`: the transaction was signed and submitted.
+    /// `Execute`: the transaction was signed, submitted and executed successfully.
     Executed(Box<ExecuteTransactionResponse>),
     /// `DryRun`: the transaction was built and simulated but not submitted.
     Simulated {
@@ -351,14 +351,21 @@ pub enum TxFailure {
     NotSubmitted(anyhow::Error),
     #[error("transaction submission failed: {0}")]
     Submit(#[source] Box<ExecuteAndWaitError>),
+    #[error("transaction {digest} failed on chain: {status:?}")]
+    Rejected {
+        digest: String,
+        status: Box<ExecutionStatus>,
+    },
 }
 
 impl SubmitCertError {
     fn classify(e: anyhow::Error) -> Self {
         match e.downcast_ref::<TxFailure>() {
-            // Untagged errors are treated as pre-submit: every path in `finalize` that runs after
-            // the submit call tags itself, so an untagged error can only come from before it.
+            // Untagged errors are treated as pre-submit: every path in `sign_and_submit` that
+            // runs after the submit call tags itself, so an untagged error can only come from
+            // before it.
             Some(TxFailure::NotSubmitted(_)) | None => Self::NotSubmitted(e),
+            Some(TxFailure::Rejected { status, .. }) => Self::Rejected(status.clone()),
             Some(TxFailure::Submit(inner)) => match **inner {
                 // Both a failed subscribe (nothing sent) and a failed execute call (possibly
                 // already forwarded to validators) arrive as `RpcError`, indistinguishable here.
@@ -394,7 +401,7 @@ impl TransactionExecutionError {
 fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
     match e.downcast_ref::<TxFailure>()? {
         TxFailure::NotSubmitted(inner) => inner.downcast_ref(),
-        TxFailure::Submit(_) => None,
+        TxFailure::Submit(_) | TxFailure::Rejected { .. } => None,
     }
 }
 /// Return the structured execution error from either transaction simulation or
@@ -404,6 +411,9 @@ pub(crate) fn transaction_execution_error(
 ) -> Option<&sui_rpc::proto::sui::rpc::v2::ExecutionError> {
     if let Some(tx_err) = err.downcast_ref::<TransactionExecutionError>() {
         return tx_err.status().error_opt();
+    }
+    if let Some(TxFailure::Rejected { status, .. }) = err.downcast_ref::<TxFailure>() {
+        return status.error_opt();
     }
     match builder_error(err) {
         Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
@@ -513,26 +523,51 @@ pub async fn finalize(
                     "cannot execute transaction: no keypair configured"
                 ))
             })?;
-            let transaction = builder
-                .build(client)
-                .await
-                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
-            let signature = signer
-                .sign_transaction(&transaction)
-                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
-            let response = client
-                .execute_transaction_and_wait_for_checkpoint(
-                    ExecuteTransactionRequest::new(transaction.into())
-                        .with_signatures(vec![signature.into()])
-                        .with_read_mask(FieldMask::from_str("*")),
-                    timeout,
-                )
-                .await
-                .map_err(|e| TxFailure::Submit(Box::new(e)))?
-                .into_inner();
+            let response = sign_and_submit(client, signer, builder, timeout).await?;
+            ensure_success(&response)?;
             Ok(TxOutcome::Executed(Box::new(response)))
         }
     }
+}
+
+/// Build, sign and submit `builder`, waiting for the checkpoint. Returns the
+/// response even if execution failed: the executor's callers classify that.
+async fn sign_and_submit(
+    client: &mut Client,
+    signer: &SimpleKeypair,
+    builder: TransactionBuilder,
+    timeout: Duration,
+) -> anyhow::Result<ExecuteTransactionResponse> {
+    let transaction = builder
+        .build(client)
+        .await
+        .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
+    let signature = signer
+        .sign_transaction(&transaction)
+        .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            timeout,
+        )
+        .await
+        .map_err(|e| TxFailure::Submit(Box::new(e)))?
+        .into_inner();
+    Ok(response)
+}
+
+fn ensure_success(response: &ExecuteTransactionResponse) -> Result<(), TxFailure> {
+    let transaction = response.transaction();
+    let status = transaction.effects().status();
+    if status.success() {
+        return Ok(());
+    }
+    Err(TxFailure::Rejected {
+        digest: transaction.digest().to_owned(),
+        status: Box::new(status.clone()),
+    })
 }
 
 /// A reusable executor for submitting Sui transactions.
@@ -636,7 +671,7 @@ impl SuiTxExecutor {
     )]
     pub async fn execute(
         &mut self,
-        builder: TransactionBuilder,
+        mut builder: TransactionBuilder,
     ) -> anyhow::Result<ExecuteTransactionResponse> {
         // Node-internal executors refuse to submit when the chain is running
         // package versions this binary doesn't support — fail fast rather than
@@ -653,27 +688,16 @@ impl SuiTxExecutor {
             }
         }
 
-        let outcome = finalize(
-            &mut self.client,
-            Some(&self.signer),
-            builder,
-            None,
-            &GasOverrides::default(),
-            TxMode::Execute,
-            self.timeout,
-        )
-        .await?;
-
-        let TxOutcome::Executed(response) = outcome else {
-            unreachable!("TxMode::Execute always yields TxOutcome::Executed");
-        };
+        builder.set_sender(self.sender());
+        let response =
+            sign_and_submit(&mut self.client, &self.signer, builder, self.timeout).await?;
 
         tracing::Span::current().record(
             "sui_digest",
             tracing::field::display(response.transaction().digest()),
         );
 
-        Ok(*response)
+        Ok(response)
     }
 
     // ========================================================================
@@ -3321,5 +3345,42 @@ mod tests {
             SubmitCertError::classify(executed.into()),
             SubmitCertError::Unconfirmed(_)
         ));
+
+        let rejected = TxFailure::Rejected {
+            digest: "digest".to_owned(),
+            status: Box::default(),
+        };
+        assert!(matches!(
+            SubmitCertError::classify(rejected.into()),
+            SubmitCertError::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn failed_effects_are_rejected_with_the_digest() {
+        use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
+        use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+        use sui_rpc::proto::sui::rpc::v2::TransactionEffects;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+        let executed = |status: ExecutionStatus| {
+            ExecuteTransactionResponse::default().with_transaction(
+                ExecutedTransaction::default()
+                    .with_digest("FailedTxDigest")
+                    .with_effects(TransactionEffects::default().with_status(status)),
+            )
+        };
+
+        ensure_success(&executed(ExecutionStatus::default().with_success(true))).unwrap();
+        assert!(ensure_success(&executed(ExecutionStatus::default())).is_err());
+
+        let mut error = ExecutionError::default();
+        error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+        let failed = ExecutionStatus::default()
+            .with_success(false)
+            .with_error(error.clone());
+        let err: anyhow::Error = ensure_success(&executed(failed)).unwrap_err().into();
+        assert!(err.to_string().contains("FailedTxDigest"), "{err}");
+        assert_eq!(transaction_execution_error(&err), Some(&error));
     }
 }
