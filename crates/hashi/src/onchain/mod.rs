@@ -2743,6 +2743,9 @@ mod inconsistent_listing_tests {
 #[cfg(test)]
 mod boot_scrape_retry_tests {
     use super::*;
+    use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsResponse;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateService;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateServiceServer;
     use tokio::time::Instant;
 
     fn raced() -> anyhow::Error {
@@ -2779,6 +2782,70 @@ mod boot_scrape_retry_tests {
             .deserialize()
             .unwrap();
         assert_eq!(value, 7);
+    }
+
+    #[derive(Clone)]
+    struct VanishedFieldListing;
+
+    #[tonic::async_trait]
+    impl StateService for VanishedFieldListing {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let field = DynamicField::default()
+                .with_parent(request.into_inner().parent.unwrap_or_default())
+                .with_field_id(Address::ZERO.to_string());
+            let mut response = tonic::Response::new(
+                ListDynamicFieldsResponse::default().with_dynamic_fields(vec![field]),
+            );
+            response.metadata_mut().insert(
+                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+                "7".parse().unwrap(),
+            );
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_scrapes_report_a_vanished_field_as_an_inconsistent_listing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(StateServiceServer::new(VanishedFieldListing))
+                .serve_with_incoming(incoming),
+        );
+        let client = Client::new(format!("http://{addr}").as_str()).unwrap();
+
+        let errors = [
+            scrape_all_member_info(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_committees(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_utxo_records(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_object_bag::<types::WithdrawalTransaction, _>(
+                &client,
+                Address::ZERO,
+                |txn| route::TrackedKind::WithdrawalTxn(txn.id),
+                "withdrawal_txns",
+                None,
+            )
+            .await
+            .err(),
+        ];
+        for err in errors {
+            let err = err.expect("a vanished field must fail the scrape");
+            assert!(is_inconsistent_listing(&err), "{err:#}");
+        }
     }
 
     #[test]
