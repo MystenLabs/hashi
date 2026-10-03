@@ -88,7 +88,8 @@ committee (`approve_deposit`) and being confirmed (`confirm_deposit`). Provides
 a window in which a fraudulent or erroneous approval can be detected and the
 service paused before any `hBTC` is minted. See the
 [deposit flow](deposit.mdx#confirm) for how this delay fits into the overall
-process.
+process. `hashi launch --bitcoin-deposit-time-delay-ms` can set a different
+starting value; on Sui mainnet it refuses one below the default.
 
 ### `bitcoin_withdrawal_minimum`
 
@@ -112,8 +113,11 @@ fee deduction. The floor ensures the worst-case network fee is always at least
 | **Default** | `6` |
 | **Unit** | blocks |
 
-The number of Bitcoin block confirmations required before a deposit is
-considered final. Guards against chain reorganizations.
+The number of Bitcoin block confirmations nodes require before approving a
+deposit (at least 100 for a coinbase output) and before confirming a
+withdrawal transaction. Guards against chain reorganizations.
+`hashi launch --bitcoin-confirmation-threshold` can set a different starting
+value; on Sui mainnet it refuses one below the default.
 
 
 
@@ -124,9 +128,11 @@ considered final. Guards against chain reorganizations.
 | **Type** | `bool` |
 | **Default** | `false` |
 
-When `true`, the protocol pauses processing of deposits and withdrawals.
-Requests already in the queue remain queued and resume processing when the
-system is unpaused. Reconfiguration and governance actions are not affected.
+When `true`, new deposit and withdrawal requests are refused and every step
+that advances a queued request aborts. Requests already in the queue resume
+processing when the system is unpaused, but users can still cancel withdrawal
+requests after the cooldown, and deposit requests can still expire.
+Reconfiguration and governance actions are not affected.
 
 ### `reconfig_hold`
 
@@ -189,7 +195,13 @@ operation requires a supermajority.
 The MPC parameters live in the epoch config and are tuned with
 `UpdateEpochConfig`. The store is pinned onto each committee at
 reconfiguration, so a change mid-epoch never affects the active committee; new
-values take effect when the next committee forms.
+values take effect when the next committee forms. Each key's range is checked
+when a proposal is created and again when it executes. The rule that
+`mpc_weight_reduction_allowed_delta` stays below
+`mpc_max_faulty_in_basis_points` is checked only at execution, on the
+resulting store, so move both keys in one proposal when one would cross the
+other. The epoch config also refuses the retired keys
+`mpc_threshold_in_basis_points` and `mpc_nonce_generation_protocol`.
 
 ### `mpc_max_faulty_in_basis_points`
 
@@ -197,7 +209,7 @@ values take effect when the next committee forms.
 |---|---|
 | **Type** | `u64` |
 | **Default** | `3333` |
-| **Valid range** | `1` to `3333` |
+| **Valid range** | `1` to `3333`, and above `mpc_weight_reduction_allowed_delta` |
 | **Unit** | basis points of committee voting weight |
 
 The assumed upper bound on faulty (offline or adversarial) committee weight.
@@ -218,8 +230,22 @@ MPC protocol runs, because each unit of weight corresponds to a share and
 protocol cost scales with total shares. Reduction necessarily distorts
 relative voting power; this parameter bounds the distortion, allowing the
 effective fault-tolerance assumption to shift by at most this many basis
-points relative to the unreduced committee. `0` disables weight reduction,
-so parties keep their full committee weights.
+points relative to the unreduced committee. `0` still allows a reduction, but
+only one with no liveness slack: any set of members that could reach a
+threshold before reduction still can. Members' relative weights can still
+change.
+
+### `mpc_nonce_accumulation_window_ms`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `2000` |
+| **Valid range** | `0` to `10000` |
+| **Unit** | milliseconds |
+
+How long nodes keep collecting nonce dealer certificates after the certified
+dealers reach the `W − f` weight floor.
 
 ## Read-only or genesis-only parameters
 
@@ -231,8 +257,8 @@ so parties keep their full committee weights.
 
 The 32-byte Bitcoin chain identifier as defined by
 [BIP-122](https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki)
-(the genesis block hash). Set at genesis and not updatable through the
-`UpdateConfig` proposal.
+(the genesis block hash). Set at launch (`finish_publish`) and not updatable
+through the `UpdateConfig` proposal.
 
 ### `guardian_btc_public_key`
 
@@ -240,11 +266,12 @@ The 32-byte Bitcoin chain identifier as defined by
 |---|---|
 | **Type** | `bytes` |
 
-The guardian's x-only BTC public key (32 bytes), pinned at genesis. Every
-2-of-2 deposit address is derived against it, so it is write-once and not
-updatable through the `UpdateConfig` proposal. The guardian's URLs remain
-governable: `guardian_url`, its public endpoint, and `guardian_node_url`, the
-endpoint nodes call.
+The guardian's x-only BTC public key (32 bytes), pinned at launch
+(`finish_publish`). Every 2-of-2 deposit address is derived against it, so it
+is write-once and not updatable through the `UpdateConfig` proposal. The
+guardian's URLs remain governable: `guardian_url`, its public endpoint, and
+`guardian_node_url`, the endpoint nodes call. A node resolves
+`guardian_node_url` once, so it picks up a change only after a restart.
 
 ## Derived values
 
@@ -254,7 +281,7 @@ stored directly.
 ### `deposit_minimum`
 
 ```
-deposit_minimum = bitcoin_deposit_minimum
+deposit_minimum = max(bitcoin_deposit_minimum, 546)
 ```
 
 The minimum deposit amount. With defaults: `30,000 sats`.
@@ -262,12 +289,12 @@ The minimum deposit amount. With defaults: `30,000 sats`.
 ### `worst_case_network_fee`
 
 ```
-worst_case_network_fee = bitcoin_withdrawal_minimum - 546
+worst_case_network_fee = max(bitcoin_withdrawal_minimum, 547) - 546
 ```
 
-The maximum miner fee the contract accepts for a withdrawal transaction,
-derived from `bitcoin_withdrawal_minimum` minus the dust threshold. With
-defaults: `30,000 - 546 = 29,454 sats`.
+The largest share of a withdrawal transaction's miner fee that each request in
+it may pay, derived from `bitcoin_withdrawal_minimum` minus the dust
+threshold. With defaults: `30,000 - 546 = 29,454 sats` per request.
 
 ## Adding a parameter without a package upgrade
 
