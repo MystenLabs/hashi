@@ -35,8 +35,10 @@ jobs:
           rustc --version
           cargo --version
 
-      - uses: taiki-e/install-action@cargo-nextest
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # pin@v2.87.22
+        with:
+          tool: cargo-nextest
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # pin@v2.87.22
         with:
           # Keep in step with the insta crate in Cargo.lock.
           tool: cargo-insta@1.48.0
@@ -104,7 +106,7 @@ jobs:
         run: cargo test -p hashi-guardian attestation_is_verified_before_log_signatures
 
       - name: Detect TRM client changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # pin@v3.0.4
         id: trm-filter
         # Pull requests from forks don't get the TRM API key.
         if: github.event.pull_request.head.repo.full_name == github.repository
@@ -140,7 +142,7 @@ jobs:
 
       # Install buf
       - name: Install buf
-        uses: bufbuild/buf-setup-action@v1.24.0
+        uses: bufbuild/buf-setup-action@d5f79ca09dab494736bae6976ce973d76d8853e1 # pin@v1.24.0
         with:
           version: 1.47.2
           github_token: ${{ secrets.GITHUB_TOKEN }}
