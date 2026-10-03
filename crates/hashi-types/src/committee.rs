@@ -744,6 +744,10 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, ReducedWeight<'
 }
 
 impl<'a, T: IntentMessage + Clone, W: WeightDomain> BlsSignatureAggregator<'a, T, W> {
+    pub fn epoch(&self) -> u64 {
+        self.committee.epoch
+    }
+
     /// Add a signature to this aggregator.
     ///
     /// Returns an error if:
