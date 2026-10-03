@@ -69,16 +69,18 @@ impl GuardianS3Client {
     // Constructors
     // ========================================================================
 
-    /// Construct the client and check S3 access and Object Lock support.
+    /// Construct a client for off-enclave readers (tools, monitor) using normal
+    /// networking, then check S3 access and Object Lock support.
     pub async fn new(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
-        Self::with_http_client(bucket_info, retention_environment, credentials, None).await
+        Self::build(bucket_info, retention_environment, credentials, None).await
     }
 
-    async fn with_http_client(
+    /// Shared constructor body; `http_client` overrides the SDK's default transport.
+    async fn build(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
@@ -113,17 +115,18 @@ impl GuardianS3Client {
         if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
             s3_builder = s3_builder.force_path_style(true);
         }
-        let client = S3Client::from_conf(s3_builder.build());
-
-        let client = Self::from_client(bucket_info.clone(), retention_environment, client);
+        let client = Self {
+            client: S3Client::from_conf(s3_builder.build()),
+            bucket_info: bucket_info.clone(),
+            object_lock_policy: S3ObjectLockPolicy::for_environment(retention_environment),
+        };
         client.test_s3_connectivity().await?;
         Ok(client)
     }
 
-    /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
-    /// Tests and `non-enclave-dev` builds outside an enclave use normal networking,
-    /// as do readers using `new`.
-    pub(crate) async fn new_with_custom_resolver(
+    /// Construct the enclave's client, routing AWS S3 hostnames to its VSOCK
+    /// forwarders. Tests and `non-enclave-dev` builds outside an enclave use `new`.
+    pub(crate) async fn new_in_enclave(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
@@ -141,7 +144,7 @@ impl GuardianS3Client {
                 tls::rustls_provider::CryptoMode::AwsLc,
             ))
             .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
-        Self::with_http_client(
+        Self::build(
             bucket_info,
             retention_environment,
             credentials,
@@ -150,9 +153,9 @@ impl GuardianS3Client {
         .await
     }
 
-    /// Wrap an already-configured S3 client without making network requests.
-    /// Call [`Self::test_s3_connectivity`] to check S3 access and Object Lock support.
-    pub fn from_client(
+    /// Wrap a preconfigured (mock) S3 client for tests, without network checks.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn from_client(
         bucket_info: S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         client: S3Client,
