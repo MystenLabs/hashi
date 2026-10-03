@@ -32,17 +32,23 @@ questions:
   - How does EmergencyPause work in Hashi?
 answer: >-
   Hashi governance uses typed Proposal objects that committee members vote on
-  with their validator stake weight. Available actions include Upgrade
+  with their Sui voting power. Available actions include Upgrade
   (package upgrades), EnableVersion/DisableVersion (version management),
-  UpdateConfig, UpdateEpochConfig, and AddConfig (parameter changes), and EmergencyPause (pause/unpause
-  deposits and withdrawals).
+  UpdateConfig, UpdateEpochConfig, and AddConfig (parameter changes),
+  IgnoreMember (excluding a member from the next committee), and
+  EmergencyPause (pause/unpause deposits and withdrawals).
 ---
 
 Governance actions are each defined by a unique `Proposal<T>` type. Proposals
 adjust protocol parameters, pause or unpause operations, or perform sensitive
 operations like package upgrades. Only members of the current Hashi committee
 can create proposals. Each proposal type has its own threshold, which a quorum
-of validators must reach by voting in support of the proposal.
+of validators must reach by voting in support of the proposal. Creating a
+proposal casts the creator's vote. Quorum is counted against the committee in
+office when the proposal executes, so votes from members who left at a
+reconfiguration no longer count. A proposal expires seven days after it is
+created; it can then no longer be voted on or executed, and anyone can delete
+it. Executed proposals stay onchain.
 
 The following is the current set of available proposal types.
 
@@ -62,8 +68,10 @@ it again.
 
 ## `DisableVersion`
 
-Disables a package version, preventing it from being used. The currently
-active version cannot be disabled, to avoid bricking the protocol.
+Disables a package version, preventing it from being used. A version cannot
+disable itself: executing the proposal through package version N refuses to
+disable N (`EDisableCurrentVersion`). To disable a broken new version, execute
+through an older version that is still enabled.
 
 ## `UpdateConfig`
 
@@ -84,13 +92,16 @@ endpoint nodes call) to a new string value. The URLs are the only guardian
 settings governance can change: the guardian's BTC public key is immutable
 once set, because rotating it would invalidate derived deposit addresses.
 Executing the proposal changes the onchain value, but a running node keeps the
-guardian client it already resolved, so each node must be restarted before it
-uses the new endpoint.
+guardian client it already resolved from `guardian_node_url`, so each node must
+be restarted before it calls a new node URL. Nodes do not read
+`guardian_url`.
 
 ## `UpdateEpochConfig`
 
 Updates existing parameters in the epoch config by key, including the MPC
-parameters, which must pass their range check (`EInvalidConfigEntry`). The new
+parameters, which must pass their range check (`EInvalidConfigEntry`). At
+execution, `mpc_weight_reduction_allowed_delta` must also end up below
+`mpc_max_faulty_in_basis_points` (`EInconsistentMpcConfig`). The new
 values are copied onto the next committee formed after execution; the active
 committee keeps its pinned copy. The pinned keys are refused here as well.
 
@@ -113,12 +124,17 @@ the same proposal type with the flag cleared re-admits it.
 
 ## `EmergencyPause`
 
-Pauses or unpauses deposit and withdrawal processing by setting the `paused`
-config flag. The two directions use different vote thresholds: pausing is
-deliberately cheap (`governance_emergency_pause_threshold_bps`, default 5% of
-committee weight) so a small fraction of the committee can quickly halt the
-system, while unpausing requires a supermajority
-(`governance_emergency_unpause_threshold_bps`, default two thirds).
+Pauses or unpauses the bridge by setting the `paused` config flag. While
+paused, the chain refuses new deposit and withdrawal requests and every
+committee step that processes them; users can still cancel withdrawal
+requests, and reconfiguration and governance keep running. The two directions
+use different vote thresholds: pausing is deliberately cheap
+(`governance_emergency_pause_threshold_bps`, default 5% of committee weight)
+so a small fraction of the committee can quickly halt the system, while
+unpausing requires a supermajority
+(`governance_emergency_unpause_threshold_bps`, default two thirds). `paused`
+is also an ordinary config key, so an `UpdateConfig` proposal can set or clear
+it at the two-thirds threshold.
 
 Aborting a stuck reconfiguration is deliberately **not** a proposal: the
 committees that could vote on one are the parties a stalled reconfiguration
