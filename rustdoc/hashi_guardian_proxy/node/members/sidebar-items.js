@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["read_snapshot"],"struct":["ChainMemberSource","MemberAllowlist","MemberSnapshot"],"trait":["MemberSource"]};

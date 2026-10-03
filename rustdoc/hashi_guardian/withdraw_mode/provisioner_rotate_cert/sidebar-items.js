@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["provisioner_rotate_cert"]};
