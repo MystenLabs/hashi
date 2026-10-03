@@ -13,7 +13,7 @@
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
 <script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1279/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1279/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.fd7e3958.js" defer="defer"></script>
+<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.7a5361fa.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1279/assets/js/main.537876bb.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -57,13 +57,14 @@ and cannot be written through any config proposal (<code>EProtectedConfigKey</co
 Values themselves are otherwise not bounded onchain: a proposal needs a
 supermajority of committee weight, and reviewing the proposed value is part of
 voting. See <a class="" href="/hashi/pr-preview/pr-1279/config/">Configuration</a> for the keys and defaults.</p>
-<p>The guardian&#x27;s URL is changed through this proposal as well, with an entry
-that sets the <code>guardian_url</code> key to a new string value. The URL is the only
-guardian setting governance can change: the guardian&#x27;s BTC public key is
-immutable once set, because rotating it would invalidate derived deposit
-addresses. Executing the proposal changes the onchain value, but a running
-node keeps the guardian client it already resolved, so each node must be
-restarted before it uses the new endpoint.</p>
+<p>The guardian&#x27;s URLs are changed through this proposal as well, with entries
+that set <code>guardian_url</code> (the public endpoint) or <code>guardian_node_url</code> (the
+endpoint nodes call) to a new string value. The URLs are the only guardian
+settings governance can change: the guardian&#x27;s BTC public key is immutable
+once set, because rotating it would invalidate derived deposit addresses.
+Executing the proposal changes the onchain value, but a running node keeps the
+guardian client it already resolved, so each node must be restarted before it
+uses the new endpoint.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="updateepochconfig"><code>UpdateEpochConfig</code><a href="#updateepochconfig" class="hash-link" aria-label="Direct link to updateepochconfig" title="Direct link to updateepochconfig" translate="no">​</a></h2>
 <p>Updates existing parameters in the epoch config by key, including the MPC
 parameters, which must pass their range check (<code>EInvalidConfigEntry</code>). The new

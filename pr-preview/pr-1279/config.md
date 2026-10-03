@@ -203,8 +203,9 @@ The 32-byte Bitcoin chain identifier as defined by
 
 The guardian's x-only BTC public key (32 bytes), pinned at genesis. Every
 2-of-2 deposit address is derived against it, so it is write-once and not
-updatable through the `UpdateConfig` proposal. The guardian URL
-(`guardian_url`) remains governable.
+updatable through the `UpdateConfig` proposal. The guardian's URLs remain
+governable: `guardian_url`, its public endpoint, and `guardian_node_url`, the
+endpoint nodes call.
 
 ## Derived values
 

@@ -13,7 +13,7 @@
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
 <script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1279/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1279/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.fd7e3958.js" defer="defer"></script>
+<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.7a5361fa.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1279/assets/js/main.537876bb.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -46,16 +46,21 @@ through the public relay.</li>
 <li class=""><strong>Activation</strong> is the operator-triggered takeover step. The standby enclave
 confirms a quiet window, derives live state from S3, checks the operator&#x27;s
 expected state hash, records activation, and only then serves withdrawals.</li>
-<li class=""><strong>Normal operation</strong> is a data-plane flow. MPC nodes call the public guardian
-proxy for guardian info, withdrawal signatures, and committee handoff updates.</li>
+<li class=""><strong>Normal operation</strong> is a data-plane flow. MPC nodes call the guardian proxy&#x27;s
+node endpoint for guardian info, withdrawal signatures, and committee handoff
+updates.</li>
 </ul>
 <p>The main components are:</p>
 <ul>
 <li class=""><strong>MPC nodes</strong>: the Hashi validator committee. Nodes collect committee
 certificates, run the MPC signer, and call the guardian for the second
 Bitcoin signature.</li>
-<li class=""><strong>Guardian proxy</strong>: the public gRPC endpoint. It forwards node-facing
-guardian RPCs and relays key-provisioner shares.</li>
+<li class=""><strong>Guardian proxy</strong>: the guardian&#x27;s gRPC endpoints. The public one
+(<code>guardian_url</code>) serves <code>/info</code> and relays key-provisioner shares. Nodes
+call a separate one (<code>guardian_node_url</code>), which serves only
+<code>GetGuardianInfo</code> and node RPCs: the proxy terminates TLS itself and forwards
+node RPCs only for current or pending committee members, who present their
+registered TLS key as a client certificate.</li>
 <li class=""><strong>Guardian enclave</strong>: the private signer and policy engine. A standby
 guardian stores static config and the reconstructed BTC key; an active
 guardian additionally verifies committee certificates, enforces the limiter,

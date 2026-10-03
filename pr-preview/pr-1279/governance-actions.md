@@ -44,13 +44,14 @@ Values themselves are otherwise not bounded onchain: a proposal needs a
 supermajority of committee weight, and reviewing the proposed value is part of
 voting. See [Configuration](config.mdx) for the keys and defaults.
 
-The guardian's URL is changed through this proposal as well, with an entry
-that sets the `guardian_url` key to a new string value. The URL is the only
-guardian setting governance can change: the guardian's BTC public key is
-immutable once set, because rotating it would invalidate derived deposit
-addresses. Executing the proposal changes the onchain value, but a running
-node keeps the guardian client it already resolved, so each node must be
-restarted before it uses the new endpoint.
+The guardian's URLs are changed through this proposal as well, with entries
+that set `guardian_url` (the public endpoint) or `guardian_node_url` (the
+endpoint nodes call) to a new string value. The URLs are the only guardian
+settings governance can change: the guardian's BTC public key is immutable
+once set, because rotating it would invalidate derived deposit addresses.
+Executing the proposal changes the onchain value, but a running node keeps the
+guardian client it already resolved, so each node must be restarted before it
+uses the new endpoint.
 
 ## `UpdateEpochConfig`
 

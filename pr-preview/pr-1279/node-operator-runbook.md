@@ -442,8 +442,8 @@ backup-dir = "/var/lib/hashi/backups"
 # TRM Labs API key for AML screening on mainnet (when unset, screening is skipped)
 # trm-api-key = "<your TRM Labs API key>"
 
-# Guardian gRPC endpoint (when unset, the guardian integration is bypassed)
-# guardian-endpoint = "https://hashi-guardian.example.com"
+# Guardian node endpoint if onchain guardian_node_url is unset at startup (then used until restart)
+# guardian-endpoint = "https://node.guardian.example.com"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
@@ -560,19 +560,26 @@ The port is configurable through `listen-address`. It must be publicly reachable
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
 > - **Bitcoin RPC:** the node broadcasts withdrawals through `sendrawtransaction`, so the RPC user/whitelist must permit it, not only read calls.
 
-### 4.3 Metrics (localhost only)
+### 4.3 Metrics and liveness (not public)
 
 | Port | Protocol | Bind | Purpose |
 |------|----------|------|---------|
-| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics` |
+| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics`, and `/health` for liveness probes |
 
 Not exposed externally by default. Scrape from localhost or through a reverse proxy with access controls.
+
+Point a liveness probe at `/health` on this port rather than on 443, once your node runs a release that serves it (older releases answer 404, which would restart the node in a loop):
+
+- It answers from its own thread rather than the node's busy async runtime, and fails only once that runtime has stopped running tasks for two minutes.
+- A probe with `periodSeconds: 10`, `timeoutSeconds: 5` and `failureThreshold: 3` restarts a wedged node within about 2.5 minutes.
+- In Kubernetes, bind `metrics-http-address` to `0.0.0.0:9180` so the kubelet can reach it, but keep the port off public Services and host networking: anyone who can reach it can slow the probe.
 
 ### 4.4 TLS
 
 - Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
 - The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
 - The node auto-generates certificates from the `tls-private-key` at startup.
+- The node also presents this key's certificate to the guardian's node endpoint (`guardian_node_url`), which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.
 
 ---
 
@@ -627,7 +634,8 @@ Genesis is gated on an explicit launch step. Once every expected validator has r
 ```bash
 hashi launch \
   --bitcoin-chain-id <genesis block hash> \
-  --guardian-url <guardian gRPC URL> \
+  --guardian-url <guardian public URL> \
+  --guardian-node-url <guardian node URL> \
   --guardian-btc-public-key <x-only hex> \
   --keypair /path/to/publisher.pem   # reads ./hashi_ids.json from publish
 ```
@@ -796,10 +804,10 @@ hashi proposal create emergency-pause [--unpause] [-m key=value]
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-The guardian endpoint is the `guardian_url` instant config key, so changing it is an `update-config` proposal:
+Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
 
 ```bash
-hashi proposal create update-config guardian_url string:<url> [-m key=value]
+hashi proposal create update-config guardian_node_url string:<url> [-m key=value]
 ```
 
 Executing the proposal changes the onchain value, but a running node keeps the guardian client it already resolved and goes on dialing the old endpoint. Restart each node after the proposal executes for the new endpoint to take effect.
@@ -880,7 +888,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
 
-> The guardian endpoint has no proposal type of its own: it is the `guardian_url` key (a `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after the proposal executes. The guardian's BTC public key is pinned at launch and no proposal can change it.
+> The guardian endpoints have no proposal type of their own: they are the `guardian_node_url` and `guardian_url` keys (both `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after the proposal executes. The guardian's BTC public key is pinned at launch and no proposal can change it.
 
 **Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold and the time delay gate the [deposit confirm step](deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](withdraw.mdx#request):
 
@@ -893,7 +901,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | `withdrawal_cancellation_cooldown_ms` | u64 | 3,600,000 ms (1 hr) | Cooldown before a withdrawal can be cancelled |
 | `paused` | bool | false | Pause all deposit/withdrawal processing |
 
-> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`); `bitcoin_deposit_time_delay_ms` is still settable.
+> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`, `guardian_node_url`); `bitcoin_deposit_time_delay_ms` is still settable.
 
 ### 7.3 Lifecycle example: UpdateConfig
 

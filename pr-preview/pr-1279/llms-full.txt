@@ -336,13 +336,14 @@ Values themselves are otherwise not bounded onchain: a proposal needs a
 supermajority of committee weight, and reviewing the proposed value is part of
 voting. See [Configuration](config.mdx) for the keys and defaults.
 
-The guardian's URL is changed through this proposal as well, with an entry
-that sets the `guardian_url` key to a new string value. The URL is the only
-guardian setting governance can change: the guardian's BTC public key is
-immutable once set, because rotating it would invalidate derived deposit
-addresses. Executing the proposal changes the onchain value, but a running
-node keeps the guardian client it already resolved, so each node must be
-restarted before it uses the new endpoint.
+The guardian's URLs are changed through this proposal as well, with entries
+that set `guardian_url` (the public endpoint) or `guardian_node_url` (the
+endpoint nodes call) to a new string value. The URLs are the only guardian
+settings governance can change: the guardian's BTC public key is immutable
+once set, because rotating it would invalidate derived deposit addresses.
+Executing the proposal changes the onchain value, but a running node keeps the
+guardian client it already resolved, so each node must be restarted before it
+uses the new endpoint.
 
 ## `UpdateEpochConfig`
 
@@ -701,16 +702,21 @@ The guardian integration has four distinct flows:
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
-- **Normal operation** is a data-plane flow. MPC nodes call the public guardian
-  proxy for guardian info, withdrawal signatures, and committee handoff updates.
+- **Normal operation** is a data-plane flow. MPC nodes call the guardian proxy's
+  node endpoint for guardian info, withdrawal signatures, and committee handoff
+  updates.
 
 The main components are:
 
 - **MPC nodes**: the Hashi validator committee. Nodes collect committee
   certificates, run the MPC signer, and call the guardian for the second
   Bitcoin signature.
-- **Guardian proxy**: the public gRPC endpoint. It forwards node-facing
-  guardian RPCs and relays key-provisioner shares.
+- **Guardian proxy**: the guardian's gRPC endpoints. The public one
+  (`guardian_url`) serves `/info` and relays key-provisioner shares. Nodes
+  call a separate one (`guardian_node_url`), which serves only
+  `GetGuardianInfo` and node RPCs: the proxy terminates TLS itself and forwards
+  node RPCs only for current or pending committee members, who present their
+  registered TLS key as a client certificate.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
@@ -1337,8 +1343,9 @@ The 32-byte Bitcoin chain identifier as defined by
 
 The guardian's x-only BTC public key (32 bytes), pinned at genesis. Every
 2-of-2 deposit address is derived against it, so it is write-once and not
-updatable through the `UpdateConfig` proposal. The guardian URL
-(`guardian_url`) remains governable.
+updatable through the `UpdateConfig` proposal. The guardian's URLs remain
+governable: `guardian_url`, its public endpoint, and `guardian_node_url`, the
+endpoint nodes call.
 
 ## Derived values
 
@@ -1816,14 +1823,19 @@ A user submits an onchain Sui transaction to request a withdrawal by calling
 `hashi::withdraw::request_withdrawal`:
 
 ```move
-public fun request_withdrawal(
+entry fun request_withdrawal(
     hashi: &mut Hashi,
     clock: &Clock,
-    btc: Coin<BTC>,
+    btc: Balance<BTC>,
     bitcoin_address: vector<u8>,
     ctx: &mut TxContext,
 )
 ```
+
+It is a private `entry` function, so it is called directly from a
+programmable transaction block (PTB) rather than from other Move packages. The
+`Balance<BTC>` can come from earlier commands in the same PTB, such as
+`0x2::balance::redeem_funds` on the sender's address balance.
 
 - `btc`: the `hBTC` to withdraw. Must be at least the
   [`bitcoin_withdrawal_minimum`](config.mdx#bitcoin_withdrawal_minimum).
@@ -2451,8 +2463,8 @@ backup-dir = "/var/lib/hashi/backups"
 # TRM Labs API key for AML screening on mainnet (when unset, screening is skipped)
 # trm-api-key = "<your TRM Labs API key>"
 
-# Guardian gRPC endpoint (when unset, the guardian integration is bypassed)
-# guardian-endpoint = "https://hashi-guardian.example.com"
+# Guardian node endpoint if onchain guardian_node_url is unset at startup (then used until restart)
+# guardian-endpoint = "https://node.guardian.example.com"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
@@ -2569,19 +2581,26 @@ The port is configurable through `listen-address`. It must be publicly reachable
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
 > - **Bitcoin RPC:** the node broadcasts withdrawals through `sendrawtransaction`, so the RPC user/whitelist must permit it, not only read calls.
 
-### 4.3 Metrics (localhost only)
+### 4.3 Metrics and liveness (not public)
 
 | Port | Protocol | Bind | Purpose |
 |------|----------|------|---------|
-| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics` |
+| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics`, and `/health` for liveness probes |
 
 Not exposed externally by default. Scrape from localhost or through a reverse proxy with access controls.
+
+Point a liveness probe at `/health` on this port rather than on 443, once your node runs a release that serves it (older releases answer 404, which would restart the node in a loop):
+
+- It answers from its own thread rather than the node's busy async runtime, and fails only once that runtime has stopped running tasks for two minutes.
+- A probe with `periodSeconds: 10`, `timeoutSeconds: 5` and `failureThreshold: 3` restarts a wedged node within about 2.5 minutes.
+- In Kubernetes, bind `metrics-http-address` to `0.0.0.0:9180` so the kubelet can reach it, but keep the port off public Services and host networking: anyone who can reach it can slow the probe.
 
 ### 4.4 TLS
 
 - Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
 - The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
 - The node auto-generates certificates from the `tls-private-key` at startup.
+- The node also presents this key's certificate to the guardian's node endpoint (`guardian_node_url`), which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.
 
 ---
 
@@ -2636,7 +2655,8 @@ Genesis is gated on an explicit launch step. Once every expected validator has r
 ```bash
 hashi launch \
   --bitcoin-chain-id <genesis block hash> \
-  --guardian-url <guardian gRPC URL> \
+  --guardian-url <guardian public URL> \
+  --guardian-node-url <guardian node URL> \
   --guardian-btc-public-key <x-only hex> \
   --keypair /path/to/publisher.pem   # reads ./hashi_ids.json from publish
 ```
@@ -2805,10 +2825,10 @@ hashi proposal create emergency-pause [--unpause] [-m key=value]
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-The guardian endpoint is the `guardian_url` instant config key, so changing it is an `update-config` proposal:
+Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
 
 ```bash
-hashi proposal create update-config guardian_url string:<url> [-m key=value]
+hashi proposal create update-config guardian_node_url string:<url> [-m key=value]
 ```
 
 Executing the proposal changes the onchain value, but a running node keeps the guardian client it already resolved and goes on dialing the old endpoint. Restart each node after the proposal executes for the new endpoint to take effect.
@@ -2889,7 +2909,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
 
-> The guardian endpoint has no proposal type of its own: it is the `guardian_url` key (a `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after the proposal executes. The guardian's BTC public key is pinned at launch and no proposal can change it.
+> The guardian endpoints have no proposal type of their own: they are the `guardian_node_url` and `guardian_url` keys (both `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after the proposal executes. The guardian's BTC public key is pinned at launch and no proposal can change it.
 
 **Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold and the time delay gate the [deposit confirm step](deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](withdraw.mdx#request):
 
@@ -2902,7 +2922,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | `withdrawal_cancellation_cooldown_ms` | u64 | 3,600,000 ms (1 hr) | Cooldown before a withdrawal can be cancelled |
 | `paused` | bool | false | Pause all deposit/withdrawal processing |
 
-> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`); `bitcoin_deposit_time_delay_ms` is still settable.
+> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`, `guardian_node_url`); `bitcoin_deposit_time_delay_ms` is still settable.
 
 ### 7.3 Lifecycle example: UpdateConfig
 
@@ -3965,11 +3985,6 @@ namespace reads the guardian's public, read-only `/info` endpoint to surface tha
 headroom.
 
 ```ts
-const client = new SuiGrpcClient({
-	network: 'devnet',
-	baseUrl: 'https://fullnode.devnet.sui.io:443',
-}).$extend(hashi({ guardianUrl: 'https://hashi-guardian-devnet.mystenlabs.com' }));
-
 // Guardian identity + limiter. `limiter` is null before the guardian is provisioned.
 const info = await client.hashi.guardian.info();
 

@@ -13,7 +13,7 @@
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
 <script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1279/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1279/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.fd7e3958.js" defer="defer"></script>
+<script src="/hashi/pr-preview/pr-1279/assets/js/runtime~main.7a5361fa.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1279/assets/js/main.537876bb.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -133,8 +133,9 @@ so parties keep their full committee weights.</p>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>bytes</code></td></tr></tbody></table>
 <p>The guardian&#x27;s x-only BTC public key (32 bytes), pinned at genesis. Every
 2-of-2 deposit address is derived against it, so it is write-once and not
-updatable through the <code>UpdateConfig</code> proposal. The guardian URL
-(<code>guardian_url</code>) remains governable.</p>
+updatable through the <code>UpdateConfig</code> proposal. The guardian&#x27;s URLs remain
+governable: <code>guardian_url</code>, its public endpoint, and <code>guardian_node_url</code>, the
+endpoint nodes call.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="derived-values">Derived values<a href="#derived-values" class="hash-link" aria-label="Direct link to Derived values" title="Direct link to Derived values" translate="no">​</a></h2>
 <p>Several values are computed from the configurable parameters above rather than
 stored directly.</p>
