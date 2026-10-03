@@ -102,7 +102,7 @@ async fn write_with_retries(
             );
         }
 
-        match complete_before_attempt_deadline(attempt_deadline, s3.write_log_record_once(record))
+        match complete_before_attempt_deadline(attempt_deadline, s3.write_log_entry_once(record))
             .await
         {
             Ok(Ok(())) => return,

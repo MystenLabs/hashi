@@ -69,16 +69,18 @@ impl GuardianS3Client {
     // Constructors
     // ========================================================================
 
-    /// Construct the client and check S3 access and Object Lock support.
+    /// Construct a client for off-enclave readers (tools, monitor) using normal
+    /// networking, then check S3 access and Object Lock support.
     pub async fn new(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
-        Self::with_http_client(bucket_info, retention_environment, credentials, None).await
+        Self::build(bucket_info, retention_environment, credentials, None).await
     }
 
-    async fn with_http_client(
+    /// Shared constructor body; `http_client` overrides the SDK's default transport.
+    async fn build(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
@@ -113,17 +115,18 @@ impl GuardianS3Client {
         if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
             s3_builder = s3_builder.force_path_style(true);
         }
-        let client = S3Client::from_conf(s3_builder.build());
-
-        let client = Self::from_client(bucket_info.clone(), retention_environment, client);
+        let client = Self {
+            client: S3Client::from_conf(s3_builder.build()),
+            bucket_info: bucket_info.clone(),
+            object_lock_policy: S3ObjectLockPolicy::for_environment(retention_environment),
+        };
         client.test_s3_connectivity().await?;
         Ok(client)
     }
 
-    /// Construct and check a client with DNS mapped to the enclave's VSOCK S3 routes.
-    /// Tests and `non-enclave-dev` builds outside an enclave use normal networking,
-    /// as do readers using `new`.
-    pub(crate) async fn new_with_custom_resolver(
+    /// Construct the enclave's client, routing AWS S3 hostnames to its VSOCK
+    /// forwarders. Tests and `non-enclave-dev` builds outside an enclave use `new`.
+    pub(crate) async fn new_in_enclave(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
@@ -141,7 +144,7 @@ impl GuardianS3Client {
                 tls::rustls_provider::CryptoMode::AwsLc,
             ))
             .build_with_resolver(crate::s3_resolver::EnclaveS3Resolver::new(bucket_info));
-        Self::with_http_client(
+        Self::build(
             bucket_info,
             retention_environment,
             credentials,
@@ -150,9 +153,9 @@ impl GuardianS3Client {
         .await
     }
 
-    /// Wrap an already-configured S3 client without making network requests.
-    /// Call [`Self::test_s3_connectivity`] to check S3 access and Object Lock support.
-    pub fn from_client(
+    /// Wrap a preconfigured (mock) S3 client for tests, without network checks.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn from_client(
         bucket_info: S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         client: S3Client,
@@ -166,20 +169,12 @@ impl GuardianS3Client {
     }
 
     // ========================================================================
-    // Getters
-    // ========================================================================
-
-    pub fn bucket_info(&self) -> &S3BucketInfo {
-        &self.bucket_info
-    }
-
-    // ========================================================================
     // S3 Write
     // ========================================================================
 
     /// Attempt one immutable log PUT. The Guardian log writer owns retries and
     /// deadlines, so SDK retries are disabled for this operation.
-    pub(crate) async fn write_log_record_once(
+    pub(crate) async fn write_log_entry_once(
         &self,
         log: &VerifiableLogEntry,
     ) -> GuardianResult<()> {
@@ -340,55 +335,6 @@ impl GuardianS3Client {
 
         Ok(())
     }
-
-    /// List up to 10 objects in the bucket.
-    /// This is intended as a lightweight connectivity/debug helper (primarily for testing).
-    pub async fn list_objects_sample(&self) -> GuardianResult<()> {
-        let s3_client = &self.client;
-
-        let bucket_objects = s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket_info.name)
-            .max_keys(10)
-            .send()
-            .await
-            .map_err(|e| {
-                S3Error(format!(
-                    "Failed to list objects: {}",
-                    DisplayErrorContext(&e)
-                ))
-            })?;
-
-        let objects = bucket_objects.contents();
-
-        if objects.is_empty() {
-            info!(
-                "Bucket {} has no objects (or no access to list)",
-                self.bucket_info.name
-            );
-            return Ok(());
-        }
-
-        info!(
-            "Bucket {}: listing {} object(s) (max 10)",
-            self.bucket_info.name,
-            objects.len()
-        );
-
-        for (i, obj) in objects.iter().enumerate() {
-            let key = obj.key().unwrap_or("<missing key>");
-            info!(
-                "  {}. key={} size={:?} last_modified={:?} etag={:?}",
-                i + 1,
-                key,
-                obj.size(),
-                obj.last_modified(),
-                obj.e_tag()
-            );
-        }
-
-        Ok(())
-    }
 }
 
 /// Controls whether an S3 read establishes that the object is still immutable.
@@ -414,6 +360,9 @@ impl GuardianS3Client {
     /// whose objects are hidden by delete markers. Uses `delimiter='/'` to walk
     /// the hour-partitioned withdraw layout without paginating every object key.
     /// Returned prefixes are unique and sorted lexicographically.
+    ///
+    /// Returns directory names only; callers check history and locks on the keys
+    /// they read inside a chosen directory later.
     pub async fn list_common_prefixes(&self, prefix: &str) -> GuardianResult<Vec<String>> {
         let mut key_marker: Option<String> = None;
         let mut version_id_marker: Option<String> = None;
@@ -750,7 +699,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         // Repeated attempts must send the same expiry, including subsecond precision.
         for _ in 0..2 {
-            logger.write_log_record_once(&record).await.unwrap();
+            logger.write_log_entry_once(&record).await.unwrap();
         }
         assert_eq!(put_ok.num_calls(), 2);
     }

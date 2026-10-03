@@ -647,10 +647,6 @@ impl Enclave {
         self.write_log(LogMessage::Heartbeat(msg)).await
     }
 
-    pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Ceremony(Box::new(state))).await
-    }
-
     pub async fn log_ceremony_proposal(
         &self,
         proposal: CeremonyProposalLogMessage,
