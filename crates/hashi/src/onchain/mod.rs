@@ -14,11 +14,13 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
+use std::time::Duration;
 use sui_futures::service::Service;
 use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
@@ -46,6 +48,10 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// Bounded so a huge queue isn't returned as one oversized page that overflows
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
+
+const BOOT_SCRAPE_RETRY_WINDOW: Duration = Duration::from_secs(5 * 60);
+const BOOT_SCRAPE_MIN_BACKOFF: Duration = Duration::from_secs(1);
+const BOOT_SCRAPE_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -184,14 +190,16 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
-        let (state, seed) = Self::scrape_into_state(
-            sui_rpc_url,
-            ids,
-            ScrapeScope::Full,
-            tls_private_key,
-            grpc_max_decoding_message_size,
-            metrics.clone(),
-        )
+        let (state, seed) = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            Self::scrape_into_state(
+                sui_rpc_url,
+                ids,
+                ScrapeScope::Full,
+                tls_private_key.clone(),
+                grpc_max_decoding_message_size,
+                metrics.clone(),
+            )
+        })
         .await?;
         let seed = seed.context("a full scrape must produce a mirror seed")?;
 
@@ -1166,6 +1174,48 @@ impl State {
     }
 }
 
+/// `window` opens at the first retryable failure, since a full scrape can take
+/// tens of minutes. It bounds when a retry may start, never a running attempt.
+async fn retry_boot_scrape<T, F, Fut>(window: Duration, mut scrape: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut deadline = None;
+    let mut backoff = BOOT_SCRAPE_MIN_BACKOFF;
+    let mut attempt = 1u32;
+    loop {
+        let error = match scrape().await {
+            Ok(scraped) => return Ok(scraped),
+            Err(error) => error,
+        };
+        if !is_retryable_scrape_error(&error) {
+            return Err(error);
+        }
+        let now = tokio::time::Instant::now();
+        if now + backoff >= *deadline.get_or_insert(now + window) {
+            return Err(error.context(format!(
+                "giving up on the on-chain scrape after attempt {attempt}"
+            )));
+        }
+        tracing::warn!(
+            attempt,
+            backoff_ms = backoff.as_millis() as u64,
+            "On-chain scrape failed: {error:#}; retrying from scratch"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = backoff.saturating_mul(2).min(BOOT_SCRAPE_MAX_BACKOFF);
+        attempt += 1;
+    }
+}
+
+fn is_retryable_scrape_error(error: &anyhow::Error) -> bool {
+    is_inconsistent_listing(error)
+        || error
+            .downcast_ref::<tonic::Status>()
+            .is_some_and(crate::leader::is_retriable_transport)
+}
+
 // List out all the package versions for hashi so that we can stay ontop of upgrades
 // dynamically
 async fn scrape_package_versions(
@@ -1269,6 +1319,17 @@ async fn scrape_dynamic_field_pages(
         "Scraped on-chain container"
     );
     Ok(min_height)
+}
+
+/// The fullnode lists fields from its index and loads each object afterwards,
+/// so a field deleted in between comes back with only its ids.
+fn listed_bcs<'a>(bcs: Option<&'a Bcs>, field: &DynamicField, container: &str) -> Result<&'a Bcs> {
+    bcs.filter(|bcs| !bcs.value().is_empty()).ok_or_else(|| {
+        inconsistent_listing(format!(
+            "{container}: dynamic field {} listed without its object (deleted mid-scrape)",
+            field.field_id()
+        ))
+    })
 }
 
 /// The derived object id of the `BitcoinState` dynamic field hanging
@@ -1794,10 +1855,10 @@ async fn scrape_all_member_info(
         metrics,
         |fields| {
             for field in fields {
-                let info: move_types::MemberInfo = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
+                let info: move_types::MemberInfo =
+                    listed_bcs(field.value_opt(), &field, "members")?
+                        .deserialize()
+                        .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
                 let info = convert_move_member_info(info);
                 let field_id: Address = field.field_id().parse()?;
                 seed.entries.push((
@@ -1876,6 +1937,7 @@ async fn scrape_committees(
         metrics,
         |fields| {
             for field in fields {
+                let value = listed_bcs(field.value_opt(), &field, "committees")?;
                 let value_type: TypeTag = field
                     .value_type_opt()
                     .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
@@ -1888,8 +1950,7 @@ async fn scrape_committees(
                 let field_version = field.field_object().version();
                 match struct_tag.name().as_str() {
                     "Committee" => {
-                        let committee: move_types::Committee = field
-                            .value()
+                        let committee: move_types::Committee = value
                             .deserialize()
                             .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?;
                         seed.entries.push((
@@ -1904,8 +1965,7 @@ async fn scrape_committees(
                             field.name().deserialize().map_err(|e| {
                                 anyhow!("failed to deserialize CommitteeHandoffKey: {e}")
                             })?;
-                        let handoff: move_types::CommitteeHandoff = field
-                            .value()
+                        let handoff: move_types::CommitteeHandoff = value
                             .deserialize()
                             .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?;
                         seed.entries.push((
@@ -2002,11 +2062,13 @@ where
     let mut values = Vec::new();
     seed.height = scrape_dynamic_field_pages(client, container, mask, label, metrics, |fields| {
         for field in fields {
-            let value: T = field
-                .child_object()
-                .contents()
-                .deserialize()
-                .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
+            let value: T = listed_bcs(
+                field.child_object_opt().and_then(Object::contents_opt),
+                &field,
+                label,
+            )?
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
             let wrapper_id: Address = field.field_id().parse()?;
             let child_id: Address = field.child_object().object_id().parse()?;
             seed.entries.push((
@@ -2132,10 +2194,10 @@ async fn scrape_utxo_records(
         metrics,
         |fields| {
             for field in fields {
-                let record: types::UtxoRecord = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
+                let record: types::UtxoRecord =
+                    listed_bcs(field.value_opt(), &field, "utxo_records")?
+                        .deserialize()
+                        .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
                 let field_id: Address = field.field_id().parse()?;
                 seed.entries.push((
                     field_id,
@@ -2675,5 +2737,279 @@ mod inconsistent_listing_tests {
         assert!(!super::is_inconsistent_listing(&anyhow::anyhow!(
             "Sui RPC transport failure"
         )));
+    }
+}
+
+#[cfg(test)]
+mod boot_scrape_retry_tests {
+    use super::*;
+    use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsResponse;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateService;
+    use sui_rpc::proto::sui::rpc::v2::state_service_server::StateServiceServer;
+    use tokio::time::Instant;
+
+    fn raced() -> anyhow::Error {
+        inconsistent_listing("withdrawal_txns: dynamic field 0x1 listed without its object".into())
+    }
+
+    #[test]
+    fn a_field_listed_without_its_object_is_an_inconsistent_listing() {
+        // What the fullnode returns once the field object is gone: ids only.
+        let vanished = DynamicField::default().with_field_id("0x1");
+        let err = listed_bcs(vanished.value_opt(), &vanished, "utxo_records").unwrap_err();
+        assert!(is_inconsistent_listing(&err), "{err:#}");
+        let err = listed_bcs(
+            vanished.child_object_opt().and_then(Object::contents_opt),
+            &vanished,
+            "withdrawal_txns",
+        )
+        .unwrap_err();
+        assert!(is_inconsistent_listing(&err), "{err:#}");
+
+        let emptied = DynamicField::default()
+            .with_child_object(Object::default().with_contents(Vec::<u8>::new()));
+        let err = listed_bcs(
+            emptied.child_object_opt().and_then(Object::contents_opt),
+            &emptied,
+            "withdrawal_txns",
+        )
+        .unwrap_err();
+        assert!(is_inconsistent_listing(&err), "{err:#}");
+
+        let listed = DynamicField::default().with_value(Bcs::serialize(&7u64).unwrap());
+        let value: u64 = listed_bcs(listed.value_opt(), &listed, "utxo_records")
+            .unwrap()
+            .deserialize()
+            .unwrap();
+        assert_eq!(value, 7);
+    }
+
+    async fn spawn_state_service(service: impl StateService) -> Client {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(StateServiceServer::new(service))
+                .serve_with_incoming(incoming),
+        );
+        Client::new(format!("http://{addr}").as_str()).unwrap()
+    }
+
+    struct VanishedFieldListing;
+
+    #[tonic::async_trait]
+    impl StateService for VanishedFieldListing {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let field = DynamicField::default()
+                .with_parent(request.into_inner().parent.unwrap_or_default())
+                .with_field_id(Address::ZERO.to_string());
+            let mut response = tonic::Response::new(
+                ListDynamicFieldsResponse::default().with_dynamic_fields(vec![field]),
+            );
+            response.metadata_mut().insert(
+                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+                "7".parse().unwrap(),
+            );
+            Ok(response)
+        }
+    }
+
+    struct HungListing;
+
+    #[tonic::async_trait]
+    impl StateService for HungListing {
+        async fn list_dynamic_fields(
+            &self,
+            _request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_or_hung_fullnode_is_retried() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let refused = Client::new(format!("http://{closed}").as_str()).unwrap();
+        // The deadline layer `new_sui_rpc_client` installs, shortened.
+        let hung = spawn_state_service(HungListing).await.request_layer(
+            tower::timeout::TimeoutLayer::new(Duration::from_millis(200)),
+        );
+        for client in [refused, hung] {
+            let err = scrape_utxo_records(client, Address::ZERO, None)
+                .await
+                .unwrap_err();
+            assert!(is_retryable_scrape_error(&err), "{err:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_scrapes_report_a_vanished_field_as_an_inconsistent_listing() {
+        let client = spawn_state_service(VanishedFieldListing).await;
+
+        let errors = [
+            scrape_all_member_info(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_committees(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_utxo_records(client.clone(), Address::ZERO, None)
+                .await
+                .err(),
+            scrape_object_bag::<types::WithdrawalTransaction, _>(
+                &client,
+                Address::ZERO,
+                |txn| route::TrackedKind::WithdrawalTxn(txn.id),
+                "withdrawal_txns",
+                None,
+            )
+            .await
+            .err(),
+        ];
+        for err in errors {
+            let err = err.expect("a vanished field must fail the scrape");
+            assert!(is_inconsistent_listing(&err), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn only_raced_listings_and_transport_failures_are_retried() {
+        assert!(is_retryable_scrape_error(&raced()));
+        assert!(is_retryable_scrape_error(
+            &raced().context("scraping the withdrawal queue")
+        ));
+        // This client's own request deadline surfaces as `Unknown`.
+        for status in [
+            tonic::Status::unavailable("tcp connect error"),
+            tonic::Status::unknown("request timed out"),
+            tonic::Status::deadline_exceeded("timeout expired"),
+            tonic::Status::internal("h2 protocol error: http2 error"),
+            tonic::Status::cancelled("operation was canceled"),
+        ] {
+            let code = status.code();
+            assert!(is_retryable_scrape_error(&status.into()), "{code:?}");
+        }
+        for status in [
+            tonic::Status::not_found("object not found"),
+            tonic::Status::invalid_argument("invalid read_mask path"),
+            tonic::Status::out_of_range("decoded message length too large"),
+        ] {
+            let code = status.code();
+            assert!(!is_retryable_scrape_error(&status.into()), "{code:?}");
+        }
+        let decode = bcs::from_bytes::<move_types::MemberInfo>(&[1, 2, 3])
+            .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))
+            .unwrap_err();
+        assert!(!is_retryable_scrape_error(&decode));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_raced_scrape_is_retried_from_scratch_until_it_succeeds() {
+        let start = Instant::now();
+        let mut attempts = 0;
+        let scraped = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            std::future::ready(if attempts < 3 {
+                Err(raced())
+            } else {
+                Ok(attempts)
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(scraped, 3);
+        assert_eq!(start.elapsed(), Duration::from_secs(1 + 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_decode_error_fails_without_a_retry() {
+        let mut attempts = 0;
+        let err = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(anyhow!(
+                "failed to deserialize ObjectBag child: invalid bool"
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(!format!("{err:#}").contains("giving up"), "{err:#}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_first_attempt_that_fails_late_is_still_retried() {
+        let mut attempts = 0;
+        retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            let first = attempts == 1;
+            async move {
+                if first {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 4).await;
+                    Err(raced())
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_stop_once_the_window_from_the_first_failure_closes() {
+        let boot = Instant::now();
+        let mut starts = Vec::new();
+        let err = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            starts.push(Instant::now());
+            let first = starts.len() == 1;
+            async move {
+                if first {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 2).await;
+                }
+                Err::<(), _>(tonic::Status::unavailable("tcp connect error").into())
+            }
+        })
+        .await
+        .unwrap_err();
+        let first_failure = boot + BOOT_SCRAPE_RETRY_WINDOW * 2;
+        let deadline = first_failure + BOOT_SCRAPE_RETRY_WINDOW;
+        assert!(starts.len() > 2);
+        assert!(starts.iter().all(|start| *start < deadline));
+        assert!(Instant::now() < deadline);
+        assert!(format!("{err:#}").contains("giving up"), "{err:#}");
+        assert!(err.downcast_ref::<tonic::Status>().is_some(), "{err:#}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_running_past_the_deadline_is_not_cut_short() {
+        let deadline = Instant::now() + BOOT_SCRAPE_RETRY_WINDOW;
+        let mut attempts = 0;
+        retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+            attempts += 1;
+            let first = attempts == 1;
+            async move {
+                if first {
+                    Err(raced())
+                } else {
+                    tokio::time::sleep(BOOT_SCRAPE_RETRY_WINDOW * 2).await;
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(Instant::now() > deadline);
     }
 }
