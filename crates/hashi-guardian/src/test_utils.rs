@@ -395,11 +395,6 @@ impl Enclave {
         Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
 
-    /// Create an enclave post operator_init() but pre provisioner_init().
-    pub async fn create_operator_initialized() -> Arc<Self> {
-        Self::create_operator_initialized_with(OperatorInitTestArgs::default()).await
-    }
-
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
         enclave.install_operator_init_for_testing(args);

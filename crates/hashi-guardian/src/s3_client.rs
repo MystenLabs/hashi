@@ -174,7 +174,7 @@ impl GuardianS3Client {
 
     /// Attempt one immutable log PUT. The Guardian log writer owns retries and
     /// deadlines, so SDK retries are disabled for this operation.
-    pub(crate) async fn write_log_record_once(
+    pub(crate) async fn write_log_entry_once(
         &self,
         log: &VerifiableLogEntry,
     ) -> GuardianResult<()> {
@@ -335,55 +335,6 @@ impl GuardianS3Client {
 
         Ok(())
     }
-
-    /// List up to 10 objects in the bucket.
-    /// This is intended as a lightweight connectivity/debug helper (primarily for testing).
-    pub async fn list_objects_sample(&self) -> GuardianResult<()> {
-        let s3_client = &self.client;
-
-        let bucket_objects = s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket_info.name)
-            .max_keys(10)
-            .send()
-            .await
-            .map_err(|e| {
-                S3Error(format!(
-                    "Failed to list objects: {}",
-                    DisplayErrorContext(&e)
-                ))
-            })?;
-
-        let objects = bucket_objects.contents();
-
-        if objects.is_empty() {
-            info!(
-                "Bucket {} has no objects (or no access to list)",
-                self.bucket_info.name
-            );
-            return Ok(());
-        }
-
-        info!(
-            "Bucket {}: listing {} object(s) (max 10)",
-            self.bucket_info.name,
-            objects.len()
-        );
-
-        for (i, obj) in objects.iter().enumerate() {
-            let key = obj.key().unwrap_or("<missing key>");
-            info!(
-                "  {}. key={} size={:?} last_modified={:?} etag={:?}",
-                i + 1,
-                key,
-                obj.size(),
-                obj.last_modified(),
-                obj.e_tag()
-            );
-        }
-
-        Ok(())
-    }
 }
 
 /// Controls whether an S3 read establishes that the object is still immutable.
@@ -409,6 +360,9 @@ impl GuardianS3Client {
     /// whose objects are hidden by delete markers. Uses `delimiter='/'` to walk
     /// the hour-partitioned withdraw layout without paginating every object key.
     /// Returned prefixes are unique and sorted lexicographically.
+    ///
+    /// Returns directory names only; callers check history and locks on the keys
+    /// they read inside a chosen directory later.
     pub async fn list_common_prefixes(&self, prefix: &str) -> GuardianResult<Vec<String>> {
         let mut key_marker: Option<String> = None;
         let mut version_id_marker: Option<String> = None;
@@ -745,7 +699,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         // Repeated attempts must send the same expiry, including subsecond precision.
         for _ in 0..2 {
-            logger.write_log_record_once(&record).await.unwrap();
+            logger.write_log_entry_once(&record).await.unwrap();
         }
         assert_eq!(put_ok.num_calls(), 2);
     }
