@@ -12,6 +12,7 @@ use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::withdrawals::MpcInputSignaturesMessage;
+use crate::withdrawals::WithdrawalAlreadyFinalized;
 use crate::withdrawals::WithdrawalApprovalError;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
@@ -276,7 +277,7 @@ impl BridgeService for HttpService {
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(withdrawal_signing_refusal_status)?;
         tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {
             member_signature: Some(member_signature),
@@ -303,7 +304,7 @@ impl BridgeService for HttpService {
         let member_signature = self
             .inner
             .validate_and_sign_mpc_input_signatures(&message)
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(withdrawal_signing_refusal_status)?;
         tracing::info!("Signed MPC input signatures chunk");
         Ok(Response::new(SignMpcInputSignaturesResponse {
             member_signature: Some(member_signature),
@@ -388,6 +389,16 @@ pub(crate) fn withdrawal_approval_refusal_status(err: WithdrawalApprovalError) -
     match err {
         WithdrawalApprovalError::AlreadyApproved(_) => Status::already_exists(err.to_string()),
         err => Status::failed_precondition(err.to_string()),
+    }
+}
+
+/// `AlreadyExists` tells the leader the withdrawal is already finalized, so it
+/// can stop collecting signatures for it.
+pub(crate) fn withdrawal_signing_refusal_status(err: anyhow::Error) -> Status {
+    if err.is::<WithdrawalAlreadyFinalized>() {
+        Status::already_exists(err.to_string())
+    } else {
+        Status::failed_precondition(err.to_string())
     }
 }
 

@@ -3,7 +3,12 @@
 
 use super::LEADER_TASK_TIMEOUT;
 use super::LeaderService;
+use super::NoQuorum;
+use super::NoSignature;
+use super::collect_signatures;
+use super::is_already_approved_refusal;
 use super::parse_member_signature;
+use super::retry_peer_call;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::onchain::types::WithdrawalTransaction;
@@ -512,7 +517,6 @@ impl LeaderService {
             .current_committee()
             .expect("No current committee");
 
-        let required_weight = certificate_threshold(committee.total_weight());
         // Pass the limiter seq/timestamp the leader validated against (above) as
         // validation-only fields so each committee member re-validates the rate
         // limit once at the finalize cert. They are NOT part of the signed message.
@@ -524,7 +528,10 @@ impl LeaderService {
             let proto_request = proto_request.clone();
             let member = member.clone();
             sig_tasks.spawn(async move {
-                Self::request_withdrawal_tx_signing_signature(&inner, proto_request, &member).await
+                let reply =
+                    Self::request_withdrawal_tx_signing_signature(&inner, proto_request, &member)
+                        .await;
+                (member.weight(), reply)
             });
         }
 
@@ -532,21 +539,18 @@ impl LeaderService {
             inner.config.hashi_ids().hashi_object_id,
             signed_message.clone(),
         );
-        while let Some(result) = sig_tasks.join_next().await {
-            let Ok(Some(sig)) = result else { continue };
-            if let Err(e) = aggregator.add_signature(sig) {
-                error!(withdrawal_txn_id = %txn.id, "Failed to add withdrawal sign message signature: {e}");
+        match collect_signatures(&mut sig_tasks, &mut aggregator, committee.total_weight()).await {
+            Ok(()) => {}
+            Err(NoQuorum::AlreadyApproved) => {
+                info!("Peers report the withdrawal already finalized");
+                return Ok(());
             }
-            if aggregator.weight() >= required_weight {
-                break;
-            }
-        }
-
-        let weight = aggregator.weight();
-        if weight < required_weight {
-            anyhow::bail!(
+            Err(NoQuorum::Short {
+                weight,
+                required_weight,
+            }) => anyhow::bail!(
                 "Insufficient signatures for sign_withdrawal: weight {weight} < {required_weight}"
-            );
+            ),
         }
 
         let signed = aggregator.finish()?;
@@ -749,7 +753,6 @@ impl LeaderService {
             .onchain_state()
             .current_committee()
             .expect("No current committee");
-        let required_weight = certificate_threshold(committee.total_weight());
 
         // The collect returns at most one chunk's worth of inputs (≤ M), unioned
         // across members; commit whatever it gathered in a single cert-gated PTB.
@@ -774,27 +777,28 @@ impl LeaderService {
             let proto_request = proto_request.clone();
             let member = member.clone();
             sig_tasks.spawn(async move {
-                Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
+                let reply =
+                    Self::request_mpc_input_signatures_signature(&inner, proto_request, &member)
+                        .await;
+                (member.weight(), reply)
             });
         }
         let mut aggregator = committee.signature_aggregator(
             inner.config.hashi_ids().hashi_object_id,
             signed_message.clone(),
         );
-        while let Some(result) = sig_tasks.join_next().await {
-            let Ok(Some(sig)) = result else { continue };
-            if let Err(e) = aggregator.add_signature(sig) {
-                error!(withdrawal_txn_id = %txn.id, "Failed to add chunk cert signature: {e}");
+        match collect_signatures(&mut sig_tasks, &mut aggregator, committee.total_weight()).await {
+            Ok(()) => {}
+            Err(NoQuorum::AlreadyApproved) => {
+                info!("Peers report the withdrawal already finalized");
+                return Ok(());
             }
-            if aggregator.weight() >= required_weight {
-                break;
-            }
-        }
-        if aggregator.weight() < required_weight {
-            anyhow::bail!(
-                "Insufficient signatures for commit_input_signatures: weight {} < {required_weight}",
-                aggregator.weight()
-            );
+            Err(NoQuorum::Short {
+                weight,
+                required_weight,
+            }) => anyhow::bail!(
+                "Insufficient signatures for commit_input_signatures: weight {weight} < {required_weight}"
+            ),
         }
         let signed = aggregator.finish()?;
 
@@ -975,20 +979,37 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         proto_request: SignWithdrawalTxSigningRequest,
         member: &CommitteeMember,
-    ) -> Option<MemberSignature> {
+    ) -> Result<MemberSignature, NoSignature> {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal tx signing signature");
 
-        let response = Self::call_peer_with_retry(
-            inner,
+        let response = match retry_peer_call(
             validator_address,
             "withdrawal tx signing signature",
+            || {
+                inner
+                    .onchain_state()
+                    .bridge_service_client(&validator_address)
+            },
             move |mut client| {
                 let request = proto_request.clone();
                 async move { client.sign_withdrawal_tx_signing(request).await }
             },
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(status) if is_already_approved_refusal(&status) => {
+                debug!("{validator_address} reports the withdrawal already finalized");
+                return Err(NoSignature::AlreadyApproved);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to get withdrawal tx signing signature from {validator_address}: {e}"
+                );
+                return Err(NoSignature::Failed);
+            }
+        };
 
         trace!(
             "Retrieved withdrawal tx signing signature from {}",
@@ -1006,7 +1027,7 @@ impl LeaderService {
                     validator_address
                 );
             })
-            .ok()
+            .map_err(|_| NoSignature::Failed)
     }
 
     /// Requests a committee member's BLS signature over one MPC-signature chunk.
@@ -1015,20 +1036,37 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         proto_request: SignMpcInputSignaturesRequest,
         member: &CommitteeMember,
-    ) -> Option<MemberSignature> {
+    ) -> Result<MemberSignature, NoSignature> {
         let validator_address = member.validator_address();
         trace!("Requesting MPC input signatures chunk signature");
 
-        let response = Self::call_peer_with_retry(
-            inner,
+        let response = match retry_peer_call(
             validator_address,
             "mpc input signatures signature",
+            || {
+                inner
+                    .onchain_state()
+                    .bridge_service_client(&validator_address)
+            },
             move |mut client| {
                 let request = proto_request.clone();
                 async move { client.sign_mpc_input_signatures(request).await }
             },
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(status) if is_already_approved_refusal(&status) => {
+                debug!("{validator_address} reports the withdrawal already finalized");
+                return Err(NoSignature::AlreadyApproved);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to get mpc input signatures signature from {validator_address}: {e}"
+                );
+                return Err(NoSignature::Failed);
+            }
+        };
 
         response
             .into_inner()
@@ -1041,7 +1079,7 @@ impl LeaderService {
                     validator_address
                 );
             })
-            .ok()
+            .map_err(|_| NoSignature::Failed)
     }
 
     /// Submits one durable chunk of per-input MPC signatures to Sui.
