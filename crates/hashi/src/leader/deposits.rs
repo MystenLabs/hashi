@@ -517,6 +517,9 @@ impl LeaderService {
             .await
             .map_err(|e| match e {
                 NoQuorum::AlreadyApproved => UnapprovedDepositError::AlreadyApprovedThisEpoch,
+                NoQuorum::StaleCommittee { epoch, peer_epoch } => {
+                    UnapprovedDepositError::StaleCommittee { epoch, peer_epoch }
+                }
                 NoQuorum::Short {
                     weight,
                     required_weight,

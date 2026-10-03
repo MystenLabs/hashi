@@ -634,24 +634,44 @@ fn is_already_approved_refusal(status: &tonic::Status) -> bool {
 
 enum NoQuorum {
     AlreadyApproved,
+    StaleCommittee { epoch: u64, peer_epoch: u64 },
     Short { weight: u64, required_weight: u64 },
 }
 
 /// Add each member's signature to `aggregator` until it reaches a certificate
-/// quorum, stopping early once members reporting the request already approved
-/// rule a quorum out.
+/// quorum, stopping early once members reporting the request already approved,
+/// or signing at a newer epoch than the aggregator's committee, rule a quorum out.
 async fn collect_signatures<T: IntentMessage + Clone>(
     sig_tasks: &mut JoinSet<(u64, Result<MemberSignature, NoSignature>)>,
     aggregator: &mut BlsSignatureAggregator<'_, T>,
     total_weight: u64,
 ) -> Result<(), NoQuorum> {
     let required_weight = certificate_threshold(total_weight);
+    // Past `total - required`, quorum is out of reach, and that is more weight than
+    // faulty members can hold, so what those members report is true.
+    let quorum_slack = total_weight.saturating_sub(required_weight);
     let mut already_approved_weight = 0;
+    let mut newer_epoch_weight = 0;
     while let Some(result) = sig_tasks.join_next().await {
         let Ok((weight, reply)) = result else {
             continue;
         };
         match reply {
+            Ok(sig) if sig.epoch() > aggregator.epoch() => {
+                debug!(
+                    "{} signed at epoch {}, ahead of committee epoch {}",
+                    sig.address(),
+                    sig.epoch(),
+                    aggregator.epoch()
+                );
+                newer_epoch_weight += weight;
+                if newer_epoch_weight > quorum_slack {
+                    return Err(NoQuorum::StaleCommittee {
+                        epoch: aggregator.epoch(),
+                        peer_epoch: sig.epoch(),
+                    });
+                }
+            }
             Ok(sig) => {
                 if let Err(e) = aggregator.add_signature(sig) {
                     error!("Failed to add member signature: {e}");
@@ -659,9 +679,7 @@ async fn collect_signatures<T: IntentMessage + Clone>(
             }
             Err(NoSignature::AlreadyApproved) => {
                 already_approved_weight += weight;
-                // Past `total - required`, quorum is out of reach, and that is more weight
-                // than faulty members can hold, so an approval really landed.
-                if already_approved_weight > total_weight.saturating_sub(required_weight) {
+                if already_approved_weight > quorum_slack {
                     return Err(NoQuorum::AlreadyApproved);
                 }
             }
@@ -708,8 +726,12 @@ mod tests {
     use super::retry_peer_call;
     use crate::withdrawals::WithdrawalApprovalError;
     use crate::withdrawals::WithdrawalRequestApproval;
+    use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::MemberSignature;
     use sui_sdk_types::Address;
     use tokio::task::JoinSet;
     use tonic::Code;
@@ -776,6 +798,106 @@ mod tests {
                 required_weight: 6_667,
             })
         ));
+    }
+
+    fn signature_at(epoch: u64) -> MemberSignature {
+        let message = WithdrawalRequestApproval {
+            request_id: Address::ZERO,
+        };
+        Bls12381PrivateKey::generate(&mut rand::thread_rng()).sign(
+            Address::ZERO,
+            epoch,
+            Address::ZERO,
+            &message,
+        )
+    }
+
+    #[tokio::test]
+    async fn stops_collecting_once_newer_epoch_weight_rules_out_quorum() {
+        let committee = Committee::new(vec![], 1, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_334, Ok(signature_at(2))) });
+        sig_tasks.spawn(std::future::pending());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_signatures(&mut sig_tasks, &mut aggregator, 10_000),
+        )
+        .await
+        .expect("should stop without waiting for the member that never answers");
+
+        assert!(matches!(
+            result,
+            Err(NoQuorum::StaleCommittee {
+                epoch: 1,
+                peer_epoch: 2,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn keeps_collecting_while_newer_epoch_weight_leaves_quorum_reachable() {
+        let committee = Committee::new(vec![], 1, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_333, Ok(signature_at(2))) });
+        sig_tasks.spawn(async { (6_667, Err(NoSignature::Failed)) });
+
+        let result = collect_signatures(&mut sig_tasks, &mut aggregator, 10_000).await;
+
+        assert!(matches!(
+            result,
+            Err(NoQuorum::Short {
+                weight: 0,
+                required_weight: 6_667,
+            })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reaches_quorum_past_newer_epoch_signatures() {
+        let key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let encryption_key = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
+        let member = CommitteeMember::new(Address::ZERO, key.public_key(), encryption_key, 6_667);
+        let committee = Committee::new(vec![member], 1, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let message = WithdrawalRequestApproval {
+            request_id: Address::ZERO,
+        };
+        let signature = key.sign(Address::ZERO, 1, Address::ZERO, &message);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (3_333, Ok(signature_at(2))) });
+        // Answers last, so the newer-epoch signature is counted first.
+        sig_tasks.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            (6_667, Ok(signature))
+        });
+
+        let result = collect_signatures(&mut sig_tasks, &mut aggregator, 10_000).await;
+
+        assert!(matches!(result, Ok(())));
+        assert_eq!(aggregator.weight(), 6_667);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_waiting_past_older_epoch_signatures() {
+        let committee = Committee::new(vec![], 1, 0, 5_000);
+        let mut aggregator = aggregator(&committee);
+        let mut sig_tasks = JoinSet::new();
+        sig_tasks.spawn(async { (6_667, Ok(signature_at(0))) });
+        sig_tasks.spawn(std::future::pending());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_signatures(&mut sig_tasks, &mut aggregator, 10_000),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a stale member's signature must not end the round"
+        );
     }
 
     /// Runs `retry_peer_call` against a peer that answers attempt `n` (from 1)
