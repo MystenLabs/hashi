@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -31,7 +31,12 @@
 adjust protocol parameters, pause or unpause operations, or perform sensitive
 operations like package upgrades. Only members of the current Hashi committee
 can create proposals. Each proposal type has its own threshold, which a quorum
-of validators must reach by voting in support of the proposal.</p>
+of validators must reach by voting in support of the proposal. Creating a
+proposal casts the creator&#x27;s vote. Quorum is counted against the committee in
+office when the proposal executes, so votes from members who left at a
+reconfiguration no longer count. A proposal expires seven days after it is
+created; it can then no longer be voted on or executed, and anyone can delete
+it. Executed proposals stay onchain.</p>
 <p>The following is the current set of available proposal types.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="upgrade"><code>Upgrade</code><a href="#upgrade" class="hash-link" aria-label="Direct link to upgrade" title="Direct link to upgrade" translate="no">​</a></h2>
 <p>Authorizes a package upgrade and records whether it is exclusive. An exclusive
@@ -44,8 +49,10 @@ validator rollout contract.</p>
 <p>Re-enables a previously disabled package version, allowing the protocol to use
 it again.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="disableversion"><code>DisableVersion</code><a href="#disableversion" class="hash-link" aria-label="Direct link to disableversion" title="Direct link to disableversion" translate="no">​</a></h2>
-<p>Disables a package version, preventing it from being used. The currently
-active version cannot be disabled, to avoid bricking the protocol.</p>
+<p>Disables a package version, preventing it from being used. A version cannot
+disable itself: executing the proposal through package version N refuses to
+disable N (<code>EDisableCurrentVersion</code>). To disable a broken new version, execute
+through an older version that is still enabled.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="updateconfig"><code>UpdateConfig</code><a href="#updateconfig" class="hash-link" aria-label="Direct link to updateconfig" title="Direct link to updateconfig" translate="no">​</a></h2>
 <p>Updates existing parameters in the instant config by key; the new values apply
 when the proposal executes. Every entry is validated when the proposal is
@@ -63,11 +70,14 @@ endpoint nodes call) to a new string value. The URLs are the only guardian
 settings governance can change: the guardian&#x27;s BTC public key is immutable
 once set, because rotating it would invalidate derived deposit addresses.
 Executing the proposal changes the onchain value, but a running node keeps the
-guardian client it already resolved, so each node must be restarted before it
-uses the new endpoint.</p>
+guardian client it already resolved from <code>guardian_node_url</code>, so each node must
+be restarted before it calls a new node URL. Nodes do not read
+<code>guardian_url</code>.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="updateepochconfig"><code>UpdateEpochConfig</code><a href="#updateepochconfig" class="hash-link" aria-label="Direct link to updateepochconfig" title="Direct link to updateepochconfig" translate="no">​</a></h2>
 <p>Updates existing parameters in the epoch config by key, including the MPC
-parameters, which must pass their range check (<code>EInvalidConfigEntry</code>). The new
+parameters, which must pass their range check (<code>EInvalidConfigEntry</code>). At
+execution, <code>mpc_weight_reduction_allowed_delta</code> must also end up below
+<code>mpc_max_faulty_in_basis_points</code> (<code>EInconsistentMpcConfig</code>). The new
 values are copied onto the next committee formed after execution; the active
 committee keeps its pinned copy. The pinned keys are refused here as well.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="addconfig"><code>AddConfig</code><a href="#addconfig" class="hash-link" aria-label="Direct link to addconfig" title="Direct link to addconfig" translate="no">​</a></h2>
@@ -84,12 +94,17 @@ reconfiguration is already pending the change lands one epoch later. The
 member stays registered (an ignored member cannot be removed as inactive), and
 the same proposal type with the flag cleared re-admits it.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="emergencypause"><code>EmergencyPause</code><a href="#emergencypause" class="hash-link" aria-label="Direct link to emergencypause" title="Direct link to emergencypause" translate="no">​</a></h2>
-<p>Pauses or unpauses deposit and withdrawal processing by setting the <code>paused</code>
-config flag. The two directions use different vote thresholds: pausing is
-deliberately cheap (<code>governance_emergency_pause_threshold_bps</code>, default 5% of
-committee weight) so a small fraction of the committee can quickly halt the
-system, while unpausing requires a supermajority
-(<code>governance_emergency_unpause_threshold_bps</code>, default two thirds).</p>
+<p>Pauses or unpauses the bridge by setting the <code>paused</code> config flag. While
+paused, the chain refuses new deposit and withdrawal requests and every
+committee step that processes them; users can still cancel withdrawal
+requests, and reconfiguration and governance keep running. The two directions
+use different vote thresholds: pausing is deliberately cheap
+(<code>governance_emergency_pause_threshold_bps</code>, default 5% of committee weight)
+so a small fraction of the committee can quickly halt the system, while
+unpausing requires a supermajority
+(<code>governance_emergency_unpause_threshold_bps</code>, default two thirds). <code>paused</code>
+is also an ordinary config key, so an <code>UpdateConfig</code> proposal can set or clear
+it at the two-thirds threshold.</p>
 <p>Aborting a stuck reconfiguration is deliberately <strong>not</strong> a proposal: the
 committees that could vote on one are the parties a stalled reconfiguration
 puts in doubt. It is a permissionless entry function gated on onchain state

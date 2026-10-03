@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -33,11 +33,14 @@ using a self-signed cert (each member registers its ed25519 public key in the
 <code>CommitteeSet</code> on the <code>Hashi</code> object), and serves the gRPC <code>BridgeService</code> and
 <code>MpcService</code>. Peers connect with their own registered TLS key, and the node
 refuses any caller whose key belongs to no registered validator, except on
-<code>/health</code> and <code>/ready</code>.</p>
+<code>/health</code> and <code>/ready</code>. The <code>/health</code> there always answers; liveness probes
+should use the <code>/health</code> on the plain-HTTP metrics listener
+(<code>metrics-http-address</code>, default <code>127.0.0.1:9180</code>) instead, which fails once
+the node&#x27;s main runtime stops running tasks for two minutes.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="sui-contracts">Sui contracts<a href="#sui-contracts" class="hash-link" aria-label="Direct link to Sui contracts" title="Direct link to Sui contracts" translate="no">​</a></h2>
 <ul>
-<li class="">The Hashi Move packages are published as normal packages. The Hashi packages
-are not system packages, and are not part of the Sui framework.</li>
+<li class="">The Hashi Move package is published as a normal package. It is not a system
+package and is not part of the Sui framework.</li>
 </ul>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="stateless">Stateless<a href="#stateless" class="hash-link" aria-label="Direct link to Stateless" title="Direct link to Stateless" translate="no">​</a></h2>
 <p>A main goal of this design is to make the Hashi service as stateless as

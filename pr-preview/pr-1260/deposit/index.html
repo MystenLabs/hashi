@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -51,29 +51,34 @@ constructing a <code>Utxo</code> and calling <code>hashi::deposit::deposit</code
 <p>The <code>Utxo</code> is constructed from the Bitcoin transaction details:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">public fun utxo(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    utxo_id: UtxoId,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    amount: u64,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    derivation_path: Option&lt;address&gt;,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">): Utxo</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">public fun utxo_id(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    txid: address,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    vout: u32,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">): UtxoId</span><br></span></code></pre></div></div>
 <ul>
-<li class=""><code>txid</code>: the 32-byte Bitcoin transaction hash.</li>
+<li class=""><code>txid</code>: the 32-byte transaction hash in Bitcoin&#x27;s internal byte order, the
+reverse of the hex txid that wallets and explorers show.</li>
 <li class=""><code>vout</code>: the output index within that transaction.</li>
 <li class=""><code>amount</code>: the deposit amount in satoshis.</li>
 <li class=""><code>derivation_path</code>: the Sui address used to derive the deposit address.</li>
 </ul>
 <p>The user then submits it:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun deposit(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    hashi: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    utxo: Utxo,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    clock: &amp;Clock,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    ctx: &amp;mut TxContext,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
-<p>The function validates that the deposit meets the minimum amount and the UTXO
-has not been previously deposited, then creates a <code>DepositRequest</code> and places
-it in the deposit queue. Committee members start monitoring Bitcoin for
-confirmation.</p>
+<p>The function checks that the service is not paused (deposits are accepted
+during a reconfiguration), that the deposit meets the minimum amount, and that
+the UTXO is not already in the pool, active or spent. It then creates a
+<code>DepositRequest</code> and places it in the deposit queue. Committee members start
+monitoring Bitcoin for confirmation.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="approve">Approve<a href="#approve" class="hash-link" aria-label="Direct link to Approve" title="Direct link to Approve" translate="no">​</a></h2>
 <!-- -->
 <p>Committee members monitor the Bitcoin network for the deposit transaction. The
 transaction must reach a sufficient number of block confirmations (see
 <a class="" href="/hashi/pr-preview/pr-1260/config/#bitcoin_confirmation_threshold"><code>bitcoin_confirmation_threshold</code></a>)
 before it is considered final. This guards against chain reorganizations where
-a confirmed transaction could be reversed. If the transaction is never
-confirmed or is invalidated by a reorg, the deposit is ignored.</p>
-<p>After confirmation, each committee member independently screens the deposit&#x27;s
-Bitcoin transaction and Sui recipient with its own TRM Labs account (see
-<a class="" href="/hashi/pr-preview/pr-1260/sanctions/">Handling Sanctioned Addresses</a>). A member that rejects the
-deposit does not vote to approve it.</p>
+a confirmed transaction could be reversed. If the transaction never reaches the
+threshold, for example because a reorg drops it, the request is never
+approved. A request that isn&#x27;t confirmed expires 24 hours after it is created
+and is then deleted; the user can submit the UTXO again.</p>
+<p>After confirmation, on Bitcoin mainnet, each committee member with a TRM Labs
+API key independently screens the deposit&#x27;s Bitcoin transaction and Sui
+recipient (see <a class="" href="/hashi/pr-preview/pr-1260/sanctions/">Handling Sanctioned Addresses</a>); other members
+approve without screening. A member that rejects the deposit does not vote to
+approve it.</p>
 <p>After a node determines that a deposit request is both confirmed on Bitcoin
 and passes its own screening checks, it communicates with the other members
 of the Hashi committee and collects signatures from validators that agree the
@@ -83,9 +88,12 @@ if invalid.</p>
 <p>After a quorum is reached, one validator submits the certificate onchain by
 calling <code>hashi::deposit::approve_deposit</code>:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun approve_deposit(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    hashi: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    request_id: address,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    cert: CommitteeSignature,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    clock: &amp;Clock,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    ctx: &amp;mut TxContext,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
-<p>The function verifies the committee certificate against the current committee
-and records both the certificate and the current clock timestamp on the
-request. The request remains in the deposit queue, and no <code>hBTC</code> is minted yet.</p>
+<p>The function aborts while the service is paused or a reconfiguration is
+pending, if the UTXO is already in the pool, or if the current committee has
+already approved the request. Otherwise it verifies the committee certificate
+against the current committee and records both the certificate and the
+current clock timestamp on the request. The request remains in the deposit
+queue, and no <code>hBTC</code> is minted yet.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="confirm">Confirm<a href="#confirm" class="hash-link" aria-label="Direct link to Confirm" title="Direct link to Confirm" translate="no">​</a></h2>
 <!-- -->
 <p>After approval, the deposit must wait through the configured time-delay
@@ -93,26 +101,30 @@ window (see
 <a class="" href="/hashi/pr-preview/pr-1260/config/#bitcoin_deposit_time_delay_ms"><code>bitcoin_deposit_time_delay_ms</code></a>)
 before it can be confirmed. The window gives operators a chance to detect a
 faulty or fraudulent approval and pause the service before funds are minted.
-While the service is paused, <code>confirm_deposit</code> is rejected, so any pending
-approvals stay parked in the queue until the system is unpaused or the
-committee rotates and the deposit is re-approved.</p>
-<p>If the committee rotates during the delay window, the existing approval
-becomes invalid and the deposit must be re-approved by the new committee. The
-onchain <code>confirm_deposit</code> re-verifies the stored certificate against the
-current committee, not the committee that originally approved it.</p>
+While the service is paused, <code>approve_deposit</code> and <code>confirm_deposit</code> are both
+rejected, so pending approvals stay parked in the queue until the system is
+unpaused, unless the request expires first.</p>
+<p>If the committee rotates before the deposit is confirmed, the existing
+approval becomes invalid and the deposit must be re-approved by the new
+committee, which restarts the delay. The onchain <code>confirm_deposit</code> re-verifies
+the stored certificate against the current committee, not the committee that
+originally approved it.</p>
 <p>After the delay has elapsed, any caller may call <code>hashi::deposit::confirm_deposit</code>:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun confirm_deposit(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    hashi: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    request_id: address,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    clock: &amp;Clock,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    ctx: &amp;mut TxContext,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
 <p>The function:</p>
 <ol>
+<li class="">Aborts while the service is paused or a reconfiguration is pending, or if
+the UTXO is already in the pool (active or spent), before anything changes.</li>
 <li class="">Re-verifies the stored committee certificate against the current committee.</li>
-<li class="">Asserts that <code>approval_timestamp_ms + bitcoin_deposit_time_delay_ms &lt;= now</code>.</li>
+<li class="">Asserts that <code>approved_timestamp_ms + bitcoin_deposit_time_delay_ms &lt;= now</code>.</li>
 <li class="">Aborts if the request was never approved, the certificate no longer
 verifies, or the delay has not elapsed.</li>
 </ol>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="mint">Mint<a href="#mint" class="hash-link" aria-label="Direct link to Mint" title="Direct link to Mint" translate="no">​</a></h2>
 <!-- -->
 <p>After both checks in <code>confirm_deposit</code> pass, the function mints the
-corresponding amount of <code>hBTC</code> and sends it to the user&#x27;s Sui address. The
+corresponding amount of <code>hBTC</code> and sends it to the Sui address in the UTXO&#x27;s
+<code>derivation_path</code> (a UTXO without one mints nothing). The
 deposited UTXO is added to the Hashi-managed UTXO pool, making it available
 for future withdrawal coin selection.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/deposit.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1260/reconfiguration/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Reconfiguration</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1260/withdraw/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Withdraw</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#request" class="table-of-contents__link toc-highlight">Request</a></li><li><a href="#approve" class="table-of-contents__link toc-highlight">Approve</a></li><li><a href="#confirm" class="table-of-contents__link toc-highlight">Confirm</a></li><li><a href="#mint" class="table-of-contents__link toc-highlight">Mint</a></li></ul></div></div></div></div></main></div></div></div></div>
 </body>

@@ -10,12 +10,15 @@ using a self-signed cert (each member registers its ed25519 public key in the
 `CommitteeSet` on the `Hashi` object), and serves the gRPC `BridgeService` and
 `MpcService`. Peers connect with their own registered TLS key, and the node
 refuses any caller whose key belongs to no registered validator, except on
-`/health` and `/ready`.
+`/health` and `/ready`. The `/health` there always answers; liveness probes
+should use the `/health` on the plain-HTTP metrics listener
+(`metrics-http-address`, default `127.0.0.1:9180`) instead, which fails once
+the node's main runtime stops running tasks for two minutes.
 
 ## Sui contracts
 
-- The Hashi Move packages are published as normal packages. The Hashi packages
-  are not system packages, and are not part of the Sui framework.
+- The Hashi Move package is published as a normal package. It is not a system
+  package and is not part of the Sui framework.
 
 ## Stateless
 

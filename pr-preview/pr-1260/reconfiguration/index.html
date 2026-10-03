@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -39,25 +39,29 @@ The new committee resumes and processes them after reconfiguration completes.</p
 <!-- -->
 <p>Each Hashi node monitors Sui for epoch changes. When a new Sui epoch is
 detected and the Hashi epoch has not yet advanced to match, the node knows
-that a reconfiguration is needed. A committee member submits an onchain
-transaction by calling <code>hashi::reconfig::start_reconfig</code> to signal that
-reconfiguration should begin for the target epoch:</p>
+that a reconfiguration is needed. Every running node then submits
+<code>hashi::reconfig::start_reconfig</code>, which is permissionless; the first
+transaction to land forms the committee for Sui&#x27;s current epoch:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun start_reconfig(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    self: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    sui_system: &amp;SuiSystemState,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    ctx: &amp;TxContext,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
-<p>This sets a pending epoch change flag in the onchain state, which pauses
-normal operations (deposits, withdrawals) until reconfiguration completes.
+<p>This sets a pending epoch change flag in the onchain state. Until
+reconfiguration completes, the chain refuses deposit approval and
+confirmation, and withdrawal approval, commitment, and signing
+(<code>EReconfiguring</code>); users can still submit deposit and withdrawal requests,
+which are processed afterwards.
 The new committee membership is determined by the active Sui validators that
 registered with Hashi and set their next-epoch keys, leaving out any that
-resigned or that governance ignored through an <code>IgnoreMember</code> proposal. Stake
-weights come from the Sui validator set.</p>
+resigned or that governance ignored through an <code>IgnoreMember</code> proposal. Each
+member&#x27;s weight is its Sui voting power, and every threshold is a share of the
+formed committee&#x27;s total weight.</p>
 <p>At genesis (when no MPC public key exists yet), the <strong>launch switch</strong>
 additionally gates <code>start_reconfig</code>: it aborts until the publisher
 has sent <code>hashi::finish_publish</code> (the <code>hashi launch</code> CLI command), which
 finalizes the deploy configuration and hands the package <code>UpgradeCap</code> into
 onchain custody. This gives the publisher explicit control over when (and
 with which registered validators) the initial committee forms. After genesis
-Hashi never consults the gate; it follows Sui&#x27;s validator set
-unconditionally, because a floor on a normal reconfig would let validators
-brick reconfiguration by withholding registration.</p>
+Hashi never consults the gate and applies no registration floor, because a
+floor on a normal reconfig would let validators brick reconfiguration by
+withholding registration.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="dkg-or-key-rotation">DKG or Key Rotation<a href="#dkg-or-key-rotation" class="hash-link" aria-label="Direct link to DKG or Key Rotation" title="Direct link to DKG or Key Rotation" translate="no">​</a></h3>
 <!-- -->
 <p>The MPC key protocol runs among the new committee members. Which protocol
@@ -70,15 +74,20 @@ fresh master key.</li>
 key shares are redistributed to the new committee. The old committee
 members act as dealers and the new committee members act as receivers.</li>
 </ul>
-<p>In both cases, the output is a <code>DkgOutput</code> containing the new committee&#x27;s
-key shares and the MPC public key. See <a class="" href="/hashi/pr-preview/pr-1260/mpc-protocol/">MPC Protocol</a>
-for details.</p>
+<p>In both cases, each new member ends with an <code>MpcOutput</code>: its own key shares
+and the MPC public key. See <a class="" href="/hashi/pr-preview/pr-1260/mpc-protocol/">MPC Protocol</a> for details.</p>
 <p>Each committee member then signs a <code>ReconfigCompletionMessage</code> containing
 the target epoch and the MPC public key using their BLS12-381 key. Nodes
 collect signatures from each other through RPC until a quorum (2/3 of
 committee weight) is reached, producing a BLS aggregate signature certificate.
 This ensures that a supermajority of the new committee agrees on the key
 protocol output before the epoch transition is finalized onchain.</p>
+<p>On a key rotation the outgoing committee must also approve the new one. Nodes
+collect its signatures over a <code>CommitteeTransitionRequest</code> with the
+<code>SignCommitteeTransition</code> RPC and submit that certificate through
+<code>submit_committee_handoff</code>, in the same transaction as <code>end_reconfig</code>, which
+does not activate a rotation without it. Initial DKG has no outgoing committee
+and skips this step.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="end-reconfig">End Reconfig<a href="#end-reconfig" class="hash-link" aria-label="Direct link to End Reconfig" title="Direct link to End Reconfig" translate="no">​</a></h3>
 <!-- -->
 <p>A committee member submits the aggregate signature certificate onchain by
@@ -112,8 +121,9 @@ key their retry-or-give-up decision on which of these fires.</p>
 <p>After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
 presignatures needed for the threshold Schnorr signing protocol (see
-<a class="" href="/hashi/pr-preview/pr-1260/mpc-protocol/">MPC Protocol</a>). After presignatures are ready, normal
-operations resume for processing deposits and withdrawals.</p>
+<a class="" href="/hashi/pr-preview/pr-1260/mpc-protocol/">MPC Protocol</a>). Deposits, and withdrawal approval and
+commitment, resume as soon as <code>end_reconfig</code> lands; signing withdrawal inputs
+waits until the new committee&#x27;s presignatures are ready.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="abort-reconfig">Abort Reconfig<a href="#abort-reconfig" class="hash-link" aria-label="Direct link to Abort Reconfig" title="Direct link to Abort Reconfig" translate="no">​</a></h3>
 <!-- -->
 <p>Reconfiguration can fail after <code>start_reconfig</code> has committed the pending

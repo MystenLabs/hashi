@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -43,7 +43,8 @@ programmable transaction block (PTB) rather than from other Move packages. The
 <li class=""><code>btc</code>: the <code>hBTC</code> to withdraw. Must be at least the
 <a class="" href="/hashi/pr-preview/pr-1260/config/#bitcoin_withdrawal_minimum"><code>bitcoin_withdrawal_minimum</code></a>.</li>
 <li class=""><code>bitcoin_address</code>: the destination witness program, either <code>P2WPKH</code> (20
-bytes) or <code>P2TR</code> (32 bytes).</li>
+bytes) or <code>P2TR</code> (32 bytes). A 32-byte program is always paid as <code>P2TR</code>, so
+<code>P2WSH</code> destinations aren&#x27;t supported.</li>
 </ul>
 <p>The protocol enforces a minimum withdrawal amount to guarantee that every
 request can produce a valid Bitcoin transaction even under worst-case fee
@@ -54,12 +55,17 @@ consolidation) and the dust threshold for the user&#x27;s output. See
 <p>The full <code>hBTC</code> amount is stored with the request and placed in a queue with a
 timestamp. The user can cancel their request at any point before it has been
 committed to a withdrawal transaction, subject to a cooldown period
-(<a class="" href="/hashi/pr-preview/pr-1260/config/#withdrawal_cancellation_cooldown_ms"><code>withdrawal_cancellation_cooldown_ms</code></a>).</p>
+(<a class="" href="/hashi/pr-preview/pr-1260/config/#withdrawal_cancellation_cooldown_ms"><code>withdrawal_cancellation_cooldown_ms</code></a>).
+To cancel, the requester calls the private <code>entry</code> function
+<code>hashi::withdraw::cancel_withdrawal</code>, which returns the refunded
+<code>Balance&lt;BTC&gt;</code> for a later command in the same PTB, such as
+<code>0x2::balance::send_funds</code> back to the sender.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="approve">Approve<a href="#approve" class="hash-link" aria-label="Direct link to Approve" title="Direct link to Approve" translate="no">​</a></h2>
 <!-- -->
-<p>Each committee member independently screens the Bitcoin destination address
-and the requesting Sui address with its own TRM Labs account (see
-<a class="" href="/hashi/pr-preview/pr-1260/sanctions/">Handling Sanctioned Addresses</a>). A member that rejects the
+<p>On Bitcoin mainnet, each committee member with a TRM Labs API key
+independently screens the Bitcoin destination address and the requesting Sui
+address (see <a class="" href="/hashi/pr-preview/pr-1260/sanctions/">Handling Sanctioned Addresses</a>); other members
+approve without screening. A member that rejects the
 request does not vote to approve it. If a quorum still approves, all members
 must assist in completing the withdrawal.</p>
 <p>Committee members communicate with each other to collect signatures to approve
@@ -73,15 +79,18 @@ approved, allowing it to be picked up for transaction construction.</p>
 <p>The leader batches multiple approved requests into a single Bitcoin
 transaction to amortize the fixed transaction overhead across users. The
 leader waits for approved requests to buffer up before constructing a
-transaction, until either a request has been waiting for roughly 5 minutes,
-or a threshold number of approved requests have accumulated, whichever comes
-first. This balances latency for individual users against efficiency for the
-protocol.</p>
-<p>The leader only batches requests that fit the current capacity of the
-Guardian&#x27;s token-bucket rate limiter. A request that would exceed it remains
-in the queue until capacity is replenished, and a request larger than the
-bucket&#x27;s maximum capacity is skipped. Requests are generally processed in FIFO
-order, but this is not a strict requirement.</p>
+transaction, until a request has been waiting for roughly 5 minutes since it
+was submitted, a threshold number of approved requests have accumulated, or
+the rate limiter can&#x27;t fit the next request, whichever comes first. This
+balances latency for individual users against efficiency for the protocol.
+The leader builds one batch at a time: it commits the next only after the
+previous one is fully signed.</p>
+<p>The leader takes approved requests oldest first and stops at the first one
+that doesn&#x27;t fit the current capacity of the Guardian&#x27;s token-bucket rate
+limiter, as tracked by the leader&#x27;s own copy of it. That request and every
+request behind it wait until capacity is replenished. A request larger than
+the bucket&#x27;s maximum capacity is skipped every time, so it is never processed
+unless the limit is raised; its owner can cancel it.</p>
 <p>The leader then constructs an unsigned Bitcoin transaction:</p>
 <ol>
 <li class=""><strong>Coin selection</strong>: select UTXOs from the pool to cover the total
@@ -89,7 +98,8 @@ withdrawal amount (miner fees are taken from the user&#x27;s withdrawn amount).
 The coin selector might include extra inputs to opportunistically
 consolidate small UTXOs (see <a class="" href="/hashi/pr-preview/pr-1260/fees/">Fees</a>).</li>
 <li class=""><strong>Outputs</strong>: one output per withdrawal request to each user&#x27;s destination
-address, plus one change output back to a Hashi-controlled address.</li>
+address, plus, when the inputs exceed the requested total, one change
+output back to a Hashi-controlled address.</li>
 <li class=""><strong>Fee calculation</strong>: the miner fee is estimated through <code>estimatesmartfee</code>,
 floored at <code>3 sat/vB</code>. Each user&#x27;s share of the miner fee
 is deducted from their output. Validators independently verify that the
@@ -112,15 +122,19 @@ validators can independently verify.</p>
 protocol (see <a class="" href="/hashi/pr-preview/pr-1260/mpc-protocol/">MPC Protocol</a>) to produce a signature for
 each input.</li>
 <li class=""><strong>Guardian signature</strong>: once every input has an MPC signature, the
-unsigned transaction and metadata are sent to the Guardian enclave, which
-independently validates the request, debits its rate limiter, and produces
-the second signature for each input.</li>
+unsigned transaction and metadata are sent, with a committee certificate,
+to the Guardian enclave, which checks the certificate and the request&#x27;s
+timestamp, debits its rate limiter, and produces the second signature for
+each input.</li>
 </ol>
 <p>Both signatures are combined into the taproot script-path witness for each
 input.</p>
 <p>The MPC signatures are committed onchain in chunks, each under its own
 committee certificate, by calling <code>hashi::withdraw::commit_input_signatures</code>:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun commit_input_signatures(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    hashi: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    withdrawal_id: address,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    indices: vector&lt;u64&gt;,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    signatures: vector&lt;vector&lt;u8&gt;&gt;,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    cert: CommitteeSignature,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
+<p>If a reconfiguration lands while a withdrawal is part-way through signing,
+its still-unsigned inputs get fresh presignatures from the new committee
+(<code>hashi::withdraw::reallocate_presigs</code>); signatures already recorded are kept.</p>
 <p>The Guardian signatures are then attached by calling
 <code>hashi::withdraw::finalize_withdrawal</code>:</p>
 <div class="language-move codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-move codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">entry fun finalize_withdrawal(</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    hashi: &amp;mut Hashi,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    withdrawal_id: address,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    guardian_signatures: vector&lt;vector&lt;u8&gt;&gt;,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    cert: CommitteeSignature,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">    clock: &amp;Clock,</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">)</span><br></span></code></pre></div></div>
@@ -141,9 +155,12 @@ Once confirmed, a committee member calls
 confirmed and its input UTXOs spent, and promotes its change outputs from
 pending to confirmed UTXOs. The withdrawal record stays in place until the
 leader&#x27;s garbage collection archives it with
-<code>hashi::withdraw::archive_confirmed_withdrawals</code>.</p>
+<code>hashi::withdraw::archive_confirmed_withdrawals</code>, or, for a batch too large
+for one transaction, <code>archive_withdrawal_requests</code> followed by
+<code>finish_archive_withdrawal_txns</code>.</p>
 <p>If a transaction gets stuck, fee bumping is handled through CPFP. Either the
-withdrawal recipient spends their output with a high-fee child, or Hashi
-spends the change UTXO (see <a class="" href="/hashi/pr-preview/pr-1260/fees/#stuck-transactions">Fees: stuck transactions</a>).</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/withdraw.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1260/deposit/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Deposit</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1260/node-operator-runbook/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Hashi Node Operator Runbook</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#request" class="table-of-contents__link toc-highlight">Request</a></li><li><a href="#approve" class="table-of-contents__link toc-highlight">Approve</a></li><li><a href="#build-tx" class="table-of-contents__link toc-highlight">Build TX</a></li><li><a href="#sign" class="table-of-contents__link toc-highlight">Sign</a></li><li><a href="#broadcast" class="table-of-contents__link toc-highlight">Broadcast</a></li></ul></div></div></div></div></main></div></div></div></div>
+withdrawal recipient spends their output with a high-fee child, or a later
+withdrawal batch spends the stuck transaction&#x27;s change UTXO and pays its fee
+shortfall (see <a class="" href="/hashi/pr-preview/pr-1260/fees/#stuck-transactions">Fees: stuck transactions</a>).</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/withdraw.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1260/deposit/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Deposit</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1260/node-operator-runbook/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Hashi Node Operator Runbook</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#request" class="table-of-contents__link toc-highlight">Request</a></li><li><a href="#approve" class="table-of-contents__link toc-highlight">Approve</a></li><li><a href="#build-tx" class="table-of-contents__link toc-highlight">Build TX</a></li><li><a href="#sign" class="table-of-contents__link toc-highlight">Sign</a></li><li><a href="#broadcast" class="table-of-contents__link toc-highlight">Broadcast</a></li></ul></div></div></div></div></main></div></div></div></div>
 </body>
 </html>

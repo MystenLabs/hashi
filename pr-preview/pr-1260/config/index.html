@@ -12,8 +12,8 @@
 
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
-<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.b4401914.js" defer="defer"></script>
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1260/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1260/assets/css/styles.79c226ed.css">
+<script src="/hashi/pr-preview/pr-1260/assets/js/runtime~main.21998bc0.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1260/assets/js/main.414de89f.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -58,7 +58,8 @@ committee (<code>approve_deposit</code>) and being confirmed (<code>confirm_depo
 a window in which a fraudulent or erroneous approval can be detected and the
 service paused before any <code>hBTC</code> is minted. See the
 <a class="" href="/hashi/pr-preview/pr-1260/deposit/#confirm">deposit flow</a> for how this delay fits into the overall
-process.</p>
+process. <code>hashi launch --bitcoin-deposit-time-delay-ms</code> can set a different
+starting value; on Sui mainnet it refuses one below the default.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="bitcoin_withdrawal_minimum"><code>bitcoin_withdrawal_minimum</code><a href="#bitcoin_withdrawal_minimum" class="hash-link" aria-label="Direct link to bitcoin_withdrawal_minimum" title="Direct link to bitcoin_withdrawal_minimum" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>u64</code></td></tr><tr><td><strong>Default</strong></td><td><code>30000</code></td></tr><tr><td><strong>Unit</strong></td><td>satoshis</td></tr><tr><td><strong>Floor</strong></td><td><code>547</code> (dust relay minimum + 1)</td></tr></tbody></table>
 <p>The minimum total withdrawal amount in satoshis. The <code>worst_case_network_fee</code>
@@ -67,13 +68,18 @@ fee deduction. The floor ensures the worst-case network fee is always at least
 <code>1 sat</code>.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="bitcoin_confirmation_threshold"><code>bitcoin_confirmation_threshold</code><a href="#bitcoin_confirmation_threshold" class="hash-link" aria-label="Direct link to bitcoin_confirmation_threshold" title="Direct link to bitcoin_confirmation_threshold" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>u64</code></td></tr><tr><td><strong>Default</strong></td><td><code>6</code></td></tr><tr><td><strong>Unit</strong></td><td>blocks</td></tr></tbody></table>
-<p>The number of Bitcoin block confirmations required before a deposit is
-considered final. Guards against chain reorganizations.</p>
+<p>The number of Bitcoin block confirmations nodes require before approving a
+deposit (at least 100 for a coinbase output) and before confirming a
+withdrawal transaction. Guards against chain reorganizations.
+<code>hashi launch --bitcoin-confirmation-threshold</code> can set a different starting
+value; on Sui mainnet it refuses one below the default.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="paused"><code>paused</code><a href="#paused" class="hash-link" aria-label="Direct link to paused" title="Direct link to paused" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>bool</code></td></tr><tr><td><strong>Default</strong></td><td><code>false</code></td></tr></tbody></table>
-<p>When <code>true</code>, the protocol pauses processing of deposits and withdrawals.
-Requests already in the queue remain queued and resume processing when the
-system is unpaused. Reconfiguration and governance actions are not affected.</p>
+<p>When <code>true</code>, new deposit and withdrawal requests are refused and every step
+that advances a queued request aborts. Requests already in the queue resume
+processing when the system is unpaused, but users can still cancel withdrawal
+requests after the cooldown, and deposit requests can still expire.
+Reconfiguration and governance actions are not affected.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="reconfig_hold"><code>reconfig_hold</code><a href="#reconfig_hold" class="hash-link" aria-label="Direct link to reconfig_hold" title="Direct link to reconfig_hold" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>bool</code></td></tr><tr><td><strong>Default</strong></td><td><code>false</code></td></tr></tbody></table>
 <p>When <code>true</code>, <code>start_reconfig</code> aborts on chain, so no new committee can form.
@@ -107,9 +113,15 @@ operation requires a supermajority.</p>
 <p>The MPC parameters live in the epoch config and are tuned with
 <code>UpdateEpochConfig</code>. The store is pinned onto each committee at
 reconfiguration, so a change mid-epoch never affects the active committee; new
-values take effect when the next committee forms.</p>
+values take effect when the next committee forms. Each key&#x27;s range is checked
+when a proposal is created and again when it executes. The rule that
+<code>mpc_weight_reduction_allowed_delta</code> stays below
+<code>mpc_max_faulty_in_basis_points</code> is checked only at execution, on the
+resulting store, so move both keys in one proposal when one would cross the
+other. The epoch config also refuses the retired keys
+<code>mpc_threshold_in_basis_points</code> and <code>mpc_nonce_generation_protocol</code>.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="mpc_max_faulty_in_basis_points"><code>mpc_max_faulty_in_basis_points</code><a href="#mpc_max_faulty_in_basis_points" class="hash-link" aria-label="Direct link to mpc_max_faulty_in_basis_points" title="Direct link to mpc_max_faulty_in_basis_points" translate="no">​</a></h3>
-<table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>u64</code></td></tr><tr><td><strong>Default</strong></td><td><code>3333</code></td></tr><tr><td><strong>Valid range</strong></td><td><code>1</code> to <code>3333</code></td></tr><tr><td><strong>Unit</strong></td><td>basis points of committee voting weight</td></tr></tbody></table>
+<table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>u64</code></td></tr><tr><td><strong>Default</strong></td><td><code>3333</code></td></tr><tr><td><strong>Valid range</strong></td><td><code>1</code> to <code>3333</code>, and above <code>mpc_weight_reduction_allowed_delta</code></td></tr><tr><td><strong>Unit</strong></td><td>basis points of committee voting weight</td></tr></tbody></table>
 <p>The assumed upper bound on faulty (offline or adversarial) committee weight.
 MPC protocol parameters are derived under the assumption that at most this
 fraction of weight misbehaves.</p>
@@ -120,33 +132,40 @@ MPC protocol runs, because each unit of weight corresponds to a share and
 protocol cost scales with total shares. Reduction necessarily distorts
 relative voting power; this parameter bounds the distortion, allowing the
 effective fault-tolerance assumption to shift by at most this many basis
-points relative to the unreduced committee. <code>0</code> disables weight reduction,
-so parties keep their full committee weights.</p>
+points relative to the unreduced committee. <code>0</code> still allows a reduction, but
+only one with no liveness slack: any set of members that could reach a
+threshold before reduction still can. Members&#x27; relative weights can still
+change.</p>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="mpc_nonce_accumulation_window_ms"><code>mpc_nonce_accumulation_window_ms</code><a href="#mpc_nonce_accumulation_window_ms" class="hash-link" aria-label="Direct link to mpc_nonce_accumulation_window_ms" title="Direct link to mpc_nonce_accumulation_window_ms" translate="no">​</a></h3>
+<table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>u64</code></td></tr><tr><td><strong>Default</strong></td><td><code>2000</code></td></tr><tr><td><strong>Valid range</strong></td><td><code>0</code> to <code>10000</code></td></tr><tr><td><strong>Unit</strong></td><td>milliseconds</td></tr></tbody></table>
+<p>How long nodes keep collecting nonce dealer certificates after the certified
+dealers reach the <code>W − f</code> weight floor.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="read-only-or-genesis-only-parameters">Read-only or genesis-only parameters<a href="#read-only-or-genesis-only-parameters" class="hash-link" aria-label="Direct link to Read-only or genesis-only parameters" title="Direct link to Read-only or genesis-only parameters" translate="no">​</a></h2>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="bitcoin_chain_id"><code>bitcoin_chain_id</code><a href="#bitcoin_chain_id" class="hash-link" aria-label="Direct link to bitcoin_chain_id" title="Direct link to bitcoin_chain_id" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>address</code></td></tr></tbody></table>
 <p>The 32-byte Bitcoin chain identifier as defined by
 <a href="https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki" target="_blank" rel="noopener noreferrer" class="">BIP-122</a>
-(the genesis block hash). Set at genesis and not updatable through the
-<code>UpdateConfig</code> proposal.</p>
+(the genesis block hash). Set at launch (<code>finish_publish</code>) and not updatable
+through the <code>UpdateConfig</code> proposal.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="guardian_btc_public_key"><code>guardian_btc_public_key</code><a href="#guardian_btc_public_key" class="hash-link" aria-label="Direct link to guardian_btc_public_key" title="Direct link to guardian_btc_public_key" translate="no">​</a></h3>
 <table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td><strong>Type</strong></td><td><code>bytes</code></td></tr></tbody></table>
-<p>The guardian&#x27;s x-only BTC public key (32 bytes), pinned at genesis. Every
-2-of-2 deposit address is derived against it, so it is write-once and not
-updatable through the <code>UpdateConfig</code> proposal. The guardian&#x27;s URLs remain
-governable: <code>guardian_url</code>, its public endpoint, and <code>guardian_node_url</code>, the
-endpoint nodes call.</p>
+<p>The guardian&#x27;s x-only BTC public key (32 bytes), pinned at launch
+(<code>finish_publish</code>). Every 2-of-2 deposit address is derived against it, so it
+is write-once and not updatable through the <code>UpdateConfig</code> proposal. The
+guardian&#x27;s URLs remain governable: <code>guardian_url</code>, its public endpoint, and
+<code>guardian_node_url</code>, the endpoint nodes call. A node resolves
+<code>guardian_node_url</code> once, so it picks up a change only after a restart.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="derived-values">Derived values<a href="#derived-values" class="hash-link" aria-label="Direct link to Derived values" title="Direct link to Derived values" translate="no">​</a></h2>
 <p>Several values are computed from the configurable parameters above rather than
 stored directly.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="deposit_minimum"><code>deposit_minimum</code><a href="#deposit_minimum" class="hash-link" aria-label="Direct link to deposit_minimum" title="Direct link to deposit_minimum" translate="no">​</a></h3>
-<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">deposit_minimum = bitcoin_deposit_minimum</span><br></span></code></pre></div></div>
+<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">deposit_minimum = max(bitcoin_deposit_minimum, 546)</span><br></span></code></pre></div></div>
 <p>The minimum deposit amount. With defaults: <code>30,000 sats</code>.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="worst_case_network_fee"><code>worst_case_network_fee</code><a href="#worst_case_network_fee" class="hash-link" aria-label="Direct link to worst_case_network_fee" title="Direct link to worst_case_network_fee" translate="no">​</a></h3>
-<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">worst_case_network_fee = bitcoin_withdrawal_minimum - 546</span><br></span></code></pre></div></div>
-<p>The maximum miner fee the contract accepts for a withdrawal transaction,
-derived from <code>bitcoin_withdrawal_minimum</code> minus the dust threshold. With
-defaults: <code>30,000 - 546 = 29,454 sats</code>.</p>
+<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">worst_case_network_fee = max(bitcoin_withdrawal_minimum, 547) - 546</span><br></span></code></pre></div></div>
+<p>The largest share of a withdrawal transaction&#x27;s miner fee that each request in
+it may pay, derived from <code>bitcoin_withdrawal_minimum</code> minus the dust
+threshold. With defaults: <code>30,000 - 546 = 29,454 sats</code> per request.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="adding-a-parameter-without-a-package-upgrade">Adding a parameter without a package upgrade<a href="#adding-a-parameter-without-a-package-upgrade" class="hash-link" aria-label="Direct link to Adding a parameter without a package upgrade" title="Direct link to Adding a parameter without a package upgrade" translate="no">​</a></h2>
 <p>The Move package reads only the keys documented on this page; any other key
 is opaque to it and is consumed by the node software. To make a node-side
@@ -154,6 +173,6 @@ setting governable, pass an <code>AddConfig</code> proposal naming the key, its 
 value (which fixes the key&#x27;s type for later updates), and the store: the epoch
 config when every node must agree on the value for the whole epoch, the
 instant config otherwise. A node reads an absent key as its built-in default,
-so the key can be added before or after the node release that consumes it.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/config.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1260/fees/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Fees</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1260/reconfiguration/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Reconfiguration</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#parameters" class="table-of-contents__link toc-highlight">Parameters</a><ul><li><a href="#bitcoin_deposit_minimum" class="table-of-contents__link toc-highlight"><code>bitcoin_deposit_minimum</code></a></li><li><a href="#bitcoin_deposit_time_delay_ms" class="table-of-contents__link toc-highlight"><code>bitcoin_deposit_time_delay_ms</code></a></li><li><a href="#bitcoin_withdrawal_minimum" class="table-of-contents__link toc-highlight"><code>bitcoin_withdrawal_minimum</code></a></li><li><a href="#bitcoin_confirmation_threshold" class="table-of-contents__link toc-highlight"><code>bitcoin_confirmation_threshold</code></a></li><li><a href="#paused" class="table-of-contents__link toc-highlight"><code>paused</code></a></li><li><a href="#reconfig_hold" class="table-of-contents__link toc-highlight"><code>reconfig_hold</code></a></li><li><a href="#withdrawal_cancellation_cooldown_ms" class="table-of-contents__link toc-highlight"><code>withdrawal_cancellation_cooldown_ms</code></a></li><li><a href="#governance_emergency_pause_threshold_bps" class="table-of-contents__link toc-highlight"><code>governance_emergency_pause_threshold_bps</code></a></li><li><a href="#governance_emergency_unpause_threshold_bps" class="table-of-contents__link toc-highlight"><code>governance_emergency_unpause_threshold_bps</code></a></li></ul></li><li><a href="#mpc-parameters" class="table-of-contents__link toc-highlight">MPC parameters</a><ul><li><a href="#mpc_max_faulty_in_basis_points" class="table-of-contents__link toc-highlight"><code>mpc_max_faulty_in_basis_points</code></a></li><li><a href="#mpc_weight_reduction_allowed_delta" class="table-of-contents__link toc-highlight"><code>mpc_weight_reduction_allowed_delta</code></a></li></ul></li><li><a href="#read-only-or-genesis-only-parameters" class="table-of-contents__link toc-highlight">Read-only or genesis-only parameters</a><ul><li><a href="#bitcoin_chain_id" class="table-of-contents__link toc-highlight"><code>bitcoin_chain_id</code></a></li><li><a href="#guardian_btc_public_key" class="table-of-contents__link toc-highlight"><code>guardian_btc_public_key</code></a></li></ul></li><li><a href="#derived-values" class="table-of-contents__link toc-highlight">Derived values</a><ul><li><a href="#deposit_minimum" class="table-of-contents__link toc-highlight"><code>deposit_minimum</code></a></li><li><a href="#worst_case_network_fee" class="table-of-contents__link toc-highlight"><code>worst_case_network_fee</code></a></li></ul></li><li><a href="#adding-a-parameter-without-a-package-upgrade" class="table-of-contents__link toc-highlight">Adding a parameter without a package upgrade</a></li></ul></div></div></div></div></main></div></div></div></div>
+so the key can be added before or after the node release that consumes it.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/config.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1260/fees/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Fees</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1260/reconfiguration/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Reconfiguration</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#parameters" class="table-of-contents__link toc-highlight">Parameters</a><ul><li><a href="#bitcoin_deposit_minimum" class="table-of-contents__link toc-highlight"><code>bitcoin_deposit_minimum</code></a></li><li><a href="#bitcoin_deposit_time_delay_ms" class="table-of-contents__link toc-highlight"><code>bitcoin_deposit_time_delay_ms</code></a></li><li><a href="#bitcoin_withdrawal_minimum" class="table-of-contents__link toc-highlight"><code>bitcoin_withdrawal_minimum</code></a></li><li><a href="#bitcoin_confirmation_threshold" class="table-of-contents__link toc-highlight"><code>bitcoin_confirmation_threshold</code></a></li><li><a href="#paused" class="table-of-contents__link toc-highlight"><code>paused</code></a></li><li><a href="#reconfig_hold" class="table-of-contents__link toc-highlight"><code>reconfig_hold</code></a></li><li><a href="#withdrawal_cancellation_cooldown_ms" class="table-of-contents__link toc-highlight"><code>withdrawal_cancellation_cooldown_ms</code></a></li><li><a href="#governance_emergency_pause_threshold_bps" class="table-of-contents__link toc-highlight"><code>governance_emergency_pause_threshold_bps</code></a></li><li><a href="#governance_emergency_unpause_threshold_bps" class="table-of-contents__link toc-highlight"><code>governance_emergency_unpause_threshold_bps</code></a></li></ul></li><li><a href="#mpc-parameters" class="table-of-contents__link toc-highlight">MPC parameters</a><ul><li><a href="#mpc_max_faulty_in_basis_points" class="table-of-contents__link toc-highlight"><code>mpc_max_faulty_in_basis_points</code></a></li><li><a href="#mpc_weight_reduction_allowed_delta" class="table-of-contents__link toc-highlight"><code>mpc_weight_reduction_allowed_delta</code></a></li><li><a href="#mpc_nonce_accumulation_window_ms" class="table-of-contents__link toc-highlight"><code>mpc_nonce_accumulation_window_ms</code></a></li></ul></li><li><a href="#read-only-or-genesis-only-parameters" class="table-of-contents__link toc-highlight">Read-only or genesis-only parameters</a><ul><li><a href="#bitcoin_chain_id" class="table-of-contents__link toc-highlight"><code>bitcoin_chain_id</code></a></li><li><a href="#guardian_btc_public_key" class="table-of-contents__link toc-highlight"><code>guardian_btc_public_key</code></a></li></ul></li><li><a href="#derived-values" class="table-of-contents__link toc-highlight">Derived values</a><ul><li><a href="#deposit_minimum" class="table-of-contents__link toc-highlight"><code>deposit_minimum</code></a></li><li><a href="#worst_case_network_fee" class="table-of-contents__link toc-highlight"><code>worst_case_network_fee</code></a></li></ul></li><li><a href="#adding-a-parameter-without-a-package-upgrade" class="table-of-contents__link toc-highlight">Adding a parameter without a package upgrade</a></li></ul></div></div></div></div></main></div></div></div></div>
 </body>
 </html>
