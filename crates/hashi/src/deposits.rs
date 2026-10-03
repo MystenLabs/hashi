@@ -474,6 +474,9 @@ pub enum UnapprovedDepositError {
     #[error("Failed quorum: weight {weight} < {required_weight}")]
     FailedQuorum { weight: u64, required_weight: u64 },
 
+    #[error("Committee epoch {epoch} is stale: peers signed at epoch {peer_epoch}")]
+    StaleCommittee { epoch: u64, peer_epoch: u64 },
+
     #[error("Failed to build deposit certificate: {0}")]
     CertificateBuildFailed(#[source] anyhow::Error),
 
@@ -502,6 +505,7 @@ impl UnapprovedDepositError {
             | Self::DepositAddressUnavailable(_)
             | Self::SpentUtxoLookupFailed(_)
             | Self::FailedQuorum { .. }
+            | Self::StaleCommittee { .. }
             | Self::CertificateBuildFailed(_)
             | Self::ExecutorInitFailed(_)
             | Self::ApproveDepositFailed(_)
