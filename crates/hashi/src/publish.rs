@@ -89,7 +89,13 @@ stderr: {}",
         ));
     }
 
-    let build_output: MoveBuildOutput = serde_json::from_slice(&output.stdout)?;
+    parse_build_output(&output.stdout)
+}
+
+/// Parse the JSON that `sui move build --dump-bytecode-as-base64` prints, for
+/// callers that ran the build ahead of time (e.g. when an image is built).
+pub fn parse_build_output(json: &[u8]) -> Result<sui_sdk_types::Publish> {
+    let build_output: MoveBuildOutput = serde_json::from_slice(json)?;
     let modules = build_output
         .modules
         .into_iter()

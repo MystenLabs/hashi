@@ -592,8 +592,73 @@ pub(crate) async fn apply_onchain_config_overrides(
     networks: &mut TestNetworks,
     overrides: &[(String, hashi_types::move_types::ConfigValue)],
 ) -> Result<()> {
-    use hashi::cli::client::CreateProposalParams;
     use hashi::sui_tx_executor::SuiTxExecutor;
+
+    let nodes = networks.hashi_network.nodes();
+
+    // The committee is only available after DKG. Wait on the first node; the
+    // others are guaranteed to be ready too once DKG completes.
+    nodes[0]
+        .wait_for_mpc_key(std::time::Duration::from_secs(120))
+        .await?;
+
+    // Build one executor per node, reused across all overrides.
+    let mut executors: Vec<SuiTxExecutor> = nodes
+        .iter()
+        .filter(|node| node.is_running())
+        .map(|node| {
+            let hashi = node.hashi();
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let exec_checkpoint = submit_onchain_config_overrides(
+        &mut networks.sui_network.client.clone(),
+        networks.hashi_network.ids(),
+        nodes[0].hashi().onchain_state(),
+        &mut executors,
+        overrides,
+    )
+    .await?;
+
+    // Wait for all nodes' watchers to process the checkpoint that contains the
+    // last execute transaction. The watcher re-fetches config on each
+    // ProposalExecuted<UpdateConfig>, so once a node reaches this
+    // checkpoint its in-memory config will reflect the override.
+    let futs = networks
+        .hashi_network()
+        .nodes()
+        .iter()
+        .filter(|node| node.is_running())
+        .map(|node| {
+            let mut subscription = node.hashi().onchain_state().subscribe_checkpoint();
+            async move {
+                while subscription.borrow().height < exec_checkpoint {
+                    subscription.changed().await.unwrap();
+                }
+            }
+        });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        futures::future::join_all(futs),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Run each override through propose/vote/execute, with `executors[0]`
+/// proposing and every executor voting, so quorum is reached regardless of
+/// weight distribution. `onchain_state` must already reflect a formed
+/// committee. Returns the checkpoint of the last execute (0 if none ran).
+pub async fn submit_onchain_config_overrides(
+    client: &mut sui_rpc::Client,
+    hashi_ids: hashi::config::HashiIds,
+    onchain_state: &hashi::onchain::OnchainState,
+    executors: &mut [hashi::sui_tx_executor::SuiTxExecutor],
+    overrides: &[(String, hashi_types::move_types::ConfigValue)],
+) -> Result<u64> {
+    use hashi::cli::client::CreateProposalParams;
     use hashi_types::move_types::ConfigValue;
     use sui_sdk_types::Identifier;
     use sui_sdk_types::StructTag;
@@ -616,35 +681,9 @@ pub(crate) async fn apply_onchain_config_overrides(
     let has_mpc_overrides =
         mpc_max_faulty_bps.is_some() || mpc_weight_reduction_allowed_delta.is_some();
 
-    let nodes = networks.hashi_network.nodes();
-
-    // The committee is only available after DKG. Wait on the first node; the
-    // others are guaranteed to be ready too once DKG completes.
-    nodes[0]
-        .wait_for_mpc_key(std::time::Duration::from_secs(120))
-        .await?;
-
-    let hashi_ids = networks.hashi_network.ids();
-    let execute_package_id = nodes[0]
-        .hashi()
-        .onchain_state()
-        .package_id()
-        .unwrap_or(hashi_ids.package_id);
-    let hashi_initial_shared_version = hashi::cli::client::fetch_initial_shared_version(
-        &mut networks.sui_network.client.clone(),
-        hashi_ids.hashi_object_id,
-    )
-    .await?;
-
-    // Build one executor per node, reused across all overrides.
-    let mut executors: Vec<SuiTxExecutor> = nodes
-        .iter()
-        .filter(|node| node.is_running())
-        .map(|node| {
-            let hashi = node.hashi();
-            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
-        })
-        .collect::<anyhow::Result<_>>()?;
+    let execute_package_id = onchain_state.package_id().unwrap_or(hashi_ids.package_id);
+    let hashi_initial_shared_version =
+        hashi::cli::client::fetch_initial_shared_version(client, hashi_ids.hashi_object_id).await?;
 
     // Updated to the checkpoint of each execute response; used after the loop
     // to wait for all nodes to catch up to the last applied override.
@@ -668,8 +707,7 @@ pub(crate) async fn apply_onchain_config_overrides(
     // MPC parameters and anything governance added there) go through
     // `UpdateEpochConfig`, everything else through `UpdateConfig`.
     let epoch_keys: std::collections::BTreeSet<String> = {
-        let hashi = nodes[0].hashi();
-        let state = hashi.onchain_state().state();
+        let state = onchain_state.state();
         state
             .hashi()
             .epoch_config
@@ -689,7 +727,7 @@ pub(crate) async fn apply_onchain_config_overrides(
             hashi_ids,
             hashi_initial_shared_version,
             execute_package_id,
-            &mut executors,
+            executors,
             CreateProposalParams::UpdateMpcConfig {
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
@@ -733,7 +771,7 @@ pub(crate) async fn apply_onchain_config_overrides(
             hashi_ids,
             hashi_initial_shared_version,
             execute_package_id,
-            &mut executors,
+            executors,
             params,
             type_tag,
             module,
@@ -742,30 +780,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         .await?;
     }
 
-    // Wait for all nodes' watchers to process the checkpoint that contains the
-    // last execute transaction. The watcher re-fetches config on each
-    // ProposalExecuted<UpdateConfig>, so once a node reaches this
-    // checkpoint its in-memory config will reflect the override.
-    let futs = networks
-        .hashi_network()
-        .nodes()
-        .iter()
-        .filter(|node| node.is_running())
-        .map(|node| {
-            let mut subscription = node.hashi().onchain_state().subscribe_checkpoint();
-            async move {
-                while subscription.borrow().height < exec_checkpoint {
-                    subscription.changed().await.unwrap();
-                }
-            }
-        });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        futures::future::join_all(futs),
-    )
-    .await?;
-
-    Ok(())
+    Ok(exec_checkpoint)
 }
 
 /// `execute_package_id` must be the chain's active package: calling the
@@ -797,7 +812,8 @@ async fn submit_proposal_through_quorum(
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "create {label} proposal failed"
+        "create {label} proposal failed: {:?}",
+        response.transaction().effects().status().error()
     );
     let proposal_id = extract_proposal_id_from_response(&response)?;
     tracing::info!("{label} proposal {proposal_id} created; collecting votes");
@@ -814,7 +830,8 @@ async fn submit_proposal_through_quorum(
         let vote_resp = executor.execute(vote_tx).await?;
         anyhow::ensure!(
             vote_resp.transaction().effects().status().success(),
-            "vote on {label} proposal {proposal_id} failed"
+            "vote on {label} proposal {proposal_id} failed: {:?}",
+            vote_resp.transaction().effects().status().error()
         );
     }
     let execute_tx = build_execute_proposal_transaction(
@@ -827,7 +844,8 @@ async fn submit_proposal_through_quorum(
     let exec_resp = executors[0].execute(execute_tx).await?;
     anyhow::ensure!(
         exec_resp.transaction().effects().status().success(),
-        "execute {label} proposal {proposal_id} failed"
+        "execute {label} proposal {proposal_id} failed: {:?}",
+        exec_resp.transaction().effects().status().error()
     );
     let checkpoint = exec_resp
         .transaction()
