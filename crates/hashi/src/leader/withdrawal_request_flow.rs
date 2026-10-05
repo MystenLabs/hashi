@@ -262,6 +262,10 @@ impl LeaderService {
                     debug!("Peers report the withdrawal request already approved");
                     WithdrawalApprovalErrorKind::AlreadyApproved
                 }
+                NoQuorum::StaleCommittee { epoch, peer_epoch } => {
+                    warn!("Committee epoch {epoch} is stale: peers signed at epoch {peer_epoch}");
+                    WithdrawalApprovalErrorKind::FailedQuorum
+                }
                 NoQuorum::Short {
                     weight,
                     required_weight,

@@ -545,6 +545,9 @@ impl LeaderService {
                 info!("Peers report the withdrawal already finalized");
                 return Ok(());
             }
+            Err(NoQuorum::StaleCommittee { epoch, peer_epoch }) => anyhow::bail!(
+                "Committee epoch {epoch} is stale: peers signed at epoch {peer_epoch}"
+            ),
             Err(NoQuorum::Short {
                 weight,
                 required_weight,
@@ -793,6 +796,9 @@ impl LeaderService {
                 info!("Peers report the withdrawal already finalized");
                 return Ok(());
             }
+            Err(NoQuorum::StaleCommittee { epoch, peer_epoch }) => anyhow::bail!(
+                "Committee epoch {epoch} is stale: peers signed at epoch {peer_epoch}"
+            ),
             Err(NoQuorum::Short {
                 weight,
                 required_weight,
