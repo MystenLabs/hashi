@@ -188,6 +188,9 @@ pub async fn run(common: &CommonArgs, args: Args) -> Result<()> {
         "package_id": deployment.package_id.to_string(),
         "hashi_object_id": deployment.hashi_object_id.to_string(),
     }));
+    // The `mystenlabs` notebook ends setup on this stdout line, as printed by
+    // sui-operations' stress-antithesis entrypoint, not on the SDK event.
+    println!("Setup Complete");
     tracing::info!("bootstrap complete");
     Ok(())
 }
