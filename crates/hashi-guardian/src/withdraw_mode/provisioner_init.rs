@@ -220,7 +220,7 @@ mod tests {
 
     struct TestContext {
         shares: Vec<Share>,
-        enclave: Arc<Enclave>,
+        enclave: Enclave,
         captures: crate::test_utils::CapturedPuts,
         kp_keys: Vec<(AttestedKpCert, String)>,
         alternate_kp_key: (AttestedKpCert, String),
@@ -265,7 +265,7 @@ mod tests {
             init_args = init_args.with_genesis_state(genesis_state);
         }
         init_args.ceremony_state.btc_master_pubkey = ceremony_btc_pubkey;
-        let enclave = Enclave::create_operator_initialized_with(init_args).await;
+        let enclave = Enclave::create_operator_initialized_with(init_args);
         TestContext {
             shares,
             enclave,
@@ -278,6 +278,7 @@ mod tests {
     impl TestContext {
         fn config_hash(&self) -> [u8; 32] {
             self.enclave
+                .state
                 .temporary_init_state()
                 .expect("test enclave should retain temporary initialization state")
                 .config_hash
@@ -296,6 +297,7 @@ mod tests {
                 expected_session_id,
                 expected_config_hash,
                 self.enclave
+                    .state
                     .temporary_init_state()
                     .expect("test enclave should retain temporary initialization state")
                     .genesis_state
@@ -317,6 +319,7 @@ mod tests {
                 expected_session_id,
                 expected_config_hash,
                 self.enclave
+                    .state
                     .temporary_init_state()
                     .expect("test enclave should retain temporary initialization state")
                     .genesis_state
@@ -355,7 +358,7 @@ mod tests {
                 expected_config_hash,
                 expected_genesis_state_hash,
                 share,
-                self.enclave.encryption_public_key(),
+                self.enclave.config.encryption_public_key(),
                 &mut rand::thread_rng(),
             );
             let (cert, secret) = signer;
@@ -364,7 +367,7 @@ mod tests {
         }
 
         fn request(&self, shares: &[Share]) -> BatchProvisionerInitRequest {
-            let session_id = self.enclave.s3_session_id();
+            let session_id = self.enclave.config.s3_session_id();
             let config_hash = self.config_hash();
             let submissions = shares
                 .iter()
@@ -380,14 +383,14 @@ mod tests {
             BatchProvisionerInitRequest(submissions)
         }
 
-        async fn provision(&self, request: BatchProvisionerInitRequest) -> GuardianResult<()> {
-            provisioner_init(self.enclave.clone(), request).await
+        async fn provision(&mut self, request: BatchProvisionerInitRequest) -> GuardianResult<()> {
+            provisioner_init(&mut self.enclave, request).await
         }
     }
 
     #[tokio::test]
     async fn happy_path_threshold_reached() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
             .await
             .expect("ok");
@@ -396,7 +399,7 @@ mod tests {
             "Bitcoin key should be set after threshold"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave.state.lifecycle(),
             WithdrawStage::ProvisionerInitialized.into(),
             "provisioner init complete"
         );
@@ -413,7 +416,7 @@ mod tests {
         };
         assert_eq!(
             captured[0].0,
-            message.object_key(&ctx.enclave.s3_session_id())
+            message.object_key(&ctx.enclave.config.s3_session_id())
         );
         let PIEnclaveFullyInitialized {
             sharing_seq,
@@ -443,7 +446,7 @@ mod tests {
         let expected = genesis_state.clone().into_parts();
         let sk = SecretKey::random(&mut rand::thread_rng());
         let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
-        let ctx =
+        let mut ctx =
             setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, Some(genesis_state))
                 .await;
 
@@ -473,11 +476,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_alternate_cert_for_rostered_share() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let mut submissions = vec![ctx.signed_submission_with_key(
             &ctx.shares[0],
             &ctx.alternate_kp_key,
-            ctx.enclave.s3_session_id(),
+            ctx.enclave.config.s3_session_id(),
             ctx.config_hash(),
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
@@ -494,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_second_call_after_complete() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
             .await
             .expect("ok");
@@ -508,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_below_threshold() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let err = ctx
             .provision(ctx.request(&ctx.shares[..TEST_T - 1]))
             .await
@@ -519,7 +522,7 @@ mod tests {
             "Bitcoin key should not be set below threshold"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave.state.lifecycle(),
             WithdrawStage::OperatorInitialized.into(),
             "failed preparation should not advance the lifecycle"
         );
@@ -534,7 +537,7 @@ mod tests {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let different_sk = SecretKey::random(&mut rand::thread_rng());
         let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&different_sk);
-        let ctx = setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, None).await;
+        let mut ctx = setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, None).await;
 
         let err = ctx
             .provision(ctx.request(&ctx.shares[..TEST_T]))
@@ -549,7 +552,7 @@ mod tests {
             "mismatched Bitcoin key should not be installed"
         );
         assert_eq!(
-            ctx.enclave.lifecycle(),
+            ctx.enclave.state.lifecycle(),
             WithdrawStage::OperatorInitialized.into(),
             "failed preparation should not advance the lifecycle"
         );
@@ -557,8 +560,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_before_operator_init() {
-        let enclave = Enclave::create_with_random_keys();
-        let err = provisioner_init(enclave, BatchProvisionerInitRequest(vec![]))
+        let mut enclave = Enclave::create_with_random_keys();
+        let err = provisioner_init(&mut enclave, BatchProvisionerInitRequest(vec![]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, LifecycleMismatch { .. }));
@@ -566,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_mismatched_config_hash() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let wrong_config_hash = [0xABu8; 32];
         let submissions = ctx.shares[..TEST_T]
             .iter()
@@ -574,7 +577,7 @@ mod tests {
                 ctx.signed_submission(
                     share,
                     usize::from(share.id.get() - 1),
-                    ctx.enclave.s3_session_id(),
+                    ctx.enclave.config.s3_session_id(),
                     wrong_config_hash,
                 )
             })
@@ -588,14 +591,14 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_mismatched_genesis_state_hash() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let submissions = ctx.shares[..TEST_T]
             .iter()
             .map(|share| {
                 ctx.signed_submission_with_genesis_hash(
                     share,
                     usize::from(share.id.get() - 1),
-                    ctx.enclave.s3_session_id(),
+                    ctx.enclave.config.s3_session_id(),
                     ctx.config_hash(),
                     Some([0xAB; 32]),
                 )
@@ -610,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_mismatched_session() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let config_hash = ctx.config_hash();
         let submissions = ctx.shares[..TEST_T]
             .iter()
@@ -632,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_signature() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let mut submissions = ctx.request(&ctx.shares[..TEST_T]).0;
         submissions[0].signature = "invalid signature".into();
         let err = ctx
@@ -644,12 +647,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_signer_not_assigned_to_share() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let mut submissions = ctx.request(&ctx.shares[..TEST_T]).0;
         submissions[0] = ctx.signed_submission(
             &ctx.shares[0],
             1,
-            ctx.enclave.s3_session_id(),
+            ctx.enclave.config.s3_session_id(),
             ctx.config_hash(),
         );
         let err = ctx
@@ -661,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32),
@@ -669,7 +672,7 @@ mod tests {
         let mut submissions = vec![ctx.signed_submission(
             &bogus_share,
             0,
-            ctx.enclave.s3_session_id(),
+            ctx.enclave.config.s3_session_id(),
             ctx.config_hash(),
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
@@ -682,11 +685,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_duplicate_share_id_in_batch() {
-        let ctx = setup().await;
+        let mut ctx = setup().await;
         let first = ctx.signed_submission(
             &ctx.shares[0],
             0,
-            ctx.enclave.s3_session_id(),
+            ctx.enclave.config.s3_session_id(),
             ctx.config_hash(),
         );
         let err = ctx
@@ -696,7 +699,7 @@ mod tests {
                 ctx.signed_submission(
                     &ctx.shares[1],
                     1,
-                    ctx.enclave.s3_session_id(),
+                    ctx.enclave.config.s3_session_id(),
                     ctx.config_hash(),
                 ),
             ]))

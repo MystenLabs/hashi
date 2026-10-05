@@ -351,15 +351,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let enclave = Enclave::create_with_random_keys();
+        let mut enclave = Enclave::create_with_random_keys();
         let install = OIInstall::new(
             install.init_config.deployment().clone(),
             NitroAttestation::new(vec![]),
             crate::test_utils::mock_logger(),
             Some(install),
         );
-        commit_operator_init(&enclave, install).await;
-        let info = enclave.info().await;
+        commit_operator_init(&mut enclave, install).await;
+        let info = enclave.info();
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, None);
@@ -382,15 +382,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let enclave = Enclave::create_with_random_keys();
+        let mut enclave = Enclave::create_with_random_keys();
         let install = OIInstall::new(
             install.init_config.deployment().clone(),
             NitroAttestation::new(vec![]),
             crate::test_utils::mock_logger(),
             Some(install),
         );
-        commit_operator_init(&enclave, install).await;
-        let info = enclave.info().await;
+        commit_operator_init(&mut enclave, install).await;
+        let info = enclave.info();
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, Some(expected_hash));
@@ -436,11 +436,11 @@ mod tests {
 
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
     /// carries the InitConfig install bundle; ceremony => none).
-    async fn commit_for_mode(mode: EnclaveMode) -> (Arc<Enclave>, CapturedPuts) {
-        let enclave = Arc::new(Enclave::new(
+    async fn commit_for_mode(mode: EnclaveMode) -> (Enclave, CapturedPuts) {
+        let mut enclave = Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
-        ));
+        );
 
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let (deployment, withdraw_mode) = match mode {
@@ -461,9 +461,9 @@ mod tests {
             EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
-        let attestation = get_attestation(&enclave.signing_pubkey()).unwrap();
+        let attestation = get_attestation(&enclave.config.signing_pubkey()).unwrap();
         let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
-        commit_operator_init(&enclave, install).await;
+        commit_operator_init(&mut enclave, install).await;
         (enclave, captures)
     }
 
@@ -472,10 +472,12 @@ mod tests {
         captures: &CapturedPuts,
         expected_mode: EnclaveMode,
     ) {
-        let live_info = enclave.info().await;
+        let live_info = enclave.info();
+        let state = &enclave.state;
+        let temporary_init_state = state.temporary_init_state().ok();
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 2, "operator init should write two records");
-        let session_id = enclave.s3_session_id();
+        let session_id = enclave.config.s3_session_id();
         assert_eq!(
             captured[0].0,
             InitLogMessage::attestation_object_key(&session_id)
@@ -505,10 +507,10 @@ mod tests {
         assert_eq!(&info.deployment, enclave.config.deployment().unwrap());
         assert_eq!(
             info.encryption_pubkey,
-            enclave.encryption_public_key().to_bytes().to_vec()
+            enclave.config.encryption_public_key().to_bytes().to_vec()
         );
         if let OperatorInitMode::Withdraw(withdraw) = &info.mode {
-            let state = enclave.temporary_init_state().unwrap();
+            let state = temporary_init_state.unwrap();
             assert_eq!(
                 withdraw.secret_sharing_instance,
                 state.ceremony_state.secret_sharing_instance
@@ -518,18 +520,23 @@ mod tests {
                 withdraw.genesis_state_hash,
                 state.genesis_state.as_ref().map(GenesisState::digest)
             );
-            assert_eq!(withdraw.limiter_config, enclave.limiter_config().unwrap());
+            assert_eq!(
+                withdraw.limiter_config,
+                enclave.config.limiter_config().unwrap()
+            );
             assert_eq!(Some(withdraw.hashi_object_id), live_info.hashi_object_id);
             assert_eq!(Some(withdraw.mpc_master_g), live_info.mpc_master_g);
         }
-        guardian_info.validate(&enclave.signing_pubkey()).unwrap();
+        guardian_info
+            .validate(&enclave.config.signing_pubkey())
+            .unwrap();
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_withdraw_mode() {
         let (enclave, captures) = commit_for_mode(EnclaveMode::Withdraw).await;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
         assert_operator_init_logs(&enclave, &captures, EnclaveMode::Withdraw).await;
@@ -539,7 +546,7 @@ mod tests {
     async fn commit_marks_operator_init_complete_ceremony_mode() {
         let (enclave, captures) = commit_for_mode(EnclaveMode::Ceremony).await;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
         assert_operator_init_logs(&enclave, &captures, EnclaveMode::Ceremony).await;
@@ -547,8 +554,8 @@ mod tests {
     #[tokio::test]
     async fn initialized_sessions_reject_reinitialization_and_mode_switches() {
         for mode in [EnclaveMode::Ceremony, EnclaveMode::Withdraw] {
-            let (enclave, _) = commit_for_mode(mode).await;
-            let before = enclave.info().await;
+            let (mut enclave, _) = commit_for_mode(mode).await;
+            let before = enclave.info();
             for request in [
                 OperatorInitRequest::mock_for_testing(),
                 OperatorInitRequest::new_ceremony_mode(
@@ -557,61 +564,11 @@ mod tests {
                 ),
             ] {
                 assert!(matches!(
-                    crate::task_spawner::operator_init(enclave.clone(), request).await,
+                    operator_init(&mut enclave, request).await,
                     Err(GuardianError::LifecycleMismatch { .. })
                 ));
-                assert_eq!(enclave.info().await, before);
+                assert_eq!(enclave.info(), before);
             }
         }
-    }
-
-    #[tokio::test]
-    async fn info_waits_for_control_operation_to_publish_lifecycle() {
-        use std::time::Duration;
-        use tokio::sync::oneshot;
-
-        let enclave = Enclave::create_with_random_keys();
-        let before = enclave.info().await;
-        assert_eq!(before.lifecycle, None);
-        assert!(before.deployment_info.is_none());
-
-        let (installed_tx, installed_rx) = oneshot::channel();
-        let (resume_tx, resume_rx) = oneshot::channel();
-        let initializing = tokio::spawn(enclave.clone().spawn_control_task(
-            (),
-            move |enclave, ()| async move {
-                enclave
-                    .config
-                    .set_deployment(DeploymentConfig::mock_for_testing())?;
-                enclave
-                    .config
-                    .set_s3_logger(crate::test_utils::mock_logger())?;
-                installed_tx.send(()).unwrap();
-                resume_rx.await.unwrap();
-                enclave.advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
-            },
-        ));
-        installed_rx.await.unwrap();
-
-        // The request must wait while initialization holds the control lock.
-        let mut response = std::pin::pin!(crate::task_spawner::get_guardian_info(enclave.clone(),));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut response)
-                .await
-                .is_err()
-        );
-
-        resume_tx.send(()).unwrap();
-        initializing.await.unwrap().unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(1), response)
-            .await
-            .expect("status request should finish after initialization")
-            .unwrap();
-        let after = response.response;
-        assert_eq!(after.lifecycle, CeremonyStage::OperatorInitialized.into());
-        assert_eq!(
-            after.deployment_info,
-            Some(DeploymentConfig::mock_for_testing().summary())
-        );
     }
 }

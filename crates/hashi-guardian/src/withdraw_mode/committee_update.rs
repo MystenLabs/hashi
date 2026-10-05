@@ -142,7 +142,7 @@ mod tests {
         agg.finish().expect("threshold should be met")
     }
 
-    async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
+    async fn enclave_at_epoch(epoch: u64) -> Enclave {
         let kp =
             BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[1u8; 32]).expect("valid test secret key");
         let master_pubkey =
@@ -162,22 +162,21 @@ mod tests {
                 next_seq: 0,
             },
         })
-        .await
     }
 
     #[tokio::test]
     async fn happy_path_advances_committee() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(5, committee_at(6));
 
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
+        let new_epoch = update_committee(&mut enclave, signed).await.unwrap();
         assert_eq!(new_epoch, 6);
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 6);
     }
 
     #[tokio::test]
     async fn invalid_encryption_key_does_not_block_handoffs() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let outgoing = committee_at(5);
         let mut new_committee = hashi_types::move_types::Committee::from(&committee_at(6));
         new_committee.members[0].encryption_public_key = vec![0xff; 32];
@@ -189,13 +188,13 @@ mod tests {
         agg.add_signature(sig).unwrap();
 
         assert_eq!(
-            update_committee(enclave.clone(), agg.finish().unwrap())
+            update_committee(&mut enclave, agg.finish().unwrap())
                 .await
                 .unwrap(),
             6
         );
         assert_eq!(
-            update_committee(enclave, sign_transition_at(6, committee_at(7)))
+            update_committee(&mut enclave, sign_transition_at(6, committee_at(7)))
                 .await
                 .unwrap(),
             7
@@ -204,10 +203,10 @@ mod tests {
 
     #[tokio::test]
     async fn already_applied_is_noop() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(5, committee_at(5));
 
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
+        let new_epoch = update_committee(&mut enclave, signed).await.unwrap();
         assert_eq!(new_epoch, 5);
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
     }
@@ -217,23 +216,23 @@ mod tests {
         // Hashi committee epochs can skip values (sparse reconfig). A cert
         // signed by the current committee for a future non-adjacent epoch
         // is legitimate and must be accepted.
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(5, committee_at(7));
 
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
+        let new_epoch = update_committee(&mut enclave, signed).await.unwrap();
         assert_eq!(new_epoch, 7);
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
     }
 
     #[tokio::test]
     async fn update_committee_chain_advances_multiple_handoffs() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let transitions = vec![
             sign_transition_at(5, committee_at(7)),
             sign_transition_at(7, committee_at(9)),
         ];
 
-        let new_epoch = update_committee_chain(enclave.clone(), transitions)
+        let new_epoch = update_committee_chain(&mut enclave, transitions)
             .await
             .unwrap();
 
@@ -243,13 +242,13 @@ mod tests {
 
     #[tokio::test]
     async fn update_committee_chain_rejects_bad_middle_handoff() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let transitions = vec![
             sign_transition_at(5, committee_at(7)),
             sign_transition_at(6, committee_at(9)),
         ];
 
-        let err = update_committee_chain(enclave.clone(), transitions)
+        let err = update_committee_chain(&mut enclave, transitions)
             .await
             .expect_err("bad middle handoff must error");
 
@@ -262,10 +261,10 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_signing_epoch_rejected() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(4, committee_at(6));
 
-        let err = update_committee(enclave.clone(), signed)
+        let err = update_committee(&mut enclave, signed)
             .await
             .expect_err("mismatched signing epoch must error");
         assert!(
@@ -277,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_committee_rejects_stale_expected_epoch() {
-        let enclave = enclave_at_epoch(5).await;
+        let mut enclave = enclave_at_epoch(5).await;
 
         let err = enclave
             .state

@@ -223,112 +223,150 @@ impl GuardianService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::GuardianEncKeyPair;
-    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::CeremonyStage;
+    use hashi_types::guardian::DeploymentConfig;
     use std::time::Duration;
     use tokio::sync::oneshot;
 
-    /// A task body that reports when it starts, waits for the test to let it
-    /// continue, then reports completion.
-    struct PausedTask {
-        started: oneshot::Sender<()>,
-        resume: oneshot::Receiver<()>,
-        finished: oneshot::Sender<()>,
-    }
-
-    fn test_enclave() -> Arc<Enclave> {
-        Arc::new(Enclave::new(
-            GuardianSignKeyPair::new(rand::thread_rng()),
-            GuardianEncKeyPair::random(&mut rand::thread_rng()),
-        ))
-    }
-
-    async fn pause_after_start(_enclave: Arc<Enclave>, task: PausedTask) -> GuardianResult<()> {
-        task.started.send(()).unwrap();
-        task.resume.await.unwrap();
-        task.finished.send(()).unwrap();
-        Ok(())
-    }
-
-    async fn signal_started(
-        _enclave: Arc<Enclave>,
-        started: oneshot::Sender<()>,
-    ) -> GuardianResult<()> {
-        started.send(()).unwrap();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn root_owned_task_survives_caller_cancellation() {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (resume_tx, resume_rx) = oneshot::channel();
-        let (finished_tx, finished_rx) = oneshot::channel();
-
-        // This outer task represents the Tonic RPC handler awaiting the
-        // independently spawned guardian task.
-        let caller = tokio::spawn(test_enclave().spawn_task(
-            PausedTask {
-                started: started_tx,
-                resume: resume_rx,
-                finished: finished_tx,
-            },
-            pause_after_start,
-        ));
-        // Ensure the guardian accepted and started the task before simulating
-        // the client disconnect.
-        started_rx.await.unwrap();
-
-        // Cancelling the RPC handler drops only its waiter. The guardian task
-        // spawned by `spawn_task` must continue independently.
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-
-        // Allow the guardian task to finish and prove that caller cancellation
-        // did not cancel it.
-        resume_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), finished_rx)
-            .await
-            .expect("root-owned task should finish")
-            .unwrap();
+    fn test_service() -> GuardianService {
+        GuardianService::new(Enclave::create_with_random_keys())
     }
 
     #[tokio::test]
     async fn control_tasks_are_serialized() {
-        let enclave = test_enclave();
-        let (first_started_tx, first_started_rx) = oneshot::channel();
-        let (first_resume_tx, first_resume_rx) = oneshot::channel();
-        let (first_finished_tx, first_finished_rx) = oneshot::channel();
+        let service = test_service();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let first = {
+            let service = service.clone();
+            tokio::spawn(async move {
+                service
+                    .run(move |_enclave| {
+                        Box::pin(async move {
+                            started_tx.send(()).unwrap();
+                            resume_rx.await.unwrap();
+                            Ok(())
+                        })
+                    })
+                    .await
+            })
+        };
+        started_rx.await.unwrap();
 
-        // The first task acquires the control lock, then pauses while holding it.
-        let first = tokio::spawn(enclave.clone().spawn_control_task(
-            PausedTask {
-                started: first_started_tx,
-                resume: first_resume_rx,
-                finished: first_finished_tx,
-            },
-            pause_after_start,
-        ));
-        first_started_rx.await.unwrap();
-
-        // A second control task is accepted and spawned, but must wait for the
-        // first task to release the control lock.
         let (second_started_tx, mut second_started_rx) = oneshot::channel();
-        let second = tokio::spawn(enclave.spawn_control_task(second_started_tx, signal_started));
-        // Yield this test task to give Tokio an opportunity to poll the second
-        // task and let it reach the control lock. This is a scheduling hint,
-        // not proof that the second task reached the lock-waiting point.
-        tokio::task::yield_now().await;
-        assert!(matches!(
-            second_started_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-
-        // Finishing the first task releases the lock, after which the second
-        // task may enter and signal that it started.
-        first_resume_tx.send(()).unwrap();
-        first_finished_rx.await.unwrap();
+        let second = tokio::spawn(async move {
+            service
+                .run(move |_enclave| {
+                    Box::pin(async move {
+                        second_started_tx.send(()).unwrap();
+                        Ok(())
+                    })
+                })
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second_started_rx)
+                .await
+                .is_err()
+        );
+        resume_tx.send(()).unwrap();
         second_started_rx.await.unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_task_retains_state_after_caller_cancellation() {
+        let service = test_service();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let caller = {
+            let service = service.clone();
+            tokio::spawn(async move {
+                service
+                    .run(move |enclave| {
+                        Box::pin(async move {
+                            enclave
+                                .config
+                                .set_deployment(DeploymentConfig::mock_for_testing())?;
+                            enclave
+                                .config
+                                .set_s3_logger(crate::test_utils::mock_logger())?;
+                            started_tx.send(()).unwrap();
+                            resume_rx.await.unwrap();
+                            enclave
+                                .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+                        })
+                    })
+                    .await
+            })
+        };
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        let mut info = std::pin::pin!(service.get_guardian_info());
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut info)
+            .await
+            .is_err());
+        resume_tx.send(()).unwrap();
+        let info = tokio::time::timeout(Duration::from_secs(1), info)
+            .await
+            .expect("accepted control task must finish")
+            .unwrap();
+        assert_eq!(
+            info.response.lifecycle,
+            CeremonyStage::OperatorInitialized.into()
+        );
+        assert!(info.response.deployment_info.is_some());
+    }
+
+    #[tokio::test]
+    async fn queued_control_task_survives_caller_cancellation() {
+        let service = test_service();
+        let guard = service.enclave.lock().await;
+        let (finished_tx, finished_rx) = oneshot::channel();
+        let caller = service.run(move |_enclave| {
+            Box::pin(async move {
+                finished_tx.send(()).unwrap();
+                Ok(())
+            })
+        });
+        // Poll once to submit the owned task, then cancel the caller while the
+        // enclave is still locked. The queued operation must remain accepted.
+        let mut caller = Box::pin(caller);
+        std::future::poll_fn(|cx| {
+            assert!(caller.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(caller);
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn heartbeats_wait_for_control_lock_before_writing() {
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_with(
+            crate::OperatorInitTestArgs::default().with_s3_logger(logger),
+        );
+        let service = GuardianService::new(enclave);
+        let guard = service.enclave.lock().await;
+        let mut tick = Box::pin(service.run(|enclave| Box::pin(enclave.heartbeat())));
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut tick)
+            .await
+            .is_err());
+        assert!(captures.lock().unwrap().is_empty());
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), tick)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(captures.lock().unwrap().len(), 1);
     }
 }
