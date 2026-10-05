@@ -326,6 +326,8 @@ impl LeaderService {
                         self.check_prune_tob_certs(checkpoint_timestamp_ms);
                     } else {
                         trace!("We are not the leader node");
+                        // Deposit tasks outlive the leader's turn, but not a halt.
+                        self.check_halt_deposit_processing();
                     }
                 }
                 wait_result = deposit_work_rx.changed() => {
@@ -555,12 +557,16 @@ impl LeaderService {
     /// the cached `is_leader`.
     fn update_leadership(&mut self, checkpoint_height: u64) -> bool {
         let is_leader = Self::node_is_leader(&self.inner, checkpoint_height);
+        self.set_leadership(is_leader);
+        is_leader
+    }
+
+    fn set_leadership(&mut self, is_leader: bool) {
         self.inner.metrics.is_leader.set(i64::from(is_leader));
         if self.is_leader && !is_leader {
-            self.stop_deposit_processing();
+            self.stop_scheduling_deposits();
         }
         self.is_leader = is_leader;
-        is_leader
     }
 }
 

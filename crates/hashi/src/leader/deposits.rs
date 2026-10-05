@@ -433,7 +433,7 @@ impl LeaderService {
         }
     }
 
-    fn check_halt_deposit_processing(&mut self) -> bool {
+    pub(super) fn check_halt_deposit_processing(&mut self) -> bool {
         // Evaluate all predicates from one consistent state snapshot.
         let halt = {
             let state = self.inner.onchain_state().state();
@@ -449,13 +449,19 @@ impl LeaderService {
         halt
     }
 
-    pub(super) fn stop_deposit_processing(&mut self) {
+    /// Drop queued deposit work but let running tasks finish, so a leader
+    /// rotation keeps the approvals and confirmations already underway.
+    pub(super) fn stop_scheduling_deposits(&mut self) {
         self.last_reload_confirmation_threshold = None;
+        self.pending_unapproved_deposit_requests.clear();
+        self.reset_approved_deposit_metrics();
+    }
+
+    fn stop_deposit_processing(&mut self) {
+        self.stop_scheduling_deposits();
         self.unapproved_deposit_tasks = JoinSet::new();
         self.approved_deposit_tasks = JoinSet::new();
-        self.pending_unapproved_deposit_requests.clear();
         self.inflight_deposits.clear();
-        self.reset_approved_deposit_metrics();
     }
 
     pub(super) fn activate_unapproved_deposits_for_btc_block(&mut self, block_sequence: u64) {
@@ -969,5 +975,83 @@ mod tests {
                 UnapprovedDepositError::AlreadyApprovedThisEpoch.to_string()
             )
         ));
+    }
+
+    fn leader_service() -> (LeaderService, tempfile::TempDir) {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::new_for_testing();
+        config.db = Some(tmpdir.path().into());
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            None,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        (LeaderService::new(hashi), tmpdir)
+    }
+
+    #[tokio::test]
+    async fn deposit_tasks_finish_after_leadership_moves_on() {
+        let (mut leader, _tmpdir) = leader_service();
+        leader.set_leadership(true);
+        let approval = deposit_request(1, 1);
+        let confirmation = deposit_request(2, 2);
+        leader
+            .unapproved_deposit_tasks
+            .spawn(std::future::ready(UnapprovedDepositTaskResult {
+                deposit_id: approval.id,
+                outpoint: outpoint(&approval),
+                block_sequence: 0,
+                bitcoin_generation: 0,
+                result: Ok(()),
+            }));
+        leader.approved_deposit_tasks.spawn(std::future::ready((
+            confirmation.id,
+            Ok(ApprovedDepositOutcome::UtxoAlreadySpent),
+        )));
+        leader
+            .inflight_deposits
+            .extend([approval.id, confirmation.id]);
+        leader
+            .pending_unapproved_deposit_requests
+            .push_back(deposit_request(3, 3));
+
+        leader.set_leadership(false);
+
+        assert!(leader.pending_unapproved_deposit_requests.is_empty());
+        assert_eq!(
+            leader.inflight_deposits,
+            HashSet::from([approval.id, confirmation.id])
+        );
+        let approved = leader.unapproved_deposit_tasks.join_next().await;
+        leader.handle_completed_unapproved_deposit_task(approved.expect("approval task kept"));
+        let confirmed = leader.approved_deposit_tasks.join_next().await;
+        leader.handle_completed_approved_deposit_task(confirmed.expect("confirmation task kept"));
+
+        assert!(leader.inflight_deposits.is_empty());
+        assert!(leader.never_retry_deposit_ids.contains(&confirmation.id));
+    }
+
+    #[tokio::test]
+    async fn stop_deposit_processing_aborts_tasks_kept_from_an_earlier_turn() {
+        let (mut leader, _tmpdir) = leader_service();
+        leader.set_leadership(true);
+        leader
+            .unapproved_deposit_tasks
+            .spawn(std::future::pending());
+        leader.approved_deposit_tasks.spawn(std::future::pending());
+        leader
+            .inflight_deposits
+            .extend([deposit_request(1, 1).id, deposit_request(2, 2).id]);
+        leader.set_leadership(false);
+        assert_eq!(leader.unapproved_deposit_tasks.len(), 1);
+        assert_eq!(leader.approved_deposit_tasks.len(), 1);
+
+        leader.stop_deposit_processing();
+
+        assert!(leader.unapproved_deposit_tasks.is_empty());
+        assert!(leader.approved_deposit_tasks.is_empty());
+        assert!(leader.inflight_deposits.is_empty());
     }
 }
