@@ -111,7 +111,6 @@ pub fn restore(
     backup_tarball: &Path,
     decryptor: RestoreDecryptor,
     output_dir: &Path,
-    copy_to_original_paths: bool,
 ) -> Result<()> {
     let extract_dir = output_dir.join(backup::extract_dir_name(backup_tarball)?);
     if extract_dir
@@ -155,7 +154,7 @@ pub fn restore(
             Box::new(decrypt_with_gpg(backup_tarball, homedir.as_deref())?)
         }
     };
-    let (manifest, manifest_toml) = {
+    let manifest_toml = {
         let mut archive = tar::Archive::new(&mut backup_stream);
         let mut entries = archive.entries()?;
         let manifest_entry = entries
@@ -164,7 +163,7 @@ pub fn restore(
             .ok_or_else(|| anyhow::anyhow!("Backup archive is empty"))?;
         let (manifest, manifest_toml) = backup::read_backup_manifest(manifest_entry)?;
         backup::restore_backup_entries(entries, staging.path(), &manifest)?;
-        (manifest, manifest_toml)
+        manifest_toml
     };
     io::copy(&mut backup_stream, &mut io::sink())
         .context("Failed to finish reading backup stream")?;
@@ -184,11 +183,6 @@ pub fn restore(
             extract_dir.display()
         ))
     })?;
-
-    if copy_to_original_paths {
-        backup::copy_restored_files_to_original_paths(&extract_dir, &manifest)?;
-        backup::copy_db_snapshot_to_original_path(&extract_dir, &manifest)?;
-    }
 
     print_success(&format!(
         "Restore completed from {} into {}",
@@ -236,10 +230,7 @@ mod tests {
     /// Fixture holding a populated source directory and node config.
     struct TestFixture {
         _src: TempDir,
-        config_path: PathBuf,
         node_config_path: PathBuf,
-        keypair_path: PathBuf,
-        btc_key_path: PathBuf,
     }
 
     impl TestFixture {
@@ -271,10 +262,7 @@ mod tests {
 
             Self {
                 _src: src,
-                config_path,
                 node_config_path,
-                keypair_path,
-                btc_key_path,
             }
         }
     }
@@ -375,7 +363,6 @@ mod tests {
             &backup.tarball,
             local_secret_key_decryptor(&backup),
             out.path(),
-            false,
         )
         .unwrap();
 
@@ -422,7 +409,6 @@ mod tests {
             &backup.tarball,
             local_secret_key_decryptor(&backup),
             out.path(),
-            false,
         )
         .unwrap_err();
 
@@ -441,78 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_copy_to_original_paths_rewrites_originals() {
-        let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
-
-        let db_path = fixture.db_path();
-
-        // Delete the originals so copy_to_original_paths can recreate them.
-        fs::remove_file(&fixture.config_path).unwrap();
-        fs::remove_file(&fixture.node_config_path).unwrap();
-        fs::remove_file(&fixture.keypair_path).unwrap();
-        fs::remove_file(&fixture.btc_key_path).unwrap();
-        fs::remove_dir_all(&db_path).unwrap();
-
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(
-            &backup.tarball,
-            local_secret_key_decryptor(&backup),
-            out.path(),
-            true,
-        )
-        .unwrap();
-
-        // Only node config files are backed up; CLI config and its referenced
-        // files are intentionally ignored.
-        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
-        assert!(extract_dir.join("config.toml").is_file());
-        assert!(!extract_dir.join("hashi-cli.toml").exists());
-        assert!(!extract_dir.join("keypair.pem").exists());
-        assert!(!extract_dir.join("btc.wif").exists());
-
-        assert!(fixture.node_config_path.is_file());
-        assert!(!fixture.config_path.exists());
-        assert!(!fixture.keypair_path.exists());
-        assert!(!fixture.btc_key_path.exists());
-
-        assert_mode_0600(&fixture.node_config_path);
-
-        // The restored database should be openable.
-        let _db = crate::db::Database::open(&db_path).unwrap();
-    }
-
-    #[test]
-    fn restore_refuses_to_overwrite_existing_original_paths() {
-        let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
-
-        // Leave the node config in place. The copy-back loop should refuse to
-        // overwrite it before touching the database.
-
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        let err = restore(
-            &backup.tarball,
-            local_secret_key_decryptor(&backup),
-            out.path(),
-            true,
-        )
-        .unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("Refusing to overwrite existing original path"),
-            "error chain did not mention overwrite refusal: {chain}"
-        );
-        assert!(
-            chain.contains("config.toml"),
-            "error chain did not mention the colliding file: {chain}"
-        );
-
-        assert!(fixture.node_config_path.is_file());
-    }
-
-    #[test]
-    fn basename_collision_disambiguates_and_copy_to_original_paths_restores_correctly() {
+    fn basename_collision_disambiguates_extracted_files() {
         // Set up two key files with the same basename in different directories.
         let src = tempfile::Builder::new().tempdir().unwrap();
         let tls_dir = src.path().join("tls");
@@ -537,10 +452,7 @@ mod tests {
 
         let fixture = TestFixture {
             _src: src,
-            config_path: PathBuf::new(),
-            node_config_path: node_config_path.clone(),
-            keypair_path: PathBuf::new(),
-            btc_key_path: PathBuf::new(),
+            node_config_path,
         };
 
         let backup = save_with_fresh_pgp_key(&fixture);
@@ -551,33 +463,12 @@ mod tests {
             &backup.tarball,
             local_secret_key_decryptor(&backup),
             out.path(),
-            false,
         )
         .unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
         assert_file_eq(&extract_dir.join("key.pem"), b"tls-key-bytes");
         assert_file_eq(&extract_dir.join("key-2.pem"), b"operator-key-bytes");
-
-        // Now test that --copy-to-original-paths uses the real paths, not the
-        // disambiguated archive names.
-        let db_path = fixture.db_path();
-        fs::remove_file(&node_config_path).unwrap();
-        fs::remove_file(&tls_key_path).unwrap();
-        fs::remove_file(&op_key_path).unwrap();
-        fs::remove_dir_all(&db_path).unwrap();
-
-        let out2 = tempfile::Builder::new().tempdir().unwrap();
-        restore(
-            &backup.tarball,
-            local_secret_key_decryptor(&backup),
-            out2.path(),
-            true,
-        )
-        .unwrap();
-
-        assert_file_eq(&tls_key_path, b"tls-key-bytes");
-        assert_file_eq(&op_key_path, b"operator-key-bytes");
     }
 
     #[test]
@@ -613,11 +504,10 @@ mod tests {
             &backup.tarball,
             local_secret_key_decryptor(&backup),
             out.path(),
-            false,
         )
         .unwrap();
 
-        // Open the extracted snapshot directory directly — no copy-to-original step.
+        // Open the extracted snapshot directory directly.
         // This is the real test of the stated goal: a decrypted/extracted snapshot
         // dir is immediately usable as a fjall db.
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
@@ -762,7 +652,6 @@ mod tests {
             &backup.tarball,
             local_secret_key_decryptor(&backup),
             out.path(),
-            false,
         )
         .unwrap();
 
@@ -877,11 +766,72 @@ mod tests {
         let tarball = write_unencrypted_tar_backup(&backup);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&tarball, RestoreDecryptor::Unencrypted, out.path(), false).unwrap();
+        restore(&tarball, RestoreDecryptor::Unencrypted, out.path()).unwrap();
 
         let extract_dir = expected_extract_dir(&tarball, out.path());
         assert!(extract_dir.join("config.toml").is_file());
         assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
+    }
+
+    #[test]
+    fn restore_ignores_forged_absolute_original_paths() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture);
+        let tarball = write_unencrypted_tar_backup(&backup);
+        let external = tempfile::Builder::new().tempdir().unwrap();
+        let config_target = external.path().join("config-parent/config.toml");
+        let db_target = external.path().join("db-parent/db");
+        assert!(config_target.is_absolute());
+        assert!(db_target.is_absolute());
+
+        // Forge both original destinations in an otherwise valid raw archive.
+        let forged_tarball = backup._dir.path().join("forged.tar");
+        let mut archive = tar::Archive::new(File::open(&tarball).unwrap());
+        let mut entries = archive.entries().unwrap();
+        let (mut manifest, _) =
+            backup::read_backup_manifest(entries.next().unwrap().unwrap()).unwrap();
+        assert_eq!(manifest.paths.len(), 1);
+        manifest.paths[0].original_path = config_target.clone();
+        manifest.db.original_path = db_target.clone();
+        let manifest_toml = toml::to_string(&manifest).unwrap();
+        let mut builder = tar::Builder::new(File::create(&forged_tarball).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_toml.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                backup::BACKUP_MANIFEST_FILE_NAME,
+                manifest_toml.as_bytes(),
+            )
+            .unwrap();
+        for entry in entries {
+            let mut entry = entry.unwrap();
+            let header = entry.header().clone();
+            builder.append(&header, &mut entry).unwrap();
+        }
+        builder.finish().unwrap();
+        drop(builder);
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&forged_tarball, RestoreDecryptor::Unencrypted, out.path()).unwrap();
+
+        let extract_dir = expected_extract_dir(&forged_tarball, out.path());
+        assert_file_eq(
+            &extract_dir.join("config.toml"),
+            &fs::read(&fixture.node_config_path).unwrap(),
+        );
+        assert_file_eq(
+            &extract_dir.join(backup::BACKUP_MANIFEST_FILE_NAME),
+            manifest_toml.as_bytes(),
+        );
+        let snapshot_dir = extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX);
+        assert!(snapshot_dir.is_dir());
+        let _db = crate::db::Database::open(&snapshot_dir).unwrap();
+        assert!(!config_target.exists());
+        assert!(!db_target.exists());
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
     }
 
     #[test]
@@ -894,73 +844,11 @@ mod tests {
         fs::rename(&backup.tarball, &bad).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let err =
-            restore(&bad, local_secret_key_decryptor(&backup), out.path(), false).unwrap_err();
+        let err = restore(&bad, local_secret_key_decryptor(&backup), out.path()).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains(".tar or .tar.asc suffix"),
             "expected suffix-required error, got: {chain}"
-        );
-    }
-
-    #[test]
-    fn restore_copy_to_original_paths_restores_into_existing_empty_db_dir() {
-        let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
-
-        let db_path = fixture.db_path();
-
-        fs::remove_file(&fixture.config_path).unwrap();
-        fs::remove_file(&fixture.node_config_path).unwrap();
-        fs::remove_file(&fixture.keypair_path).unwrap();
-        fs::remove_file(&fixture.btc_key_path).unwrap();
-        fs::remove_dir_all(&db_path).unwrap();
-        fs::create_dir(&db_path).unwrap();
-
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(
-            &backup.tarball,
-            local_secret_key_decryptor(&backup),
-            out.path(),
-            true,
-        )
-        .unwrap();
-
-        assert!(fixture.node_config_path.is_file());
-        let _db = crate::db::Database::open(&db_path).unwrap();
-    }
-
-    #[test]
-    fn restore_copy_to_original_paths_refuses_non_empty_db_dir() {
-        let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
-
-        let db_path = fixture.db_path();
-
-        // Delete the file originals so the config-copy loop succeeds and we
-        // reach the db-copy step, but leave the db dir in place.
-        fs::remove_file(&fixture.config_path).unwrap();
-        fs::remove_file(&fixture.node_config_path).unwrap();
-        fs::remove_file(&fixture.keypair_path).unwrap();
-        fs::remove_file(&fixture.btc_key_path).unwrap();
-        assert!(db_path.exists(), "db dir should still exist for this test");
-
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        let err = restore(
-            &backup.tarball,
-            local_secret_key_decryptor(&backup),
-            out.path(),
-            true,
-        )
-        .unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("Refusing to restore database into non-empty directory"),
-            "error chain did not mention db overwrite refusal: {chain}"
-        );
-        assert!(
-            chain.contains(&db_path.display().to_string()),
-            "error chain did not mention the colliding db path: {chain}"
         );
     }
 }
