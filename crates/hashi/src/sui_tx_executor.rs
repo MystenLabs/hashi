@@ -312,7 +312,7 @@ impl GasOverrides {
 
 /// The result of [`finalize`], depending on the [`TxMode`].
 pub enum TxOutcome {
-    /// `Execute`: the transaction was signed and submitted.
+    /// `Execute`: the transaction was signed, submitted and executed successfully.
     Executed(Box<ExecuteTransactionResponse>),
     /// `DryRun`: the transaction was built and simulated but not submitted.
     Simulated {
@@ -351,14 +351,20 @@ pub enum TxFailure {
     NotSubmitted(anyhow::Error),
     #[error("transaction submission failed: {0}")]
     Submit(#[source] Box<ExecuteAndWaitError>),
+    #[error("transaction {digest} failed on chain: {status:?}")]
+    Rejected {
+        digest: String,
+        status: Box<ExecutionStatus>,
+    },
 }
 
 impl SubmitCertError {
     fn classify(e: anyhow::Error) -> Self {
         match e.downcast_ref::<TxFailure>() {
-            // Untagged errors are treated as pre-submit: every path in `finalize` that runs after
+            // Untagged errors are treated as pre-submit: every path in `execute` that runs after
             // the submit call tags itself, so an untagged error can only come from before it.
             Some(TxFailure::NotSubmitted(_)) | None => Self::NotSubmitted(e),
+            Some(TxFailure::Rejected { status, .. }) => Self::Rejected(status.clone()),
             Some(TxFailure::Submit(inner)) => match **inner {
                 // Both a failed subscribe (nothing sent) and a failed execute call (possibly
                 // already forwarded to validators) arrive as `RpcError`, indistinguishable here.
@@ -387,14 +393,14 @@ impl TransactionExecutionError {
 }
 
 /// The SDK build error behind `e`, if `e` is a [`TxFailure::NotSubmitted`]
-/// wrapping one. [`finalize`] wraps when it executes, and the
-/// validator-registration path wraps its own build; an unwrapped build error
+/// wrapping one. [`sign_and_submit`] wraps its build, and the
+/// validator-registration path wraps its own; an unwrapped build error
 /// (such as `finalize`'s serialize-unsigned and dry-run modes produce) is
 /// invisible here.
 fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
     match e.downcast_ref::<TxFailure>()? {
         TxFailure::NotSubmitted(inner) => inner.downcast_ref(),
-        TxFailure::Submit(_) => None,
+        TxFailure::Submit(_) | TxFailure::Rejected { .. } => None,
     }
 }
 /// Return the structured execution error from either transaction simulation or
@@ -404,6 +410,9 @@ pub(crate) fn transaction_execution_error(
 ) -> Option<&sui_rpc::proto::sui::rpc::v2::ExecutionError> {
     if let Some(tx_err) = err.downcast_ref::<TransactionExecutionError>() {
         return tx_err.status().error_opt();
+    }
+    if let Some(TxFailure::Rejected { status, .. }) = err.downcast_ref::<TxFailure>() {
+        return status.error_opt();
     }
     match builder_error(err) {
         Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
@@ -461,6 +470,10 @@ pub(crate) fn move_abort_name(err: &anyhow::Error) -> Option<String> {
 fn is_execution_failure(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TransactionExecutionError>().is_some()
         || matches!(
+            e.downcast_ref::<TxFailure>(),
+            Some(TxFailure::Rejected { .. })
+        )
+        || matches!(
             builder_error(e),
             Some(sui_transaction_builder::Error::SimulationFailure(_))
         )
@@ -513,26 +526,51 @@ pub async fn finalize(
                     "cannot execute transaction: no keypair configured"
                 ))
             })?;
-            let transaction = builder
-                .build(client)
-                .await
-                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
-            let signature = signer
-                .sign_transaction(&transaction)
-                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
-            let response = client
-                .execute_transaction_and_wait_for_checkpoint(
-                    ExecuteTransactionRequest::new(transaction.into())
-                        .with_signatures(vec![signature.into()])
-                        .with_read_mask(FieldMask::from_str("*")),
-                    timeout,
-                )
-                .await
-                .map_err(|e| TxFailure::Submit(Box::new(e)))?
-                .into_inner();
+            let response = sign_and_submit(client, signer, builder, timeout).await?;
+            ensure_success(&response)?;
             Ok(TxOutcome::Executed(Box::new(response)))
         }
     }
+}
+
+/// Build, sign and submit `builder`, waiting for the checkpoint. Returns the
+/// response even if execution failed: the executor's callers classify that.
+async fn sign_and_submit(
+    client: &mut Client,
+    signer: &SimpleKeypair,
+    builder: TransactionBuilder,
+    timeout: Duration,
+) -> anyhow::Result<ExecuteTransactionResponse> {
+    let transaction = builder
+        .build(client)
+        .await
+        .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
+    let signature = signer
+        .sign_transaction(&transaction)
+        .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            timeout,
+        )
+        .await
+        .map_err(|e| TxFailure::Submit(Box::new(e)))?
+        .into_inner();
+    Ok(response)
+}
+
+fn ensure_success(response: &ExecuteTransactionResponse) -> Result<(), TxFailure> {
+    let transaction = response.transaction();
+    let status = transaction.effects().status();
+    if status.success() {
+        return Ok(());
+    }
+    Err(TxFailure::Rejected {
+        digest: transaction.digest().to_owned(),
+        status: Box::new(status.clone()),
+    })
 }
 
 /// A reusable executor for submitting Sui transactions.
@@ -636,7 +674,7 @@ impl SuiTxExecutor {
     )]
     pub async fn execute(
         &mut self,
-        builder: TransactionBuilder,
+        mut builder: TransactionBuilder,
     ) -> anyhow::Result<ExecuteTransactionResponse> {
         // Node-internal executors refuse to submit when the chain is running
         // package versions this binary doesn't support — fail fast rather than
@@ -653,27 +691,16 @@ impl SuiTxExecutor {
             }
         }
 
-        let outcome = finalize(
-            &mut self.client,
-            Some(&self.signer),
-            builder,
-            None,
-            &GasOverrides::default(),
-            TxMode::Execute,
-            self.timeout,
-        )
-        .await?;
-
-        let TxOutcome::Executed(response) = outcome else {
-            unreachable!("TxMode::Execute always yields TxOutcome::Executed");
-        };
+        builder.set_sender(self.sender());
+        let response =
+            sign_and_submit(&mut self.client, &self.signer, builder, self.timeout).await?;
 
         tracing::Span::current().record(
             "sui_digest",
             tracing::field::display(response.transaction().digest()),
         );
 
-        Ok(*response)
+        Ok(response)
     }
 
     // ========================================================================
@@ -3179,11 +3206,17 @@ mod tests {
         }
         .into();
         assert!(is_execution_failure(&on_chain));
+        let rejected: anyhow::Error = TxFailure::Rejected {
+            digest: "digest".to_owned(),
+            status: Box::default(),
+        }
+        .into();
+        assert!(is_execution_failure(&rejected));
 
         // The simulate RPC failing (as opposed to the simulated execution
         // failing) is a build failure, not a size signal. Wrapped exactly as
-        // `finalize` wraps SDK build errors, and the intermediate downcast is
-        // asserted separately: `SimulationFailure` cannot be constructed
+        // `sign_and_submit` wraps SDK build errors, and the intermediate downcast
+        // is asserted separately: `SimulationFailure` cannot be constructed
         // outside the SDK, so this is what proves the classifier can reach
         // the SDK error at all (a silently failing downcast would mean
         // "never split", wedging the sweep on a genuinely over-limit chunk).
@@ -3321,5 +3354,182 @@ mod tests {
             SubmitCertError::classify(executed.into()),
             SubmitCertError::Unconfirmed(_)
         ));
+
+        let rejected = TxFailure::Rejected {
+            digest: "digest".to_owned(),
+            status: Box::default(),
+        };
+        assert!(matches!(
+            SubmitCertError::classify(rejected.into()),
+            SubmitCertError::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn failed_effects_are_rejected_with_the_digest() {
+        use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
+        use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+        use sui_rpc::proto::sui::rpc::v2::TransactionEffects;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+        let executed = |status: ExecutionStatus| {
+            ExecuteTransactionResponse::default().with_transaction(
+                ExecutedTransaction::default()
+                    .with_digest("FailedTxDigest")
+                    .with_effects(TransactionEffects::default().with_status(status)),
+            )
+        };
+
+        ensure_success(&executed(ExecutionStatus::default().with_success(true))).unwrap();
+        assert!(ensure_success(&executed(ExecutionStatus::default())).is_err());
+
+        let mut error = ExecutionError::default();
+        error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+        let failed = ExecutionStatus::default()
+            .with_success(false)
+            .with_error(error.clone());
+        let err: anyhow::Error = ensure_success(&executed(failed)).unwrap_err().into();
+        assert!(err.to_string().contains("FailedTxDigest"), "{err}");
+        assert_eq!(transaction_execution_error(&err), Some(&error));
+    }
+
+    #[tokio::test]
+    async fn finalize_rejects_failed_effects_that_execute_returns() {
+        use sui_rpc::proto::sui::rpc::v2::Checkpoint;
+        use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
+        use sui_rpc::proto::sui::rpc::v2::SimulateTransactionRequest;
+        use sui_rpc::proto::sui::rpc::v2::SimulateTransactionResponse;
+        use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+        use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsResponse;
+        use sui_rpc::proto::sui::rpc::v2::TransactionEffects;
+        use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionService;
+        use sui_rpc::proto::sui::rpc::v2::subscription_service_server::SubscriptionServiceServer;
+        use sui_rpc::proto::sui::rpc::v2::transaction_execution_service_server::TransactionExecutionService;
+        use sui_rpc::proto::sui::rpc::v2::transaction_execution_service_server::TransactionExecutionServiceServer;
+
+        /// A fullnode that simulates every transaction as `transaction`, then
+        /// executes and checkpoints it with `status`.
+        #[derive(Clone)]
+        struct Fullnode {
+            transaction: Transaction,
+            status: ExecutionStatus,
+        }
+
+        impl Fullnode {
+            fn executed(&self, status: ExecutionStatus) -> ExecutedTransaction {
+                ExecutedTransaction::default()
+                    .with_digest(self.transaction.digest().to_string())
+                    .with_transaction(self.transaction.clone())
+                    .with_effects(TransactionEffects::default().with_status(status))
+            }
+        }
+
+        #[tonic::async_trait]
+        impl TransactionExecutionService for Fullnode {
+            async fn simulate_transaction(
+                &self,
+                _request: tonic::Request<SimulateTransactionRequest>,
+            ) -> Result<tonic::Response<SimulateTransactionResponse>, tonic::Status> {
+                let simulated = self.executed(ExecutionStatus::default().with_success(true));
+                Ok(tonic::Response::new(
+                    SimulateTransactionResponse::default().with_transaction(simulated),
+                ))
+            }
+
+            async fn execute_transaction(
+                &self,
+                _request: tonic::Request<ExecuteTransactionRequest>,
+            ) -> Result<tonic::Response<ExecuteTransactionResponse>, tonic::Status> {
+                Ok(tonic::Response::new(
+                    ExecuteTransactionResponse::default()
+                        .with_transaction(self.executed(self.status.clone())),
+                ))
+            }
+        }
+
+        #[tonic::async_trait]
+        impl SubscriptionService for Fullnode {
+            async fn subscribe_checkpoints(
+                &self,
+                _request: tonic::Request<SubscribeCheckpointsRequest>,
+            ) -> Result<
+                tonic::Response<tonic::codegen::BoxStream<SubscribeCheckpointsResponse>>,
+                tonic::Status,
+            > {
+                let checkpoint = Checkpoint::default()
+                    .with_sequence_number(1)
+                    .with_transactions(vec![
+                        ExecutedTransaction::default()
+                            .with_digest(self.transaction.digest().to_string()),
+                    ]);
+                let frame = SubscribeCheckpointsResponse::default()
+                    .with_cursor(1)
+                    .with_checkpoint(checkpoint);
+                let frames = futures::stream::iter([Ok(frame)]);
+                Ok(tonic::Response::new(Box::pin(frames)))
+            }
+        }
+
+        let mut builder = TransactionBuilder::new();
+        builder.set_sender(Address::ZERO);
+        builder.set_gas_budget(1);
+        builder.set_gas_price(1);
+        builder.add_gas_objects([ObjectInput::owned(
+            Address::from_static("0x1"),
+            1,
+            sui_sdk_types::Digest::ZERO,
+        )]);
+        let transaction = builder.try_build().expect("offline PTB must build");
+        let digest = transaction.digest().to_string();
+        let fullnode = Fullnode {
+            transaction,
+            status: ExecutionStatus::default().with_success(false),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(TransactionExecutionServiceServer::new(fullnode.clone()))
+                .add_service(SubscriptionServiceServer::new(fullnode))
+                .serve_with_incoming(incoming),
+        );
+        let mut client = Client::new(format!("http://{addr}").as_str()).unwrap();
+        let signer = SimpleKeypair::from(sui_crypto::ed25519::Ed25519PrivateKey::new([7; 32]));
+
+        let Err(err) = finalize(
+            &mut client,
+            Some(&signer),
+            TransactionBuilder::new(),
+            None,
+            &GasOverrides::default(),
+            TxMode::Execute,
+            Duration::from_secs(5),
+        )
+        .await
+        else {
+            panic!("finalize reported a failed transaction as executed");
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<TxFailure>(),
+                Some(TxFailure::Rejected { digest: rejected, .. }) if *rejected == digest
+            ),
+            "{err:#}"
+        );
+
+        let hashi_ids = HashiIds {
+            package_id: Address::ZERO,
+            hashi_object_id: Address::ZERO,
+        };
+        let response = SuiTxExecutor::new(client, signer, hashi_ids)
+            .execute(TransactionBuilder::new())
+            .await
+            .unwrap();
+        assert!(!response.transaction().effects().status().success());
     }
 }
