@@ -180,6 +180,11 @@ From the repository root, run the interactive provisioning script:
 
 Follow its prompts. The script changes the factory PINs, checks the SIG/DEC
 slots, generates those keys, enables touch, and tests signing and decryption.
+The SIG key is the OpenPGP primary key, used for signing and certification; the
+DEC key is its encryption subkey. Verification requires the primary key itself
+to match the SIG attestation, so the KP identity fingerprint identifies the
+attested signing key. A separate, unattested certification primary is rejected.
+
 When prompted for the new User PIN and Admin PIN, use the
 **Hashi key provisioner - YubiKey User PIN** and
 **Hashi key provisioner - YubiKey Admin PIN**, respectively, that you generated

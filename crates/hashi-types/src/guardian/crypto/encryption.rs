@@ -4,7 +4,6 @@
 use super::primitives::*;
 use crate::guardian::errors::GuardianError::InvalidInputs;
 use crate::guardian::errors::GuardianResult;
-use crate::pgp::AttestedPgpKeys;
 use crate::pgp::Fingerprint;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::encrypt_armored_for_key;
@@ -31,7 +30,9 @@ pub type KPFingerprint = String;
 /// A key-provisioner's PGP certificate and its verified YubiKey attestations.
 ///
 /// Construction checks the certificate and all three PEM artifacts with
-/// [`crate::pgp::verify_yubikey_attestations`]. This records a successful check
+/// [`crate::pgp::verify_yubikey_attestations`]. The sole usable signing key must
+/// be the primary key attested by SIG; DEC attests the sole usable encryption
+/// key separately. This records a successful check
 /// at construction, not ongoing freshness or a time-validity policy: the
 /// verifier does not enforce X.509 dates, revocation, touch, or freshness, or
 /// establish current possession of either private key.
@@ -43,8 +44,9 @@ pub struct AttestedKpCert {
     device_pem: Vec<u8>,
     sig_pem: Vec<u8>,
     dec_pem: Vec<u8>,
+    // SIG attests the primary key, so only DEC needs a separate fingerprint.
     #[serde(skip)]
-    keys: AttestedPgpKeys,
+    encryption_fingerprint: Fingerprint,
 }
 
 impl AttestedKpCert {
@@ -67,7 +69,7 @@ impl AttestedKpCert {
             device_pem,
             sig_pem,
             dec_pem,
-            keys,
+            encryption_fingerprint: keys.encryption,
         })
     }
 
@@ -79,12 +81,8 @@ impl AttestedKpCert {
         self.cert.fingerprint()
     }
 
-    pub(crate) fn signing_fingerprint(&self) -> &Fingerprint {
-        &self.keys.signing
-    }
-
     pub(crate) fn encryption_fingerprint(&self) -> &Fingerprint {
-        &self.keys.encryption
+        &self.encryption_fingerprint
     }
 
     pub fn device_pem(&self) -> &[u8] {
@@ -226,8 +224,8 @@ impl KpCertRoster {
 }
 
 impl KpEncryptedShare {
-    /// Verify the recorded certificate identity and require every OpenPGP
-    /// recipient to identify its attested encryption key.
+    /// Verify the recorded certificate identity and require exactly one OpenPGP
+    /// recipient identifying its attested encryption key, including no duplicates.
     pub fn verify_recipient(&self, cert: &AttestedKpCert) -> GuardianResult<()> {
         let expected_fingerprint = cert.fingerprint().to_hex();
         if self.recipient_fingerprint != expected_fingerprint {
@@ -244,22 +242,21 @@ impl KpEncryptedShare {
                 self.id.get()
             ))
         })?;
-        if recipients.is_empty() {
+        let [handle] = recipients.as_slice() else {
             return Err(InvalidInputs(format!(
-                "share id {} has no PGP recipients",
-                self.id.get()
+                "share id {} must have exactly one PGP recipient, got {}",
+                self.id.get(),
+                recipients.len()
             )));
-        }
+        };
         let expected_key = sequoia_openpgp::KeyHandle::from(cert.encryption_fingerprint().clone());
-        for handle in &recipients {
-            if !expected_key.aliases(handle) {
-                return Err(InvalidInputs(format!(
-                    "share id {} (keyed by {}) is encrypted to key {handle}, which is not the \
-                     attested encryption key",
-                    self.id.get(),
-                    self.recipient_fingerprint
-                )));
-            }
+        if !expected_key.aliases(handle) {
+            return Err(InvalidInputs(format!(
+                "share id {} (keyed by {}) is encrypted to key {handle}, which is not the \
+                 attested encryption key",
+                self.id.get(),
+                self.recipient_fingerprint
+            )));
         }
         info!(
             share_id = self.id.get(),
@@ -895,6 +892,64 @@ mod tests {
             KpEncryptedShareRoster::new(vec![wrong_ciphertext_recipient])
                 .unwrap()
                 .verify_recipients(&KpCertRoster::new(vec![other]).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn encrypted_share_rejects_duplicate_correct_key_recipients() {
+        use sequoia_openpgp::Packet;
+        use sequoia_openpgp::PacketPile;
+        use sequoia_openpgp::armor;
+        use sequoia_openpgp::parse::Parse;
+        use sequoia_openpgp::serialize::Serialize;
+
+        let (recipient, secret) = cert_and_secret();
+        let share = Share {
+            id: ShareID::new(1).unwrap(),
+            value: Scalar::ONE,
+        };
+        let mut encrypted_share = KpEncryptedShare {
+            id: share.id,
+            recipient_fingerprint: recipient.fingerprint().to_hex(),
+            armored_ciphertext: encrypt_share_for_provisioner(&share, &recipient),
+        };
+        encrypted_share.verify_recipient(&recipient).unwrap();
+        let packets =
+            PacketPile::from_bytes(encrypted_share.armored_ciphertext.as_bytes()).unwrap();
+        let mut packets: Vec<_> = packets.into_children().collect();
+        let pkesk = packets
+            .iter()
+            .find(|packet| matches!(packet, Packet::PKESK(_)))
+            .expect("real encryption must contain a public-key session packet")
+            .clone();
+        packets.insert(0, pkesk);
+        let mut armored = armor::Writer::new(Vec::new(), armor::Kind::Message).unwrap();
+        PacketPile::from(packets).serialize(&mut armored).unwrap();
+        encrypted_share.armored_ciphertext =
+            String::from_utf8(armored.finalize().unwrap()).unwrap();
+
+        let recipients = pgp_message_recipients(&encrypted_share.armored_ciphertext).unwrap();
+        assert_eq!(recipients.len(), 2);
+        let expected_key =
+            sequoia_openpgp::KeyHandle::from(recipient.encryption_fingerprint().clone());
+        assert!(recipients.iter().all(|key| expected_key.aliases(key)));
+        let mut decryptor = decrypt_with_secret_key(
+            Cursor::new(encrypted_share.armored_ciphertext.clone().into_bytes()),
+            secret.as_bytes(),
+        )
+        .unwrap();
+        let mut plaintext = Vec::new();
+        decryptor.read_to_end(&mut plaintext).unwrap();
+        assert_eq!(plaintext, share.value.to_bytes().as_slice());
+        assert!(matches!(
+            encrypted_share.verify_recipient(&recipient),
+            Err(InvalidInputs(_))
+        ));
+        assert!(
+            KpEncryptedShareRoster::new(vec![encrypted_share])
+                .unwrap()
+                .verify_recipients(&KpCertRoster::new(vec![recipient]).unwrap())
                 .is_err()
         );
     }

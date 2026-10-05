@@ -55,8 +55,9 @@ fn pem(der: &[u8]) -> Vec<u8> {
 }
 
 /// Generate an immutable KP bundle verified against a synthetic test authority,
-/// together with its armored signing/decryption secret. The public constructor,
-/// serde decoder, and protobuf decoder do not trust this authority.
+/// together with its armored signing/decryption secret. The SIG key is the
+/// certification/signing primary; a separate DEC subkey encrypts. The public
+/// constructor, serde decoder, and protobuf decoder do not trust this authority.
 ///
 /// This helper only generates its own inputs: it cannot bless caller-supplied
 /// certificates, attestations, keys, or trust roots.
@@ -65,8 +66,12 @@ pub fn mock_attested_kp_keypair() -> (AttestedKpCert, String) {
     use sequoia_openpgp::cert::CipherSuite;
     use sequoia_openpgp::serialize::Serialize;
     use sequoia_openpgp::types::Features;
+    use sequoia_openpgp::types::KeyFlags;
 
-    let (cert, _) = CertBuilder::general_purpose(["backup@example.com"])
+    let (cert, _) = CertBuilder::new()
+        .add_userid("backup@example.com")
+        .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing())
+        .add_transport_encryption_subkey()
         .set_profile(sequoia_openpgp::Profile::RFC4880)
         .unwrap()
         .set_cipher_suite(CipherSuite::P256)
@@ -84,7 +89,8 @@ pub fn mock_attested_kp_keypair() -> (AttestedKpCert, String) {
     )
 }
 
-/// Keep the expired software key in the same certificate as the attested keys.
+/// Keep an expired software signing subkey alongside the attested SIG primary
+/// and DEC subkey so historical signatures can exercise attested-key pinning.
 #[cfg(test)]
 pub(in crate::guardian::crypto) fn mock_attested_kp_keypair_with_expired_signer()
 -> (AttestedKpCert, Cert, std::time::SystemTime) {
@@ -100,13 +106,12 @@ pub(in crate::guardian::crypto) fn mock_attested_kp_keypair_with_expired_signer(
         .set_profile(sequoia_openpgp::Profile::RFC4880)
         .unwrap()
         .set_creation_time(creation_time)
-        .set_primary_key_flags(KeyFlags::empty().set_certification())
+        .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing())
         .add_subkey(
             KeyFlags::empty().set_signing(),
             Duration::from_secs(24 * 60 * 60),
             None,
         )
-        .add_signing_subkey()
         .add_transport_encryption_subkey()
         .generate()
         .unwrap();
@@ -136,7 +141,7 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
         device_pem: pem(&device),
         sig_pem: pem(&sig),
         dec_pem: pem(&dec),
-        keys,
+        encryption_fingerprint: keys.encryption,
     }
 }
 

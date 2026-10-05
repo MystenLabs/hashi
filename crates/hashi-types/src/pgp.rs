@@ -141,25 +141,34 @@ pub fn load_certs(paths: &[PathBuf]) -> Result<Vec<PgpPublicCert>> {
     Ok(certs)
 }
 
+/// Policy-usable keys, without imposing a purpose, cardinality, or fingerprint.
+/// Generic certificates may have multiple recipients; attestation narrows this
+/// same selection to exactly one key for each slot.
+fn usable_keys(
+    cert: &openpgp::Cert,
+) -> openpgp::cert::amalgamation::key::ValidKeyAmalgamationIter<
+    '_,
+    openpgp::packet::key::PublicParts,
+    openpgp::packet::key::UnspecifiedRole,
+> {
+    cert.keys()
+        .with_policy(&*POLICY, None)
+        .supported()
+        .alive()
+        .revoked(false)
+}
+
 fn validate_pgp_cert(cert: &openpgp::Cert) -> Result<()> {
     if cert.keys().secret().next().is_some() {
         anyhow::bail!("OpenPGP backup certificate must not contain secret key material")
     }
 
-    cert.keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
+    usable_keys(cert)
         .for_transport_encryption()
         .next()
         .ok_or_else(|| anyhow::anyhow!("OpenPGP certificate has no usable encryption key"))?;
 
-    cert.keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
+    usable_keys(cert)
         .for_signing()
         .next()
         .ok_or_else(|| anyhow::anyhow!("OpenPGP certificate has no usable signing key"))?;
@@ -210,13 +219,7 @@ fn armored_encrypt_writer_with_key<'a, W>(
 where
     W: 'a + Write + Send + Sync,
 {
-    let mut recipients = cert
-        .cert
-        .keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
+    let mut recipients = usable_keys(&cert.cert)
         .for_transport_encryption()
         .filter(|candidate| key.is_none_or(|key| candidate.key().fingerprint() == *key))
         .peekable();
@@ -719,15 +722,7 @@ fn ensure_usable_unencrypted_secret_key(cert: &openpgp::Cert) -> Result<()> {
     let mut has_transport_secret_key = false;
     let mut has_unencrypted_transport_secret_key = false;
 
-    for key in cert
-        .keys()
-        .secret()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_transport_encryption()
-    {
+    for key in usable_keys(cert).for_transport_encryption().secret() {
         has_transport_secret_key = true;
         if key.key().has_unencrypted_secret() {
             has_unencrypted_transport_secret_key = true;
@@ -768,16 +763,7 @@ impl DecryptionHelper for LocalSecretKeyDecryptHelper {
         sym_algo: Option<SymmetricAlgorithm>,
         decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
     ) -> openpgp::Result<Option<openpgp::Cert>> {
-        for key in self
-            .cert
-            .keys()
-            .secret()
-            .with_policy(&*POLICY, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-        {
+        for key in usable_keys(&self.cert).for_transport_encryption().secret() {
             let key = key.key().clone();
             if !key.has_unencrypted_secret() {
                 continue;

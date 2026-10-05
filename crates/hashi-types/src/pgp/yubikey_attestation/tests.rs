@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::POLICY;
 use super::super::PgpPublicCert;
+use super::super::usable_keys;
 use super::TRUSTED_ISSUERS;
 use super::parse_single_certificate_pem;
 use super::verify_yubikey_attestations;
@@ -102,9 +102,8 @@ fn pgp_cert_with_suite(
         .set_cipher_suite(suite)
         .set_creation_time(UNIX_EPOCH + Duration::from_secs(1_704_067_200))
         .set_validity_period(None)
-        .set_primary_key_flags(KeyFlags::empty().set_certification())
+        .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing())
         .add_userid("") // Match provisioning's `oct generate --userid ''`.
-        .add_signing_subkey()
         .add_transport_encryption_subkey();
     if extra_signing {
         builder = builder.add_signing_subkey();
@@ -119,13 +118,7 @@ fn pgp_cert_with_suite(
 }
 
 fn key_material(cert: &PgpPublicCert, slot: Slot) -> (Vec<u8>, Vec<u8>) {
-    let keys = cert
-        .cert
-        .keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false);
+    let keys = usable_keys(&cert.cert);
     let key = match slot {
         Slot::Sig => keys.for_signing().next().unwrap(),
         Slot::Dec => keys.for_transport_encryption().next().unwrap(),
@@ -279,6 +272,16 @@ impl Fixture {
 fn valid_binding_accepts_ecdsa_issuer_and_both_slot_keys() {
     let fixture = Fixture::new(pgp_cert(false, false));
     fixture.verify().unwrap();
+    let keys = verify_yubikey_attestations_with_issuers(
+        &fixture.cert,
+        fixture.device.der(),
+        &fixture.statements[0],
+        &fixture.statements[1],
+        &[fixture.issuer.der().as_ref()],
+    )
+    .unwrap();
+    assert_eq!(keys.signing, fixture.cert.cert.fingerprint());
+    assert_ne!(keys.encryption, keys.signing);
     // A custom trusted test issuer must not become a production trust anchor.
     assert!(
         verify_yubikey_attestations(
@@ -499,6 +502,48 @@ fn fingerprint_metadata_cannot_substitute_for_either_public_key() {
 fn ambiguous_usable_pgp_keys_are_rejected_even_when_first_key_matches() {
     for (extra_signing, extra_encryption) in [(true, false), (false, true)] {
         let fixture = Fixture::new(pgp_cert(extra_signing, extra_encryption));
+        assert!(fixture.verify().is_err());
+    }
+}
+
+#[test]
+fn valid_attestations_for_signing_subkey_cannot_authenticate_unattested_primary() {
+    for suite in [CipherSuite::Cv25519, CipherSuite::P256] {
+        let (cert, _) = CertBuilder::new()
+            .set_profile(Profile::RFC4880)
+            .unwrap()
+            .set_cipher_suite(suite)
+            .set_primary_key_flags(KeyFlags::empty().set_certification())
+            .add_userid("")
+            .add_signing_subkey()
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+        // This remains a valid generic certificate, but the SIG statement
+        // authenticates only its signing subkey, not its primary identity.
+        let fixture = Fixture::new(PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap());
+        let signing = usable_keys(&fixture.cert.cert)
+            .for_signing()
+            .next()
+            .unwrap();
+        assert_ne!(signing.key().fingerprint(), fixture.cert.cert.fingerprint());
+        let (_, device) = parse_x509_certificate(fixture.device.der()).unwrap();
+        super::verify_device_issuer(&device, &[fixture.issuer.der().as_ref()]).unwrap();
+        for (slot, statement) in [Slot::Sig, Slot::Dec].into_iter().zip(&fixture.statements) {
+            let (_, statement) = parse_x509_certificate(statement).unwrap();
+            super::verify_statement(&statement, &device, slot.common_name()).unwrap();
+            let curve = match (suite, slot) {
+                (CipherSuite::P256, _) => Curve::NistP256,
+                (_, Slot::Sig) => Curve::Ed25519,
+                (_, Slot::Dec) => Curve::Cv25519,
+            };
+            assert_eq!(
+                super::statement_key(&statement, &curve).unwrap(),
+                key_material(&fixture.cert, slot).0,
+            );
+        }
         assert!(fixture.verify().is_err());
     }
 }

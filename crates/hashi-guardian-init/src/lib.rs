@@ -93,9 +93,12 @@ mod tests {
     fn dev_attestations_load_beside_their_certificate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kp1.asc");
-        std::fs::write(&path, mock_pgp_keypair().0).unwrap();
+        let (cert, _) = hashi_types::guardian::test_utils::mock_attested_kp_keypair();
+        std::fs::write(&path, cert.cert().armored()).unwrap();
         write_dev_attestations(&path).unwrap();
-        load_attested_kp_cert(&path).unwrap();
+        let loaded = load_attested_kp_cert(&path).unwrap();
+        assert_eq!(loaded.fingerprint(), cert.fingerprint());
+        assert_eq!(loaded.cert(), cert.cert());
     }
 
     #[test]
