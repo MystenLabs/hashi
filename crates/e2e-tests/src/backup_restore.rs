@@ -21,6 +21,8 @@ mod tests {
 
     use anyhow::Result;
     use hashi::backup::BACKUP_FILE_NAME_PREFIX;
+    use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
+    use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
     use hashi::config::Config as HashiConfig;
@@ -98,8 +100,8 @@ mod tests {
     ///    only the backup remains").
     /// 4. Force two rotations without node 0 — the rest of the network
     ///    continues operating several epochs ahead.
-    /// 5. Run `hashi backup restore --copy-to-original-paths` to put the
-    ///    files back exactly where the manifest says.
+    /// 5. Restore into private staging, then explicitly install the config
+    ///    and DB at destinations chosen by the test, not by the manifest.
     /// 6. Restart node 0 and force one more rotation so it rejoins as a
     ///    catching-up member.
     /// 7. Assert all 4 nodes agree on the current MPC public key.
@@ -179,10 +181,10 @@ mod tests {
         commands::backup::save(&node_config_path, Some(recipient), &save_out_dir)?;
         let tarball = find_backup_tarball(&save_out_dir);
 
-        // 4. Destroy node 0's on-disk state so `restore --copy-to-original-paths`
-        //    actually has to put things back. The config has its own tempdir;
-        //    both the DB and configured backups live under the TestNetworks
-        //    tempdir, which stays alive because the handle still owns it.
+        // 4. Destroy node 0's on-disk state so recovery actually has to put
+        //    things back. The config has its own tempdir; both the DB and
+        //    configured backups live under the TestNetworks tempdir, which
+        //    stays alive because the handle still owns it.
         std::fs::remove_dir_all(&original_db_path)?;
         std::fs::remove_file(&node_config_path)?;
 
@@ -198,29 +200,39 @@ mod tests {
             .await;
         }
 
-        // 6. Restore. `--copy-to-original-paths=true` uses the manifest's
-        //    absolute paths, which are the exact paths node 0's HashiConfig
-        //    still points at, so no reconfiguration is needed after this.
+        // 6. Restore only into private staging. Keep staging on the DB's
+        //    filesystem so the explicit DB installation below can use rename.
         let restore_out_dir = tempfile::Builder::new()
             .prefix("hashi-restore-out-")
-            .tempdir()?;
+            .tempdir_in(original_db_path.parent().expect("DB must have a parent"))?;
         commands::backup::restore(
             &tarball,
             RestoreDecryptor::LocalSecretKey { secret_key_path },
             restore_out_dir.path(),
-            /* copy_to_original_paths */ true,
         )?;
 
-        // Sanity: the on-disk artefacts the node needs are back where the
-        // manifest said they belong.
+        // Extraction must not recreate the original locations. Installation
+        // destinations come from the test's pre-backup config, never from
+        // paths supplied by the archive's manifest.
+        assert!(!original_db_path.exists());
+        assert!(!node_config_path.exists());
+        let extracted_dir = restore_out_dir.path().join(extract_dir_name(&tarball)?);
+        std::fs::copy(extracted_dir.join("node-config.toml"), &node_config_path)?;
+        std::fs::rename(
+            extracted_dir.join(DB_SNAPSHOT_TAR_PREFIX),
+            &original_db_path,
+        )?;
+
+        // Sanity: explicit installation restored the artefacts needed by
+        // the node before restarting it.
         assert!(
             original_db_path.is_dir(),
-            "restore did not recreate db at {}",
+            "installation did not recreate db at {}",
             original_db_path.display()
         );
         assert!(
             node_config_path.is_file(),
-            "restore did not recreate node config at {}",
+            "installation did not recreate node config at {}",
             node_config_path.display()
         );
 

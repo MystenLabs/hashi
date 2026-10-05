@@ -491,11 +491,8 @@ pub enum BackupCommands {
 
     /// Restore files from a backup archive.
     ///
-    /// When `--copy-to-original-paths` is set, files are written to the
-    /// absolute paths stored in the manifest at backup time. If the restore
-    /// is running on a different host or with a different filesystem layout,
-    /// those paths will be used verbatim — extract without the flag and copy
-    /// files manually in that case.
+    /// Files are extracted only into the selected output directory. Original
+    /// paths recorded in the manifest are metadata, not restore destinations.
     Restore {
         /// Path to the backup tarball (.tar.asc encrypted or .tar unencrypted)
         backup_tarball: std::path::PathBuf,
@@ -519,13 +516,6 @@ pub enum BackupCommands {
         /// Directory to extract the restored files into
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
-
-        /// Copy restored files to their original paths after extraction.
-        ///
-        /// Uses the absolute paths captured in the backup manifest. Intended
-        /// for in-place recovery on the same host the backup came from.
-        #[clap(long)]
-        copy_to_original_paths: bool,
     },
 }
 
@@ -1278,7 +1268,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 use_gpg_agent,
                 gpg_homedir,
                 output_dir,
-                copy_to_original_paths,
             } => {
                 let decryptor = match crate::backup::archive_format(&backup_tarball)? {
                     crate::backup::BackupArchiveFormat::Unencrypted => {
@@ -1302,12 +1291,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         }
                     }
                 };
-                commands::backup::restore(
-                    &backup_tarball,
-                    decryptor,
-                    &output_dir,
-                    copy_to_original_paths,
-                )?;
+                commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
             }
         },
         CliCommand::Deposit { action } => {

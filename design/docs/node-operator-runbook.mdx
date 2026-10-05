@@ -862,14 +862,14 @@ Backups are **OpenPGP (Sequoia)**: encrypted archives use the suffix `.tar.asc`;
 hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
-hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> [--output-dir .] [--copy-to-original-paths]
-hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] [--output-dir .] [--copy-to-original-paths]
+hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
+hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-dir <private-staging-dir>
 
 # Restore an unencrypted .tar — no key needed
-hashi backup restore <tarball.tar> [--output-dir .]
+hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 ```
 
-`--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. `--copy-to-original-paths` writes files back to the absolute paths captured at backup time (same-host in-place recovery only).
+`--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
 
 ### 6.8 Deposit, withdraw, and balance
 
