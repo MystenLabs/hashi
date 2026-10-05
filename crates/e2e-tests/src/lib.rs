@@ -799,7 +799,8 @@ async fn submit_proposal_through_quorum(
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "create {label} proposal failed"
+        "create {label} proposal failed: {:?}",
+        response.transaction().effects().status().error()
     );
     let proposal_id = extract_proposal_id_from_response(&response)?;
     tracing::info!("{label} proposal {proposal_id} created; collecting votes");
@@ -816,7 +817,8 @@ async fn submit_proposal_through_quorum(
         let vote_resp = executor.execute(vote_tx).await?;
         anyhow::ensure!(
             vote_resp.transaction().effects().status().success(),
-            "vote on {label} proposal {proposal_id} failed"
+            "vote on {label} proposal {proposal_id} failed: {:?}",
+            vote_resp.transaction().effects().status().error()
         );
     }
     let execute_tx = build_execute_proposal_transaction(
@@ -829,7 +831,8 @@ async fn submit_proposal_through_quorum(
     let exec_resp = executors[0].execute(execute_tx).await?;
     anyhow::ensure!(
         exec_resp.transaction().effects().status().success(),
-        "execute {label} proposal {proposal_id} failed"
+        "execute {label} proposal {proposal_id} failed: {:?}",
+        exec_resp.transaction().effects().status().error()
     );
     let checkpoint = exec_resp
         .transaction()
