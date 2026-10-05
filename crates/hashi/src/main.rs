@@ -230,7 +230,10 @@ async fn run_server(config_path: std::path::PathBuf) -> anyhow::Result<()> {
 
     let hashi = Hashi::new(server_version, Some(config_path), config)?;
     let hashi_service = hashi.start().await?;
-    hashi_service.main().await?;
+    match hashi_service.main().await {
+        Ok(()) | Err(sui_futures::service::Error::Terminated) => {}
+        Err(error) => return Err(error.into()),
+    }
 
     tracing::info!("hashi shutting down; goodbye");
     Ok(())
