@@ -626,8 +626,9 @@ enum NoSignature {
     Failed,
 }
 
-/// Peers refuse a request their mirror shows already approved with
-/// `AlreadyExists` (`deposit_refusal_status`, `withdrawal_approval_refusal_status`).
+/// Peers refuse a request their mirror shows already approved, or a withdrawal
+/// it shows finalized, with `AlreadyExists` (`deposit_refusal_status`,
+/// `withdrawal_approval_refusal_status`, `withdrawal_signing_refusal_status`).
 fn is_already_approved_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::AlreadyExists
 }
@@ -706,6 +707,7 @@ mod tests {
     use super::is_already_approved_refusal;
     use super::is_retriable_transport;
     use super::retry_peer_call;
+    use crate::withdrawals::WithdrawalAlreadyFinalized;
     use crate::withdrawals::WithdrawalApprovalError;
     use crate::withdrawals::WithdrawalRequestApproval;
     use hashi_types::committee::BlsSignatureAggregator;
@@ -731,6 +733,21 @@ mod tests {
         // Older peers send the same refusal as `failed_precondition`.
         assert!(!is_already_approved_refusal(&Status::failed_precondition(
             "Never retry: Withdrawal request 0x1 is already approved"
+        )));
+    }
+
+    #[test]
+    fn tells_withdrawal_already_finalized_refusals_from_other_refusals() {
+        let refusal = crate::grpc::bridge_service::withdrawal_signing_refusal_status;
+        assert!(is_already_approved_refusal(&refusal(
+            WithdrawalAlreadyFinalized(Address::ZERO).into()
+        )));
+        assert!(!is_already_approved_refusal(&refusal(anyhow::anyhow!(
+            "Limiter rejected withdrawal 0x1: insufficient tokens"
+        ))));
+        // Older peers send the same refusal as `failed_precondition`.
+        assert!(!is_already_approved_refusal(&Status::failed_precondition(
+            WithdrawalAlreadyFinalized(Address::ZERO).to_string()
         )));
     }
 
