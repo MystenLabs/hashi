@@ -39,6 +39,9 @@ const EKeyGenCertsStillNeeded: vector<u8> =
     b"Key-generation cert buckets must be strictly older than the previous committee, whose bucket seeds the next rotation";
 #[error]
 const ENoNonceBucket: vector<u8> = b"No nonce cert bucket exists for this batch";
+#[error]
+const EDealerNotInCommittee: vector<u8> =
+    b"The dealer is not a member of the committee that deals this certificate";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -212,7 +215,7 @@ fun submit_cert_internal(
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
-    assert_can_submit(hashi, epoch, dealer, ctx);
+    assert_can_submit(hashi, key, epoch, dealer, ctx);
     let epoch_certs = hashi.epoch_certs(key, ctx);
     hashi::tob::submit_cert_with_signature(
         epoch_certs,
@@ -224,11 +227,32 @@ fun submit_cert_internal(
     );
 }
 
-fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContext) {
+fun assert_can_submit(
+    hashi: &Hashi,
+    key: hashi::tob::TobKey,
+    epoch: u64,
+    dealer: address,
+    ctx: &TxContext,
+) {
     hashi.versioning().assert_version_enabled();
-    assert!(hashi.committee_set().member_authorized(dealer, ctx));
-    let pending = hashi.committee_set().pending_epoch_change();
-    assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
+    let committee_set = hashi.committee_set();
+    assert!(committee_set.member_authorized(dealer, ctx));
+    let pending = committee_set.pending_epoch_change();
+    assert!(epoch == committee_set.epoch() || pending.contains(&epoch));
+    let in_dealing_committee = if (
+        key.protocol_type() == hashi::tob::protocol_type_key_rotation()
+    ) {
+        let previous = committee_set.committee_epoch_before(epoch);
+        previous.is_some() && in_committee(hashi, *previous.borrow(), dealer)
+    } else {
+        in_committee(hashi, epoch, dealer)
+    };
+    assert!(in_dealing_committee, EDealerNotInCommittee);
+}
+
+fun in_committee(hashi: &Hashi, epoch: u64, dealer: address): bool {
+    let committee_set = hashi.committee_set();
+    committee_set.has_committee(epoch) && committee_set.get_committee(epoch).has_member(&dealer)
 }
 
 #[test_only]
