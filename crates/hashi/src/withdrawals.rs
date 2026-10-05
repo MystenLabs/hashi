@@ -4,6 +4,7 @@
 use anyhow::anyhow;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
+use bitcoin::Network;
 use bitcoin::TxOut;
 use bitcoin::Weight;
 use bitcoin::taproot::TapLeafHash;
@@ -47,6 +48,16 @@ const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
+
+/// Signet blocks rarely fill, but bitcoind's estimate there follows a few relayed outliers.
+const SIGNET_MAX_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(9);
+
+const _: () = assert!(
+    SIGNET_MAX_FEE_RATE.to_sat_per_kwu()
+        <= FEE_RATE_TOLERANCE_MULTIPLIER
+            * CoinSelectionParams::DEFAULT_MIN_FEE_RATE.to_sat_per_kwu(),
+    "a validator at the default floor must accept the signet cap, whatever its own estimate"
+);
 
 /// Max drift between the leader-supplied `timestamp_secs` and the follower's
 /// own latest checkpoint timestamp before signing a guardian request.
@@ -287,9 +298,13 @@ fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize)
     }
 }
 
-/// The rate leader and validators price a withdrawal at. Uncapped: the on-chain
-/// per-request budget bounds the fee, and a signed withdrawal can't be replaced.
+/// The rate leader and validators price a withdrawal at. Uncapped off signet: the
+/// on-chain per-request budget bounds the fee, and a signed withdrawal can't be replaced.
 fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> FeeRate {
+    let estimate = match config.bitcoin_network() {
+        Network::Signet => estimate.min(SIGNET_MAX_FEE_RATE),
+        _ => estimate,
+    };
     estimate.max(config.withdrawal_min_fee_rate())
 }
 
@@ -2922,6 +2937,22 @@ mod tests {
 
         config.withdrawal_min_fee_rate_sat_vb = Some(50);
         assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(10)), sat_per_vb(50));
+    }
+
+    #[test]
+    fn withdrawal_fee_rate_caps_the_signet_estimate_but_not_the_floor() {
+        let sat_per_vb = FeeRate::from_sat_per_vb_unchecked;
+        let mut config = crate::config::Config::new_for_testing();
+        config.bitcoin_chain_id = Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string());
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(1)), sat_per_vb(3));
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(4)), sat_per_vb(4));
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(200)), sat_per_vb(9));
+
+        config.withdrawal_min_fee_rate_sat_vb = Some(50);
+        assert_eq!(
+            withdrawal_fee_rate(&config, sat_per_vb(200)),
+            sat_per_vb(50)
+        );
     }
 
     #[test]
