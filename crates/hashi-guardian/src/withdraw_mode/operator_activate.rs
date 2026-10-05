@@ -14,7 +14,6 @@ use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::RuntimeCommittee;
 use hashi_types::guardian::WithdrawStage;
-use std::sync::Arc;
 use tracing::info;
 use GuardianError::InvalidInputs;
 
@@ -34,17 +33,18 @@ impl OAInstall {
         enclave: &Enclave,
         request: OperatorActivateRequest,
     ) -> GuardianResult<Self> {
-        let limiter_config = enclave.limiter_config()?;
+        let limiter_config = enclave.config.limiter_config()?;
         let initialization = enclave
+            .state
             .temporary_init_state()
             .map_err(|_| InvalidInputs("temporary initialization state not set".into()))?;
         let config_hash = initialization.config_hash;
-        let armed_instance = initialization.ceremony_state.secret_sharing_instance;
+        let armed_instance = &initialization.ceremony_state.secret_sharing_instance;
 
-        let mut reader = enclave.new_guardian_reader()?;
+        let mut reader = enclave.config.new_guardian_reader()?;
 
         reader
-            .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
+            .ensure_session_live_and_others_quiet(&enclave.config.s3_session_id())
             .await?;
 
         let committee = RuntimeCommittee::from_move_with_encryption_key_fallback(
@@ -61,7 +61,7 @@ impl OAInstall {
 
         let activation_state = ActivationState::new(
             config_hash,
-            armed_instance,
+            armed_instance.clone(),
             committee.clone(),
             limiter_state,
         );
@@ -89,7 +89,7 @@ impl OAInstall {
 }
 
 pub async fn operator_activate(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: OperatorActivateRequest,
 ) -> GuardianResult<()> {
     info!("/operator_activate - Received request.");
@@ -99,11 +99,11 @@ pub async fn operator_activate(
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
-    let install = OAInstall::from_request(&enclave, request).await?;
+    let install = OAInstall::from_request(enclave, request).await?;
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing committee and rate limiter.");
-    commit_operator_activate(&enclave, install).await;
+    commit_operator_activate(enclave, install).await;
 
     info!("Operator activation complete.");
     Ok(())
@@ -112,7 +112,7 @@ pub async fn operator_activate(
 /// Install the prepared serving state, durably mark OA complete, clear stale
 /// initialization inputs, and then expose the active lifecycle. This fail-stop
 /// phase never returns an error after mutation begins.
-async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
+async fn commit_operator_activate(enclave: &mut Enclave, install: OAInstall) {
     enclave
         .state
         .init(install.committee, install.rate_limiter)
@@ -123,7 +123,7 @@ async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
         .await
         .expect("Unable to log operator activation");
 
-    enclave.clear_temporary_init_state();
+    enclave.state.clear_temporary_init_state();
 
     enclave
         .advance_lifecycle_into(WithdrawStage::Activated.into())

@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::task_spawner;
-use crate::Enclave;
+use crate::GuardianService;
 use hashi_types::guardian::proto_conversions;
-use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
@@ -17,16 +15,14 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
-use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::proto;
-use std::sync::Arc;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
 #[derive(Clone)]
 pub struct GuardianGrpc {
-    pub enclave: Arc<Enclave>,
+    pub service: GuardianService,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -85,9 +81,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_guardian_info(self.enclave.clone())
-            .await
-            .map_err(to_status)?;
+        let resp = self.service.get_guardian_info().await.map_err(to_status)?;
 
         let resp_pb = proto_conversions::get_guardian_info_response_to_pb(resp);
 
@@ -98,7 +92,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetAttestedGuardianInfoRequest>,
     ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone())
+        let resp = self
+            .service
+            .get_attested_guardian_info()
             .await
             .map_err(to_status)?;
         Ok(Response::new(
@@ -112,7 +108,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        let signed = task_spawner::setup_new_key(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .setup_new_key(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -127,7 +125,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
         let domain_req: KpSigned<CeremonyConfirmationRequest> =
             request.into_inner().try_into().map_err(to_status)?;
-        let response = task_spawner::confirm_ceremony(self.enclave.clone(), domain_req)
+        let response = self
+            .service
+            .confirm_ceremony(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -143,7 +143,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req: BatchProvisionerRotateKpSetRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
-        let signed = task_spawner::rotate_kp_set(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .rotate_kp_set(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -159,7 +161,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::OperatorInitResponse>, Status> {
         let domain_req: OperatorInitRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::operator_init(self.enclave.clone(), domain_req)
+        self.service
+            .operator_init(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -172,7 +175,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::provisioner_init(self.enclave.clone(), domain_req)
+        self.service
+            .provisioner_init(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -185,7 +189,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
         let domain_req: KpSigned<ProvisionerRotateCertRequest> =
             request.into_inner().try_into().map_err(to_status)?;
-        let signed = task_spawner::provisioner_rotate_cert(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .provisioner_rotate_cert(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -201,7 +207,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req: OperatorActivateRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::operator_activate(self.enclave.clone(), domain_req)
+        self.service
+            .operator_activate(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -216,14 +223,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req = SignedStandardWithdrawalRequestWire::try_from(request.into_inner())
             .map_err(to_status)?;
 
-        // validate address with network
-        let network = self.enclave.config.bitcoin_network().map_err(to_status)?;
-        let validated_req =
-            HashiSigned::<StandardWithdrawalRequest>::validate_addr(domain_req, network)
-                .map_err(to_status)?;
-
         // core withdraw call
-        let response = task_spawner::standard_withdrawal(self.enclave.clone(), validated_req)
+        let response = self
+            .service
+            .standard_withdrawal(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -238,7 +241,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
         let signed = HashiSigned::<CommitteeTransitionRequest>::try_from(request.into_inner())
             .map_err(to_status)?;
-        let current_committee_epoch = task_spawner::update_committee(self.enclave.clone(), signed)
+        let current_committee_epoch = self
+            .service
+            .update_committee(signed)
             .await
             .map_err(to_status)?;
 
@@ -258,10 +263,11 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map(HashiSigned::<CommitteeTransitionRequest>::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_status)?;
-        let current_committee_epoch =
-            task_spawner::update_committee_chain(self.enclave.clone(), transitions)
-                .await
-                .map_err(to_status)?;
+        let current_committee_epoch = self
+            .service
+            .update_committee_chain(transitions)
+            .await
+            .map_err(to_status)?;
 
         Ok(Response::new(proto::UpdateCommitteeResponse {
             current_committee_epoch: Some(current_committee_epoch),

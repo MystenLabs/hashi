@@ -4,15 +4,16 @@
 use super::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::now_timestamp_secs;
+use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
-use std::sync::Arc;
 use tracing::info;
 
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -20,11 +21,14 @@ const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
 const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
 pub async fn standard_withdrawal(
-    enclave: Arc<Enclave>,
-    signed_request: HashiSigned<StandardWithdrawalRequest>,
+    enclave: &mut Enclave,
+    signed_request: SignedStandardWithdrawalRequestWire,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
+    let network = enclave.config.bitcoin_network()?;
+    let signed_request =
+        HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_request, network)?;
     let wid = *signed_request.message().wid();
     // 0) Validation
     enclave.require_fully_initialized()?;
@@ -33,7 +37,11 @@ pub async fn standard_withdrawal(
     let committee = enclave.state.get_committee()?;
 
     info!("Verifying request certificate.");
-    verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
+    verify_hashi_cert(
+        enclave.config.hashi_object_id()?,
+        committee,
+        &signed_request,
+    )?;
     info!("Request certificate verified.");
 
     let (request_sign, request) = signed_request.into_parts();

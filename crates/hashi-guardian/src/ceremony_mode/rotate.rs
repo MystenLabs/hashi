@@ -10,7 +10,6 @@ use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::*;
-use std::sync::Arc;
 use tracing::info;
 
 struct VerifiedShareSubmission {
@@ -28,7 +27,7 @@ struct VerifiedRotationProposal {
 /// and re-split it to the new KP set. Returning the encrypted shares leaves this
 /// enclave awaiting confirmation from every new KP.
 pub async fn rotate_kp_set(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: BatchProvisionerRotateKpSetRequest,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     info!("/rotate_kp_set - Received request.");
@@ -38,18 +37,18 @@ pub async fn rotate_kp_set(
     let deployment = enclave.config.deployment()?;
     let proposal = verify_signed_submissions(
         request.submissions(),
-        &enclave.s3_session_id(),
+        &enclave.config.s3_session_id(),
         &deployment.digest(),
     )?;
-    let mut reader = enclave.new_guardian_reader()?;
+    let mut reader = enclave.config.new_guardian_reader()?;
     let latest_s3_state = reader.read_latest_ceremony_state().await?;
 
     let new_sharing_seq = reader.next_sharing_seq().await?;
-    complete_rotation(&enclave, proposal, latest_s3_state, new_sharing_seq).await
+    complete_rotation(enclave, proposal, latest_s3_state, new_sharing_seq).await
 }
 
 async fn complete_rotation(
-    enclave: &Arc<Enclave>,
+    enclave: &mut Enclave,
     proposal: VerifiedRotationProposal,
     latest_s3_state: CeremonyState,
     new_sharing_seq: u64,
@@ -65,7 +64,7 @@ async fn complete_rotation(
 
     let old_shares = decrypt_verify_shares(
         &encrypted_old_shares,
-        enclave.encryption_secret_key(),
+        enclave.config.encryption_secret_key(),
         &old_instance,
     )?;
     let old_t = old_instance.threshold();
@@ -174,7 +173,7 @@ fn authorize_share_submissions(
 }
 
 async fn finalize_rotation(
-    enclave: &Arc<Enclave>,
+    enclave: &mut Enclave,
     old_shares: &[Share],
     old_instance: &SecretSharingInstance,
     expected_btc_master_pubkey: BitcoinPubkey,
@@ -237,7 +236,9 @@ async fn finalize_rotation(
         encrypted_shares,
         new_instance,
     };
-    enclave.install_pending_ceremony(proposal)?;
+    enclave
+        .state
+        .install_pending_ceremony(enclave.config.deployment()?, proposal)?;
     Ok(enclave.sign(response))
 }
 

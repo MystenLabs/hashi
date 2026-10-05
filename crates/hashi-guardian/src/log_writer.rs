@@ -14,16 +14,15 @@ use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
 use std::future::Future;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::warn;
 
 const MAX_S3_WRITE_ATTEMPTS: usize = 5;
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Serializes every Guardian log write and owns the session-heartbeat fence.
+/// Owns the session-heartbeat fence. The service serializes all writes.
 pub(crate) struct LogWriter {
-    state: Mutex<LatestHeartbeatTime>,
+    state: LatestHeartbeatTime,
 }
 
 struct LatestHeartbeatTime(Option<Instant>);
@@ -58,26 +57,25 @@ impl LatestHeartbeatTime {
 impl LogWriter {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(LatestHeartbeatTime::new()),
+            state: LatestHeartbeatTime::new(),
         }
     }
 
     /// Construct and persist one serialized log record; see the README for fencing assumptions.
     pub(crate) async fn write(
-        &self,
+        &mut self,
         s3: &GuardianS3Client,
         session_id: SessionID,
         message: LogMessage,
         signing_key: &GuardianSignKeyPair,
     ) {
-        let mut state = self.state.lock().await;
         let write_started_at = Instant::now();
         let record = SignedLogEntry::new(session_id, message, signing_key);
-        let deadline = state.next_write_deadline();
+        let deadline = self.state.next_write_deadline();
 
         write_with_retries(s3, &record, deadline).await;
         if record.log_type() == LogType::Heartbeat {
-            state.renew(write_started_at);
+            self.state.renew(write_started_at);
         }
     }
 }

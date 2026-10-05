@@ -6,7 +6,6 @@ use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::*;
 use k256::SecretKey;
-use std::sync::Arc;
 use tracing::info;
 
 /// Set up a new BTC key. Flow:
@@ -14,7 +13,7 @@ use tracing::info;
 ///     2. Operator calls setup_new_key
 ///     3. KPs fetch the proposed ceremony state from `kp-shares/proposed/`
 pub async fn setup_new_key(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
@@ -28,11 +27,15 @@ pub async fn setup_new_key(
         .await?;
     if !ceremony_keys.is_empty() {
         return Err(GuardianError::InvalidInputs(
-            "a completed ceremony already exists; rotate the KP set instead of setting up a new key"
-                .into(),
-        ));
+        "a completed ceremony already exists; rotate the KP set instead of setting up a new key"
+            .into(),
+    ));
     }
-    let sharing_seq = enclave.new_guardian_reader()?.next_sharing_seq().await?;
+    let sharing_seq = enclave
+        .config
+        .new_guardian_reader()?
+        .next_sharing_seq()
+        .await?;
 
     let params = request.params();
     let n = params.num_shares();
@@ -87,7 +90,9 @@ pub async fn setup_new_key(
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
     };
-    enclave.install_pending_ceremony(proposal)?;
+    enclave
+        .state
+        .install_pending_ceremony(enclave.config.deployment()?, proposal)?;
     let response = enclave.sign(response);
 
     enclave
