@@ -242,8 +242,8 @@ impl<T: KpSigningIntent> KpSigned<T> {
     }
 
     /// Sign a KP payload by invoking `gpg --detach-sign` for the
-    /// signer's attested signing-key fingerprint. Includes the KP intent in the signed
-    /// bytes; payload types carry any request-specific replay-binding fields.
+    /// signer's attested primary signing-key fingerprint. Includes the KP intent
+    /// in the signed bytes; payload types carry request-specific replay bindings.
     pub fn sign(
         data: T,
         signer_cert: AttestedKpCert,
@@ -276,8 +276,8 @@ impl<T: KpSigningIntent> KpSigned<T> {
         bcs::to_bytes(&(T::INTENT as u8, data)).expect("serialization should not fail")
     }
 
-    /// Verify the signature and borrow the authenticated request.
-    /// Checks the intent byte to ensure the signature is for this request type.
+    /// Verify the signature with the attested primary signing key and borrow the
+    /// authenticated request. Checks the intent byte for this request type.
     pub fn verify_signature(&self) -> CryptoVerificationResult<&T> {
         let msg_bytes = Self::signed_bytes(&self.data);
         verify_detached_signature_for_key(
@@ -355,6 +355,7 @@ mod tests {
         let old_fingerprint = old_key.key().fingerprint();
         assert_ne!(&old_fingerprint, attested.signing_fingerprint());
         assert_eq!(secret.fingerprint(), attested.fingerprint());
+        assert_eq!(attested.signing_fingerprint(), &attested.fingerprint());
 
         // This is a freshly constructed request for the current session, not a
         // replay of an old payload. An old software key can backdate its signature.

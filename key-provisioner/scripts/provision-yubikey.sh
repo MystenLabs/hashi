@@ -370,7 +370,7 @@ TEST_FILES_STARTED=true
 printf 'OpenPGP encryption and signing test\n' > "$PLAINTEXT_FILE"
 
 # Import the public certificate and let GnuPG associate it with the private keys
-# on the card before exercising the encryption and signing subkeys.
+# on the card before exercising the encryption subkey and signing primary key.
 run_or_die "GnuPG could not import the public certificate into your keyring." \
   gpg --batch --import "$OUTPUT_FILE"
 printf 'Public certificate imported into your GnuPG keyring.\n'

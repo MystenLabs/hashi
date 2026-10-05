@@ -11,9 +11,11 @@
 //! trusted directly; their ancestors are not additional trust anchors.
 //!
 //! X.509 validity dates, revocation, touch policy, and freshness are not enforced.
-//! OpenPGP keys must be usable under the existing OpenPGP policy. Attestation
-//! fingerprint metadata is deliberately ignored: the device administrator can
-//! overwrite it. See <https://developers.yubico.com/PGP/Attestation.html>.
+//! OpenPGP keys must be usable under the existing OpenPGP policy. The sole
+//! signing key must be the certificate's primary key, binding its identity to
+//! SIG attestation; the sole transport-encryption key is attested separately.
+//! Attestation fingerprint metadata is deliberately ignored: the device
+//! administrator can overwrite it. See <https://developers.yubico.com/PGP/Attestation.html>.
 //!
 //! Statements support NIST P-256 uncompressed SEC1 points with named-curve SPKI
 //! parameters, or RFC 8410 Ed25519/X25519 raw 32-byte keys with absent parameters.
@@ -22,8 +24,8 @@
 
 use super::AttestedPgpKeys;
 use super::Fingerprint;
-use super::POLICY;
 use super::PgpPublicCert;
+use super::usable_keys;
 use anyhow::Context;
 use anyhow::Result;
 use sequoia_openpgp as openpgp;
@@ -60,8 +62,9 @@ static TRUSTED_ISSUERS: LazyLock<[Vec<u8>; 4]> = LazyLock::new(|| {
     issuers
 });
 
-/// Verify that `cert`'s sole usable signing and transport-encryption keys were
-/// generated on a YubiKey, using its device certificate and SIG/DEC statements.
+/// Verify that `cert`'s sole usable signing key is its primary key and that it
+/// and the sole usable transport-encryption key were generated on a YubiKey,
+/// using its device certificate and SIG/DEC statements.
 ///
 /// Each input must contain exactly one PEM `CERTIFICATE` block, with no other
 /// non-whitespace data and exactly one DER certificate inside. The device must
@@ -250,19 +253,17 @@ fn statement_key<'a>(statement: &'a X509Certificate<'_>, curve: &Curve) -> Resul
 }
 
 fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
-    let mut candidates = cert
-        .keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_signing();
+    let mut candidates = usable_keys(cert).for_signing();
     let candidate = candidates
         .next()
         .context("OpenPGP certificate has no usable signing key")?;
     anyhow::ensure!(
         candidates.next().is_none(),
         "OpenPGP certificate has multiple usable signing keys"
+    );
+    anyhow::ensure!(
+        candidate.key().fingerprint() == cert.fingerprint(),
+        "OpenPGP signing key must be the certificate's primary key"
     );
     match candidate.key().mpis() {
         mpi::PublicKey::EdDSA {
@@ -285,13 +286,7 @@ fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
 }
 
 fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
-    let mut candidates = cert
-        .keys()
-        .with_policy(&*POLICY, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_transport_encryption();
+    let mut candidates = usable_keys(cert).for_transport_encryption();
     let candidate = candidates
         .next()
         .context("OpenPGP certificate has no usable encryption key")?;

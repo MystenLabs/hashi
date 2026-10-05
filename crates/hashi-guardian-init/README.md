@@ -76,8 +76,9 @@ Bitcoin network, and PCR allowlist. The enclave checks its own attestation again
 
 `kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
 New ceremonies assign share IDs by fingerprint order; existing assignments
-come from signed `kp-shares/` state. Each ciphertext targets its recipient's
-attested DEC key, with the primary-key fingerprint identifying the KP.
+come from signed `kp-shares/` state. Each ciphertext must contain exactly one
+OpenPGP recipient matching its KP's attested DEC key. The primary key must be
+the attested SIG key, so its fingerprint identifies both the KP and its signing key.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
