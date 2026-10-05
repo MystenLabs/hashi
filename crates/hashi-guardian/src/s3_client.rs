@@ -106,6 +106,18 @@ impl GuardianS3Client {
             .load()
             .await;
 
+        // Endpoint overrides target local S3-compatible services and may use
+        // plaintext HTTP, so only devnet may use them.
+        if retention_environment != S3RetentionEnvironment::Devnet
+            && ["AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some())
+        {
+            return Err(S3Error(format!(
+                "S3 endpoint overrides are only allowed for devnet, not {retention_environment:?}"
+            )));
+        }
+
         // A custom endpoint implies an S3-compatible service (MinIO, LocalStack), which
         // need path-style addressing.
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
@@ -227,7 +239,7 @@ impl GuardianS3Client {
                     DisplayErrorContext(&e)
                 )));
             }
-            self.verify_existing_write(key, &body).await?;
+            self.verify_existing_write(key, &body, &expiry_time).await?;
             info!("Object {} already contains the intended record", key);
         }
 
@@ -241,9 +253,15 @@ impl GuardianS3Client {
         Ok(())
     }
 
-    /// Similar to `get_object_unsafe`, but compares the raw bytes and treats
-    /// invalid lock metadata as a fatal conflict at this write-once key.
-    async fn verify_existing_write(&self, key: &str, expected_body: &[u8]) -> GuardianResult<()> {
+    /// After a 412, require the existing object to be this exact record under the
+    /// same Compliance-lock rule readers apply; anything else is a fatal conflict.
+    /// Similar to `get_object_unsafe`, but compares the raw bytes.
+    async fn verify_existing_write(
+        &self,
+        key: &str,
+        expected_body: &[u8],
+        expiry_time: &DateTime,
+    ) -> GuardianResult<()> {
         let response = self
             .client
             .get_object()
@@ -258,8 +276,12 @@ impl GuardianS3Client {
                     DisplayErrorContext(&e)
                 ))
             })?;
-        let has_compliance_lock = response.object_lock_mode() == Some(&ObjectLockMode::Compliance)
-            && response.object_lock_retain_until_date().is_some();
+        let has_compliance_lock = has_valid_compliance_lock(
+            response.object_lock_mode(),
+            response.object_lock_retain_until_date(),
+            SystemTime::now(),
+            expiry_time,
+        );
         let actual_body = response.body.collect().await.map_err(|e| {
             S3Error(format!(
                 "Failed to read object body for key {}: {}",
@@ -337,7 +359,14 @@ impl GuardianS3Client {
     }
 }
 
-/// Controls whether an S3 read establishes that the object is still immutable.
+/// Controls whether an S3 read makes sure that the object is still immutable.
+/// An immutable object satisfies two conditions:
+/// 1. The object has an active Compliance lock until the required expiry or later.
+/// 2. The version history of the key shows no overwrite and no delete marker.
+///
+/// `Required` checks the two conditions on the exact key.
+/// `MutationAlreadyChecked` checks condition 1. The caller checks condition 2 for the directory.
+/// Note that checking Condition 2 is meaningless without condition 1.
 #[derive(Clone, Copy)]
 pub(crate) enum ImmutabilityCheck {
     /// Validate the exact key has no mutation history and reject the object
@@ -602,8 +631,7 @@ impl GuardianS3Client {
                 lock_mode.as_ref(),
                 retain_until.as_ref(),
                 SystemTime::now(),
-                &record,
-                self.object_lock_policy,
+                &DateTime::from(record.object_lock_expiry(self.object_lock_policy)),
             )
         {
             return Err(S3Error(format!(
@@ -620,19 +648,22 @@ impl GuardianS3Client {
     }
 }
 
+/// Make sure that the record has a Compliance lock.
+/// The lock must stay active until `required_expiry` or later.
 fn has_valid_compliance_lock(
     mode: Option<&ObjectLockMode>,
     retain_until: Option<&DateTime>,
     now: SystemTime,
-    record: &VerifiableLogEntry,
-    policy: S3ObjectLockPolicy,
+    required_expiry: &DateTime,
 ) -> bool {
     let (Some(ObjectLockMode::Compliance), Some(expiry)) = (mode, retain_until) else {
         return false;
     };
 
-    // Retention may be extended beyond the expiry originally requested by the writer.
-    *expiry > DateTime::from(now) && *expiry >= DateTime::from(record.object_lock_expiry(policy))
+    // This check accepts a lock date that is later than the required date.
+    // Thus, an old record can stay valid after the lock on a newer record expires.
+    // This can occur only after the long-lived lock duration.
+    *expiry > DateTime::from(now) && expiry >= required_expiry
 }
 
 #[cfg(test)]
@@ -706,6 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_412_accepts_identical_locked_object() {
+        let expiry = DateTime::from(SystemTime::now() + Duration::from_mins(5));
         let put_precondition_failed = mock!(Client::put_object)
             .match_requests(|req| req.bucket() == Some("bucket"))
             .sequence()
@@ -713,12 +745,10 @@ mod tests {
             .build();
         let get_existing = mock!(Client::get_object)
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
-            .then_output(|| {
+            .then_output(move || {
                 GetObjectOutput::builder()
                     .object_lock_mode(ObjectLockMode::Compliance)
-                    .object_lock_retain_until_date(DateTime::from(
-                        SystemTime::now() + Duration::from_mins(5),
-                    ))
+                    .object_lock_retain_until_date(expiry)
                     .body(ByteStream::from_static(br#"{"a":1}"#))
                     .build()
             });
@@ -731,11 +761,7 @@ mod tests {
         );
         let logger = mk_logger_with_client(client);
         logger
-            .write_at_key_once(
-                "key",
-                &TestPayload { a: 1 },
-                DateTime::from(SystemTime::now() + Duration::from_mins(5)),
-            )
+            .write_at_key_once("key", &TestPayload { a: 1 }, expiry)
             .await
             .unwrap();
 
@@ -853,27 +879,25 @@ mod tests {
         };
         let expiry_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let expiry = DateTime::from(expiry_time);
+        let required_expiry = DateTime::from(record.object_lock_expiry(policy));
 
         assert!(!has_valid_compliance_lock(
             Some(&ObjectLockMode::Compliance),
             Some(&expiry),
             expiry_time + Duration::from_secs(1),
-            &record,
-            policy,
+            &required_expiry,
         ));
         assert!(!has_valid_compliance_lock(
             Some(&ObjectLockMode::Compliance),
             Some(&expiry),
             expiry_time,
-            &record,
-            policy,
+            &required_expiry,
         ));
         assert!(has_valid_compliance_lock(
             Some(&ObjectLockMode::Compliance),
             Some(&expiry),
             expiry_time - Duration::from_secs(1),
-            &record,
-            policy,
+            &required_expiry,
         ));
 
         // An extension keeps the record readable beyond its original retention period.
@@ -882,8 +906,7 @@ mod tests {
             Some(&ObjectLockMode::Compliance),
             Some(&extended_expiry),
             expiry_time + Duration::from_secs(1),
-            &record,
-            policy,
+            &required_expiry,
         ));
     }
 
