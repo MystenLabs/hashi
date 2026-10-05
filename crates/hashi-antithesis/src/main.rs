@@ -38,6 +38,9 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     antithesis_sdk::antithesis_init();
+    // Reading on-chain state builds rustls client configs, and hashi-guardian's
+    // AWS deps compile in a second provider, so rustls can't pick one itself.
+    hashi::init_crypto_provider();
     hashi_types::telemetry::TelemetryConfig::new()
         .with_default_level(tracing::level_filters::LevelFilter::INFO)
         .with_env()
