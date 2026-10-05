@@ -141,7 +141,7 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
         device_pem: pem(&device),
         sig_pem: pem(&sig),
         dec_pem: pem(&dec),
-        keys,
+        encryption_fingerprint: keys.encryption,
     }
 }
 

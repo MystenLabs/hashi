@@ -250,17 +250,14 @@ impl<T: KpSigningIntent> KpSigned<T> {
         gpg_home: Option<&Path>,
     ) -> GuardianResult<Self> {
         let signing_payload = Self::signed_bytes(&data);
-        let signature = sign_detached_via_gpg_for_key(
-            &signing_payload,
-            signer_cert.signing_fingerprint(),
-            gpg_home,
-        )
-        .map_err(|e| InternalError(format!("KP signing failed: {e}")))?;
+        let fingerprint = signer_cert.fingerprint();
+        let signature = sign_detached_via_gpg_for_key(&signing_payload, &fingerprint, gpg_home)
+            .map_err(|e| InternalError(format!("KP signing failed: {e}")))?;
         verify_detached_signature_for_key(
             &signing_payload,
             &signature,
             signer_cert.cert(),
-            signer_cert.signing_fingerprint(),
+            &fingerprint,
         )
         .map_err(|e| InternalError(format!("KP signing produced an invalid signature: {e}")))?;
         Ok(Self {
@@ -284,7 +281,7 @@ impl<T: KpSigningIntent> KpSigned<T> {
             &msg_bytes,
             &self.signature,
             self.signer_cert.cert(),
-            self.signer_cert.signing_fingerprint(),
+            &self.signer_cert.fingerprint(),
         )
         .map_err(|e| {
             CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
@@ -353,9 +350,8 @@ mod tests {
             .find(|key| key.alive().is_err())
             .expect("fixture must retain an expired signing key");
         let old_fingerprint = old_key.key().fingerprint();
-        assert_ne!(&old_fingerprint, attested.signing_fingerprint());
+        assert_ne!(old_fingerprint, attested.fingerprint());
         assert_eq!(secret.fingerprint(), attested.fingerprint());
-        assert_eq!(attested.signing_fingerprint(), &attested.fingerprint());
 
         // This is a freshly constructed request for the current session, not a
         // replay of an old payload. An old software key can backdate its signature.
@@ -403,7 +399,7 @@ mod tests {
         // Consuming extraction is also a public authentication boundary.
         assert!(forged.verify_into_data().is_err());
 
-        let signature = sign(attested.signing_fingerprint(), SystemTime::now());
+        let signature = sign(&attested.fingerprint(), SystemTime::now());
         let valid = KpSigned::from_parts(request.clone(), attested, signature);
         assert_eq!(valid.verify_into_data().unwrap(), request);
     }

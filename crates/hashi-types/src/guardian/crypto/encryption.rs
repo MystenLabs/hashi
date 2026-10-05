@@ -4,7 +4,6 @@
 use super::primitives::*;
 use crate::guardian::errors::GuardianError::InvalidInputs;
 use crate::guardian::errors::GuardianResult;
-use crate::pgp::AttestedPgpKeys;
 use crate::pgp::Fingerprint;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::encrypt_armored_for_key;
@@ -45,8 +44,9 @@ pub struct AttestedKpCert {
     device_pem: Vec<u8>,
     sig_pem: Vec<u8>,
     dec_pem: Vec<u8>,
+    // SIG attests the primary key, so only DEC needs a separate fingerprint.
     #[serde(skip)]
-    keys: AttestedPgpKeys,
+    encryption_fingerprint: Fingerprint,
 }
 
 impl AttestedKpCert {
@@ -69,7 +69,7 @@ impl AttestedKpCert {
             device_pem,
             sig_pem,
             dec_pem,
-            keys,
+            encryption_fingerprint: keys.encryption,
         })
     }
 
@@ -81,12 +81,8 @@ impl AttestedKpCert {
         self.cert.fingerprint()
     }
 
-    pub(crate) fn signing_fingerprint(&self) -> &Fingerprint {
-        &self.keys.signing
-    }
-
     pub(crate) fn encryption_fingerprint(&self) -> &Fingerprint {
-        &self.keys.encryption
+        &self.encryption_fingerprint
     }
 
     pub fn device_pem(&self) -> &[u8] {
