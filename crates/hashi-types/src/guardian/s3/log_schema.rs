@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The versioned `LogMessage` family the enclave emits. The `VerifiableLogEntry` wrapper
+//! The versioned `LogMessage` family the enclave emits. The `SignedLogEntry` wrapper
 //! that carries these to S3 lives in `super::log_record`.
 
 use super::config::S3ObjectLockPolicy;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
 
-/// The wire message stored in a [`crate::guardian::log::VerifiableLogEntry`]. Its version is serialized
+/// The wire message stored in a [`crate::guardian::log::SignedLogEntry`]. Its version is serialized
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
 ///
@@ -136,6 +136,14 @@ impl VersionedLogMessage {
     pub fn into_heartbeat(self) -> Option<HeartbeatLogMessage> {
         match self {
             Self::V1(LogMessageV1::Heartbeat(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Return a reference to the init message, or `None` for another message type.
+    pub fn as_init(&self) -> Option<&InitLogMessage> {
+        match self {
+            Self::V1(LogMessageV1::Init(message)) => Some(message.as_ref()),
             Self::V1(_) => None,
         }
     }

@@ -257,7 +257,7 @@ mod tests {
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::GuardianError::Unauthenticated;
     use hashi_types::guardian::LogMessageV1;
-    use hashi_types::guardian::VerifiableLogEntry;
+    use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use k256::SecretKey;
@@ -470,8 +470,9 @@ mod tests {
             key.starts_with("kp-shares/proposed/"),
             "expected a proposed KP-share key, got {key}"
         );
-        let record: VerifiableLogEntry = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) = record.message()
+        let record: SignedLogEntry = serde_json::from_slice(body).unwrap();
+        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) =
+            record.message_unchecked()
         else {
             panic!("expected V1 CeremonyProposal variant");
         };
@@ -530,8 +531,9 @@ mod tests {
             .response;
         assert_eq!(response.new_instance.sharing_seq(), 3);
         let captured = ctx.captures.lock().unwrap();
-        let record: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
-        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) = record.message()
+        let record: SignedLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
+        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) =
+            record.message_unchecked()
         else {
             panic!("expected ceremony proposal");
         };

@@ -306,9 +306,9 @@ mod tests {
     use super::*;
     use crate::test_utils::CapturedPuts;
 
-    fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> VerifiableLogEntry {
+    fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> SignedLogEntry {
         let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
-        VerifiableLogEntry::new(
+        SignedLogEntry::new(
             SessionID::from_signing_pubkey(&key.verification_key()),
             LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee,
@@ -484,15 +484,17 @@ mod tests {
             InitLogMessage::guardian_info_object_key(&session_id)
         );
 
-        let attestation: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
+        let attestation: SignedLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         assert!(matches!(
-            attestation.message(),
+            attestation.message_unchecked(),
             VersionedLogMessage::V1(LogMessageV1::Init(message))
                 if matches!(message.as_ref(), OIAttestation { .. })
         ));
 
-        let guardian_info: VerifiableLogEntry = serde_json::from_slice(&captured[1].1).unwrap();
-        let VersionedLogMessage::V1(LogMessageV1::Init(message)) = guardian_info.message() else {
+        let guardian_info: SignedLogEntry = serde_json::from_slice(&captured[1].1).unwrap();
+        let VersionedLogMessage::V1(LogMessageV1::Init(message)) =
+            guardian_info.message_unchecked()
+        else {
             panic!("expected V1 init record");
         };
         let OIGuardianInfo(info) = message.as_ref() else {

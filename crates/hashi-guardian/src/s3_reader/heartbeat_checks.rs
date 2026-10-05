@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Use verified heartbeat logs to check session activity and the required quiet period.
+
 use super::GuardianReader;
 use super::VerifiedLogEntry;
 use crate::HEARTBEAT_INTERVAL;
@@ -22,10 +24,14 @@ use tracing::info;
 #[derive(Debug)]
 struct HeartbeatScan {
     sessions: Vec<GuardianSessionInfo>,
+    /// Scan start time used to check the quiet period for other sessions.
     started_at: UnixMillis,
+    /// Scan end time used to check the heartbeat age of the live session.
     completed_at: UnixMillis,
 }
 
+/// The earliest and latest heartbeat timestamps for one session in the scan.
+/// These timestamps do not describe the session's complete history.
 #[derive(Debug, Clone)]
 struct GuardianSessionInfo {
     session_id: SessionID,
@@ -34,7 +40,7 @@ struct GuardianSessionInfo {
 }
 
 impl GuardianReader {
-    /// Enforces that `live_session` has heartbeated recently.
+    /// Check that `live_session` has a heartbeat within the permitted age at the end of the scan.
     pub async fn ensure_session_live(&mut self, live_session: &str) -> GuardianResult<()> {
         let scan = self.read_recent_heartbeat_summary().await?;
         let live_session_info =
@@ -52,9 +58,8 @@ impl GuardianReader {
         Ok(())
     }
 
-    /// Enforces that `live_session` has heartbeated recently, while every other
-    /// guardian session has been quiet long enough to no longer be considered
-    /// active.
+    /// Check that `live_session` has a heartbeat within the permitted age at the end of the scan.
+    /// Check that all other sessions in the scan completed the required quiet period by the start of the scan.
     pub async fn ensure_session_live_and_others_quiet(
         &mut self,
         live_session: &str,
@@ -87,14 +92,26 @@ impl GuardianReader {
     async fn read_recent_heartbeat_summary(&mut self) -> GuardianResult<HeartbeatScan> {
         let started_at = now_timestamp_ms();
         let recent_heartbeats = self.read_recent_heartbeat_logs(started_at).await?;
+        let heartbeat_count = recent_heartbeats.len();
         let sessions = summarize_heartbeats_by_session(recent_heartbeats)?;
+        let completed_at = now_timestamp_ms();
+        info!(
+            heartbeat_count,
+            session_count = sessions.len(),
+            scan_started_at_ms = started_at,
+            scan_completed_at_ms = completed_at,
+            "Completed the recent heartbeat scan"
+        );
         Ok(HeartbeatScan {
             sessions,
             started_at,
-            completed_at: now_timestamp_ms(),
+            completed_at,
         })
     }
 
+    /// Read and verify heartbeat logs from three consecutive hour directories.
+    /// Start one hour before `reference_time`, or at the Unix epoch if that time is earlier.
+    /// Include adjacent hours to allow for clock differences near an hour boundary.
     async fn read_recent_heartbeat_logs(
         &mut self,
         reference_time: UnixMillis,
@@ -115,6 +132,8 @@ impl GuardianReader {
     }
 }
 
+/// Return the earliest and latest heartbeat timestamps for each session in the supplied logs.
+/// Return an error if any entry is not a heartbeat log.
 fn summarize_heartbeats_by_session(
     logs: Vec<VerifiedLogEntry>,
 ) -> GuardianResult<Vec<GuardianSessionInfo>> {
@@ -148,6 +167,9 @@ fn summarize_heartbeats_by_session(
         .collect())
 }
 
+/// Check that all sessions except `live_session` completed the quiet period by `scan_started_at`.
+/// Use the latest heartbeat from the other sessions in the summary.
+/// Return success if the summary contains no other session.
 fn validate_other_sessions_quiet(
     summary: &[GuardianSessionInfo],
     scan_started_at: UnixMillis,
@@ -172,6 +194,8 @@ fn validate_other_sessions_quiet(
     Ok(())
 }
 
+/// Return the session summary if its latest heartbeat is within the permitted age at `now`.
+/// Return an error if the session is absent or its heartbeat is too old.
 fn validate_session_live<'a>(
     summary: &'a [GuardianSessionInfo],
     now: UnixMillis,
@@ -237,7 +261,7 @@ mod tests {
 
     fn verified_log(session_id: &str, timestamp_ms: u64, message: LogMessage) -> VerifiedLogEntry {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
-        let entry = hashi_types::guardian::VerifiableLogEntry::new_at_timestamp(
+        let entry = hashi_types::guardian::SignedLogEntry::new_at_timestamp(
             session_id.into(),
             message,
             &signing_key,

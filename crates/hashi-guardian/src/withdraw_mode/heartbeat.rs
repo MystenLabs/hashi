@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::LogMessageV1;
-    use hashi_types::guardian::VerifiableLogEntry;
+    use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::VersionedLogMessage;
 
     #[tokio::test]
@@ -82,9 +82,10 @@ mod tests {
 
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 1, "heartbeat tick should write one record");
-        let record: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
+        let record: SignedLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, record.object_key());
-        let VersionedLogMessage::V1(LogMessageV1::Heartbeat(message)) = record.message() else {
+        let VersionedLogMessage::V1(LogMessageV1::Heartbeat(message)) = record.message_unchecked()
+        else {
             panic!("expected V1 heartbeat record");
         };
         assert_eq!(message.seq, 0);
