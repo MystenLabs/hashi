@@ -242,8 +242,12 @@ fun assert_can_submit(
     let in_dealing_committee = if (
         key.protocol_type() == hashi::tob::protocol_type_key_rotation()
     ) {
-        let previous = committee_set.committee_epoch_before(epoch);
-        previous.is_some() && in_committee(hashi, *previous.borrow(), dealer)
+        let dealers_epoch = if (pending.contains(&epoch)) {
+            option::some(committee_set.epoch())
+        } else {
+            committee_set.committee_epoch_before(epoch)
+        };
+        dealers_epoch.map!(|e| in_committee(hashi, e, dealer)).destroy_or!(false)
     } else {
         in_committee(hashi, epoch, dealer)
     };

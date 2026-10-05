@@ -152,7 +152,7 @@ fun test_rotation_cert_from_a_departing_dealer_is_accepted() {
         vector[VOTER1, VOTER2, VOTER3, VOTER4],
         ctx,
     );
-    let epoch = ctx.epoch() + 1;
+    let epoch = ctx.epoch() + 2;
     set_pending_committee(&mut hashi, epoch, vector[VOTER2, VOTER3, VOTER4]);
     let clock = sui::clock::create_for_testing(ctx);
 
