@@ -117,19 +117,33 @@ impl GuardianReader {
 
     // TODO: Since we got rid of `LogRecord`, it may make sense to rename
     // all usages of the variable record with log or log_entry?
-    async fn verify_record(&mut self, record: SignedLogEntry) -> GuardianResult<VerifiedLogEntry> {
+    async fn verify_record(
+        &mut self,
+        record: SignedLogEntry,
+        require_current: bool,
+    ) -> GuardianResult<VerifiedLogEntry> {
         self.ensure_session_info_loaded(record.session_id()).await?;
         let session_info = self
             .sessions
             .get_mut(record.session_id())
             .expect("session info was loaded above");
-        session_info.verify_record(&self.s3, record).await
+        let verified_record = session_info.verify_record(&self.s3, record).await?;
+        if require_current {
+            self.expected_deployment
+                .pcr_allowlist
+                .require_current_build(verified_record.build_pcrs())?;
+        }
+        Ok(verified_record)
     }
 
     // TODO: read_log?
-    async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogEntry> {
+    async fn read_verified_record(
+        &mut self,
+        key: &str,
+        require_current: bool,
+    ) -> GuardianResult<VerifiedLogEntry> {
         let record = self.s3.get_log_record(key).await?;
-        self.verify_record(record).await
+        self.verify_record(record, require_current).await
     }
 
     /// Read and verify each immutable record in a directory for one hour.
@@ -144,7 +158,7 @@ impl GuardianReader {
 
         let mut out = Vec::with_capacity(all_logs.len());
         for record in all_logs {
-            let verified_record = self.verify_record(record).await?;
+            let verified_record = self.verify_record(record, false).await?;
             out.push(verified_record);
         }
         info!(
@@ -171,12 +185,7 @@ impl GuardianReader {
             .s3
             .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
-        let verified_record = self.verify_record(record).await?;
-        if require_current {
-            self.expected_deployment
-                .pcr_allowlist
-                .require_current_build(verified_record.build_pcrs())?;
-        }
+        let verified_record = self.verify_record(record, require_current).await?;
         let session_id = verified_record.entry().session_id().clone();
         let msg = *verified_record
             .into_entry()
@@ -250,12 +259,7 @@ impl GuardianReader {
             info!("No completed ceremony log found");
             return Ok(None);
         };
-        let verified_record = self.read_verified_record(&key).await?;
-        if require_current {
-            self.expected_deployment
-                .pcr_allowlist
-                .require_current_build(verified_record.build_pcrs())?;
-        }
+        let verified_record = self.read_verified_record(&key, require_current).await?;
         let session_id = verified_record.entry().session_id().clone();
         let msg = verified_record
             .into_entry()
@@ -334,10 +338,7 @@ impl GuardianReader {
         let key = CeremonyProposalLogMessage::object_key(session_id);
         // A live proposal has just been published, so its short-lived Compliance
         // lock must still be active.
-        let verified_record = self.read_verified_record(&key).await?;
-        self.expected_deployment
-            .pcr_allowlist
-            .require_current_build(verified_record.build_pcrs())?;
+        let verified_record = self.read_verified_record(&key, true).await?;
         let writing_session_id = verified_record.entry().session_id().clone();
         let proposal = *verified_record
             .into_entry()
@@ -408,7 +409,7 @@ impl GuardianReader {
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let verified_record = self.read_verified_record(&key).await?;
+        let verified_record = self.read_verified_record(&key, false).await?;
         let session_id = verified_record.entry().session_id().clone();
         let msg = verified_record
             .into_entry()
@@ -437,7 +438,7 @@ impl GuardianReader {
                 "expected exactly one genesis record at {key}, found {keys:?}"
             )));
         }
-        let verified_record = self.read_verified_record(&key).await?;
+        let verified_record = self.read_verified_record(&key, false).await?;
         let session_id = verified_record.entry().session_id().clone();
         let genesis = verified_record
             .into_entry()
