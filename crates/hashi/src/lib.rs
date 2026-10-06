@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use hashi_types::committee::Bls12381PrivateKey;
@@ -43,6 +44,14 @@ pub mod withdrawals;
 
 // TODO: Tune based on production workload.
 const BATCH_SIZE_PER_WEIGHT: u16 = 10;
+const SUI_RPC_STARTUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+fn retryable_sui_rpc_startup_error(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+    )
+}
 
 pub(crate) struct NextEpochKeys {
     pub encryption_public_key: EncryptionPublicKey,
@@ -754,13 +763,25 @@ impl Hashi {
         use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 
         let sui_rpc_url = self.config.sui_rpc.as_deref().unwrap();
-        let mut client = sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
-
-        let service_info = client
-            .ledger_client()
-            .get_service_info(GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
+        let service_info = loop {
+            let mut client = sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
+            match client
+                .ledger_client()
+                .get_service_info(GetServiceInfoRequest::default())
+                .await
+            {
+                Ok(response) => break response.into_inner(),
+                Err(status) if retryable_sui_rpc_startup_error(&status) => {
+                    tracing::warn!(
+                        error = %status,
+                        retry_after_secs = SUI_RPC_STARTUP_RETRY_INTERVAL.as_secs(),
+                        "Sui RPC unavailable during startup; retrying"
+                    );
+                    tokio::time::sleep(SUI_RPC_STARTUP_RETRY_INTERVAL).await;
+                }
+                Err(status) => return Err(status.into()),
+            }
+        };
 
         let rpc_chain_id = service_info.chain_id();
 
@@ -1620,6 +1641,7 @@ mod test {
     use crate::Hashi;
     use crate::ServerVersion;
     use crate::bitcoind_rpc_error_with_version_hint;
+    use crate::retryable_sui_rpc_startup_error;
 
     use crate::config::Config;
     use crate::grpc::Client;
@@ -1649,6 +1671,27 @@ mod test {
         let e = corepc_client::client_sync::Error::JsonRpc(transport);
         let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
         assert!(!msg.contains("Bitcoin Core"), "{msg}");
+    }
+
+    #[test]
+    fn sui_rpc_startup_retries_only_transient_availability_errors() {
+        for code in [tonic::Code::Unavailable, tonic::Code::DeadlineExceeded] {
+            assert!(retryable_sui_rpc_startup_error(&tonic::Status::new(
+                code,
+                "transient"
+            )));
+        }
+
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+        ] {
+            assert!(!retryable_sui_rpc_startup_error(&tonic::Status::new(
+                code,
+                "permanent"
+            )));
+        }
     }
 
     #[test]
