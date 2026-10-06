@@ -487,6 +487,10 @@ pub enum BackupCommands {
         /// Directory to write the encrypted backup into
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
+
+        /// Keep the archive local without uploading to configured S3 storage
+        #[clap(long)]
+        local_only: bool,
     },
 
     /// Restore files from a backup archive.
@@ -1259,8 +1263,10 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 node_config_path,
                 backup_pgp_cert,
                 output_dir,
+                local_only,
             } => {
-                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir)?;
+                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir, local_only)
+                    .await?;
             }
             BackupCommands::Restore {
                 backup_tarball,

@@ -286,9 +286,10 @@ Operators must remove these plaintext copies when no longer needed.
 
 ## Cloud backup
 
-Optional S3 backup configuration is available in Step 1, together with adoption
-metrics. **Automatic S3 uploads are not active yet**; upload integration comes in
-Step 2. Continue keeping independent off-host copies of your local backups.
+When configured, S3 upload runs on the existing scheduled backup cadence, after
+the encrypted archive has been successfully published locally. The local archive
+remains in `backup-dir` and follows the same retention policy whether or not the
+upload succeeds. There is no separate upload schedule.
 
 Add the following optional table to the node config:
 
@@ -298,12 +299,12 @@ bucket = "my-hashi-backups"
 region = "us-east-1"
 ```
 
-Omit `[backup-s3]` to leave S3 backup configuration disabled. When the table is
-present, both `bucket` and `region` are required and must be nonempty. Use the
-bucket name, not an S3 URI. There are no credential or custom-prefix settings in
-this table. The planned upload integration uses the AWS default credential chain;
-provide credentials through the runtime environment or an IAM role, not secrets
-in the node config.
+Omit `[backup-s3]` for local-only backups: no S3 client is created and no S3
+requests are made. When the table is present, both `bucket` and `region` are
+required and must be nonempty. Use the bucket name, not an S3 URI. There are no
+credential or custom-prefix settings in this table. Uploads use the AWS default
+credential chain; provide credentials through the runtime environment or an IAM
+role, not secrets in the node config.
 
 The object namespace is derived from the node identity:
 
@@ -318,6 +319,35 @@ S3 configuration requires the effective chain ID to be a safe, nonempty path
 component, a nonzero `hashi-object-id`, and a `validator-address`. These
 additional identity requirements apply only when `[backup-s3]` is enabled.
 
+The archive filename is appended to this trailing-slash namespace, producing
+`s3://bucket/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-<timestamp>.tar.asc`.
+Only the completed, encrypted local archive is uploaded. Configuration loading
+has a 30-second timeout; HTTP connect and read timeouts are 10 and 60 seconds.
+The entire upload, including credentials and file streaming, is bounded to
+15 minutes. Uploads have no queue or application retries,
+and the AWS SDK is configured for one attempt. A failed upload is not queued for
+a later retry; the next scheduled backup creates and attempts to upload a new
+archive. Failures report the retained local archive path and intended S3 URI.
+
+### Manual backups
+
+Stop the node before opening its database for a manual backup:
+
+```bash
+# Publish locally, then upload when [backup-s3] is configured.
+hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
+
+# Publish locally without initializing an S3 client or uploading.
+hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups --local-only
+```
+
+The default command succeeds only after the local save and any configured upload
+succeed. An upload failure returns a nonzero exit status but preserves the local
+archive; its error identifies both the retained local path and intended S3 URI.
+Without `[backup-s3]`, the default command only saves locally.
+
+### Backup metrics
+
 Adoption metrics describe **configuration, not backup health**:
 
 - `hashi_backup_s3_configured` is always exported: `0` when disabled and `1` when
@@ -329,3 +359,22 @@ Adoption metrics describe **configuration, not backup health**:
 
 These metrics do not verify credentials, bucket access, or upload success, and
 must not be used as evidence that an off-host backup exists.
+
+Scheduled completion counters are exported at zero on initialization:
+
+- `hashi_backup_scheduled_local_successes_total` increments only after an actual
+  scheduled local archive is successfully published, even if its upload fails.
+- `hashi_backup_scheduled_remote_successes_total` increments only after an actual
+  scheduled S3 upload succeeds. It stays zero when S3 is unconfigured.
+
+Neither counter increments for attempts, failures, skipped backups, or manual
+backups. They count completions in the running node process, not the number of
+archives currently retained locally or in S3.
+
+### Restore and infrastructure limits
+
+Restore still accepts local archive paths only; restoring directly from an S3 URI
+is unsupported. Download an S3 object separately before using the existing local
+restore commands. Configuring uploads does not provision buckets, IAM roles or
+policies, or bucket lifecycle rules. Operators must supply that infrastructure
+and manage remote retention separately from local cleanup.

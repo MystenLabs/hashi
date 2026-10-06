@@ -46,6 +46,9 @@ pub struct Metrics {
     // Remote-backup adoption only; these do not report S3 reachability or health.
     backup_s3_configured: IntGauge,
     backup_s3_bucket_info: IntGaugeVec,
+    // Completed scheduled backups only; manual saves do not increment these.
+    pub(crate) backup_scheduled_local_successes: IntCounter,
+    pub(crate) backup_scheduled_remote_successes: IntCounter,
 
     // TRM AML screening metrics
     pub trm_enabled: IntGauge,
@@ -491,6 +494,18 @@ impl Metrics {
                 "hashi_backup_s3_bucket_info",
                 "Configured S3 backup bucket (not a health check)",
                 &["bucket_uri"],
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_local_successes: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_local_successes_total",
+                "Scheduled local backup archives successfully published",
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_remote_successes: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_remote_successes_total",
+                "Scheduled backup archives successfully uploaded to S3",
                 registry,
             )
             .unwrap(),
@@ -2275,6 +2290,32 @@ mod tests {
             ] {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
+        }
+    }
+
+    #[test]
+    fn scheduled_backup_counters_expose_zero_initially() {
+        let registry = Registry::new();
+        let _metrics = Metrics::new(&registry);
+        let families = registry.gather();
+        for name in [
+            "hashi_backup_scheduled_local_successes_total",
+            "hashi_backup_scheduled_remote_successes_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap();
+            assert_eq!(family.get_metric().len(), 1);
+            assert!(family.get_metric()[0].label.is_empty());
+            assert_eq!(
+                family.get_metric()[0]
+                    .get_counter()
+                    .as_ref()
+                    .expect("counter")
+                    .value(),
+                0.0
+            );
         }
     }
 

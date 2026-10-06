@@ -32,6 +32,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::Hashi;
+use crate::backup_s3::BackupS3Client;
 use crate::db::Database;
 
 use fjall::KeyspaceCreateOptions;
@@ -90,6 +91,7 @@ impl BackupHandle {
 pub struct BackupService {
     inner: Arc<Hashi>,
     receiver: mpsc::UnboundedReceiver<BackupMaintenanceRequest>,
+    s3_client: Option<BackupS3Client>,
 }
 
 impl BackupService {
@@ -99,6 +101,7 @@ impl BackupService {
         let service = Self {
             inner: hashi,
             receiver,
+            s3_client: None,
         };
         let handle = BackupHandle { sender };
         (service, handle)
@@ -118,31 +121,69 @@ impl BackupService {
                     epoch,
                     write_backup,
                 } => {
-                    let hashi = self.inner.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        hashi.maintain_backups_after_epoch_change(epoch, write_backup)
-                    })
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
-                            error!(
-                                epoch,
-                                write_backup, "Epoch backup maintenance failed: {e:#}"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                epoch,
-                                write_backup, "Epoch backup maintenance failed to join: {e}"
-                            );
-                        }
+                    if let Err(e) = self.process_epoch_change(epoch, write_backup).await {
+                        error!(
+                            epoch,
+                            write_backup, "Epoch backup maintenance failed: {e:#}"
+                        );
                     }
                 }
             }
         }
         info!("Backup service stopped");
     }
+
+    async fn process_epoch_change(&mut self, epoch: u64, write_backup: bool) -> Result<()> {
+        let hashi = self.inner.clone();
+        let archive = tokio::task::spawn_blocking(move || {
+            hashi.maintain_backups_after_epoch_change(epoch, write_backup)
+        })
+        .await
+        .context("Epoch backup maintenance failed to join")??;
+        if let Some(archive) = archive
+            && let Some(uri) = upload(&self.inner.config, &mut self.s3_client, &archive).await?
+        {
+            self.inner.metrics.backup_scheduled_remote_successes.inc();
+            info!(epoch, %uri, "Scheduled remote backup completed");
+        }
+        Ok(())
+    }
+}
+
+/// Upload a published local archive if S3 is configured. Initialization failures
+/// leave the client empty so the next scheduled backup can try initialization again.
+pub(crate) async fn upload(
+    config: &crate::config::Config,
+    client: &mut Option<BackupS3Client>,
+    archive: &Path,
+) -> Result<Option<String>> {
+    let Some(s3) = &config.backup_s3 else {
+        return Ok(None);
+    };
+    let namespace = config.backup_s3_namespace().expect("S3 is configured");
+    if client.is_none() {
+        let filename = archive
+            .file_name()
+            .context("Backup archive has no filename")?;
+        let uri = format!(
+            "s3://{}/{}{}",
+            s3.bucket,
+            namespace,
+            filename.to_string_lossy()
+        );
+        *client = Some(BackupS3Client::connect(&s3.region).await.with_context(|| {
+            format!(
+                "Failed to upload backup to {uri}; local archive retained at {}",
+                archive.display()
+            )
+        })?);
+    }
+    client
+        .as_ref()
+        .expect("S3 client initialized")
+        .upload(&s3.bucket, &namespace, archive)
+        .await
+        .map(Some)
 }
 
 /// Open `path` for writing with mode `0o600`, failing if anything already
@@ -1021,6 +1062,186 @@ mod tests {
             archive.finish().unwrap();
         }
         tar_bytes
+    }
+
+    fn backup_service_fixture(
+        remote: bool,
+        config_path_present: bool,
+    ) -> (BackupService, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut config = crate::config::Config::new_for_testing();
+        config.db = Some(directory.path().join("db"));
+        config.backup_dir = directory.path().join("backups");
+        config.backup_pgp_cert = mock_pgp_cert();
+        if remote {
+            config.backup_s3 = Some(crate::config::BackupS3Config {
+                bucket: "backup-bucket".to_owned(),
+                region: "us-east-1".to_owned(),
+            });
+            config.sui_chain_id = Some("aB12Cd34".to_owned());
+            config.hashi_ids = Some(crate::config::HashiIds {
+                package_id: "0x1".parse().unwrap(),
+                hashi_object_id: "0x2".parse().unwrap(),
+            });
+            config.validator_address = Some("0x3".parse().unwrap());
+        }
+        config.save(&config_path).unwrap();
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            config_path_present.then_some(config_path),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        let (service, _) = BackupService::new(hashi);
+        (service, directory)
+    }
+
+    #[tokio::test]
+    async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_success() {
+        for (config_path_present, write_backup, remove_config) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let (mut service, directory) = backup_service_fixture(true, config_path_present);
+            if remove_config {
+                fs::remove_file(directory.path().join("config.toml")).unwrap();
+            }
+            let result = service.process_epoch_change(6, write_backup).await;
+            assert_eq!(result.is_err(), remove_config);
+            assert!(service.s3_client.is_none());
+            assert_eq!(
+                service.inner.metrics.backup_scheduled_local_successes.get(),
+                0
+            );
+            assert_eq!(
+                service
+                    .inner
+                    .metrics
+                    .backup_scheduled_remote_successes
+                    .get(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_local_only_completes_without_initializing_s3() {
+        let (mut service, _directory) = backup_service_fixture(false, true);
+        service.process_epoch_change(6, true).await.unwrap();
+        assert!(service.s3_client.is_none());
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+        assert_eq!(
+            service
+                .inner
+                .metrics
+                .backup_scheduled_remote_successes
+                .get(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_upload_counts_only_completed_stages_and_preserves_local_on_failure() {
+        use axum::body::Bytes;
+        use axum::http::HeaderMap;
+        use axum::http::StatusCode;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        for fail in [false, true] {
+            let (mut service, _directory) = backup_service_fixture(true, true);
+            let hashi = service.inner.clone();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let request_count = requests.clone();
+            let router = axum::Router::new().fallback_service(axum::routing::put(
+                move |headers: HeaderMap, body: Bytes| {
+                    let hashi = hashi.clone();
+                    let requests = request_count.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        // Publication and the local counter must precede the HTTP request.
+                        let archive = fs::read_dir(&hashi.config.backup_dir)
+                            .unwrap()
+                            .next()
+                            .unwrap()
+                            .unwrap()
+                            .path();
+                        let archive_bytes = fs::read(archive).unwrap();
+                        assert!(!archive_bytes.is_empty());
+                        if let Some(decoded_length) = headers.get("x-amz-decoded-content-length") {
+                            assert_eq!(
+                                decoded_length.to_str().unwrap().parse::<usize>().unwrap(),
+                                archive_bytes.len()
+                            );
+                        } else {
+                            assert_eq!(archive_bytes.as_slice(), body.as_ref());
+                        }
+                        assert_eq!(hashi.metrics.backup_scheduled_local_successes.get(), 1);
+                        assert_eq!(hashi.metrics.backup_scheduled_remote_successes.get(), 0);
+                        if fail {
+                            (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "<Error><Code>SlowDown</Code><Message>try later</Message></Error>",
+                            )
+                        } else {
+                            (StatusCode::OK, "")
+                        }
+                    }
+                },
+            ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let result = service.process_epoch_change(6, true).await;
+            server.abort();
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                service.inner.metrics.backup_scheduled_local_successes.get(),
+                1
+            );
+            assert_eq!(
+                service
+                    .inner
+                    .metrics
+                    .backup_scheduled_remote_successes
+                    .get(),
+                u64::from(!fail)
+            );
+            let archive = fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert!(archive.is_file());
+            if fail {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(error.contains(&archive.display().to_string()), "{error}");
+                let namespace = service.inner.config.backup_s3_namespace().unwrap();
+                let uri = format!(
+                    "s3://backup-bucket/{namespace}{}",
+                    archive.file_name().unwrap().to_string_lossy()
+                );
+                assert!(error.contains(&uri), "{error}");
+            } else {
+                result.unwrap();
+            }
+        }
     }
 
     #[test]

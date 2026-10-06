@@ -29,12 +29,13 @@ pub enum RestoreDecryptor {
 }
 
 /// Save an encrypted backup of the node config, referenced files, and database
-pub fn save(
+pub async fn save(
     node_config_path: &Path,
     backup_pgp_cert_override: Option<String>,
     output_dir: &Path,
-) -> Result<()> {
-    let node_config = crate::config::Config::load(node_config_path).with_context(|| {
+    local_only: bool,
+) -> Result<PathBuf> {
+    let node_config = Config::load(node_config_path).with_context(|| {
         format!(
             "Failed to load node config from {}",
             node_config_path.display()
@@ -82,10 +83,18 @@ pub fn save(
     })?;
 
     let output_path = backup::save(node_config_path, &node_config, &db, &recipient, output_dir)?;
+    // Release the database lock before potentially slow remote I/O.
+    drop(db);
 
     print_success(&format!("Backup completed: {}", output_path.display()));
+    if !local_only {
+        let mut client = None;
+        if let Some(uri) = backup::upload(&node_config, &mut client, &output_path).await? {
+            print_success(&format!("Backup uploaded: {uri}"));
+        }
+    }
 
-    Ok(())
+    Ok(output_path)
 }
 
 pub(crate) fn resolve_backup_recipient(
@@ -275,26 +284,18 @@ mod tests {
     }
 
     /// Run `save` with a freshly generated OpenPGP key and return everything `restore` needs.
-    fn save_with_fresh_pgp_key(fixture: &TestFixture) -> SavedBackup {
+    async fn save_with_fresh_pgp_key(fixture: &TestFixture) -> SavedBackup {
         let dir = tempfile::Builder::new().tempdir().unwrap();
         let (public_cert, secret_key) = mock_pgp_keypair();
 
-        save(&fixture.node_config_path, Some(public_cert), dir.path()).unwrap();
-
-        let tarball = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        name.starts_with(backup::BACKUP_FILE_NAME_PREFIX)
-                            && name.ends_with(".tar.asc")
-                    })
-                    .unwrap_or(false)
-            })
-            .expect("save() did not produce a tarball");
+        let tarball = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            dir.path(),
+            false,
+        )
+        .await
+        .unwrap();
 
         let secret_key_file = dir.path().join("secret-key.asc");
         fs::write(&secret_key_file, secret_key).unwrap();
@@ -353,10 +354,10 @@ mod tests {
         output_dir.join(backup::extract_dir_name(tarball).unwrap())
     }
 
-    #[test]
-    fn round_trip_restores_files_to_output_dir() {
+    #[tokio::test]
+    async fn round_trip_restores_files_to_output_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(
@@ -394,10 +395,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restore_rejects_truncated_backup_before_finalizing_extract_dir() {
+    #[tokio::test]
+    async fn restore_rejects_truncated_backup_before_finalizing_extract_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         let original = fs::read(&backup.tarball).unwrap();
         assert!(original.len() > 32, "backup unexpectedly small");
@@ -426,8 +427,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn basename_collision_disambiguates_extracted_files() {
+    #[tokio::test]
+    async fn basename_collision_disambiguates_extracted_files() {
         // Set up two key files with the same basename in different directories.
         let src = tempfile::Builder::new().tempdir().unwrap();
         let tls_dir = src.path().join("tls");
@@ -455,7 +456,7 @@ mod tests {
             node_config_path,
         };
 
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         // Verify the archive contains both key.pem and key-2.pem.
         let out = tempfile::Builder::new().tempdir().unwrap();
@@ -471,8 +472,8 @@ mod tests {
         assert_file_eq(&extract_dir.join("key-2.pem"), b"operator-key-bytes");
     }
 
-    #[test]
-    fn round_trip_preserves_db_contents_after_extraction() {
+    #[tokio::test]
+    async fn round_trip_preserves_db_contents_after_extraction() {
         use hashi_types::committee::EncryptionPrivateKey;
         use std::collections::BTreeMap;
         use std::num::NonZeroU16;
@@ -497,7 +498,7 @@ mod tests {
                 .unwrap();
         }
 
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(
@@ -536,8 +537,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_uses_node_config_backup_pgp_cert() {
+    #[tokio::test]
+    async fn save_uses_node_config_backup_pgp_cert() {
         let fixture = TestFixture::new();
         let (public_cert, _) = mock_pgp_keypair();
 
@@ -546,11 +547,59 @@ mod tests {
         node_config.save(&fixture.node_config_path).unwrap();
 
         let dir = tempfile::Builder::new().tempdir().unwrap();
-        save(&fixture.node_config_path, None, dir.path()).unwrap();
+        let tarball = save(&fixture.node_config_path, None, dir.path(), false)
+            .await
+            .unwrap();
+        assert!(tarball.is_file());
     }
 
-    #[test]
-    fn save_accepts_backup_pgp_cert_file_override() {
+    #[tokio::test]
+    async fn save_local_only_skips_configured_s3_upload() {
+        let fixture = TestFixture::new();
+        let (public_cert, secret_key) = mock_pgp_keypair();
+        let mut node_config = Config::load(&fixture.node_config_path).unwrap();
+        node_config.sui_chain_id = Some("AbCdEF12".into());
+        node_config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: sui_sdk_types::Address::ZERO,
+            hashi_object_id: "0x1".parse().unwrap(),
+        });
+        node_config.validator_address = Some("0x2".parse().unwrap());
+        node_config.backup_s3 = Some(crate::config::BackupS3Config {
+            bucket: "hashi-local-only-no-network".into(),
+            region: "us-west-2".into(),
+        });
+        node_config.save(&fixture.node_config_path).unwrap();
+
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let tarball = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            dir.path(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tarball.parent(), Some(dir.path()));
+        assert!(tarball.is_file());
+        let secret_key_file = dir.path().join("secret-key.asc");
+        fs::write(&secret_key_file, secret_key).unwrap();
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(
+            &tarball,
+            RestoreDecryptor::LocalSecretKey {
+                secret_key_path: secret_key_file,
+            },
+            out.path(),
+        )
+        .unwrap();
+        assert_file_eq(
+            &expected_extract_dir(&tarball, out.path()).join("config.toml"),
+            &fs::read(&fixture.node_config_path).unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn save_accepts_backup_pgp_cert_file_override() {
         let fixture = TestFixture::new();
         let (public_cert, _) = mock_pgp_keypair();
         let dir = tempfile::Builder::new().tempdir().unwrap();
@@ -561,7 +610,9 @@ mod tests {
             &fixture.node_config_path,
             Some(cert_path.to_string_lossy().into_owned()),
             dir.path(),
+            false,
         )
+        .await
         .unwrap();
 
         assert!(
@@ -578,8 +629,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_errors_when_db_path_does_not_exist() {
+    #[tokio::test]
+    async fn save_errors_when_db_path_does_not_exist() {
         // A typo'd `db` field in the node config would otherwise let fjall
         // silently `create_dir_all` and produce an empty backup.
         let fixture = TestFixture::new();
@@ -588,7 +639,14 @@ mod tests {
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let (public_cert, _) = mock_pgp_keypair();
-        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
+        let err = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            out.path(),
+            false,
+        )
+        .await
+        .unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -606,8 +664,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_surfaces_locked_db_error_when_node_is_running() {
+    #[tokio::test]
+    async fn save_surfaces_locked_db_error_when_node_is_running() {
         // Simulate a running node by holding the fjall lock ourselves while
         // save runs. The friendly "node is running" message proves the
         // fjall::Error::Locked downcast in save() is actually reachable,
@@ -618,7 +676,14 @@ mod tests {
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let (public_cert, _) = mock_pgp_keypair();
-        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
+        let err = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            out.path(),
+            false,
+        )
+        .await
+        .unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -627,8 +692,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_includes_path_style_node_config_key_files() {
+    #[tokio::test]
+    async fn save_includes_path_style_node_config_key_files() {
         // `tls_private_key` / `operator_private_key` in the node config are
         // path-or-inline-PEM strings. When a path is used, the referenced
         // file must be captured in the backup so the key material survives.
@@ -645,7 +710,7 @@ mod tests {
         node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
         node_config.save(&fixture.node_config_path).unwrap();
 
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(
@@ -660,8 +725,8 @@ mod tests {
         assert_file_eq(&extract_dir.join("operator.pem"), b"operator-key-bytes");
     }
 
-    #[test]
-    fn save_errors_when_node_config_key_path_does_not_exist() {
+    #[tokio::test]
+    async fn save_errors_when_node_config_key_path_does_not_exist() {
         // A path-shaped value pointing at a missing file is almost certainly a
         // typo. Silently skipping it would produce a backup that can't restore
         // the node, so we bail instead.
@@ -673,7 +738,14 @@ mod tests {
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let (public_cert, _) = mock_pgp_keypair();
-        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
+        let err = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            out.path(),
+            false,
+        )
+        .await
+        .unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -686,8 +758,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_ignores_inline_suiprivkey_and_base64_node_config_key_values() {
+    #[tokio::test]
+    async fn save_ignores_inline_suiprivkey_and_base64_node_config_key_values() {
         // The operator key may be configured inline in any format the key
         // loader accepts; none of them may be mistaken for a file path. The
         // node config file itself already captures inline values.
@@ -706,12 +778,12 @@ mod tests {
             // Just running save without error is the assertion: if the
             // inline key were treated as a path, save() would bail on the
             // missing file.
-            let _ = save_with_fresh_pgp_key(&fixture);
+            let _ = save_with_fresh_pgp_key(&fixture).await;
         }
     }
 
-    #[test]
-    fn save_error_never_echoes_inline_key_material() {
+    #[tokio::test]
+    async fn save_error_never_echoes_inline_key_material() {
         // A malformed inline key must fail the backup without the value
         // (potentially a private key) ending up in the error chain, which
         // automatic backups write to the log.
@@ -726,7 +798,14 @@ mod tests {
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let (public_cert, _) = mock_pgp_keypair();
-        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
+        let err = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            out.path(),
+            false,
+        )
+        .await
+        .unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -739,8 +818,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_ignores_inline_pem_node_config_key_values() {
+    #[tokio::test]
+    async fn save_ignores_inline_pem_node_config_key_values() {
         // When tls_private_key is inline PEM (not a real file), it must not
         // leak into backup_file_paths as a bogus path. The node config file
         // itself already captures inline values.
@@ -756,13 +835,13 @@ mod tests {
         // Just running save without error is the assertion: if the inline
         // PEM were treated as a path, the pre-flight `file.exists()` check
         // in save() would bail.
-        let _ = save_with_fresh_pgp_key(&fixture);
+        let _ = save_with_fresh_pgp_key(&fixture).await;
     }
 
-    #[test]
-    fn restore_accepts_unencrypted_tar_without_decrypting() {
+    #[tokio::test]
+    async fn restore_accepts_unencrypted_tar_without_decrypting() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
         let tarball = write_unencrypted_tar_backup(&backup);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
@@ -773,10 +852,10 @@ mod tests {
         assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
     }
 
-    #[test]
-    fn restore_ignores_forged_absolute_original_paths() {
+    #[tokio::test]
+    async fn restore_ignores_forged_absolute_original_paths() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
         let tarball = write_unencrypted_tar_backup(&backup);
         let external = tempfile::Builder::new().tempdir().unwrap();
         let config_target = external.path().join("config-parent/config.toml");
@@ -834,10 +913,10 @@ mod tests {
         assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
     }
 
-    #[test]
-    fn restore_rejects_tarball_without_backup_suffix() {
+    #[tokio::test]
+    async fn restore_rejects_tarball_without_backup_suffix() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_pgp_key(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture).await;
 
         // Rename the tarball to strip the suffix entirely.
         let bad = backup.tarball.with_file_name("totally-not-a-backup");

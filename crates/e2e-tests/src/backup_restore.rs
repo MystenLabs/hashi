@@ -20,7 +20,6 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
-    use hashi::backup::BACKUP_FILE_NAME_PREFIX;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
@@ -72,22 +71,6 @@ mod tests {
         let path = dir.join("node-config.toml");
         config.save(&path).unwrap();
         path
-    }
-
-    /// Find the single backup tarball produced under
-    /// `dir` by `backup::save`.
-    fn find_backup_tarball(dir: &Path) -> PathBuf {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("asc")
-                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
-                        name.starts_with(&format!("{BACKUP_FILE_NAME_PREFIX}-"))
-                    })
-            })
-            .expect("backup::save did not produce a tarball")
     }
 
     /// Full round-trip test:
@@ -178,8 +161,8 @@ mod tests {
         // Keep this manual archive separate from automatic backups, which use
         // the node's configured recipient rather than the key generated above.
         let save_out_dir = node0_config.backup_dir.join("manual");
-        commands::backup::save(&node_config_path, Some(recipient), &save_out_dir)?;
-        let tarball = find_backup_tarball(&save_out_dir);
+        let tarball =
+            commands::backup::save(&node_config_path, Some(recipient), &save_out_dir, true).await?;
 
         // 4. Destroy node 0's on-disk state so recovery actually has to put
         //    things back. The config has its own tempdir; both the DB and

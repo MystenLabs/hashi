@@ -86,7 +86,7 @@ These details trip up most operators:
 | [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
 | [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
-| [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available (cloud backup upload) |
+| [12. Backup limitations](#12-backup-limitations) | Remote restore and cloud infrastructure boundaries |
 | [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
@@ -883,7 +883,7 @@ Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Restore pic
 ```bash
 # Create a backup (uses the required configured cert unless overridden inline/by path).
 # Stop the node first: backup save opens its database and refuses while the node holds it.
-hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .]
+hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .] [--local-only]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
 hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
@@ -892,6 +892,12 @@ hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-di
 # Restore an unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 ```
+
+`backup save` publishes locally first, then uploads when `[backup-s3]` is
+configured. Add `--local-only` to skip S3 client initialization and upload. With no
+S3 configuration, no S3 client or requests are created. A configured upload
+failure returns a nonzero exit status and reports the retained local archive
+path and intended S3 URI; it does not delete the local archive.
 
 `--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
 
@@ -1083,6 +1089,14 @@ Notes:
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`, or `-1` until the pool holds a UTXO to probe. |
+| `hashi_backup_s3_configured` | gauge | Configuration only: `1` when S3 is configured, otherwise `0`; not proof of upload success. |
+| `hashi_backup_s3_bucket_info` | gauge | Configured only: value `1`, with `bucket_uri` identifying the trailing-slash S3 namespace. Not a health check. |
+| `hashi_backup_scheduled_local_successes_total` | counter | Starts at zero; increments only after a scheduled local archive is successfully published, even if its upload fails. |
+| `hashi_backup_scheduled_remote_successes_total` | counter | Starts at zero; increments only after a scheduled S3 upload succeeds; stays zero with S3 unconfigured. |
+
+Backup completion counters never include manual backups, failed attempts, or
+skipped backups. They count successful completions in this node process, not
+currently retained archives.
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count.
 
@@ -1177,6 +1191,33 @@ hashi committee start-reconfig
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
 The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Restore also accepts a `.tar` you decrypted yourself. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+
+To upload each completed encrypted archive on the same scheduled cadence, add an
+optional table after the config's top-level keys:
+
+```toml
+[backup-s3]
+bucket = "my-hashi-backups"
+region = "us-east-1"
+```
+
+Both fields are required when the table is present. Uploads use the AWS default
+credential chain and the identity-derived
+`<sui-chain-id>/<hashi-object-id>/<validator-address>/` namespace, followed by the
+archive filename. See [Cloud backup](node-backup.mdx#cloud-backup) for identity
+requirements and credential handling. With no table, backups remain local-only
+and create no S3 client or requests.
+
+Local publication always precedes upload. Initialization and upload have a
+bounded timeout; there is no upload queue or application retry, and the AWS SDK
+is configured for one attempt. Failures preserve the local archive and report
+its path and the intended S3 URI. Failed uploads are not queued for a later
+retry; the next scheduled backup creates a new archive.
+
+Manual backups use both destinations by default when S3 is configured. Add
+`--local-only` to save locally without initializing S3 or uploading. An upload
+failure makes the command exit nonzero, even though the local archive remains
+available. Manual backups never increment the scheduled completion counters.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
@@ -1416,13 +1457,16 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 
 ---
 
-## 12. Coming soon
+## 12. Backup limitations
 
-The following capabilities are planned but not yet available.
+S3 upload is available, but remote restore is not: `backup restore` accepts local
+archive paths, not S3 URIs. Download an object separately before following the
+existing restore procedure.
 
-### Cloud backup integration
-
-> **Coming soon (Step 2):** Automatic upload of encrypted backups to S3 is not active yet. Step 1 provides optional `[backup-s3]` configuration and adoption metrics only; these report configuration, not backup health or upload success. See [Cloud backup](node-backup.mdx#cloud-backup) for the required bucket and region, identity-derived namespace, credential handling, and metrics. Continue keeping independent off-host copies of local backups.
+Upload configuration does not provision buckets, IAM roles or policies, or
+bucket lifecycle rules. Operators must supply this infrastructure and manage
+remote retention separately; local cleanup does not delete S3 objects. See
+[Cloud backup](node-backup.mdx#cloud-backup) for upload behavior and metrics.
 
 ---
 
