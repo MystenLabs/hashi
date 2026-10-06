@@ -87,8 +87,8 @@ pub struct EnvFile {
 pub struct ValidatorEntry {
     /// Hostname of the hashi node container (e.g. `hashi1`).
     pub hashi_host: String,
-    /// Sui keystore encoding of the validator's account key, which is also the
-    /// hashi operator key.
+    /// Sui keystore encoding of this Hashi validator's operator key. These
+    /// accounts are independent of the Sui validator set.
     pub account_key: String,
 }
 
@@ -276,8 +276,7 @@ mod tests {
         let env: EnvFile = serde_yaml::from_str(
             "funded-account-key: AAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH\n\
              validators:\n\
-             - name: validator1\n  \
-               hashi-host: hashi1\n  \
+             - hashi-host: hashi1\n  \
                account-key: AAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH\n\
              guardian-btc-secret-key: 0707070707070707070707070707070707070707070707070707070707070707\n",
         )

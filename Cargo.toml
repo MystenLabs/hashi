@@ -3,6 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
+antithesis_sdk = "0.3.0"
 # sui sdk crates
 sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7", features = ["serde", "hash"] }
 sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7", features = ["ed25519", "secp256k1", "secp256r1", "pem", "bech32"] }

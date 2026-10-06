@@ -987,6 +987,7 @@ impl Hashi {
             .await
         {
             Ok(Some(_)) => {
+                antithesis_sdk::assert_reachable!("Hashi registers a validator on Sui");
                 tracing::info!("Validator registered/updated on-chain");
                 self.reported_registration_aborts.write().unwrap().clear();
             }

@@ -132,6 +132,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    antithesis_sdk::antithesis_init();
     let args = Args::parse();
 
     match args.command {

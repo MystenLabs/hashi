@@ -1302,6 +1302,7 @@ impl Monitor {
         };
         match result {
             Ok(_) => {
+                Self::report_successful_bitcoin_broadcast(txid);
                 info!("Transaction {txid} broadcast via Bitcoin Core RPC");
                 caller.reply(Ok(()));
             }
@@ -1310,6 +1311,7 @@ impl Monitor {
             {
                 // RPC error -27: tx already confirmed on-chain ("outputs already in utxo
                 // set"), so the broadcast succeeded. (A mempool duplicate returns Ok.)
+                Self::report_successful_bitcoin_broadcast(txid);
                 debug!("Transaction {txid} already confirmed on-chain");
                 caller.reply(Ok(()));
             }
@@ -1318,6 +1320,13 @@ impl Monitor {
                 caller.reply(Err(anyhow::anyhow!(e)));
             }
         }
+    }
+
+    fn report_successful_bitcoin_broadcast(txid: bitcoin::Txid) {
+        antithesis_sdk::assert_reachable!(
+            "Hashi broadcasts a Bitcoin withdrawal",
+            &serde_json::json!({ "txid": txid.to_string() })
+        );
     }
 
     async fn get_transaction_status(
@@ -1815,6 +1824,15 @@ async fn check_unspent_at_tip(
             info!(
                 "Deposit {}:{} confirmed with {confirmations}/{required_confirmations} confirmations",
                 outpoint.txid, outpoint.vout,
+            );
+            antithesis_sdk::assert_reachable!(
+                "Hashi confirms a Bitcoin deposit",
+                &serde_json::json!({
+                    "txid": outpoint.txid.to_string(),
+                    "vout": outpoint.vout,
+                    "confirmations": confirmations,
+                    "required_confirmations": required_confirmations,
+                })
             );
             Ok(DepositConfirmation::Confirmed(txout))
         }
