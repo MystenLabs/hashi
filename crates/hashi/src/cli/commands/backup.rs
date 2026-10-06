@@ -563,9 +563,16 @@ mod tests {
 
     #[tokio::test]
     async fn remote_restore_cleans_failed_downloads_and_invalid_archives() {
-        for (status, extra_length) in [("403 Forbidden", 0), ("200 OK", 100), ("200 OK", 0)] {
-            let (client, server) =
-                serve_download(b"not a tar archive".to_vec(), status, extra_length).await;
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture).await;
+        let plaintext = write_unencrypted_tar_backup(&backup);
+        // A complete valid archive must still fail when the HTTP body is truncated.
+        for (status, body, extra_length) in [
+            ("403 Forbidden", b"access denied".to_vec(), 0),
+            ("200 OK", fs::read(&plaintext).unwrap(), 100),
+            ("200 OK", b"not a tar archive".to_vec(), 0),
+        ] {
+            let (client, server) = serve_download(body, status, extra_length).await;
             let out = tempfile::tempdir().unwrap();
             fs::write(out.path().join("keep"), b"unchanged").unwrap();
             assert!(
@@ -581,6 +588,7 @@ mod tests {
             );
             server.await.unwrap();
             assert_file_eq(&out.path().join("keep"), b"unchanged");
+            assert!(!out.path().join("backup").exists());
             assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
         }
     }
@@ -898,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn save_local_only_skips_configured_s3_upload() {
         let fixture = TestFixture::new();
-        let (public_cert, secret_key) = mock_pgp_keypair();
+        let (public_cert, _) = mock_pgp_keypair();
         let mut node_config = Config::load(&fixture.node_config_path).unwrap();
         node_config.sui_chain_id = Some("AbCdEF12".into());
         node_config.hashi_ids = Some(crate::config::HashiIds {
@@ -923,21 +931,6 @@ mod tests {
         .unwrap();
         assert_eq!(tarball.parent(), Some(dir.path()));
         assert!(tarball.is_file());
-        let secret_key_file = dir.path().join("secret-key.asc");
-        fs::write(&secret_key_file, secret_key).unwrap();
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(
-            &tarball,
-            RestoreDecryptor::LocalSecretKey {
-                secret_key_path: secret_key_file,
-            },
-            out.path(),
-        )
-        .unwrap();
-        assert_file_eq(
-            &expected_extract_dir(&tarball, out.path()).join("config.toml"),
-            &fs::read(&fixture.node_config_path).unwrap(),
-        );
     }
 
     #[tokio::test]

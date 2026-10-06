@@ -27,8 +27,12 @@ mod tests {
     use hashi::cli::commands::backup::RestoreDecryptor;
     use hashi::config::BackupS3Config;
     use hashi::config::Config as HashiConfig;
+    use hashi::config::HashiIds;
+    use hashi::db::Database;
+    use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::pgp::PgpPublicCert;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
+    use sui_sdk_types::Address;
 
     use crate::HashiNodeHandle;
     use crate::TestNetworksBuilder;
@@ -109,16 +113,87 @@ mod tests {
         .context("Scheduled local backup and S3 upload did not both complete")
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires live S3 bucket, HASHI_BACKUP_S3_BUCKET, HASHI_BACKUP_S3_REGION, AWS credentials, sui and bitcoind"]
-    async fn test_backup_restore_from_s3_and_rejoin() -> Result<()> {
-        let s3 = BackupS3Config {
+    fn live_s3_config() -> Result<BackupS3Config> {
+        Ok(BackupS3Config {
             bucket: std::env::var("HASHI_BACKUP_S3_BUCKET")
                 .context("Set HASHI_BACKUP_S3_BUCKET to an existing writable bucket")?,
             region: std::env::var("HASHI_BACKUP_S3_REGION")
                 .context("Set HASHI_BACKUP_S3_REGION to the bucket region")?,
-        };
-        backup_restore_round_trip_and_rejoin(Some(s3)).await
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live S3 bucket, HASHI_BACKUP_S3_BUCKET, HASHI_BACKUP_S3_REGION, AWS credentials"]
+    async fn test_manual_backup_to_s3_and_restore() -> Result<()> {
+        const EPOCH: u64 = 42;
+        let s3 = live_s3_config()?;
+        let node_dir = tempfile::tempdir()?;
+        let recovery_dir = tempfile::tempdir()?;
+        let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
+        let db_path = node_dir.path().join("db");
+        let archive_dir = node_dir.path().join("archives");
+        let mut config = HashiConfig::new_for_testing();
+        config.db = Some(db_path.clone());
+        config.backup_dir = archive_dir.clone();
+        config.backup_pgp_cert = PgpPublicCert::new(recipient)?;
+        config.backup_s3 = Some(s3.clone());
+        config.sui_chain_id = Some("hashi-backup-e2e".into());
+        config.hashi_ids = Some(HashiIds {
+            package_id: Address::new(rand::random()),
+            hashi_object_id: Address::new(rand::random()),
+        });
+        config.validator_address = Some(Address::new(rand::random()));
+        let config_path = write_node_config_to_disk(&config, node_dir.path());
+        let original_config = std::fs::read(&config_path)?;
+        let original_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        {
+            let db = Database::open(&db_path)?;
+            db.store_encryption_key(EPOCH, &original_key)?;
+        }
+
+        let archive = commands::backup::save(&config_path, None, &archive_dir, false).await?;
+        let uri = format!(
+            "s3://{}/{}{}",
+            s3.bucket,
+            config.backup_s3_namespace().expect("S3 configured"),
+            archive.file_name().unwrap().to_str().unwrap(),
+        );
+        assert!(archive.is_file(), "Manual save must retain a local archive");
+        node_dir.close()?;
+        assert!(!archive.exists());
+        assert!(!config_path.exists());
+        assert!(!db_path.exists());
+
+        let restore_dir = tempfile::tempdir()?;
+        commands::backup::restore_from_s3(
+            &uri,
+            &s3.region,
+            None,
+            RestoreDecryptor::LocalSecretKey { secret_key_path },
+            restore_dir.path(),
+        )
+        .await?;
+        let extracted_dir = restore_dir.path().join(extract_dir_name(&archive)?);
+        assert_eq!(
+            std::fs::read(extracted_dir.join("node-config.toml"))?,
+            original_config,
+        );
+        let restored_db = Database::open(&extracted_dir.join(DB_SNAPSHOT_TAR_PREFIX))?;
+        assert_eq!(
+            restored_db
+                .get_encryption_key(EPOCH)?
+                .expect("Archived epoch key must survive remote recovery"),
+            original_key,
+        );
+        assert!(!config_path.exists());
+        assert!(!db_path.exists());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live S3 bucket, HASHI_BACKUP_S3_BUCKET, HASHI_BACKUP_S3_REGION, AWS credentials, sui and bitcoind"]
+    async fn test_backup_restore_from_s3_and_rejoin() -> Result<()> {
+        backup_restore_round_trip_and_rejoin(Some(live_s3_config()?)).await
     }
 
     /// Full round-trip test:

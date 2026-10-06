@@ -161,29 +161,30 @@ pub(crate) async fn upload(
         return Ok(None);
     };
     let namespace = config.backup_s3_namespace().expect("S3 is configured");
-    if client.is_none() {
-        let filename = archive
-            .file_name()
-            .context("Backup archive has no filename")?;
-        let uri = format!(
-            "s3://{}/{}{}",
-            s3.bucket,
-            namespace,
-            filename.to_string_lossy()
-        );
-        *client = Some(BackupS3Client::connect(&s3.region).await.with_context(|| {
-            format!(
-                "Failed to upload backup to {uri}; local archive retained at {}",
-                archive.display()
-            )
-        })?);
+    let filename = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("backup archive must have a UTF-8 filename")?;
+    let key = format!("{namespace}{filename}");
+    let uri = format!("s3://{}/{key}", s3.bucket);
+    async {
+        if client.is_none() {
+            *client = Some(BackupS3Client::connect(&s3.region).await?);
+        }
+        client
+            .as_ref()
+            .expect("S3 client initialized")
+            .upload(&s3.bucket, &key, archive)
+            .await
     }
-    client
-        .as_ref()
-        .expect("S3 client initialized")
-        .upload(&s3.bucket, &namespace, archive)
-        .await
-        .map(Some)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to upload backup to {uri}; local archive retained at {}",
+            archive.display()
+        )
+    })?;
+    Ok(Some(uri))
 }
 
 /// Open `path` for writing with mode `0o600`, failing if anything already
@@ -1238,6 +1239,9 @@ mod tests {
                     archive.file_name().unwrap().to_string_lossy()
                 );
                 assert!(error.contains(&uri), "{error}");
+                assert!(error.contains("local archive retained"), "{error}");
+                assert!(error.contains("SlowDown"), "{error}");
+                assert!(error.contains("try later"), "{error}");
             } else {
                 result.unwrap();
             }
