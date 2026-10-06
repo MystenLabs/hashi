@@ -286,5 +286,46 @@ Operators must remove these plaintext copies when no longer needed.
 
 ## Cloud backup
 
-In the future, we will likely add support for automatically uploading backups
-to cloud storage such as s3.
+Optional S3 backup configuration is available in Step 1, together with adoption
+metrics. **Automatic S3 uploads are not active yet**; upload integration comes in
+Step 2. Continue keeping independent off-host copies of your local backups.
+
+Add the following optional table to the node config:
+
+```toml
+[backup-s3]
+bucket = "my-hashi-backups"
+region = "us-east-1"
+```
+
+Omit `[backup-s3]` to leave S3 backup configuration disabled. When the table is
+present, both `bucket` and `region` are required and must be nonempty. Use the
+bucket name, not an S3 URI. There are no credential or custom-prefix settings in
+this table. The planned upload integration uses the AWS default credential chain;
+provide credentials through the runtime environment or an IAM role, not secrets
+in the node config.
+
+The object namespace is derived from the node identity:
+
+```text
+<sui-chain-id>/<hashi-object-id>/<validator-address>/
+```
+
+The chain ID preserves its configured spelling, including case-sensitive Base58,
+and uses the existing mainnet default when `sui-chain-id` is omitted. The object
+ID and validator address use canonical full-length `0x`-prefixed addresses.
+S3 configuration requires the effective chain ID to be a safe, nonempty path
+component, a nonzero `hashi-object-id`, and a `validator-address`. These
+additional identity requirements apply only when `[backup-s3]` is enabled.
+
+Adoption metrics describe **configuration, not backup health**:
+
+- `hashi_backup_s3_configured` is always exported: `0` when disabled and `1` when
+  configured.
+- `hashi_backup_s3_bucket_info` has a single `bucket_uri` label containing
+  `s3://bucket/<sui-chain-id>/<hashi-object-id>/<validator-address>/`, including the
+  trailing slash. Its value is `1` only when configured; no bucket-info sample is
+  emitted when disabled.
+
+These metrics do not verify credentials, bucket access, or upload success, and
+must not be used as evidence that an off-host backup exists.
