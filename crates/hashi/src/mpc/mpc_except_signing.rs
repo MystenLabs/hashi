@@ -971,6 +971,7 @@ impl MpcManager {
     pub async fn run_key_rotation(
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
+        onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -984,6 +985,7 @@ impl MpcManager {
         let (previous, is_member_of_previous_committee) = Self::prepare_previous_output(
             mpc_manager,
             previous_certificates,
+            onchain_mpc_key,
             p2p_channel,
             metrics,
             role,
@@ -1109,6 +1111,7 @@ impl MpcManager {
         let output = Self::run_key_rotation_as_party(
             mpc_manager,
             &previous,
+            onchain_mpc_key,
             p2p_channel,
             ordered_broadcast_channel,
             metrics,
@@ -1887,6 +1890,7 @@ impl MpcManager {
     async fn run_key_rotation_as_party(
         mpc_manager: &Arc<RwLock<Self>>,
         previous: &MpcOutput,
+        onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -2089,9 +2093,10 @@ impl MpcManager {
         let output = {
             let mgr = Arc::clone(mpc_manager);
             let previous = previous.clone();
+            let onchain_mpc_key = onchain_mpc_key.to_vec();
             spawn_blocking(move || {
                 let mut mgr = mgr.write().unwrap();
-                mgr.complete_key_rotation(&previous, &certified_share_indices)
+                mgr.complete_key_rotation(&previous, &certified_share_indices, &onchain_mpc_key)
             })
             .await?
         };
@@ -4844,6 +4849,7 @@ impl MpcManager {
         &mut self,
         previous_dkg_output: &MpcOutput,
         certified_share_indices: &[(Address, ShareIndex)],
+        onchain_mpc_key: &[u8],
     ) -> MpcResult<MpcOutput> {
         let threshold = previous_dkg_output.threshold;
         tracing::info!(
@@ -4906,6 +4912,11 @@ impl MpcManager {
         if combined.vk != previous_dkg_output.public_key {
             return Err(MpcError::ProtocolFailed(
                 "Key rotation produced different public key".into(),
+            ));
+        }
+        if contradicts_onchain_key(&combined.vk, onchain_mpc_key) {
+            return Err(MpcError::ProtocolFailed(
+                "Key rotation produced a key that does not match the on-chain key".into(),
             ));
         }
         Ok(MpcOutput {
@@ -5463,6 +5474,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
+        onchain_mpc_key: &[u8],
     ) -> MpcResult<PublicMpcOutput> {
         let (previous_committee, previous_nodes, epoch) = {
             let mgr = mpc_manager.read().unwrap();
@@ -5494,8 +5506,17 @@ impl MpcManager {
             })
             .collect();
         let mut responses: HashMap<[u8; 32], (PublicMpcOutput, u64)> = HashMap::new();
+        let mut contradicting: Vec<Address> = Vec::new();
+        let mut contradicting_weight = 0u64;
+        let mut agreed = None;
         while let Some((addr, weight, result)) = futures.next().await {
             match result {
+                Ok(response)
+                    if contradicts_onchain_key(&response.output.public_key, onchain_mpc_key) =>
+                {
+                    contradicting.push(addr);
+                    contradicting_weight += weight;
+                }
                 Ok(response) => {
                     let hash = hash_public_mpc_output(&response.output);
                     let (output, weight_sum) = responses
@@ -5503,24 +5524,34 @@ impl MpcManager {
                         .or_insert((response.output.clone(), 0));
                     *weight_sum += weight;
                     if *weight_sum >= previous_committee_threshold {
-                        return Ok(output.clone());
+                        agreed = Some(output.clone());
+                        break;
                     }
                 }
                 Err(e) => {
-                    tracing::info!("Failed to get public DKG output from {}: {}", addr, e);
+                    tracing::info!("Failed to get public MPC output from {}: {}", addr, e);
                 }
             }
         }
-        let max_weight = responses.values().map(|(_, w)| *w).max().unwrap_or(0);
-        Err(MpcError::NotEnoughApprovals {
-            needed: (previous_committee_threshold + 1) as usize,
-            got: max_weight as usize,
+        if !contradicting.is_empty() {
+            tracing::warn!(
+                "Ignored public MPC output whose key does not match the on-chain key, from \
+                 {contradicting:?} (weight {contradicting_weight})"
+            );
+        }
+        agreed.ok_or_else(|| {
+            let max_weight = responses.values().map(|(_, w)| *w).max().unwrap_or(0);
+            MpcError::NotEnoughApprovals {
+                needed: previous_committee_threshold as usize,
+                got: max_weight as usize,
+            }
         })
     }
 
     async fn prepare_previous_output(
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
+        onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
         role: RotationRole,
@@ -5560,7 +5591,21 @@ impl MpcManager {
                 )
                 .await
             }
-            .await;
+            .await
+            .and_then(|output| {
+                if contradicts_onchain_key(&output.public_key, onchain_mpc_key) {
+                    tracing::error!(
+                        "prepare_previous_output: reconstructed previous key {} does not match \
+                         the on-chain key {}",
+                        hex::encode(output.public_key.to_byte_array()),
+                        hex::encode(onchain_mpc_key),
+                    );
+                    return Err(MpcError::ProtocolFailed(
+                        "reconstructed previous key does not match the on-chain key".into(),
+                    ));
+                }
+                Ok(output)
+            });
             match reconstruction_result {
                 Ok(output) => output,
                 Err(e) => {
@@ -5572,8 +5617,13 @@ impl MpcManager {
                         .mpc_prepare_previous_fetch_public_output_duration_seconds
                         .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                         .start_timer();
-                    Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt)
-                        .await?
+                    Self::fetch_and_build_public_output(
+                        mpc_manager,
+                        p2p_channel,
+                        threshold_opt,
+                        onchain_mpc_key,
+                    )
+                    .await?
                 }
             }
         } else {
@@ -5581,7 +5631,13 @@ impl MpcManager {
                 .mpc_prepare_previous_fetch_public_output_duration_seconds
                 .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                 .start_timer();
-            Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt).await?
+            Self::fetch_and_build_public_output(
+                mpc_manager,
+                p2p_channel,
+                threshold_opt,
+                onchain_mpc_key,
+            )
+            .await?
         };
         tracing::info!(
             "prepare_previous_output: is_member_of_previous_committee={is_member_of_previous_committee}, \
@@ -5595,13 +5651,18 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         threshold_opt: Option<u16>,
+        onchain_mpc_key: &[u8],
     ) -> MpcResult<MpcOutput> {
         let threshold = threshold_opt.ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous threshold".into())
         })?;
-        let public_output =
-            Self::fetch_public_mpc_output_from_quorum(mpc_manager, p2p_channel, threshold as u64)
-                .await?;
+        let public_output = Self::fetch_public_mpc_output_from_quorum(
+            mpc_manager,
+            p2p_channel,
+            threshold as u64,
+            onchain_mpc_key,
+        )
+        .await?;
         Ok(MpcOutput {
             public_key: public_output.public_key,
             key_shares: avss::SharesForNode { shares: vec![] },
@@ -6666,6 +6727,11 @@ fn build_reduced_nodes(
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).digest
+}
+
+fn contradicts_onchain_key(key: &G, onchain_mpc_key: &[u8]) -> bool {
+    !onchain_mpc_key.is_empty()
+        && bcs::to_bytes(key).expect(EXPECT_SERIALIZATION_SUCCESS) != onchain_mpc_key
 }
 
 async fn publish_dealer_cert(

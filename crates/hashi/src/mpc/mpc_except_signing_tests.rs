@@ -7095,6 +7095,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
     let outcome = MpcManager::run_key_rotation(
         &departing,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7140,6 +7141,7 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
     let outcome = MpcManager::run_key_rotation(
         &departing,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7186,6 +7188,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
     let as_dealer_only = MpcManager::prepare_previous_output(
         &departing,
         &[],
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerOnly,
@@ -7198,6 +7201,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
 
     let (fallback, _) = MpcManager::prepare_previous_output(
         &departing,
+        &[],
         &[],
         &mock_p2p,
         &test_metrics(),
@@ -7296,6 +7300,7 @@ async fn test_run_key_rotation() {
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7434,6 +7439,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7578,6 +7584,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7802,7 +7809,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             );
         }
         ref_manager
-            .complete_key_rotation(&ref_dkg_output, &certified_share_indices)
+            .complete_key_rotation(&ref_dkg_output, &certified_share_indices, &[])
             .unwrap()
             .key_shares
     };
@@ -7814,6 +7821,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -7951,6 +7959,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
         &rotation_setup.certificates(),
+        &[],
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
@@ -8100,6 +8109,7 @@ async fn test_prepare_previous_output_for_new_member() {
     let (previous_output, is_member_of_previous_committee) = MpcManager::prepare_previous_output(
         &new_member_manager,
         &[],
+        &[],
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
@@ -8183,6 +8193,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     let (previous_output, is_member) = MpcManager::prepare_previous_output(
         &test_manager,
         &previous_certs,
+        &[],
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
@@ -8270,6 +8281,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
     let (previous_output, is_member) = MpcManager::prepare_previous_output(
         &test_manager,
         &previous_certs,
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
@@ -8391,6 +8403,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let (previous_output, is_member) = MpcManager::prepare_previous_output(
         &test_manager,
         &rotation_certs,
+        &[],
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
@@ -8493,6 +8506,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
     let (previous_output, _) = MpcManager::prepare_previous_output(
         &test_manager,
         &rotation_certs,
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
@@ -8612,6 +8626,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     let (previous_output, is_member) = MpcManager::prepare_previous_output(
         &test_manager,
         &rotation_certs,
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
@@ -8726,6 +8741,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     let (previous_output, is_member) = MpcManager::prepare_previous_output(
         &test_manager,
         &rotation_certs,
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
@@ -8743,6 +8759,166 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         0,
         "a message matching its certificate must never be re-fetched",
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_prepare_previous_output_adopts_only_the_on_chain_key() {
+    use fastcrypto::groups::GroupElement;
+    struct StaggeredChannel {
+        immediate: HashMap<Address, PublicMpcOutput>,
+        delayed: HashMap<Address, PublicMpcOutput>,
+    }
+    #[async_trait::async_trait]
+    impl P2PChannel for StaggeredChannel {
+        async fn send_messages(
+            &self,
+            _party: &Address,
+            _request: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _party: &Address,
+            _request: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _party: &Address,
+            _request: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            party: &Address,
+            _request: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            if let Some(output) = self.immediate.get(party) {
+                return Ok(GetPublicMpcOutputResponse {
+                    output: output.clone(),
+                });
+            }
+            if let Some(output) = self.delayed.get(party) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return Ok(GetPublicMpcOutputResponse {
+                    output: output.clone(),
+                });
+            }
+            Err(crate::communication::ChannelError::RequestFailed(
+                "no output".into(),
+            ))
+        }
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!()
+        }
+    }
+
+    let rotation_setup = RotationTestSetup::new();
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let rebuilt = PublicMpcOutput::from_mpc_output(&test_dkg_output);
+    let onchain = PublicMpcOutput {
+        public_key: G::generator(),
+        ..rebuilt.clone()
+    };
+    let address = |i: usize| rotation_setup.setup.address(i);
+    let channel = StaggeredChannel {
+        immediate: HashMap::from([(address(2), rebuilt.clone()), (address(3), rebuilt.clone())]),
+        delayed: HashMap::from([(address(0), onchain.clone()), (address(1), onchain.clone())]),
+    };
+    let previous_certs = rotation_setup.certificates();
+
+    let (previous, _) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &previous_certs,
+        &bcs::to_bytes(&rebuilt.public_key).unwrap(),
+        &channel,
+        &test_metrics(),
+        RotationRole::DealerAndParty,
+    )
+    .await
+    .unwrap();
+    assert_eq!(previous.public_key, rebuilt.public_key);
+    assert!(!previous.key_shares.shares.is_empty());
+
+    let (previous, _) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &previous_certs,
+        &bcs::to_bytes(&onchain.public_key).unwrap(),
+        &channel,
+        &test_metrics(),
+        RotationRole::DealerAndParty,
+    )
+    .await
+    .unwrap();
+    assert_eq!(PublicMpcOutput::from_mpc_output(&previous), onchain);
+    assert!(previous.key_shares.shares.is_empty());
+}
+
+#[test]
+fn test_complete_key_rotation_refuses_a_key_the_chain_does_not_hold() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let dealt: Vec<(Address, Messages)> = [2usize, 3]
+        .into_iter()
+        .map(|i| {
+            let (dealer, dkg_output) = rotation_setup.create_receiver_with_memory_store(i);
+            let msgs = dealer.create_rotation_messages(&dkg_output, &mut rng);
+            (rotation_setup.setup.address(i), Messages::Rotation(msgs))
+        })
+        .collect();
+    let (mut party, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let mut certified_share_indices = Vec::new();
+    for (dealer, messages) in &dealt {
+        if let Messages::Rotation(msgs) = messages {
+            party
+                .current_rotation_messages
+                .insert(*dealer, msgs.clone());
+        }
+        party
+            .try_sign_rotation_messages(&dkg_output, *dealer, messages)
+            .unwrap();
+        let party_id = party
+            .previous_committee
+            .as_ref()
+            .unwrap()
+            .index_of(dealer)
+            .unwrap() as u16;
+        certified_share_indices.extend(
+            party
+                .previous_nodes
+                .as_ref()
+                .unwrap()
+                .share_ids_of(party_id)
+                .unwrap()
+                .into_iter()
+                .map(|idx| (*dealer, idx)),
+        );
+    }
+    let onchain_key = bcs::to_bytes(&dkg_output.public_key).unwrap();
+    let mut other_key = onchain_key.clone();
+    other_key[0] ^= 0xff;
+
+    let err = party
+        .complete_key_rotation(&dkg_output, &certified_share_indices, &other_key)
+        .unwrap_err();
+    assert!(
+        matches!(&err, MpcError::ProtocolFailed(msg) if msg.contains("on-chain key")),
+        "{err:?}"
+    );
+    party
+        .complete_key_rotation(&dkg_output, &certified_share_indices, &onchain_key)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -8847,6 +9023,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
     let _ = MpcManager::prepare_previous_output(
         &test_manager,
         &rotation_certs,
+        &[],
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
@@ -10149,7 +10326,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
 
     // Complete key rotation using stored messages
     let rotation_output = party_manager
-        .complete_key_rotation(&dkg_output, &certified_share_indices)
+        .complete_key_rotation(&dkg_output, &certified_share_indices, &[])
         .unwrap();
 
     // Verify the output is valid (public key should be derivable)
@@ -16979,7 +17156,7 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
     };
 
     let mgr_arc = Arc::new(RwLock::new(manager));
-    let _ = MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1).await;
+    let _ = MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1, &[]).await;
 
     let captured = captured.lock().unwrap();
     assert!(
