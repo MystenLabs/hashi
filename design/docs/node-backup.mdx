@@ -371,6 +371,12 @@ Neither counter increments for attempts, failures, skipped backups, or manual
 backups. They count completions in the running node process, not the number of
 archives currently retained locally or in S3.
 
+A rising local counter with no remote completions is not off-host protection;
+check upload errors and the intended S3 URI. Even a remote completion does not
+prove that an object is still retained or decryptable. Keep the object URI,
+region, optional version ID, and access to the decryption key outside the node,
+and exercise recovery before relying on it.
+
 ### Restore and infrastructure limits
 
 Restore an object directly using its full S3 URI and an explicit region, without
@@ -412,3 +418,47 @@ Inspect the extracted files and install them manually at trusted destinations.
 Configuring uploads does not provision buckets, IAM roles or policies, or bucket
 lifecycle rules. Operators must supply that infrastructure and manage remote
 retention separately from local cleanup.
+
+### Machine-loss recovery
+
+1. Stop or fence the old node so only one instance can use the restored identity.
+   On a trusted replacement host, obtain the backup's full S3 URI and region,
+   AWS read credentials, and the matching private key or forwarded `gpg-agent`.
+   The original config, database, and local archive are not prerequisites.
+2. Set `umask 077` and create a private output directory owned by the recovery
+   user. Run one of the S3 restore commands above, optionally pinning an object
+   version. Treat the output as secret: encryption at rest in S3 does not protect
+   the extracted config, key files, or database.
+3. Inspect the extracted manifest and config. Verify the expected chain, Hashi
+   object, and validator identity against trusted records. Do not use archived
+   absolute paths as installation instructions; choose trusted destinations on
+   the replacement host and update config paths and service endpoints as needed.
+4. With the service stopped, install the archived node config at the trusted
+   config path and the extracted `hashi-db-snapshot` directory at its `db` path.
+   Install any separately archived key files at trusted paths and update their
+   config references; preserve inline keys. Do not merge the snapshot into an
+   existing database. Restrict ownership and permissions to the node user.
+   Start the node and check chain catch-up, committee participation, and
+   subsequent scheduled local and remote backup completions.
+5. Remove plaintext recovery output and temporary secret-key copies when no
+   longer needed. Retain secure access to the decryption key independently of
+   the replacement machine.
+
+### Opt-in remote recovery test
+
+With native `sui` and `bitcoind` available for the end-to-end suite, use an
+existing test bucket with read/write access and the normal AWS credential chain. Set
+`HASHI_BACKUP_S3_BUCKET` and `HASHI_BACKUP_S3_REGION`; for a local S3-compatible
+service, also set `AWS_ENDPOINT_URL_S3` (for example,
+`http://127.0.0.1:18333`).
+
+```bash
+HASHI_BACKUP_S3_BUCKET=hashi-backup-smoke \
+HASHI_BACKUP_S3_REGION=us-east-1 \
+cargo test -p e2e-tests test_backup_restore_from_s3_and_rejoin -- --ignored --nocapture
+```
+
+This ignored test exercises scheduled upload, loss of local recovery data,
+S3-only restore, and validator rejoin. It uses the test deployment's identity
+namespace rather than a fixed object key. It does not provision the bucket;
+manage uploaded test archives separately.

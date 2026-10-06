@@ -19,12 +19,15 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    use anyhow::Context;
     use anyhow::Result;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
+    use hashi::config::BackupS3Config;
     use hashi::config::Config as HashiConfig;
+    use hashi_types::pgp::PgpPublicCert;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
 
     use crate::HashiNodeHandle;
@@ -73,12 +76,57 @@ mod tests {
         path
     }
 
+    fn scheduled_successes(node: &HashiNodeHandle, name: &str) -> f64 {
+        node.metrics_registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == name)
+            .unwrap_or_else(|| panic!("Missing scheduled backup counter {name}"))
+            .get_metric()[0]
+            .get_counter()
+            .as_ref()
+            .expect("counter")
+            .value()
+    }
+
+    async fn wait_for_scheduled_backup(node: &HashiNodeHandle) -> Result<()> {
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                let local =
+                    scheduled_successes(node, "hashi_backup_scheduled_local_successes_total");
+                let remote =
+                    scheduled_successes(node, "hashi_backup_scheduled_remote_successes_total");
+                if local >= 1.0 && remote >= 1.0 {
+                    assert_eq!(local, 1.0, "Expected one scheduled local backup");
+                    assert_eq!(remote, 1.0, "Expected one scheduled S3 upload");
+                    return;
+                }
+            }
+        })
+        .await
+        .context("Scheduled local backup and S3 upload did not both complete")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live S3 bucket, HASHI_BACKUP_S3_BUCKET, HASHI_BACKUP_S3_REGION, AWS credentials, sui and bitcoind"]
+    async fn test_backup_restore_from_s3_and_rejoin() -> Result<()> {
+        let s3 = BackupS3Config {
+            bucket: std::env::var("HASHI_BACKUP_S3_BUCKET")
+                .context("Set HASHI_BACKUP_S3_BUCKET to an existing writable bucket")?,
+            region: std::env::var("HASHI_BACKUP_S3_REGION")
+                .context("Set HASHI_BACKUP_S3_REGION to the bucket region")?,
+        };
+        backup_restore_round_trip_and_rejoin(Some(s3)).await
+    }
+
     /// Full round-trip test:
     ///
     /// 1. DKG on 4 nodes + one key rotation so node 0's DB contains entries
     ///    across multiple keyspaces.
-    /// 2. Shut down node 0. Serialise its config, generate an OpenPGP keypair,
-    ///    and run `hashi backup save` to produce an encrypted tarball.
+    /// 2. Use either a scheduled S3 archive or stop node 0 and manually save
+    ///    an encrypted archive using an externally held OpenPGP keypair.
     /// 3. Delete node 0's on-disk state entirely (simulating "machine lost,
     ///    only the backup remains").
     /// 4. Force two rotations without node 0 — the rest of the network
@@ -87,9 +135,13 @@ mod tests {
     ///    and DB at destinations chosen by the test, not by the manifest.
     /// 6. Restart node 0 and force one more rotation so it rejoins as a
     ///    catching-up member.
-    /// 7. Assert all 4 nodes agree on the current MPC public key.
+    /// 7. Assert all 4 nodes still agree on the original MPC public key.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_backup_restore_round_trip_and_rejoin() -> Result<()> {
+        backup_restore_round_trip_and_rejoin(None).await
+    }
+
+    async fn backup_restore_round_trip_and_rejoin(s3: Option<BackupS3Config>) -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -119,6 +171,34 @@ mod tests {
             }
             assert_nodes_agree_on_mpc_key(nodes);
         }
+        let original_mpc_key = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .mpc_handle()
+            .unwrap()
+            .public_key()
+            .unwrap();
+        // The recovery key remains outside the failed node's state.
+        let config_dir = tempfile::Builder::new()
+            .prefix("hashi-backup-e2e-")
+            .tempdir()?;
+        let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
+        let node_config_path = config_dir.path().join("node-config.toml");
+        if let Some(s3) = &s3 {
+            let node = &mut test_networks.hashi_network_mut().nodes_mut()[0];
+            node.shutdown().await;
+            node.config_mut().backup_s3 = Some(s3.clone());
+            node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient.clone())?;
+            node.config().save(&node_config_path)?;
+            node.config_path = Some(node_config_path.clone());
+            node.start().await?;
+            node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+            for name in [
+                "hashi_backup_scheduled_local_successes_total",
+                "hashi_backup_scheduled_remote_successes_total",
+            ] {
+                assert_eq!(scheduled_successes(node, name), 0.0);
+            }
+        }
         let initial_epoch = test_networks.hashi_network().nodes()[0]
             .current_epoch()
             .unwrap();
@@ -128,6 +208,10 @@ mod tests {
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        if s3.is_some() {
+            // Observe the real epoch-change worker, not a direct backup call.
+            wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0]).await?;
+        }
 
         // 2. Stop node 0.
         test_networks.hashi_network_mut().nodes_mut()[0]
@@ -151,18 +235,29 @@ mod tests {
             .expect("node 0 must have a db path")
             .clone();
 
-        // 3. Serialise config, generate OpenPGP keypair, save backup.
-        let config_dir = tempfile::Builder::new()
-            .prefix("hashi-backup-e2e-")
-            .tempdir()?;
-        let node_config_path = write_node_config_to_disk(&node0_config, config_dir.path());
-        let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
-
-        // Keep this manual archive separate from automatic backups, which use
-        // the node's configured recipient rather than the key generated above.
-        let save_out_dir = node0_config.backup_dir.join("manual");
-        let tarball =
-            commands::backup::save(&node_config_path, Some(recipient), &save_out_dir, true).await?;
+        let (tarball, remote_uri) = if let Some(s3) = &s3 {
+            let archives = std::fs::read_dir(&node0_config.backup_dir)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            assert_eq!(archives.len(), 1, "Expected the scheduled archive only");
+            let tarball = archives.into_iter().next().unwrap();
+            assert!(tarball.to_string_lossy().ends_with(".tar.asc"));
+            let uri = format!(
+                "s3://{}/{}{}",
+                s3.bucket,
+                node0_config.backup_s3_namespace().expect("S3 configured"),
+                tarball.file_name().unwrap().to_str().unwrap(),
+            );
+            (tarball, Some(uri))
+        } else {
+            write_node_config_to_disk(&node0_config, config_dir.path());
+            // Keep only the manual recovery copy outside the failed machine.
+            let save_out_dir = config_dir.path().join("manual");
+            let tarball =
+                commands::backup::save(&node_config_path, Some(recipient), &save_out_dir, true)
+                    .await?;
+            (tarball, None)
+        };
 
         // 4. Destroy node 0's on-disk state so recovery actually has to put
         //    things back. The config has its own tempdir; both the DB and
@@ -170,6 +265,15 @@ mod tests {
         //    stays alive because the handle still owns it.
         std::fs::remove_dir_all(&original_db_path)?;
         std::fs::remove_file(&node_config_path)?;
+        if node0_config.backup_dir.exists() {
+            std::fs::remove_dir_all(&node0_config.backup_dir)?;
+        }
+        if remote_uri.is_some() {
+            assert!(
+                !tarball.exists(),
+                "Remote recovery must have no local archive"
+            );
+        }
 
         // 5. Two more rotations without node 0. The surviving nodes advance
         //    the Hashi epoch; node 0's backed-up DB is now several epochs
@@ -188,11 +292,19 @@ mod tests {
         let restore_out_dir = tempfile::Builder::new()
             .prefix("hashi-restore-out-")
             .tempdir_in(original_db_path.parent().expect("DB must have a parent"))?;
-        commands::backup::restore(
-            &tarball,
-            RestoreDecryptor::LocalSecretKey { secret_key_path },
-            restore_out_dir.path(),
-        )?;
+        let decryptor = RestoreDecryptor::LocalSecretKey { secret_key_path };
+        if let Some(uri) = remote_uri {
+            commands::backup::restore_from_s3(
+                &uri,
+                &s3.as_ref().unwrap().region,
+                None,
+                decryptor,
+                restore_out_dir.path(),
+            )
+            .await?;
+        } else {
+            commands::backup::restore(&tarball, decryptor, restore_out_dir.path())?;
+        }
 
         // Extraction must not recreate the original locations. Installation
         // destinations come from the test's pre-backup config, never from
@@ -222,6 +334,8 @@ mod tests {
         // 7. Restart node 0. It may not have valid shares for the current
         //    epoch yet — that's fine, we just need the server up so the
         //    upcoming rotation can deliver fresh shares.
+        *test_networks.hashi_network_mut().nodes_mut()[0].config_mut() =
+            HashiConfig::load(&node_config_path)?;
         test_networks.hashi_network_mut().nodes_mut()[0]
             .start()
             .await?;
@@ -246,6 +360,16 @@ mod tests {
         }
 
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_eq!(
+            test_networks.hashi_network().nodes()[0]
+                .hashi()
+                .mpc_handle()
+                .unwrap()
+                .public_key()
+                .unwrap(),
+            original_mpc_key,
+            "Recovery must preserve the original MPC public key",
+        );
         Ok(())
     }
 }

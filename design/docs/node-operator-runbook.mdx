@@ -1255,6 +1255,25 @@ hashi backup restore s3://<bucket>/<namespace>/hashi-backup-<timestamp>.tar.asc 
   --output-dir /var/lib/hashi/restore
 ```
 
+For machine loss, the S3 restore needs **no original node config or local
+archive**. Keep the object URI, region, optional version ID, and decryption-key
+access outside the node. Stop or fence the old instance before restarting its
+identity on a replacement host.
+
+Restore is extraction, not installation. Use `umask 077` and a private output
+directory; inspect the recovered manifest and config, then install the keys,
+config, and database at trusted destinations with the service stopped. Never
+blindly follow archived absolute paths. Update paths and endpoints for the new
+host, restrict files to the node user, and remove plaintext recovery copies
+afterward. Follow the [machine-loss recovery walkthrough](node-backup.mdx#machine-loss-recovery)
+for installation and the [opt-in remote recovery test](node-backup.mdx#opt-in-remote-recovery-test)
+for a rehearsal.
+
+After restart, check catch-up and committee participation, then scheduled backup
+completions. S3 adoption gauges only show configuration; a local completion does
+not imply an upload. Remote completions show successful scheduled uploads in
+this process, not current retention or decryptability.
+
 ---
 
 ## 11. Troubleshooting
