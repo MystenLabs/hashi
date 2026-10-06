@@ -69,21 +69,13 @@ graph LR
 The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
 address. Each deposit address is a unique Taproot address derived from the
 target destination address on Sui (see [Bitcoin Address Scheme](address-scheme.mdx)).
-The deposit must meet the dust minimum (`546 sats`) to avoid creating
-unspendable UTXOs on Bitcoin.
+The deposit must meet the
+[`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum), which is never
+below the dust minimum (`546 sats`), to avoid creating unspendable UTXOs on
+Bitcoin.
 
 After the Bitcoin transaction is broadcast, the user notifies Hashi by
-constructing a `DepositRequest` and calling `hashi::deposit::deposit` on Sui.
-
-First, the user creates the request by calling `hashi::deposit_queue::deposit_request`:
-
-```move
-public fun deposit_request(
-    utxo: Utxo,
-    clock: &Clock,
-    ctx: &mut TxContext,
-): DepositRequest
-```
+constructing a `Utxo` and calling `hashi::deposit::deposit` on Sui.
 
 The `Utxo` is constructed from the Bitcoin transaction details:
 
@@ -100,15 +92,16 @@ public fun utxo_id(
 ): UtxoId
 ```
 
-- `txid`: the 32-byte Bitcoin transaction hash.
+- `txid`: the 32-byte transaction hash in Bitcoin's internal byte order, the
+  reverse of the hex txid that wallets and explorers show.
 - `vout`: the output index within that transaction.
 - `amount`: the deposit amount in satoshis.
 - `derivation_path`: the Sui address used to derive the deposit address.
 
-The user then submits the request:
+The user then submits it:
 
 ```move
-public fun deposit(
+entry fun deposit(
     hashi: &mut Hashi,
     utxo: Utxo,
     clock: &Clock,
@@ -116,9 +109,11 @@ public fun deposit(
 )
 ```
 
-The function validates that the deposit meets the minimum amount and the UTXO
-has not been previously deposited. The request is then placed in the deposit
-queue, and committee members start monitoring Bitcoin for confirmation.
+The function checks that the service is not paused (deposits are accepted
+during a reconfiguration), that the deposit meets the minimum amount, and that
+the UTXO is not already in the pool, active or spent. It then creates a
+`DepositRequest` and places it in the deposit queue. Committee members start
+monitoring Bitcoin for confirmation.
 
 
 ## Approve
@@ -133,13 +128,16 @@ Committee members monitor the Bitcoin network for the deposit transaction. The
 transaction must reach a sufficient number of block confirmations (see
 [`bitcoin_confirmation_threshold`](config.mdx#bitcoin_confirmation_threshold))
 before it is considered final. This guards against chain reorganizations where
-a confirmed transaction could be reversed. If the transaction is never
-confirmed or is invalidated by a reorg, the deposit is ignored.
+a confirmed transaction could be reversed. If the transaction never reaches the
+threshold, for example because a reorg drops it, the request is never
+approved. A request that isn't confirmed expires 24 hours after it is created
+and is then deleted; the user can submit the UTXO again.
 
-After confirmation, each committee member independently screens the deposit's
-Bitcoin transaction and Sui recipient with its own TRM Labs account (see
-[Handling Sanctioned Addresses](sanctions.mdx)). A member that rejects the
-deposit does not vote to approve it.
+After confirmation, on Bitcoin mainnet, each committee member with a TRM Labs
+API key independently screens the deposit's Bitcoin transaction and Sui
+recipient (see [Handling Sanctioned Addresses](sanctions.mdx)); other members
+approve without screening. A member that rejects the deposit does not vote to
+approve it.
 
 After a node determines that a deposit request is both confirmed on Bitcoin
 and passes its own screening checks, it communicates with the other members
@@ -161,9 +159,12 @@ entry fun approve_deposit(
 )
 ```
 
-The function verifies the committee certificate against the current committee
-and records both the certificate and the current clock timestamp on the
-request. The request remains in the deposit queue, and no `hBTC` is minted yet.
+The function aborts while the service is paused or a reconfiguration is
+pending, if the UTXO is already in the pool, or if the current committee has
+already approved the request. Otherwise it verifies the committee certificate
+against the current committee and records both the certificate and the
+current clock timestamp on the request. The request remains in the deposit
+queue, and no `hBTC` is minted yet.
 
 ## Confirm
 
@@ -178,14 +179,15 @@ window (see
 [`bitcoin_deposit_time_delay_ms`](config.mdx#bitcoin_deposit_time_delay_ms))
 before it can be confirmed. The window gives operators a chance to detect a
 faulty or fraudulent approval and pause the service before funds are minted.
-While the service is paused, `confirm_deposit` is rejected, so any pending
-approvals stay parked in the queue until the system is unpaused or the
-committee rotates and the deposit is re-approved.
+While the service is paused, `approve_deposit` and `confirm_deposit` are both
+rejected, so pending approvals stay parked in the queue until the system is
+unpaused, unless the request expires first.
 
-If the committee rotates during the delay window, the existing approval
-becomes invalid and the deposit must be re-approved by the new committee. The
-onchain `confirm_deposit` re-verifies the stored certificate against the
-current committee, not the committee that originally approved it.
+If the committee rotates before the deposit is confirmed, the existing
+approval becomes invalid and the deposit must be re-approved by the new
+committee, which restarts the delay. The onchain `confirm_deposit` re-verifies
+the stored certificate against the current committee, not the committee that
+originally approved it.
 
 After the delay has elapsed, any caller may call `hashi::deposit::confirm_deposit`:
 
@@ -200,9 +202,11 @@ entry fun confirm_deposit(
 
 The function:
 
-1. Re-verifies the stored committee certificate against the current committee.
-2. Asserts that `approval_timestamp_ms + bitcoin_deposit_time_delay_ms <= now`.
-3. Aborts if the request was never approved, the certificate no longer
+1. Aborts while the service is paused or a reconfiguration is pending, or if
+   the UTXO is already in the pool (active or spent), before anything changes.
+2. Re-verifies the stored committee certificate against the current committee.
+3. Asserts that `approved_timestamp_ms + bitcoin_deposit_time_delay_ms <= now`.
+4. Aborts if the request was never approved, the certificate no longer
    verifies, or the delay has not elapsed.
 
 ## Mint
@@ -214,6 +218,7 @@ graph LR
 ```
 
 After both checks in `confirm_deposit` pass, the function mints the
-corresponding amount of `hBTC` and sends it to the user's Sui address. The
+corresponding amount of `hBTC` and sends it to the Sui address in the UTXO's
+`derivation_path` (a UTXO without one mints nothing). The
 deposited UTXO is added to the Hashi-managed UTXO pool, making it available
 for future withdrawal coin selection.

@@ -32,21 +32,29 @@ questions:
   - Is the Hashi service stateless?
   - What onchain state does Hashi rely on?
 answer: >-
-  The Hashi node service is a stateless gRPC service secured by TLS with
-  self-signed certificates. Each committee member runs a Hashi node that
-  stores all critical state onchain in Sui's live object set, requiring no
-  knowledge of historical transactions or events for correct operation.
+  The Hashi node service is a gRPC service secured by TLS with self-signed
+  certificates. Each committee member runs a Hashi node that stores its
+  critical state onchain in Sui's live object set, requiring no knowledge of
+  historical transactions or events for correct operation. Locally it keeps
+  only its key material and MPC protocol state, and backs up its keys and its
+  DKG and rotation messages each epoch.
 ---
 
 Every committee member is responsible for running a Hashi node service. Each
 Hashi node exposes an HTTP service, secured by Transport Layer Security (TLS)
-using a self-signed cert (the ed25519 public key is available in the Hashi
-System State object), and serves a gRPC `HashiService`.
+using a self-signed cert (each member registers its ed25519 public key in the
+`CommitteeSet` on the `Hashi` object), and serves the gRPC `BridgeService` and
+`MpcService`. Peers connect with their own registered TLS key, and the node
+refuses any caller whose key belongs to no registered validator, except on
+`/health` and `/ready`. The `/health` there always answers; liveness probes
+should use the `/health` on the plain-HTTP metrics listener
+(`metrics-http-address`, default `127.0.0.1:9180`) instead, which fails once
+the node's main runtime stops running tasks for two minutes.
 
 ## Sui contracts
 
-- The Hashi Move packages are published as normal packages. The Hashi packages
-  are not system packages, and are not part of the Sui framework.
+- The Hashi Move package is published as a normal package. It is not a system
+  package and is not part of the Sui framework.
 
 ## Stateless
 

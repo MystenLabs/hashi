@@ -30,37 +30,46 @@ questions:
   - What is the token-bucket rate limiter in Hashi?
   - Can users cancel a queued Hashi withdrawal?
 answer: >-
-  Hashi enforces a configurable token-bucket rate limit on withdrawal outflows
-  through the Guardian. Capacity is replenished continuously over a fixed
-  duration. When a withdrawal would exceed the limit, Hashi waits for
-  sufficient capacity before processing it. Users can cancel pending
-  withdrawal requests at any time before processing begins.
+  Hashi enforces a token-bucket rate limit on withdrawal outflows through the
+  Guardian. Capacity refills continuously up to a maximum. When a withdrawal
+  would exceed the limit, Hashi waits for sufficient capacity before
+  processing it. Users can cancel pending withdrawal requests after a
+  cooldown, until a request is committed to a Bitcoin transaction.
 ---
 
 To protect against vulnerabilities or other exceptional scenarios, Hashi
 implements a rate limiter on outflows through the Guardian.
 
-The limit is a configurable value denominated in `BTC` and is implemented as
-a token-bucket rate limiter. Capacity is replenished continuously over a
-fixed duration.
+The limit is implemented as a token-bucket rate limiter with two settings,
+set when the Guardian is provisioned: a maximum capacity in satoshis and a
+refill rate in satoshis per second. Capacity refills continuously up to the
+maximum.
 
 When a user wants to withdraw their `BTC` back to Bitcoin, they initiate a
 withdraw request. All withdraw requests are tagged with a timestamp of when
 the request was made and placed in a queue to wait for Hashi to process the
 withdrawal.
 
-To process a withdrawal request, Hashi selects a request from the queue and
-performs a number of checks. One check communicates with the Guardian to
-confirm there is sufficient capacity for the request. If all checks are
-satisfied and there is capacity, Hashi works with the Guardian to sign and
-broadcast a Bitcoin transaction to satisfy the request.
+To process withdrawal requests, Hashi selects them from the queue and performs
+a number of checks. Before committing a batch, the leader checks it against
+its own copy of the Guardian's limiter, which every node seeds from the
+Guardian and keeps in step with it. If all checks are satisfied and there is
+capacity, Hashi works with the Guardian to sign and broadcast a Bitcoin
+transaction to satisfy the requests. The Guardian enforces the limit itself
+when it co-signs, and each committee member re-checks its own copy before
+certifying the signed transaction.
 
 When a withdraw request would exceed the rate limit, Hashi waits to process
-it until sufficient capacity is replenished.
+it until sufficient capacity is replenished. A request larger than the
+limiter's maximum capacity is skipped until the limit is raised; its owner can
+cancel it.
 
 Withdrawals are generally processed in first-in-first-out (FIFO) order, but
 this is not a strict requirement, and there are some scenarios where they
 might be processed out of order.
 
 The Sui address that initiated a withdrawal request can cancel that request
-at any time before Hashi selects it for processing.
+once the
+[`withdrawal_cancellation_cooldown_ms`](config.mdx#withdrawal_cancellation_cooldown_ms)
+cooldown has passed, until Hashi commits it to a Bitcoin withdrawal
+transaction.

@@ -32,9 +32,9 @@ questions:
   - How are operations paused during Hashi reconfiguration?
 answer: >-
   When a Sui epoch change occurs, the Hashi service pauses in-progress
-  operations and starts reconfiguration. The old committee transfers MPC key
-  shares to the new committee through either DKG (for initial key generation)
-  or key rotation (for redistributing existing shares). Operations resume
+  operations and starts reconfiguration. At genesis the first committee
+  generates the MPC key with DKG; after that, the old committee reshares its
+  key shares to the new committee through key rotation. Operations resume
   after the new committee completes reconfiguration.
 ---
 
@@ -62,9 +62,9 @@ graph LR
 
 Each Hashi node monitors Sui for epoch changes. When a new Sui epoch is
 detected and the Hashi epoch has not yet advanced to match, the node knows
-that a reconfiguration is needed. A committee member submits an onchain
-transaction by calling `hashi::reconfig::start_reconfig` to signal that
-reconfiguration should begin for the target epoch:
+that a reconfiguration is needed. Every running node then submits
+`hashi::reconfig::start_reconfig`, which is permissionless; the first
+transaction to land forms the committee for Sui's current epoch:
 
 ```move
 entry fun start_reconfig(
@@ -74,11 +74,16 @@ entry fun start_reconfig(
 )
 ```
 
-This sets a pending epoch change flag in the onchain state, which pauses
-normal operations (deposits, withdrawals) until reconfiguration completes.
-The new committee membership is determined by the set of validators that
-registered with Hashi for the new epoch. Stake weights come from the Sui
-validator set.
+This sets a pending epoch change flag in the onchain state. Until
+reconfiguration completes, the chain refuses deposit approval and
+confirmation, and withdrawal approval, commitment, and signing
+(`EReconfiguring`); users can still submit deposit and withdrawal requests,
+which are processed afterwards.
+The new committee membership is determined by the active Sui validators that
+registered with Hashi and set their next-epoch keys, leaving out any that
+resigned or that governance ignored through an `IgnoreMember` proposal. Each
+member's weight is its Sui voting power, and every threshold is a share of the
+formed committee's total weight.
 
 At genesis (when no MPC public key exists yet), the **launch switch**
 additionally gates `start_reconfig`: it aborts until the publisher
@@ -86,9 +91,9 @@ has sent `hashi::finish_publish` (the `hashi launch` CLI command), which
 finalizes the deploy configuration and hands the package `UpgradeCap` into
 onchain custody. This gives the publisher explicit control over when (and
 with which registered validators) the initial committee forms. After genesis
-Hashi never consults the gate; it follows Sui's validator set
-unconditionally, because a floor on a normal reconfig would let validators
-brick reconfiguration by withholding registration.
+Hashi never consults the gate and applies no registration floor, because a
+floor on a normal reconfig would let validators brick reconfiguration by
+withholding registration.
 
 
 ### DKG or Key Rotation
@@ -109,9 +114,8 @@ runs depends on whether this is the first Hashi epoch or a subsequent one:
   key shares are redistributed to the new committee. The old committee
   members act as dealers and the new committee members act as receivers.
 
-In both cases, the output is a `DkgOutput` containing the new committee's
-key shares and the MPC public key. See [MPC Protocol](mpc-protocol.mdx)
-for details.
+In both cases, each new member ends with an `MpcOutput`: its own key shares
+and the MPC public key. See [MPC Protocol](mpc-protocol.mdx) for details.
 
 Each committee member then signs a `ReconfigCompletionMessage` containing
 the target epoch and the MPC public key using their BLS12-381 key. Nodes
@@ -119,6 +123,13 @@ collect signatures from each other through RPC until a quorum (2/3 of
 committee weight) is reached, producing a BLS aggregate signature certificate.
 This ensures that a supermajority of the new committee agrees on the key
 protocol output before the epoch transition is finalized onchain.
+
+On a key rotation the outgoing committee must also approve the new one. Nodes
+collect its signatures over a `CommitteeTransitionRequest` with the
+`SignCommitteeTransition` RPC and submit that certificate through
+`submit_committee_handoff`, in the same transaction as `end_reconfig`, which
+does not activate a rotation without it. Initial DKG has no outgoing committee
+and skips this step.
 
 ### End Reconfig
 
@@ -170,8 +181,9 @@ key their retry-or-give-up decision on which of these fires.
 After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
 presignatures needed for the threshold Schnorr signing protocol (see
-[MPC Protocol](mpc-protocol.mdx)). After presignatures are ready, normal
-operations resume for processing deposits and withdrawals.
+[MPC Protocol](mpc-protocol.mdx)). Deposits, and withdrawal approval and
+commitment, resume as soon as `end_reconfig` lands; signing withdrawal inputs
+waits until the new committee's presignatures are ready.
 
 ### Abort Reconfig
 

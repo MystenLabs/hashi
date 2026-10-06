@@ -10,7 +10,7 @@ keywords:
   - security
 goal:
   description: >-
-    Reader understands the Guardian's role as a second signatory, its four
+    Reader understands the Guardian's role as a second signatory, its
     operational flows, and how it provides defense in depth
   requires:
     - has_frontmatter:
@@ -30,21 +30,24 @@ questions:
   - What are the Guardian operational flows?
   - How does Hashi use 2-of-2 multisig with the Guardian?
 answer: >-
-  The Hashi Guardian is a second signatory on all managed Bitcoin deposits,
-  enforcing a 2-of-2 multisig where both the MPC committee and the Guardian
-  must sign to spend funds. It operates through four flows: ceremony mode
-  (key generation), withdraw-mode provisioning, activation, and normal
-  operation (signing withdrawals and handling committee handoffs).
+  The Hashi Guardian is a second signatory on all managed Bitcoin deposits:
+  normal spends need a 2-of-2 multisig of the MPC committee and the Guardian,
+  and the committee can spend alone only through a recovery path that opens
+  60 days after a UTXO confirms. It operates through five flows: ceremony mode
+  (key generation), withdraw-mode provisioning, activation, normal operation
+  (signing withdrawals and handling committee handoffs), and KP rotation.
 ---
 
 To protect against vulnerabilities and against malicious past committees,
 Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
-deposits. All deposits are spendable only with a 2-of-2 multisig where the
-guardian is one party and the Hashi MPC committee is the other.
+deposits. Deposits are spent with a 2-of-2 multisig where the guardian is one
+party and the Hashi MPC committee is the other. A recovery script also lets the
+MPC committee alone spend a UTXO 60 days after it confirms (see
+[Bitcoin Address Scheme](address-scheme.mdx)).
 
 ## Components
 
-The guardian integration has four distinct flows:
+The guardian integration has five distinct flows:
 
 - **Ceremony mode** is the key-generation control-plane flow. The operator
   initializes a ceremony guardian, supplies the KP roster, and receives the
@@ -52,15 +55,18 @@ The guardian integration has four distinct flows:
 - **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
   current active guardian is still alive. The operator installs a stable
   `InitConfig`; each KP independently recomputes `config_hash` from its locally
-  configured limiter config, PCR allowlist, and network plus the onchain master
-  key, requires it to match the enclave's, and submits threshold encrypted shares
-  through the public relay.
+  configured limiter config and deployment config (S3 bucket and region,
+  retention environment, network, and PCR allowlist), requires it to match the
+  enclave's, and submits threshold encrypted shares through the public relay.
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
 - **Normal operation** is a data-plane flow. MPC nodes call the guardian proxy's
   node endpoint for guardian info, withdrawal signatures, and committee handoff
   updates.
+- **KP rotation** re-deals the guardian key to a new KP set on a fresh ceremony
+  guardian (`RotateKpSet`, then every new KP confirms), or replaces one KP's
+  certificate (`ProvisionerRotateCert`).
 
 The main components are:
 
@@ -68,24 +74,27 @@ The main components are:
   certificates, run the MPC signer, and call the guardian for the second
   Bitcoin signature.
 - **Guardian proxy**: the guardian's gRPC endpoints. The public one
-  (`guardian_url`) serves `/info` and relays key-provisioner shares. Nodes
-  call a separate one (`guardian_node_url`), which serves only
+  (`guardian_url`) serves `/info`, `GetGuardianInfo`, the attested info
+  queries, and the key-provisioner RPCs (the share relay, `ConfirmCeremony`,
+  and `ProvisionerRotateCert`); it never serves operator RPCs, which reach the
+  enclave directly. Nodes call a separate one (`guardian_node_url`), which serves only
   `GetGuardianInfo` and node RPCs: the proxy terminates TLS itself and forwards
   node RPCs only for current or pending committee members, who present their
   registered TLS key as a client certificate.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
-  signs Bitcoin inputs, and records signed logs.
+  and signs Bitcoin inputs. Every session signs the records it writes to S3.
 - **Key provisioners (KPs)**: independent holders of guardian key shares. Each
   share has one configured YubiKey-backed OpenPGP certificate and one encrypted
   ciphertext.
 - **Operator**: the off-enclave actor that drives guardian ceremony and
   withdraw-mode provisioning and activation.
-- **S3**: immutable log storage for attestation,
-  ceremony, share recovery, heartbeat, genesis, withdrawal, and committee-update
-  logs. Activation records are session lifecycle records in the activating
-  session's init log.
+- **S3**: signed log storage under Object Lock for init (attestation and
+  session lifecycle), heartbeat, ceremony proposal, ceremony, KP-share,
+  genesis, withdrawal, and committee-update records. Heartbeats, ceremony
+  proposals, and KP shares get only a short lock. Activation records are
+  session lifecycle records in the activating session's init log.
 - **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
   key state used by nodes and initialization tooling.
 
@@ -118,10 +127,10 @@ sequenceDiagram
     participant Guardian as Guardian enclave
     participant KPs as Key provisioners
 
-    Operator->>Guardian: OperatorInit(S3 config)
+    Operator->>Guardian: OperatorInit(deployment config, S3 credentials)
     Guardian->>S3: log(init attestation + GuardianInfo)
-    Operator->>Guardian: SetupNewKey(ordered KP attested bundles, n, t)
-    Guardian->>Guardian: Verify all YubiKey proofs and bind SIG/DEC keys
+    Operator->>Guardian: SetupNewKey(KP attested bundles, n, t)
+    Guardian->>Guardian: Verify all YubiKey proofs, bind SIG/DEC keys, and assign share ids in fingerprint order
     Guardian->>S3: log(kp-shares/proposed/{session})
     Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
@@ -129,14 +138,15 @@ sequenceDiagram
     S3-->>KPs: One PGP-encrypted share targeting this KP's attested DEC key
     KPs->>KPs: Decrypt share and verify Nitro attestation, recipients, commitment
     KPs->>Guardian: Confirm proposed ceremony digest
-    Guardian->>S3: Publish kp-shares state, then ceremony commit
+    Guardian->>S3: Once all n KPs confirm, publish kp-shares state, then ceremony commit
 ```
 
 ## Guardian info queries
 
-`GetGuardianInfo` returns signed guardian state without generating an attestation.
-The proxy caches these responses for one second; the public HTTP `/info` view
-keeps its separate configurable cache.
+`GetGuardianInfo` returns the guardian's self-reported state, with no
+signature or attestation. The proxy caches these responses for 30 seconds and
+drops the cache after each signed withdrawal; the public HTTP `/info` view
+keeps its own cache (`INFO_CACHE_TTL_MS`, 30 seconds by default).
 
 KPs and operators use `GetAttestedGuardianInfo` to receive signed guardian state
 alongside a fresh Nitro attestation. Attested responses are never cached.
@@ -149,7 +159,7 @@ these queries: an access policy must cover both `GetAttestedGuardianInfo` and
 `GetProvisioningTargetInfo`.
 
 Clients that previously set `include_attestation` on `GetGuardianInfo` must switch
-to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation. Upgrade the guardian and proxy before
+to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation or a signature. Upgrade the guardian and proxy before
 switching KP/operator clients to the new RPC.
 
 ## Withdraw-mode provisioning flow
@@ -165,13 +175,12 @@ sequenceDiagram
     participant KPs as Key provisioners
 
     Note over Operator,Guardian: Operator initialization
-    Operator->>Operator: Gather master G from onchain state
-    Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
+    Operator->>Operator: Gather limiter config plus deployment config (bucket, region, retention environment, network, PCR allowlist)
     Operator->>Operator: Build InitConfig
     Operator->>Operator: Require S3 state to match --do-genesis intent
     Operator->>Operator: With flag, build GenesisState from committee plus Hashi object id plus master G
-    Operator->>Guardian: OperatorInit(S3 config, InitConfig, optional GenesisState)
-    Guardian->>S3: Read latest ceremony and KP-share state
+    Operator->>Guardian: OperatorInit(S3 credentials, InitConfig, optional GenesisState)
+    Guardian->>S3: Read latest ceremony and KP-share state, plus genesis record on later deploys
     Guardian->>Guardian: Snapshot CeremonyState for this arming
     Guardian->>S3: log(init GuardianInfo(config_hash, optional genesis_state_hash, sharing instance))
     Guardian->>S3: start heartbeat stream from OI onward
@@ -182,7 +191,9 @@ sequenceDiagram
     Proxy-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
-    KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
+    KPs->>S3: Read latest ceremony and kp-shares state
+    KPs->>KPs: Decrypt own share and check its commitment
+    KPs->>KPs: HPKE-encrypt the share to guardian session key (no AAD)
     KPs->>KPs: Sign(session_id, config_hash, optional genesis_state_hash, encrypted share)
     KPs->>Proxy: SingleProvisionerInit(signed submission)
     Proxy->>Proxy: Pre-verify KP signature and relay roster
@@ -210,7 +221,8 @@ Hashi object id, and MPC master `G` as an optional `GenesisState` during
 `OperatorInit`, and each KP independently derives its hash and includes it in
 the normal signed PI submission. Once PI reaches threshold, the enclave writes
 the committee, Hashi object id, and master `G` to `genesis/record.json`. Later
-deploys use `None` and do not pass the flag.
+deploys use `None` and do not pass the flag; their enclave loads the Hashi
+object id and master `G` from `genesis/record.json` instead.
 
 ## Standby activation flow
 
@@ -257,16 +269,18 @@ sequenceDiagram
     MPC->>Onchain: Read pending withdrawal transaction
     MPC->>MPC: Produce MPC signatures for each Bitcoin input
     MPC->>Onchain: Store MPC signatures
-    MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
+    MPC->>Proxy: StandardWithdrawal(cert, wid, utxos, seq, timestamp)
+    Proxy->>Proxy: Replay stored signatures for an already-signed wid (memory or S3 withdraw log)
+    Proxy->>Guardian: Forward a wid with no withdraw record
     Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
-    Guardian->>S3: log(withdraw success or failure)
-    Guardian-->>MPC: Guardian BTC signatures
+    Guardian->>S3: log(withdraw success)
+    Guardian-->>MPC: Guardian BTC signatures via proxy
     MPC->>Onchain: Finalize withdrawal with Guardian signatures
     MPC->>Bitcoin: Broadcast fully signed transaction
 
     Note over Onchain,Guardian: Committee handoff catch-up
     MPC->>Onchain: Read stored committee handoffs
-    MPC->>MPC: Collect outgoing-committee handoff certs
+    MPC->>MPC: Chain the stored handoffs from the guardian's epoch to the current one
     MPC->>Guardian: UpdateCommitteeChain(signed handoffs) via proxy
     Guardian->>S3: log(committee-update)
     Guardian-->>MPC: current_committee_epoch
