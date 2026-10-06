@@ -14,11 +14,12 @@
 //! This includes logs that a clock difference of less than one hour can place in the previous directory.
 //! Recovery selects the withdrawal with the highest sequence number from both directories.
 //!
-//! Recovery does not use the auditor's `write_completion_time` check with `DIR_WRITES_COMPLETION_DELAY`.
-//! That check protects reads when a session can still write to the directory.
-//! During recovery, it could exclude the directory that contains the previous session's final logs.
-//! Before recovery, the caller must verify that all other sessions completed the required heartbeat quiet period.
-//! S3 must make the previous session's final writes available before recovery starts.
+//! Recovery reads the latest directory immediately. It does not wait for `write_completion_time`.
+//! The auditor waits for that time because a live session can still write to the directory.
+//! Recovery cannot wait, because the latest directory is usually the current hour.
+//! For the current hour, that time can be 70 minutes away (`MAX_DIR_COMPLETION_LAG`).
+//! Instead, the caller must first verify the heartbeat quiet period for all other sessions.
+//! We assume that after the quiet period, no other session can write a withdrawal log.
 
 use super::GuardianReader;
 use super::VerifiedLogEntry;
@@ -29,6 +30,7 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
+use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
 
@@ -39,8 +41,6 @@ impl GuardianReader {
     /// Limit the available tokens to the configured capacity in case the capacity decreased.
     ///
     /// Before this call, use [`Self::ensure_session_live_and_others_quiet`] to verify that all other sessions completed the required quiet period.
-    /// This method does not check `write_completion_time`.
-    /// The previous session's final writes must be available in S3 before this call.
     pub async fn recover_limiter_state(
         &mut self,
         limiter_config: &LimiterConfig,
@@ -61,9 +61,9 @@ impl GuardianReader {
         // Read the found bucket + one bucket back, then take max-seq across
         // both. The peek-back defends against sub-hour clock skew that may have
         // placed a higher-seq log in the prior hour bucket.
-        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
+        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?)?;
         cursor = cursor.prev_dir();
-        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
+        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?)?;
         let recovered_state = [hit, peek]
             .into_iter()
             .flatten()
@@ -73,7 +73,7 @@ impl GuardianReader {
                     "latest withdrawal bucket contained no verified withdrawal logs".into(),
                 )
             })?;
-        let state = cap_limiter_state_to_config(recovered_state, limiter_config);
+        let state = recovered_state.capped_to(limiter_config);
         info!(
             next_seq = state.next_seq,
             last_updated_at = state.last_updated_at,
@@ -129,23 +129,15 @@ async fn list_subdirs_desc(
     Ok(dirs.into_iter().map(|dir| dir.to_string()).collect())
 }
 
-/// Return the withdrawal limiter state with the highest `next_seq` in the supplied logs.
-/// Ignore other message types. Return `None` if no withdrawal log is present.
-fn bucket_max_post_state(logs: Vec<VerifiedLogEntry>) -> Option<LimiterState> {
-    logs.into_iter()
-        .filter_map(|log| log.into_entry().into_message().into_withdrawal())
-        .map(|withdrawal| withdrawal.post_state)
-        .max_by_key(|s| s.next_seq)
-}
-
-fn cap_limiter_state_to_config(
-    mut state: LimiterState,
-    limiter_config: &LimiterConfig,
-) -> LimiterState {
-    state.num_tokens_available = state
-        .num_tokens_available
-        .min(limiter_config.max_bucket_capacity);
-    state
+/// Return the limiter state with the highest `next_seq` in the supplied withdrawal logs.
+/// Return an error if a log is not a withdrawal log. Return `None` if there are no logs.
+fn bucket_max_post_state(logs: Vec<VerifiedLogEntry>) -> GuardianResult<Option<LimiterState>> {
+    let mut states = Vec::with_capacity(logs.len());
+    for log in logs {
+        let withdrawal = log.extract("withdrawal", VersionedLogMessage::into_withdrawal)?;
+        states.push(withdrawal.post_state);
+    }
+    Ok(states.into_iter().max_by_key(|s| s.next_seq))
 }
 
 #[cfg(test)]
@@ -157,6 +149,7 @@ mod tests {
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::StandardWithdrawalRequest;
@@ -199,27 +192,33 @@ mod tests {
 
     #[test]
     fn bucket_max_empty_is_none() {
-        assert!(bucket_max_post_state(vec![]).is_none());
+        assert!(bucket_max_post_state(vec![]).unwrap().is_none());
     }
 
     #[test]
     fn bucket_max_picks_highest_seq() {
         let logs = vec![withdrawal_log(3), withdrawal_log(7), withdrawal_log(5)];
-        let got = bucket_max_post_state(logs).expect("non-empty withdrawal set");
+        let got = bucket_max_post_state(logs)
+            .unwrap()
+            .expect("non-empty withdrawal set");
         assert_eq!(got.next_seq, 7);
     }
 
     #[test]
-    fn cap_limiter_state_to_config_caps_tokens_only() {
-        let limiter_config = LimiterConfig {
-            refill_rate: 10,
-            max_bucket_capacity: 500,
-        };
-        let got = cap_limiter_state_to_config(state_with_seq(7), &limiter_config);
+    fn bucket_max_rejects_non_withdrawal_logs() {
+        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
+        let entry = SignedLogEntry::new_at_timestamp(
+            "test-session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
+            &signing_key,
+            0,
+        )
+        .into_entry_unchecked();
+        let heartbeat = VerifiedLogEntry::new_for_test(entry, build_pcrs());
 
-        assert_eq!(got.num_tokens_available, 500);
-        assert_eq!(got.last_updated_at, 100);
-        assert_eq!(got.next_seq, 7);
+        let err = bucket_max_post_state(vec![withdrawal_log(3), heartbeat])
+            .expect_err("must reject non-withdrawal logs");
+        assert!(err.to_string().contains("expected a withdrawal log"));
     }
 
     fn withdrawal_key(year: u16, month: u8, day: u8, hour: u8, seq: u64) -> String {

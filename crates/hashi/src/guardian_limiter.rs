@@ -161,10 +161,7 @@ impl LocalLimiter {
             return None;
         }
         guard.config = config;
-        guard.state.num_tokens_available = guard
-            .state
-            .num_tokens_available
-            .min(config.max_bucket_capacity);
+        guard.state = guard.state.capped_to(&config);
         Some(previous)
     }
 
