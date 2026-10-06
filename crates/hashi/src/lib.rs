@@ -44,13 +44,25 @@ pub mod withdrawals;
 
 // TODO: Tune based on production workload.
 const BATCH_SIZE_PER_WEIGHT: u16 = 10;
-const SUI_RPC_STARTUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const STARTUP_DEPENDENCY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 fn retryable_sui_rpc_startup_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
     )
+}
+
+fn retryable_bitcoind_startup_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<corepc_client::client_sync::Error>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Transport(_))
+                    | corepc_client::client_sync::Error::Io(_)
+            )
+        })
 }
 
 pub(crate) struct NextEpochKeys {
@@ -774,10 +786,10 @@ impl Hashi {
                 Err(status) if retryable_sui_rpc_startup_error(&status) => {
                     tracing::warn!(
                         error = %status,
-                        retry_after_secs = SUI_RPC_STARTUP_RETRY_INTERVAL.as_secs(),
+                        retry_after_secs = STARTUP_DEPENDENCY_RETRY_INTERVAL.as_secs(),
                         "Sui RPC unavailable during startup; retrying"
                     );
-                    tokio::time::sleep(SUI_RPC_STARTUP_RETRY_INTERVAL).await;
+                    tokio::time::sleep(STARTUP_DEPENDENCY_RETRY_INTERVAL).await;
                 }
                 Err(status) => return Err(status.into()),
             }
@@ -1002,10 +1014,23 @@ impl Hashi {
             .set(mpc_handle)
             .expect("MpcHandle already set");
 
-        let btc_monitor_service = self.initialize_btc_monitor().map_err(|e| {
-            tracing::error!("Failed to initialize BtcMonitor: {e}");
-            e
-        })?;
+        let btc_monitor_service = loop {
+            match self.initialize_btc_monitor() {
+                Ok(service) => break service,
+                Err(error) if retryable_bitcoind_startup_error(&error) => {
+                    tracing::warn!(
+                        error = %error,
+                        retry_after_secs = STARTUP_DEPENDENCY_RETRY_INTERVAL.as_secs(),
+                        "bitcoind unavailable during startup; retrying"
+                    );
+                    tokio::time::sleep(STARTUP_DEPENDENCY_RETRY_INTERVAL).await;
+                }
+                Err(error) => {
+                    tracing::error!("Failed to initialize BtcMonitor: {error}");
+                    return Err(error);
+                }
+            }
+        };
         let utxo_age_metrics_service = self.clone().start_utxo_age_metrics();
 
         // Start services
@@ -1641,6 +1666,7 @@ mod test {
     use crate::Hashi;
     use crate::ServerVersion;
     use crate::bitcoind_rpc_error_with_version_hint;
+    use crate::retryable_bitcoind_startup_error;
     use crate::retryable_sui_rpc_startup_error;
 
     use crate::config::Config;
@@ -1662,15 +1688,23 @@ mod test {
         // the resulting serde error must be wrapped with the version hint.
         let decode = serde_json::from_str::<Vec<String>>("\"\"").unwrap_err();
         let e = corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Json(decode));
-        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        let error = bitcoind_rpc_error_with_version_hint(e);
+        assert!(!retryable_bitcoind_startup_error(&error));
+        let msg = error.to_string();
         assert!(msg.contains("Bitcoin Core v29 or newer"), "{msg}");
 
         // Connectivity problems must not be misattributed to the version.
         let transport =
             jsonrpc::Error::Transport(Box::new(std::io::Error::other("connection refused")));
         let e = corepc_client::client_sync::Error::JsonRpc(transport);
-        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        let error = bitcoind_rpc_error_with_version_hint(e);
+        assert!(retryable_bitcoind_startup_error(&error));
+        let msg = error.to_string();
         assert!(!msg.contains("Bitcoin Core"), "{msg}");
+
+        let permanent = corepc_client::client_sync::Error::MissingUserPassword;
+        let error = bitcoind_rpc_error_with_version_hint(permanent);
+        assert!(!retryable_bitcoind_startup_error(&error));
     }
 
     #[test]
