@@ -86,8 +86,7 @@ These details trip up most operators:
 | [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
 | [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
-| [12. Backup limitations](#12-backup-limitations) | Cloud infrastructure and retention boundaries |
-| [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+| [12. Testnet releases](#12-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
@@ -160,7 +159,7 @@ See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 GIT_REVISION=$(git rev-parse HEAD) bash docker/hashi/build.sh --no-cache
 ```
 
-> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Testnet releases are tagged `testnet-<major>.<minor>` (for example `testnet-0.4`), and each release's notes give its source commit and binary sha256 (see [13](#13-testnet-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
+> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Testnet releases are tagged `testnet-<major>.<minor>` (for example `testnet-0.4`), and each release's notes give its source commit and binary sha256 (see [12](#12-testnet-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum. Compute the sha256 of your build and compare it against the published value:
 
@@ -538,6 +537,11 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # Push metrics to the Mysten collection endpoint (see section 8.2)
 [metrics-push]
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+
+# Optional S3 backups (uncomment all three lines; both fields required)
+# [backup-s3]
+# bucket = "my-hashi-backups"
+# region = "us-east-1"
 ```
 
 ### 3.2 CLI config
@@ -896,16 +900,13 @@ hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 hashi backup restore s3://<bucket>/<key>.tar.asc --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 ```
 
-`backup save` publishes locally first, then uploads when `[backup-s3]` is
-configured. Add `--local-only` to skip S3 client initialization and upload. With no
-S3 configuration, no S3 client or requests are created. A configured upload
-failure returns a nonzero exit status and reports the retained local archive
-path and intended S3 URI; it does not delete the local archive.
+With `[backup-s3]`, `backup save` uploads after saving locally; `--local-only`
+skips S3. Upload failure retains the local archive but exits nonzero, reporting
+its path and the intended S3 URI.
 
-S3 restore requires a nonempty `--region`; optional `--version-id` selects an
-exact object version. Neither flag is accepted with a local archive path.
-The default AWS credential chain supplies S3 access, separately from the selected
-decryptor. The original node configuration is not needed.
+S3 restore requires `--region`; `--version-id` optionally selects an exact
+version. Neither flag applies to local paths. Use the secret-key flag above or
+`--use-gpg-agent`; no original node configuration is needed.
 
 `--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
 
@@ -1097,14 +1098,6 @@ Notes:
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`, or `-1` until the pool holds a UTXO to probe. |
-| `hashi_backup_s3_configured` | gauge | Configuration only: `1` when S3 is configured, otherwise `0`; not proof of upload success. |
-| `hashi_backup_s3_bucket_info` | gauge | Configured only: value `1`, with `bucket_uri` identifying the trailing-slash S3 namespace. Not a health check. |
-| `hashi_backup_scheduled_local_successes_total` | counter | Starts at zero; increments only after a scheduled local archive is successfully published, even if its upload fails. |
-| `hashi_backup_scheduled_remote_successes_total` | counter | Starts at zero; increments only after a scheduled S3 upload succeeds; stays zero with S3 unconfigured. |
-
-Backup completion counters never include manual backups, failed attempts, or
-skipped backups. They count successful completions in this node process, not
-currently retained archives.
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count.
 
@@ -1200,32 +1193,11 @@ The full key-generation and restore procedures (including YubiKey setup with `oc
 
 The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Restore also accepts a `.tar` you decrypted yourself. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
-To upload each completed encrypted archive on the same scheduled cadence, add an
-optional table after the config's top-level keys:
-
-```toml
-[backup-s3]
-bucket = "my-hashi-backups"
-region = "us-east-1"
-```
-
-Both fields are required when the table is present. Uploads use the AWS default
-credential chain and the identity-derived
-`<sui-chain-id>/<hashi-object-id>/<validator-address>/` namespace, followed by the
-archive filename. See [Cloud backup](node-backup.mdx#cloud-backup) for identity
-requirements and credential handling. With no table, backups remain local-only
-and create no S3 client or requests.
-
-Local publication always precedes upload. Initialization and upload have a
-bounded timeout; there is no upload queue or application retry, and the AWS SDK
-is configured for one attempt. Failures preserve the local archive and report
-its path and the intended S3 URI. Failed uploads are not queued for a later
-retry; the next scheduled backup creates a new archive.
-
-Manual backups use both destinations by default when S3 is configured. Add
-`--local-only` to save locally without initializing S3 or uploading. An upload
-failure makes the command exit nonzero, even though the local archive remains
-available. Manual backups never increment the scheduled completion counters.
+The optional `[backup-s3]` table in the [config template](#31-validator-config)
+enables uploads using the AWS default credential chain. Without it, backups
+remain local-only. Each scheduled backup saves locally before one upload
+attempt; failed uploads retain the local archive and are not queued or retried.
+See [Cloud backup](node-backup.mdx#cloud-backup) for S3 keys and access setup.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
@@ -1244,35 +1216,10 @@ hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
 hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
   --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
   --output-dir /var/lib/hashi/restore
-
-# Restore directly from S3 with the same local-key or gpg-agent decryptors:
-hashi backup restore s3://<bucket>/<namespace>/hashi-backup-<timestamp>.tar.asc \
-  --region <aws-region> --backup-pgp-secret-key /path/to/secret-key.asc \
-  --output-dir /var/lib/hashi/restore
-hashi backup restore s3://<bucket>/<namespace>/hashi-backup-<timestamp>.tar.asc \
-  --region <aws-region> --version-id '<version-id>' \
-  --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
-  --output-dir /var/lib/hashi/restore
 ```
 
-For machine loss, the S3 restore needs **no original node config or local
-archive**. Keep the object URI, region, optional version ID, and decryption-key
-access outside the node. Stop or fence the old instance before restarting its
-identity on a replacement host.
-
-Restore is extraction, not installation. Use `umask 077` and a private output
-directory; inspect the recovered manifest and config, then install the keys,
-config, and database at trusted destinations with the service stopped. Never
-blindly follow archived absolute paths. Update paths and endpoints for the new
-host, restrict files to the node user, and remove plaintext recovery copies
-afterward. Follow the [machine-loss recovery walkthrough](node-backup.mdx#machine-loss-recovery)
-for installation and the [opt-in remote recovery test](node-backup.mdx#opt-in-remote-recovery-test)
-for a rehearsal.
-
-After restart, check catch-up and committee participation, then scheduled backup
-completions. S3 adoption gauges only show configuration; a local completion does
-not imply an upload. Remote completions show successful scheduled uploads in
-this process, not current retention or decryptability.
+For replacement-host installation and plaintext handling, follow
+[Machine-loss recovery](node-backup.mdx#machine-loss-recovery).
 
 ---
 
@@ -1493,33 +1440,11 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 
 ---
 
-## 12. Backup limitations
-
-`backup restore` accepts local archive paths and `s3://bucket/key` sources.
-S3 input requires an explicit `--region` and optionally accepts `--version-id`;
-these flags are invalid for local inputs. Plaintext `.tar` objects need no key,
-while `.tar.asc` uses the same local-secret-key or gpg-agent backend as local
-restore. No original node configuration is required.
-
-Downloads use the default AWS credential chain, stream with finite deadlines
-and no retries, and use a private temporary directory under the output directory
-(0700 directory and 0600 file on Unix). Downloaded files are removed on success,
-failure, or cancellation. Restore validates and stages extraction, refuses an
-existing destination, and never installs files at original manifest paths.
-Local restore behavior is unchanged. Inspect and install extracted files manually.
-
-Upload configuration does not provision buckets, IAM roles or policies, or
-bucket lifecycle rules. Operators must supply this infrastructure and manage
-remote retention separately; local cleanup does not delete S3 objects. See
-[Cloud backup](node-backup.mdx#cloud-backup) for upload behavior and metrics.
-
----
-
-## 13. Testnet releases
+## 12. Testnet releases
 
 Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet X.Y` and tagged `testnet-X.Y` (for example `testnet-0.4`); its notes give the source commit. Releases before the numbered scheme are tagged `testnet-<full-sha>`.
 
-### 13.1 Binary
+### 12.1 Binary
 
 Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
@@ -1540,7 +1465,7 @@ gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
 chmod +x hashi-linux-amd64
 ```
 
-### 13.2 Container image
+### 12.2 Container image
 
 The matching public image uses the same release tag:
 
@@ -1554,7 +1479,7 @@ The release notes include the image's immutable OCI digest. Pin that digest when
 mysten/hashi@sha256:<digest>
 ```
 
-### 13.3 Rolling the Mysten Testnet nodes
+### 12.3 Rolling the Mysten Testnet nodes
 
 The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
 
