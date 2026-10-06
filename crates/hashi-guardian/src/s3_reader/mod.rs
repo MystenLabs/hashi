@@ -52,8 +52,9 @@ impl GuardianReader {
     // Construction
     // ========================================================================
 
+    /// Create a reader from an existing S3 client, including the enclave's configured client.
     /// The client must use the same deployment configuration.
-    /// This method does not check the S3 connection again.
+    /// This method does not repeat the S3 connection and Object Lock checks.
     pub(crate) fn from_s3_client(
         s3: GuardianS3Client,
         expected_deployment: DeploymentConfig,
@@ -65,9 +66,9 @@ impl GuardianReader {
         }
     }
 
-    /// Check the S3 connection and Object Lock support, then create a reader.
-    /// TODO: Is new intended for off-enclave readers and from_s3_client for
-    /// in-enclave readers? At the very elast, docs should mention it..
+    /// Create a reader outside the enclave, using standard networking.
+    /// Check the S3 connection and Object Lock support before returning the reader.
+    /// Inside the enclave, use `from_s3_client()` with the configured S3 client.
     pub async fn new(
         expected_deployment: DeploymentConfig,
         credentials: S3Credentials,
@@ -96,7 +97,7 @@ impl GuardianReader {
         Ok(())
     }
 
-    // TODO: Add a 1-line comment?
+    /// Return verified session information and require the current build.
     pub async fn get_current_session_info(
         &mut self,
         session_id: &str,
@@ -116,41 +117,38 @@ impl GuardianReader {
     // Log verification and directory reads
     // ========================================================================
 
-    // TODO: Since we got rid of `LogRecord`, it may make sense to rename
-    // all usages of the variable record with log or log_entry?
     async fn verify_record(
         &mut self,
-        record: SignedLogEntry,
+        log: SignedLogEntry,
         require_current: bool,
     ) -> GuardianResult<VerifiedLogEntry> {
-        self.ensure_session_info_loaded(record.session_id()).await?;
+        self.ensure_session_info_loaded(log.session_id()).await?;
         let session_info = self
             .sessions
-            .get_mut(record.session_id())
+            .get_mut(log.session_id())
             .expect("session info was loaded above");
-        let verified_record = session_info.verify_record(&self.s3, record).await?;
+        let verified_log = session_info.verify_record(&self.s3, log).await?;
         if require_current {
             self.expected_deployment
                 .pcr_allowlist
-                .require_current_build(verified_record.build_pcrs())?;
+                .require_current_build(verified_log.build_pcrs())?;
         }
-        Ok(verified_record)
+        Ok(verified_log)
     }
 
-    // TODO: read_log?
-    async fn read_verified_record(
+    async fn read_log(
         &mut self,
         key: &str,
         require_current: bool,
     ) -> GuardianResult<VerifiedLogEntry> {
-        let record = self.s3.get_log_record(key).await?;
-        let verified_record = self.verify_record(record, require_current).await?;
+        let log = self.s3.get_log_record(key).await?;
+        let verified_log = self.verify_record(log, require_current).await?;
         info!(
             key,
-            session_id = %verified_record.session_id(),
+            session_id = %verified_log.session_id(),
             "Read and verified the S3 log record"
         );
-        Ok(verified_record)
+        Ok(verified_log)
     }
 
     /// Read and verify each immutable record in a directory for one hour.
@@ -164,9 +162,9 @@ impl GuardianReader {
         let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
-        for record in all_logs {
-            let verified_record = self.verify_record(record, false).await?;
-            out.push(verified_record);
+        for log in all_logs {
+            let verified_log = self.verify_record(log, false).await?;
+            out.push(verified_log);
         }
         info!(
             directory = %dir,
@@ -188,17 +186,17 @@ impl GuardianReader {
     ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are expected to expire, so authenticate the record
         // without claiming that S3 still makes it immutable.
-        let record = self
+        let log = self
             .s3
             .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
-        let verified_record = self.verify_record(record, require_current).await?;
+        let verified_log = self.verify_record(log, require_current).await?;
         info!(
             key,
-            session_id = %verified_record.session_id(),
+            session_id = %verified_log.session_id(),
             "Read and verified the S3 log record"
         );
-        let msg = verified_record.extract("kp-shares", VersionedLogMessage::into_kp_share_state)?;
+        let msg = verified_log.extract("kp-shares", VersionedLogMessage::into_kp_share_state)?;
         Ok(*msg)
     }
 
@@ -264,9 +262,9 @@ impl GuardianReader {
             return Ok(None);
         }
         let key = CeremonyLogMessage::latest_key(keys)?.expect("the key list is nonempty");
-        let verified_record = self.read_verified_record(&key, require_current).await?;
-        let session_id = verified_record.session_id().clone();
-        let msg = verified_record.extract("ceremony", VersionedLogMessage::into_ceremony)?;
+        let verified_log = self.read_log(&key, require_current).await?;
+        let session_id = verified_log.session_id().clone();
+        let msg = verified_log.extract("ceremony", VersionedLogMessage::into_ceremony)?;
         Ok(Some((*msg, session_id)))
     }
 
@@ -329,8 +327,8 @@ impl GuardianReader {
         let key = CeremonyProposalLogMessage::object_key(session_id);
         // A live proposal has just been published, so its short-lived Compliance
         // lock must still be active.
-        let verified_record = self.read_verified_record(&key, true).await?;
-        let proposal = verified_record.extract(
+        let verified_log = self.read_log(&key, true).await?;
+        let proposal = verified_log.extract(
             "ceremony proposal",
             VersionedLogMessage::into_ceremony_proposal,
         )?;
@@ -396,8 +394,8 @@ impl GuardianReader {
             return Ok(None);
         }
         let key = CommitteeUpdateLogMessage::latest_key(keys)?.expect("the key list is nonempty");
-        let verified_record = self.read_verified_record(&key, false).await?;
-        let msg = verified_record.extract(
+        let verified_log = self.read_log(&key, false).await?;
+        let msg = verified_log.extract(
             "committee-update",
             VersionedLogMessage::into_committee_update,
         )?;
@@ -422,8 +420,8 @@ impl GuardianReader {
                 "expected exactly one genesis record at {key}, found {keys:?}"
             )));
         }
-        let verified_record = self.read_verified_record(&key, false).await?;
-        let genesis = verified_record.extract("genesis", VersionedLogMessage::into_genesis)?;
+        let verified_log = self.read_log(&key, false).await?;
+        let genesis = verified_log.extract("genesis", VersionedLogMessage::into_genesis)?;
         Ok(Some(genesis))
     }
 
@@ -446,7 +444,7 @@ impl GuardianReader {
 /// Reads still verify the record signature and apply the S3 checks required by the read method.
 #[cfg(test)]
 pub(crate) fn reader_with_record_for_test(
-    record: Option<SignedLogEntry>,
+    log: Option<SignedLogEntry>,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
 ) -> GuardianReader {
@@ -467,8 +465,8 @@ pub(crate) fn reader_with_record_for_test(
     use std::sync::Mutex;
 
     let mut keys = extra_keys;
-    if let Some(record) = &record {
-        keys.push(record.object_key().to_string());
+    if let Some(log) = &log {
+        keys.push(log.object_key().to_string());
     }
     let request = Arc::new(Mutex::new((String::new(), false)));
     let captured_request = request.clone();
@@ -511,17 +509,15 @@ pub(crate) fn reader_with_record_for_test(
         });
     let config = InitConfig::mock_for_testing();
     let policy = S3ObjectLockPolicy::for_environment(config.deployment().retention_environment);
-    let record_key = record
-        .as_ref()
-        .map(|record| record.object_key().to_string());
+    let log_key = log.as_ref().map(|log| log.object_key().to_string());
     let get = mock!(Client::get_object)
-        .match_requests(move |req| req.key() == record_key.as_deref())
+        .match_requests(move |req| req.key() == log_key.as_deref())
         .then_output(move || {
-            let record = record.as_ref().unwrap();
+            let log = log.as_ref().unwrap();
             GetObjectOutput::builder()
                 .object_lock_mode(ObjectLockMode::Compliance)
-                .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
-                .body(ByteStream::from(serde_json::to_vec(record).unwrap()))
+                .object_lock_retain_until_date(DateTime::from(log.object_lock_expiry(policy)))
+                .body(ByteStream::from(serde_json::to_vec(log).unwrap()))
                 .build()
         });
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &get]);
@@ -570,7 +566,7 @@ mod tests {
         )
         .unwrap();
         let signing_key = GuardianSignKeyPair::from([42; 32]);
-        let record = SignedLogEntry::new(
+        let log = SignedLogEntry::new(
             SessionID::from_signing_pubkey(&signing_key.verification_key()),
             LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                 instance,
@@ -579,7 +575,7 @@ mod tests {
             &signing_key,
         );
         reader_with_record_for_test(
-            Some(record),
+            Some(log),
             signing_key.verification_key(),
             keys.iter().map(|key| key.to_string()).collect(),
         )
