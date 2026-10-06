@@ -277,6 +277,7 @@ impl BridgeService for HttpService {
         let member_signature = self
             .inner
             .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
+            .await
             .map_err(withdrawal_signing_refusal_status)?;
         tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {

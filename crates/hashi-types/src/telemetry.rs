@@ -75,7 +75,8 @@ impl TelemetryConfig {
 
         let env_filter = EnvFilter::builder()
             .with_default_directive(self.default_level.into())
-            .from_env_lossy();
+            .from_env_lossy()
+            .add_directive("corepc=info".parse().expect("valid directive"));
 
         if use_json {
             let fmt_layer = tracing_subscriber::fmt::layer()
