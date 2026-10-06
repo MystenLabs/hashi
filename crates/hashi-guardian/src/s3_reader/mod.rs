@@ -346,22 +346,26 @@ impl GuardianReader {
     /// It does not reserve the sequence number.
     /// Conditional writes reject records that compete for the same key.
     pub(crate) async fn next_sharing_seq(&mut self) -> GuardianResult<u64> {
-        let mut highest = self
+        let max_ceremony_sharing_seq = self
             .read_latest_ceremony_log(false)
             .await?
             .map(|(ceremony, _)| ceremony.sharing_seq());
         // Count occupied directories even if their records are unreadable or
         // delete-marked: an interrupted ceremony may have left shares here.
+        // Directory names are not authenticated. An operator with S3 write access
+        // can increase the next sequence or exhaust it by adding a directory.
         let shares_dir = KpShareStateLogMessage::root_dir();
         let proposals_dir = CeremonyProposalLogMessage::object_key_dir();
+        let mut max_kp_share_sharing_seq: Option<u64> = None;
         for directory in self.s3.list_common_prefixes(&shares_dir).await? {
             if directory == proposals_dir {
                 continue;
             }
             let seq = KpShareStateLogMessage::sharing_seq_from_dir(&directory)
                 .map_err(|err| InvalidS3Log(err.to_string()))?;
-            highest = Some(highest.map_or(seq, |previous| previous.max(seq)));
+            max_kp_share_sharing_seq = max_kp_share_sharing_seq.max(Some(seq));
         }
+        let highest = max_ceremony_sharing_seq.max(max_kp_share_sharing_seq);
         let next_seq = match highest {
             None => Ok(0),
             Some(seq) => seq
@@ -369,7 +373,8 @@ impl GuardianReader {
                 .ok_or_else(|| InvalidS3Log("sharing_seq exhausted".into())),
         }?;
         info!(
-            highest_used_sharing_seq = ?highest,
+            max_ceremony_sharing_seq = ?max_ceremony_sharing_seq,
+            max_kp_share_sharing_seq = ?max_kp_share_sharing_seq,
             next_sharing_seq = next_seq,
             "Selected the next ceremony sharing sequence"
         );
