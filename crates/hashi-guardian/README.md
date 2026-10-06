@@ -48,7 +48,7 @@ signed wall-clock timestamp. The fencing argument makes these assumptions:
     boundary. Reader-ahead skew and any post-deadline S3 durability delay share
     that margin; their combined duration must not exhaust it.
   - **Where we make it:** `LogWriter::write` captures the monotonic renewal time
-    immediately before `VerifiableLogEntry::new` captures the signed wall-clock time, and
+    immediately before `SignedLogEntry::new` captures the signed wall-clock time, and
     `LatestHeartbeatTime` subtracts the skew budget from the writer's fence.
     Heartbeat readers derive inactivity from the signed timestamp and the full
     quiet period.

@@ -124,8 +124,8 @@ mod tests {
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::LogMessageV1;
+    use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::VerifiableLogEntry;
     use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::guardian::WithdrawStage;
     use hashi_types::guardian::WithdrawalID;
@@ -286,9 +286,11 @@ mod tests {
             1,
             "only successful withdrawals should be logged"
         );
-        let success: VerifiableLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
+        let success: SignedLogEntry = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, success.object_key());
-        let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) = success.message() else {
+        let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) =
+            success.message_unchecked()
+        else {
             panic!("expected V1 withdrawal record");
         };
         let WithdrawalLogMessage {

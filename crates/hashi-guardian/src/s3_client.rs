@@ -10,7 +10,7 @@ use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::S3ObjectLockPolicy;
 use hashi_types::guardian::S3RetentionEnvironment;
-use hashi_types::guardian::VerifiableLogEntry;
+use hashi_types::guardian::SignedLogEntry;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -186,10 +186,7 @@ impl GuardianS3Client {
 
     /// Attempt one immutable log PUT. The Guardian log writer owns retries and
     /// deadlines, so SDK retries are disabled for this operation.
-    pub(crate) async fn write_log_entry_once(
-        &self,
-        log: &VerifiableLogEntry,
-    ) -> GuardianResult<()> {
+    pub(crate) async fn write_log_entry_once(&self, log: &SignedLogEntry) -> GuardianResult<()> {
         let key = log.object_key();
         let expiry_time = DateTime::from(log.object_lock_expiry(self.object_lock_policy));
         self.write_at_key_once(key, log, expiry_time).await
@@ -554,7 +551,7 @@ impl GuardianS3Client {
     pub async fn list_all_log_records_in_dir(
         &self,
         dir: &S3HourDirectory,
-    ) -> GuardianResult<Vec<VerifiableLogEntry>> {
+    ) -> GuardianResult<Vec<SignedLogEntry>> {
         let keys = self.list_keys(&dir.to_string()).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -576,7 +573,7 @@ impl GuardianS3Client {
         &self,
         key: &str,
         immutability_check: ImmutabilityCheck,
-    ) -> GuardianResult<VerifiableLogEntry> {
+    ) -> GuardianResult<SignedLogEntry> {
         if matches!(immutability_check, ImmutabilityCheck::Required) {
             let keys = self.list_keys(key).await?;
             if keys.len() != 1 || keys[0] != key {
@@ -614,7 +611,7 @@ impl GuardianS3Client {
         })?;
 
         let record =
-            serde_json::from_slice::<VerifiableLogEntry>(&bytes.into_bytes()).map_err(|e| {
+            serde_json::from_slice::<SignedLogEntry>(&bytes.into_bytes()).map_err(|e| {
                 InvalidS3Log(format!(
                     "Failed to deserialize object {} into target type: {}",
                     key, e
@@ -642,7 +639,7 @@ impl GuardianS3Client {
     }
 
     /// Read an immutable-log object with history and Compliance-lock checks.
-    pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<VerifiableLogEntry> {
+    pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<SignedLogEntry> {
         self.get_log_record_inner(key, ImmutabilityCheck::Required)
             .await
     }
@@ -703,7 +700,7 @@ mod tests {
     async fn log_put_uses_record_timestamp_for_expiry() {
         let signing_key = GuardianSignKeyPair::from([17u8; 32]);
         let timestamp_ms = 1_700_000_000_123;
-        let record = VerifiableLogEntry::new_at_timestamp(
+        let record = SignedLogEntry::new_at_timestamp(
             "session".into(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
@@ -867,7 +864,7 @@ mod tests {
     #[test]
     fn compliance_lock_expiry_is_strict() {
         let signing_key = GuardianSignKeyPair::from([15u8; 32]);
-        let record = VerifiableLogEntry::new_at_timestamp(
+        let record = SignedLogEntry::new_at_timestamp(
             "session".into(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
@@ -926,7 +923,7 @@ mod tests {
                 182,
             ),
         ] {
-            let record = VerifiableLogEntry::new_at_timestamp(
+            let record = SignedLogEntry::new_at_timestamp(
                 session_id.clone(),
                 message,
                 &signing_key,
@@ -989,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn required_read_rejects_expired_compliance_lock() {
         let signing_key = GuardianSignKeyPair::from([15u8; 32]);
-        let record = VerifiableLogEntry::new_at_timestamp(
+        let record = SignedLogEntry::new_at_timestamp(
             "session".into(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
@@ -1029,7 +1026,7 @@ mod tests {
     async fn attestation_log_replay_is_rejected_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let record = VerifiableLogEntry::new_at_timestamp(
+        let record = SignedLogEntry::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -1066,7 +1063,7 @@ mod tests {
 
     async fn assert_log_read_rejects_relocation(relocated_key: &str) {
         let signing_key = GuardianSignKeyPair::from([13u8; 32]);
-        let record = VerifiableLogEntry::new_at_timestamp(
+        let record = SignedLogEntry::new_at_timestamp(
             "session".into(),
             LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,

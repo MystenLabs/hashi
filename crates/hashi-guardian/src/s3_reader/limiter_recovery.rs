@@ -1,28 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recovers a standby enclave's activation limiter state from guardian S3
-//! withdrawal logs.
+//! Recover the limiter state for standby enclave activation from Guardian S3 withdrawal logs.
 //!
-//! Each withdrawal log carries the limiter `post_state` after that
-//! consume. The withdrawal seq is strictly monotonic across rotations, so the
-//! global max-seq withdrawal log holds the most recent limiter state.
+//! Each withdrawal log contains the limiter `post_state` after that withdrawal consumes tokens.
+//! The withdrawal sequence number always increases, including across rotations.
+//! The log with the highest sequence number contains the latest limiter state.
 //!
-//! Finding that log is a 4-level S3 tree-walk over the hour-partitioned layout
-//! (`withdraw/YYYY/MM/DD/HH/`): at each level we list `CommonPrefixes`, pick the
-//! greatest numeric component, and descend. The first hour bucket containing
-//! any withdrawal key is the latest non-empty bucket. We read it and one bucket back
-//! (sub-hour clock-skew defense across hour boundaries), then take the max-seq
-//! withdrawal across both.
+//! The search uses four directory levels: `withdraw/YYYY/MM/DD/HH/`.
+//! At each level, it lists `CommonPrefixes` and searches the directories from highest to lowest numeric value.
+//! It stops at the first hour directory that contains a withdrawal key.
+//! Recovery reads that directory and the directory for the previous hour.
+//! This includes logs that a clock difference of less than one hour can place in the previous directory.
+//! Recovery selects the withdrawal with the highest sequence number from both directories.
 //!
-//! We deliberately do not apply the auditor's `write_completion_time`
-//! (`DIR_WRITES_COMPLETION_DELAY`) gate when reading the found bucket. That gate
-//! exists for polling/auditor reads where the source might still be writing; if
-//! used here, an enclave that died late in an hour could have its final-hour
-//! bucket treated as not-yet-complete, and recovery would miss the most recent
-//! log. Activation instead calls this only after the heartbeat quiet check has
-//! confirmed every non-standby session has been silent long enough for S3
-//! read-after-write consistency to cover the old session's final writes.
+//! Recovery does not use the auditor's `write_completion_time` check with `DIR_WRITES_COMPLETION_DELAY`.
+//! That check protects reads when a session can still write to the directory.
+//! During recovery, it could exclude the directory that contains the previous session's final logs.
+//! Before recovery, the caller must verify that all other sessions completed the required heartbeat quiet period.
+//! S3 must make the previous session's final writes available before recovery starts.
 
 use super::GuardianReader;
 use super::VerifiedLogEntry;
@@ -37,14 +33,14 @@ use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
 
 impl GuardianReader {
-    /// Derive the activation limiter state from withdrawal logs. Uses the
-    /// global max-seq withdrawal post-state when present, otherwise genesis, and
-    /// caps tokens to the supplied config in case capacity was lowered.
+    /// Recover the limiter state for activation from withdrawal logs.
+    /// Use the `post_state` from the withdrawal with the highest sequence number.
+    /// Use the genesis limiter state if no withdrawal log exists.
+    /// Limit the available tokens to the configured capacity in case the capacity decreased.
     ///
-    /// Precondition: the caller must have already verified that every
-    /// non-standby session is quiet (`ensure_session_live_and_others_quiet`).
-    /// This read deliberately skips the `write_completion_time` gate, so it is
-    /// only sound once the prior session's final writes are guaranteed visible.
+    /// Before this call, use [`Self::ensure_session_live_and_others_quiet`] to verify that all other sessions completed the required quiet period.
+    /// This method does not check `write_completion_time`.
+    /// The previous session's final writes must be available in S3 before this call.
     pub async fn recover_limiter_state(
         &mut self,
         limiter_config: &LimiterConfig,
@@ -55,6 +51,12 @@ impl GuardianReader {
             info!("no withdrawal logs found; using genesis limiter state");
             return Ok(LimiterState::genesis(limiter_config));
         };
+
+        info!(
+            latest_directory = %cursor,
+            previous_directory = %cursor.prev_dir(),
+            "Reading withdrawal logs for limiter recovery"
+        );
 
         // Read the found bucket + one bucket back, then take max-seq across
         // both. The peek-back defends against sub-hour clock skew that may have
@@ -83,9 +85,9 @@ impl GuardianReader {
     }
 }
 
-/// Finds the latest hour bucket under `withdraw/` containing at least one
-/// withdrawal key, by walking the YYYY/MM/DD/HH tree in descending numeric
-/// order at each level. Returns `None` if no withdrawal log exists anywhere.
+/// Find the latest hour directory under `withdraw/` that contains a withdrawal key.
+/// Search the YYYY/MM/DD/HH directories from highest to lowest numeric value at each level.
+/// Return `None` if no withdrawal log exists.
 async fn find_latest_withdrawal_bucket(
     s3_client: &GuardianS3Client,
 ) -> GuardianResult<Option<S3HourDirectory>> {
@@ -107,6 +109,8 @@ async fn find_latest_withdrawal_bucket(
     Ok(None)
 }
 
+/// List the immediate numeric subdirectories from highest to lowest value.
+/// Return an error if a directory path does not match the required numeric format.
 async fn list_subdirs_desc(
     s3_client: &GuardianS3Client,
     prefix: &str,
@@ -125,6 +129,8 @@ async fn list_subdirs_desc(
     Ok(dirs.into_iter().map(|dir| dir.to_string()).collect())
 }
 
+/// Return the withdrawal limiter state with the highest `next_seq` in the supplied logs.
+/// Ignore other message types. Return `None` if no withdrawal log is present.
 fn bucket_max_post_state(logs: Vec<VerifiedLogEntry>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| log.into_entry().into_message().into_withdrawal())
@@ -152,10 +158,10 @@ mod tests {
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
-    use hashi_types::guardian::VerifiableLogEntry;
     use hashi_types::guardian::WithdrawalLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
@@ -181,7 +187,7 @@ mod tests {
             post_state: state_with_seq(next_seq),
         };
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
-        let entry = VerifiableLogEntry::new_at_timestamp(
+        let entry = SignedLogEntry::new_at_timestamp(
             "test-session".into(),
             LogMessage::Withdrawal(Box::new(msg)),
             &signing_key,

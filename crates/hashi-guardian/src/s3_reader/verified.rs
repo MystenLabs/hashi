@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Verify session attestations, log signatures, and required initialization checkpoints.
+
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::DeploymentConfig;
@@ -10,25 +12,25 @@ use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
-use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogType;
 use hashi_types::guardian::OperatorInitInfo;
-use hashi_types::guardian::VerifiableLogEntry;
-use hashi_types::guardian::VersionedLogMessage;
+use hashi_types::guardian::SignedLogEntry;
+use tracing::error;
+use tracing::info;
 
-/// Initialization checkpoint required by or verified for a session.
-///
-/// Variants are ordered by the durable log prefix each checkpoint proves.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// An initialization checkpoint required for a read or verified for a session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InitCheckpoint {
-    /// OI attestation and info (01-02), verified while initializing VerifiedSessionInfo.
+    /// Operator initialization logs 01-02: the attestation and session information.
+    /// Construction of [`VerifiedSessionInfo`] verifies these logs.
     OperatorInitialized,
-    /// The complete withdraw-mode initialization sequence (01-04).
+    /// Initialization logs 01-04 for withdrawal mode.
     OperatorActivated,
 }
 
-/// A session's attestation-anchored signing key, signed [`OperatorInitInfo`], build
-/// PCRs, and highest verified initialization checkpoint.
+/// Verified session information and the highest verified initialization checkpoint.
+/// This includes the signing key, signed [`OperatorInitInfo`], and build PCR values.
+/// The session attestation verifies the signing key and PCR values.
 #[derive(Debug, Clone)]
 pub struct VerifiedSessionInfo {
     signing_pubkey: GuardianPubKey,
@@ -37,10 +39,9 @@ pub struct VerifiedSessionInfo {
     verified_init_checkpoint: InitCheckpoint,
 }
 
-/// A log record whose message signature, writing session's attestation/PCRs,
-/// and required initialization checkpoint have been verified. The exact
-/// versioned entry is retained so callers can choose which schema versions they
-/// accept and how to interpret them.
+/// A log entry with a verified signature, session attestation, build PCR values, and required initialization checkpoint.
+/// This type keeps the original entry and its schema version.
+/// The caller selects which schema versions to accept and how to read them.
 #[derive(Debug)]
 pub struct VerifiedLogEntry {
     entry: LogEntry,
@@ -48,10 +49,11 @@ pub struct VerifiedLogEntry {
 }
 
 impl InitCheckpoint {
-    /// Return the initialization checkpoint required before serving a log.
-    /// Withdrawal and committee-update logs require 01-04; heartbeat, ceremony,
-    /// and genesis logs require only 01-02. KP-share state is mode-dependent.
-    /// Init logs use the dedicated init-log reader and are rejected here.
+    /// Return the initialization checkpoint required to read a log.
+    /// Withdrawal and committee update logs require initialization logs 01-04.
+    /// Heartbeat, ceremony, ceremony proposal, and genesis logs require initialization logs 01-02.
+    /// KP-share state logs require logs 01-02 in ceremony mode and logs 01-04 in withdrawal mode.
+    /// Reject initialization logs here. Use the initialization log reader for those records.
     fn required_for(log_type: LogType, mode: EnclaveMode) -> GuardianResult<Self> {
         let required = match log_type {
             LogType::Init => {
@@ -74,6 +76,7 @@ impl InitCheckpoint {
 }
 
 impl VerifiedSessionInfo {
+    /// Create session information for tests without attestation or initialization log verification.
     #[cfg(test)]
     pub(super) fn new_for_test(signing_pubkey: GuardianPubKey, build_pcrs: BuildPcrs) -> Self {
         Self {
@@ -84,6 +87,9 @@ impl VerifiedSessionInfo {
         }
     }
 
+    /// Read and verify the session attestation and operator initialization information from S3.
+    /// Select the build PCR values from the reader's deployment allowlist.
+    /// Verify the attestation before using its signing key to verify the two log signatures.
     pub(super) async fn read_from_s3(
         s3: &GuardianS3Client,
         session_id: &str,
@@ -112,7 +118,8 @@ impl VerifiedSessionInfo {
             )));
         };
         // Replay checks the certificate chain at the attestation's signed timestamp.
-        let build_pcrs = verify_deployment_info(session_id, &info.deployment, expected_deployment)?;
+        let build_pcrs =
+            verify_deployment_and_resolve_build(session_id, &info.deployment, expected_deployment)?;
         attestation
             .verify_replay(signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
@@ -120,6 +127,12 @@ impl VerifiedSessionInfo {
         // An embedded key's signature is trusted only after its attestation verifies.
         attestation_record.validate(signing_pubkey)?;
         info_record.validate(signing_pubkey)?;
+
+        info!(
+            session_id,
+            git_revision = build_pcrs.git_revision(),
+            "Verified the session attestation and operator initialization logs"
+        );
 
         Ok(Self {
             signing_pubkey: *signing_pubkey,
@@ -129,11 +142,11 @@ impl VerifiedSessionInfo {
         })
     }
 
-    /// Verify a record and the initialization checkpoint required to emit it.
+    /// Verify a record and the initialization checkpoint required to write it.
     pub(super) async fn verify_record(
         &mut self,
         s3: &GuardianS3Client,
-        record: VerifiableLogEntry,
+        record: SignedLogEntry,
     ) -> GuardianResult<VerifiedLogEntry> {
         let entry = record.validate_into_entry(&self.signing_pubkey)?;
         let required = InitCheckpoint::required_for(entry.log_type(), self.info.mode())?;
@@ -145,21 +158,19 @@ impl VerifiedSessionInfo {
         })
     }
 
+    /// Verify the required initialization checkpoint if this session has not reached it.
+    /// Keep the current checkpoint if any verification fails.
+    /// The `session_id` must identify this session.
     async fn ensure_init_checkpoint(
         &mut self,
         s3: &GuardianS3Client,
         session_id: &str,
         required: InitCheckpoint,
     ) -> GuardianResult<()> {
-        if self.verified_init_checkpoint >= required {
-            return Ok(());
-        }
-
-        match required {
-            InitCheckpoint::OperatorInitialized => {
-                unreachable!("session construction verifies operator initialization")
-            }
-            InitCheckpoint::OperatorActivated => {
+        match (self.verified_init_checkpoint, required) {
+            (_, InitCheckpoint::OperatorInitialized)
+            | (InitCheckpoint::OperatorActivated, InitCheckpoint::OperatorActivated) => Ok(()),
+            (InitCheckpoint::OperatorInitialized, InitCheckpoint::OperatorActivated) => {
                 let pi_key = InitLogMessage::pi_fully_initialized_object_key(session_id);
                 let pi_message =
                     Self::read_verified_init_log(s3, &pi_key, &self.signing_pubkey).await?;
@@ -170,24 +181,24 @@ impl VerifiedSessionInfo {
                 InitLogMessage::verify_oi_pi_consistency(&self.info, &pi_message)?;
                 InitLogMessage::verify_oi_oa_consistency(&self.info, &oa_message)?;
                 InitLogMessage::verify_pi_oa_consistency(&pi_message, &oa_message)?;
+                self.verified_init_checkpoint = InitCheckpoint::OperatorActivated;
+                info!(session_id, "Verified the session activation checkpoint");
+                Ok(())
             }
         }
-
-        self.verified_init_checkpoint = required;
-        Ok(())
     }
 
-    fn unverified_init_message(record: &VerifiableLogEntry) -> GuardianResult<&InitLogMessage> {
-        match record.message() {
-            VersionedLogMessage::V1(LogMessage::Init(message)) => Ok(message),
-            _ => Err(InvalidS3Log(format!(
+    /// The caller must verify the attestation and log signatures before trusting the message.
+    fn unverified_init_message(record: &SignedLogEntry) -> GuardianResult<&InitLogMessage> {
+        record.message_unchecked().as_init().ok_or_else(|| {
+            InvalidS3Log(format!(
                 "expected an init log at key {}",
                 record.object_key()
-            ))),
-        }
+            ))
+        })
     }
 
-    /// Read an init log and validate it with the authenticated signing key.
+    /// Read an initialization log and verify it with the authenticated signing key.
     async fn read_verified_init_log(
         s3: &GuardianS3Client,
         key: &str,
@@ -214,9 +225,12 @@ impl VerifiedSessionInfo {
     }
 }
 
-/// Check the reported deployment and resolve its build using the reader's allowlist.
-/// The selected PCR pin must still be verified against the Nitro attestation.
-fn verify_deployment_info(
+/// Check the reported deployment and return its build from the reader's allowlist.
+/// The reported current build must have the same PCR values as the selected build.
+/// Log an error if a shared historical revision has different PCR values in the two allowlists.
+/// Historical mismatches do not prevent the read.
+/// The caller must then verify the Nitro attestation against the selected build's PCR values.
+fn verify_deployment_and_resolve_build(
     session_id: &str,
     reported: &DeploymentConfig,
     expected: &DeploymentConfig,
@@ -239,13 +253,41 @@ fn verify_deployment_info(
             reported.bitcoin_network, expected.bitcoin_network
         )));
     }
-    expected
+    let reported_build = reported.pcr_allowlist.current_build();
+    let expected_build = expected
         .pcr_allowlist
-        .resolve(reported.pcr_allowlist.current_build().git_revision())
-        .cloned()
+        .resolve(reported_build.git_revision())?;
+    if reported_build != expected_build {
+        return Err(InvalidS3Log(format!(
+            "session {session_id} reported PCR values for build '{}' do not match the reader's allowlist",
+            reported_build.git_revision()
+        )));
+    }
+
+    // Historical revisions can be removed from either allowlist.
+    // Compare only revisions present in both allowlists.
+    // Log an error if their PCR values differ, but continue the read.
+    for reported_build in reported.pcr_allowlist.prev_builds() {
+        let Ok(expected_build) = expected
+            .pcr_allowlist
+            .resolve(reported_build.git_revision())
+        else {
+            continue;
+        };
+        if reported_build != expected_build {
+            error!(
+                session_id,
+                git_revision = reported_build.git_revision(),
+                "Reported historical PCR values do not match the reader's allowlist"
+            );
+        }
+    }
+
+    Ok(expected_build.clone())
 }
 
 impl VerifiedLogEntry {
+    /// Create a log entry for tests without signature, attestation, or initialization log verification.
     #[cfg(test)]
     pub(super) fn new_for_test(entry: LogEntry, build_pcrs: BuildPcrs) -> Self {
         Self { entry, build_pcrs }
@@ -291,7 +333,7 @@ mod tests {
         let expected = DeploymentConfig::mock_for_testing();
         let reported = expected.clone();
         assert_eq!(
-            verify_deployment_info("session", &reported, &expected).unwrap(),
+            verify_deployment_and_resolve_build("session", &reported, &expected).unwrap(),
             *expected.pcr_allowlist.current_build()
         );
         let mut wrong_bucket = reported.clone();
@@ -305,7 +347,7 @@ mod tests {
         wrong_network.bitcoin_network = bitcoin::Network::Bitcoin;
         for changed in [wrong_bucket, wrong_region, wrong_retention, wrong_network] {
             assert!(matches!(
-                verify_deployment_info("session", &changed, &expected),
+                verify_deployment_and_resolve_build("session", &changed, &expected),
                 Err(InvalidS3Log(message)) if message.contains("does not match expected")
             ));
         }
@@ -323,7 +365,7 @@ mod tests {
         let mut reported = expected.clone();
         reported.pcr_allowlist =
             hashi_types::guardian::PcrAllowlist::new(previous.clone(), []).unwrap();
-        let build = verify_deployment_info("session", &reported, &expected).unwrap();
+        let build = verify_deployment_and_resolve_build("session", &reported, &expected).unwrap();
         assert_eq!(build, previous);
         assert!(expected
             .pcr_allowlist
@@ -334,22 +376,30 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(verify_deployment_info("session", &reported, &expected).is_err());
+        assert!(verify_deployment_and_resolve_build("session", &reported, &expected).is_err());
     }
 
     #[test]
-    fn logged_pcr_pins_do_not_replace_the_readers_trust_policy() {
-        let expected = DeploymentConfig::mock_for_testing();
-        let mut reported = expected.clone();
-        reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
-            BuildPcrs::mock_for_testing(expected.pcr_allowlist.current_build().git_revision(), 9),
-            [],
-        )
-        .unwrap();
-        assert_eq!(
-            verify_deployment_info("session", &reported, &expected).unwrap(),
-            *expected.pcr_allowlist.current_build(),
-        );
+    fn reported_pcr_pins_must_match_the_readers_allowlist() {
+        let mut expected = DeploymentConfig::mock_for_testing();
+        let current = expected.pcr_allowlist.current_build().clone();
+        let previous = BuildPcrs::mock_for_testing("previous", 2);
+        expected.pcr_allowlist =
+            hashi_types::guardian::PcrAllowlist::new(current.clone(), [previous.clone()]).unwrap();
+        for build in [current, previous] {
+            let mut reported = expected.clone();
+            reported.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+                BuildPcrs::mock_for_testing(build.git_revision(), 9),
+                [],
+            )
+            .unwrap();
+            assert!(matches!(
+                verify_deployment_and_resolve_build("session", &reported, &expected),
+                Err(InvalidS3Log(message))
+                    if message.contains("reported PCR values")
+                        && message.contains(build.git_revision())
+            ));
+        }
     }
 
     fn build_pcrs() -> BuildPcrs {
@@ -366,7 +416,7 @@ mod tests {
             .build()
     }
 
-    fn locked_record(record: &VerifiableLogEntry, policy: S3ObjectLockPolicy) -> GetObjectOutput {
+    fn locked_record(record: &SignedLogEntry, policy: S3ObjectLockPolicy) -> GetObjectOutput {
         GetObjectOutput::builder()
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
@@ -389,7 +439,7 @@ mod tests {
             assert!(attestation
                 .verify_replay(&signing_pubkey, deployment.pcr_allowlist.current_build())
                 .is_err());
-            let mut attestation_record = VerifiableLogEntry::new(
+            let mut attestation_record = SignedLogEntry::new(
                 session_id.clone(),
                 LogMessage::Init(Box::new(InitLogMessage::OIAttestation {
                     attestation,
@@ -405,7 +455,7 @@ mod tests {
                 attestation_record = serde_json::from_value(json).unwrap();
                 assert!(attestation_record.validate(&signing_pubkey).is_err());
             }
-            let info_record = VerifiableLogEntry::new(
+            let info_record = SignedLogEntry::new(
                 session_id.clone(),
                 LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(info)))),
                 &signing_key,
@@ -483,7 +533,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([8u8; 32]);
         let signing_pubkey = signing_key.verification_key();
         let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
-        let pi_log = VerifiableLogEntry::new(
+        let pi_log = SignedLogEntry::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -498,7 +548,7 @@ mod tests {
             })),
             &signing_key,
         );
-        let oa_log = VerifiableLogEntry::new(
+        let oa_log = SignedLogEntry::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [1; 32],
