@@ -24,6 +24,7 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
+use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -143,7 +144,13 @@ impl GuardianReader {
         require_current: bool,
     ) -> GuardianResult<VerifiedLogEntry> {
         let record = self.s3.get_log_record(key).await?;
-        self.verify_record(record, require_current).await
+        let verified_record = self.verify_record(record, require_current).await?;
+        info!(
+            key,
+            session_id = %verified_record.session_id(),
+            "Read and verified the S3 log record"
+        );
+        Ok(verified_record)
     }
 
     /// Read and verify each immutable record in a directory for one hour.
@@ -186,14 +193,13 @@ impl GuardianReader {
             .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
         let verified_record = self.verify_record(record, require_current).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = *verified_record
-            .into_entry()
-            .into_message()
-            .into_kp_share_state()
-            .ok_or_else(|| InvalidS3Log(format!("expected a kp-shares log at {key}")))?;
-        log_verified_read(key, &session_id);
-        Ok(msg)
+        info!(
+            key,
+            session_id = %verified_record.session_id(),
+            "Read and verified the S3 log record"
+        );
+        let msg = verified_record.extract("kp-shares", VersionedLogMessage::into_kp_share_state)?;
+        Ok(*msg)
     }
 
     /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
@@ -207,24 +213,22 @@ impl GuardianReader {
         sharing_seq: u64,
         require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
-        let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_keys_allowing_mutations(&prefix).await?;
-        let Some(key) = keys.into_iter().max() else {
+        let keys = self
+            .s3
+            .list_keys_allowing_mutations(&KpShareStateLogMessage::object_key_dir(sharing_seq))
+            .await?;
+        if keys.is_empty() {
             info!(
                 sharing_seq,
                 "No KP-share state log found for the sharing sequence"
             );
             return Ok(None);
-        };
+        }
+        let key = KpShareStateLogMessage::latest_key(sharing_seq, keys)?
+            .expect("the key list is nonempty");
         let msg = self
             .read_kp_share_state_log_at_key(&key, require_current)
             .await?;
-        if msg.sharing_seq != sharing_seq {
-            return Err(InvalidS3Log(format!(
-                "sharing_seq mismatch: {} != {}",
-                msg.sharing_seq, sharing_seq
-            )));
-        }
         Ok(Some(msg))
     }
 
@@ -255,18 +259,14 @@ impl GuardianReader {
             .s3
             .list_keys(&CeremonyLogMessage::object_key_dir())
             .await?;
-        let Some(key) = keys.into_iter().max() else {
+        if keys.is_empty() {
             info!("No completed ceremony log found");
             return Ok(None);
-        };
+        }
+        let key = CeremonyLogMessage::latest_key(keys)?.expect("the key list is nonempty");
         let verified_record = self.read_verified_record(&key, require_current).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = verified_record
-            .into_entry()
-            .into_message()
-            .into_ceremony()
-            .ok_or_else(|| InvalidS3Log(format!("expected a ceremony log at {key}")))?;
-        log_verified_read(&key, &session_id);
+        let session_id = verified_record.session_id().clone();
+        let msg = verified_record.extract("ceremony", VersionedLogMessage::into_ceremony)?;
         Ok(Some((*msg, session_id)))
     }
 
@@ -311,19 +311,10 @@ impl GuardianReader {
             .map(|(state, _dealer)| state)
     }
 
-    /// Read the latest ceremony and the latest KP-share state for its `sharing_seq`.
+    /// Read the latest ceremony and its KP-share state. Return the state and dealer session ID.
     /// Both records must come from the current build.
-    pub async fn read_latest_ceremony_state_from_current_build(
-        &mut self,
-    ) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_requirement(true)
-            .await
-            .map(|(state, _dealer)| state)
-    }
-
-    /// Return the result of [`Self::read_latest_ceremony_state_from_current_build`] with the dealer session ID.
     /// The dealer session wrote the `ceremony/` record.
-    pub async fn read_latest_ceremony_state_with_dealer(
+    pub async fn read_latest_ceremony_state_from_current_build(
         &mut self,
     ) -> GuardianResult<(CeremonyState, SessionID)> {
         self.read_latest_ceremony_state_with_build_requirement(true)
@@ -339,17 +330,12 @@ impl GuardianReader {
         // A live proposal has just been published, so its short-lived Compliance
         // lock must still be active.
         let verified_record = self.read_verified_record(&key, true).await?;
-        let writing_session_id = verified_record.entry().session_id().clone();
-        let proposal = *verified_record
-            .into_entry()
-            .into_message()
-            .into_ceremony_proposal()
-            .ok_or_else(|| InvalidS3Log(format!("expected a ceremony proposal log at {key}")))?;
-        let state = CeremonyState::from_proposal(proposal).map_err(|error| {
-            InvalidS3Log(format!("invalid ceremony proposal at {key}: {error}"))
-        })?;
-        log_verified_read(&key, &writing_session_id);
-        Ok(state)
+        let proposal = verified_record.extract(
+            "ceremony proposal",
+            VersionedLogMessage::into_ceremony_proposal,
+        )?;
+        CeremonyState::from_proposal(*proposal)
+            .map_err(|error| InvalidS3Log(format!("invalid ceremony proposal at {key}: {error}")))
     }
 
     /// Return the next unused sharing sequence number.
@@ -406,17 +392,15 @@ impl GuardianReader {
             .s3
             .list_keys(&CommitteeUpdateLogMessage::object_key_dir())
             .await?;
-        let Some(key) = keys.into_iter().max() else {
+        if keys.is_empty() {
             return Ok(None);
-        };
+        }
+        let key = CommitteeUpdateLogMessage::latest_key(keys)?.expect("the key list is nonempty");
         let verified_record = self.read_verified_record(&key, false).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = verified_record
-            .into_entry()
-            .into_message()
-            .into_committee_update()
-            .ok_or_else(|| InvalidS3Log(format!("expected a committee-update log at {key}")))?;
-        log_verified_read(&key, &session_id);
+        let msg = verified_record.extract(
+            "committee-update",
+            VersionedLogMessage::into_committee_update,
+        )?;
         Ok(Some(msg.new_committee))
     }
 
@@ -439,13 +423,7 @@ impl GuardianReader {
             )));
         }
         let verified_record = self.read_verified_record(&key, false).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let genesis = verified_record
-            .into_entry()
-            .into_message()
-            .into_genesis()
-            .ok_or_else(|| InvalidS3Log(format!("expected a genesis log at {key}")))?;
-        log_verified_read(&key, &session_id);
+        let genesis = verified_record.extract("genesis", VersionedLogMessage::into_genesis)?;
         Ok(Some(genesis))
     }
 
@@ -461,10 +439,6 @@ impl GuardianReader {
         info!("No committee update log found; checking the genesis record");
         Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
     }
-}
-
-fn log_verified_read(key: &str, session_id: &SessionID) {
-    info!(key, session_id = %session_id, "Read and verified the S3 log record");
 }
 
 /// Create a reader with mock S3 responses for one optional record and additional keys.

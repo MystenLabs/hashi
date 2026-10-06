@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::log_layout::S3_DIR_CEREMONY;
+use super::super::log_layout::S3SequencedKey;
 use super::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
+use crate::guardian::GuardianResult;
 use crate::guardian::KpEncryptedShareRoster;
 use crate::guardian::SecretSharingInstance;
 use serde::Deserialize;
@@ -69,7 +71,13 @@ impl CeremonyLogMessage {
     }
 
     pub fn object_key(&self) -> String {
-        format!("{}{:020}.json", Self::object_key_dir(), self.sharing_seq())
+        S3SequencedKey::format(&Self::object_key_dir(), self.sharing_seq())
+    }
+
+    /// Return the greatest canonical key, or `None` for an empty list.
+    /// Return an error if any key has an invalid prefix, numeric field, or suffix.
+    pub fn latest_key(keys: Vec<String>) -> GuardianResult<Option<String>> {
+        S3SequencedKey::latest_key(&Self::object_key_dir(), keys)
     }
 }
 

@@ -3,6 +3,8 @@
 
 use super::super::S3NumericDirectory;
 use super::super::log_layout::S3_DIR_KP_SHARES;
+use super::super::log_layout::S3SequencedKey;
+use crate::guardian::GuardianResult;
 use crate::guardian::KpEncryptedShareRoster;
 use serde::Deserialize;
 use serde::Serialize;
@@ -64,7 +66,14 @@ impl KpShareStateLogMessage {
 
     /// Construct the object key from sequence numbers before fetching the message.
     pub fn object_key_for_sequences(sharing_seq: u64, cert_seq: u64) -> String {
-        format!("{}{:020}.json", Self::object_key_dir(sharing_seq), cert_seq)
+        S3SequencedKey::format(&Self::object_key_dir(sharing_seq), cert_seq)
+    }
+
+    /// Return the greatest canonical key, or `None` for an empty list.
+    /// Return an error if any key has an invalid prefix, numeric field, or suffix.
+    /// Each key must belong to the specified sharing sequence.
+    pub fn latest_key(sharing_seq: u64, keys: Vec<String>) -> GuardianResult<Option<String>> {
+        S3SequencedKey::latest_key(&Self::object_key_dir(sharing_seq), keys)
     }
 }
 

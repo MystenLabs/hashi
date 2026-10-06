@@ -196,7 +196,9 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     // A completed guardian no longer accepts confirmations (e.g. this KP re-runs
     // after a lost response), so check the committed S3 state instead.
     if verified.info().lifecycle == CeremonyStage::Completed.into() {
-        let (committed, dealer) = reader.read_latest_ceremony_state_with_dealer().await?;
+        let (committed, dealer) = reader
+            .read_latest_ceremony_state_from_current_build()
+            .await?;
         ensure!(
             dealer == session_id,
             "latest committed ceremony was dealt by session {dealer}, not {session_id}"
