@@ -36,4 +36,43 @@ impl WithdrawalLogMessage {
             self.request_data.seq, self.request_data.wid,
         ))
     }
+
+    /// Return the sequence number in a key from [`Self::object_key`].
+    /// Return `None` if the file name does not start with 20 decimal digits.
+    pub fn seq_from_object_key(key: &str) -> Option<u64> {
+        let name = key.rsplit('/').next()?;
+        name.get(..20)?.parse().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seq_from_object_key_reads_the_zero_padded_prefix() {
+        let key = "withdraw/2026/10/06/12/00000000000000000042-wid0xaa.json";
+        assert_eq!(WithdrawalLogMessage::seq_from_object_key(key), Some(42));
+        let max = format!("withdraw/2026/10/06/12/{:020}-wid0xaa.json", u64::MAX);
+        assert_eq!(
+            WithdrawalLogMessage::seq_from_object_key(&max),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn seq_from_object_key_rejects_other_file_names() {
+        for key in [
+            "withdraw/2026/10/06/12/unknown-s-wid0xaa.json",
+            "withdraw/2026/10/06/12/0042-wid0xaa.json",
+            "withdraw/2026/10/06/12/99999999999999999999-wid0xaa.json",
+            "withdraw/2026/10/06/12/",
+        ] {
+            assert_eq!(
+                WithdrawalLogMessage::seq_from_object_key(key),
+                None,
+                "{key}"
+            );
+        }
+    }
 }

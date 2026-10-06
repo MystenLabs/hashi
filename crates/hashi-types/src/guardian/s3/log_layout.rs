@@ -77,6 +77,18 @@ impl S3NumericDirectory {
             path: path.to_string(),
         })
     }
+
+    /// Return the paths in order from the highest to the lowest numeric value.
+    /// Return an error if a path does not have the numeric format.
+    pub fn sort_desc(paths: Vec<String>) -> anyhow::Result<Vec<String>> {
+        let mut dirs = Vec::with_capacity(paths.len());
+        for path in &paths {
+            dirs.push(Self::from_path(path)?);
+        }
+        dirs.sort();
+        dirs.reverse();
+        Ok(dirs.into_iter().map(|dir| dir.path).collect())
+    }
 }
 
 impl fmt::Display for S3NumericDirectory {

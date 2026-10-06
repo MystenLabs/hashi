@@ -552,6 +552,21 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_seq_round_trips_through_its_object_key() {
+        for message in dummy_log_messages() {
+            let LogMessage::Withdrawal(withdrawal) = &message else {
+                continue;
+            };
+            let seq = withdrawal.request_data.seq;
+            let record = dummy_log_record(message);
+            assert_eq!(
+                WithdrawalLogMessage::seq_from_object_key(record.object_key()),
+                Some(seq)
+            );
+        }
+    }
+
+    #[test]
     fn hourly_log_deserialization_rejects_out_of_range_timestamps() {
         for message in dummy_log_messages() {
             if !matches!(

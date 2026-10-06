@@ -115,18 +115,9 @@ async fn list_subdirs_desc(
     s3_client: &GuardianS3Client,
     prefix: &str,
 ) -> GuardianResult<Vec<String>> {
-    let mut dirs = s3_client
-        .list_common_prefixes(prefix)
-        .await?
-        .into_iter()
-        .map(|path| {
-            S3NumericDirectory::from_path(&path)
-                .map_err(|e| InvalidS3Log(format!("invalid withdrawal-log directory {path}: {e}")))
-        })
-        .collect::<GuardianResult<Vec<_>>>()?;
-    dirs.sort();
-    dirs.reverse();
-    Ok(dirs.into_iter().map(|dir| dir.to_string()).collect())
+    let dirs = s3_client.list_common_prefixes(prefix).await?;
+    S3NumericDirectory::sort_desc(dirs)
+        .map_err(|e| InvalidS3Log(format!("invalid withdrawal-log directory: {e:#}")))
 }
 
 /// Return the limiter state with the highest `next_seq` in the supplied withdrawal logs.
