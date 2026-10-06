@@ -488,8 +488,11 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB)
+# Max gRPC response size in bytes this node decodes from Sui RPC and peers (default: 33554432 = 32 MiB)
 # grpc-max-decoding-message-size = 33554432
+
+# Max gRPC request size in bytes the bridge and MPC services decode (default: 4194304 = 4 MiB)
+# grpc-server-max-decoding-message-size = 4194304
 
 # Max in-flight gRPC requests per peer (default: 200)
 # grpc-per-peer-inflight-limit = 200

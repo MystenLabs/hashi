@@ -59,15 +59,22 @@ impl HttpService {
         &self.inner.metrics
     }
 
+    fn bridge_service_server(
+        &self,
+    ) -> hashi_types::proto::bridge_service_server::BridgeServiceServer<Self> {
+        hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone())
+            .max_decoding_message_size(self.inner.config.grpc_server_max_decoding_message_size())
+    }
+
+    fn mpc_service_server(&self) -> hashi_types::proto::mpc_service_server::MpcServiceServer<Self> {
+        hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone())
+            .max_decoding_message_size(self.inner.config.grpc_server_max_decoding_message_size())
+    }
+
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
-            let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();
-            let bridge_service =
-                hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone())
-                    .max_decoding_message_size(max_decoding_message_size);
-            let mpc_service =
-                hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone())
-                    .max_decoding_message_size(max_decoding_message_size);
+            let bridge_service = self.bridge_service_server();
+            let mpc_service = self.mpc_service_server();
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
@@ -403,5 +410,65 @@ mod tests {
         )
         .await
         .expect("a requested shutdown must stop the server");
+    }
+
+    async fn status_for_declared_length<S>(service: S, path: &str, declared: u32) -> tonic::Status
+    where
+        S: tower::Service<
+                http::Request<axum::body::Body>,
+                Response = http::Response<tonic::body::Body>,
+            >,
+        S::Error: std::fmt::Debug,
+    {
+        let mut header = vec![0u8];
+        header.extend_from_slice(&declared.to_be_bytes());
+        let request = http::Request::post(path)
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(axum::body::Body::from(header))
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(service, request).await.unwrap();
+        tonic::Status::from_header_map(response.headers()).expect("a gRPC status")
+    }
+
+    #[tokio::test]
+    async fn both_services_refuse_a_declared_length_over_the_server_limit() {
+        for (configured, limit) in [
+            (None, 4 * 1024 * 1024),
+            (Some(8 * 1024 * 1024), 8 * 1024 * 1024),
+        ] {
+            let tmpdir = tempfile::tempdir().unwrap();
+            let mut config = crate::config::Config::new_for_testing();
+            config.db = Some(tmpdir.path().into());
+            config.grpc_server_max_decoding_message_size = configured;
+            let hashi = Hashi::new_with_registry(
+                crate::ServerVersion::new("unknown", "unknown"),
+                None,
+                config,
+                &prometheus::Registry::new(),
+            )
+            .unwrap();
+            let service = HttpService::new(hashi);
+
+            for (declared, refused) in [(limit, false), (limit + 1, true)] {
+                let mpc = status_for_declared_length(
+                    service.mpc_service_server(),
+                    "/sui.hashi.v1alpha.MpcService/SendMessages",
+                    declared,
+                )
+                .await;
+                assert_eq!(mpc.code() == tonic::Code::OutOfRange, refused, "{mpc:?}");
+                let bridge = status_for_declared_length(
+                    service.bridge_service_server(),
+                    "/sui.hashi.v1alpha.BridgeService/GetServiceInfo",
+                    declared,
+                )
+                .await;
+                assert_eq!(
+                    bridge.code() == tonic::Code::OutOfRange,
+                    refused,
+                    "{bridge:?}"
+                );
+            }
+        }
     }
 }

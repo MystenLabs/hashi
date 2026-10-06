@@ -2145,7 +2145,7 @@ mod test {
         let mut config = Config::new_for_testing();
         config.db = Some(tmpdir.path().into());
         let decode_limit = 64 * 1024;
-        config.grpc_max_decoding_message_size = Some(decode_limit);
+        config.grpc_server_max_decoding_message_size = Some(decode_limit);
         let tls_public_key = config.tls_public_key().unwrap();
         let tls_private_key = config.tls_private_key().unwrap();
 

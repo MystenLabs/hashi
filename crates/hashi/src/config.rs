@@ -15,9 +15,9 @@ use crate::constants::SUI_MAINNET_CHAIN_ID;
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
 const DEFAULT_WITHDRAWAL_SIGNING_PER_CALLER_LIMIT: usize = 4;
-/// Tonic's 4 MiB default is too small to scrape a large on-chain state or
-/// receive large MPC round messages.
+/// Tonic's 4 MiB default is too small to scrape a large on-chain state.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+const DEFAULT_GRPC_SERVER_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 pub(crate) const DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT: u32 = 200;
 /// Core's short fee-estimation horizon. Longer targets are answered from
 /// horizons that lag the fee market by hours to days.
@@ -130,13 +130,19 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_endpoint: Option<String>,
 
-    /// Maximum gRPC decoding message size in bytes.
+    /// Maximum gRPC message size in bytes this node decodes as a client: Sui
+    /// RPC responses and responses from peers.
     ///
     /// Defaults to 32 MiB if not specified. Tonic's built-in default is 4 MiB,
-    /// which is too small to scrape a large on-chain state or receive large MPC
-    /// round messages.
+    /// which is too small to scrape a large on-chain state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
+
+    /// Maximum gRPC request size in bytes the bridge and MPC services decode.
+    ///
+    /// Defaults to 4 MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_server_max_decoding_message_size: Option<usize>,
 
     /// Maximum requests served concurrently for one registered peer across all
     /// its connections; requests above it are shed with `Unavailable`.
@@ -339,6 +345,12 @@ impl Config {
         let file = std::fs::read(path)?;
         let config: Self = toml::from_slice(&file)?;
         anyhow::ensure!(
+            config
+                .grpc_server_max_decoding_message_size
+                .is_none_or(|limit| limit >= DEFAULT_GRPC_SERVER_MAX_DECODING_MESSAGE_SIZE),
+            "grpc_server_max_decoding_message_size must be at least {DEFAULT_GRPC_SERVER_MAX_DECODING_MESSAGE_SIZE}"
+        );
+        anyhow::ensure!(
             config.grpc_per_peer_inflight_limit != Some(0),
             "grpc_per_peer_inflight_limit must be at least 1"
         );
@@ -508,6 +520,11 @@ impl Config {
             .unwrap_or(DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE)
     }
 
+    pub fn grpc_server_max_decoding_message_size(&self) -> usize {
+        self.grpc_server_max_decoding_message_size
+            .unwrap_or(DEFAULT_GRPC_SERVER_MAX_DECODING_MESSAGE_SIZE)
+    }
+
     pub fn grpc_per_peer_inflight_limit(&self) -> u32 {
         self.grpc_per_peer_inflight_limit
             .unwrap_or(DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT)
@@ -593,6 +610,7 @@ impl Config {
             trm_api_key: None,
             guardian_endpoint: None,
             grpc_max_decoding_message_size: None,
+            grpc_server_max_decoding_message_size: None,
             grpc_per_peer_inflight_limit: None,
             max_concurrent_leader_job_tasks: None,
             withdrawal_batching_delay_ms: None,
