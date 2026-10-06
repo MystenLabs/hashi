@@ -1548,6 +1548,15 @@ hashi backup save /path/to/validator.toml \
 
 `hashi backup restore` decrypts an archive and extracts it into a directory you choose. It installs nothing, so restoring a node is: extract, put the files back, start. The example paths below follow the systemd layout in [6.2](#62-server).
 
+For machine loss, the S3 restore needs **no original node config or local
+archive**. Keep the object URI, region, optional version ID, and decryption-key
+access outside the node. Stop or fence the old instance before restarting its
+identity on a replacement host. See the
+[machine-loss recovery walkthrough](node-backup.mdx#machine-loss-recovery)
+for installation guidance and the
+[opt-in remote recovery test](node-backup.mdx#opt-in-remote-recovery-test)
+for a rehearsal.
+
 **Which backup to use.** Use the newest one. To take part in the current epoch, the restored database must hold the encryption and signing keys recorded for your node in the current committee, and the backup the node wrote at the most recent epoch change does. An older backup, or an empty database, still gives you a working node: it registers replacement keys by itself and rejoins at the next reconfiguration, without taking part in MPC until then. There is no fixed age limit: what matters is whether the backup holds those keys, and if it does not, the cost is that wait.
 
 **What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the backup was written.
@@ -1561,6 +1570,7 @@ hashi backup save /path/to/validator.toml \
 2. **Extract the archive into a private directory.** The extracted files are plaintext keys and database contents. Use a directory only your user can read, on the same filesystem as the `db` path so the database can be moved rather than copied.
 
    ```bash
+   umask 077
    sudo install -d -m 700 -o "$USER" /var/lib/hashi/restore
 
    # With a local OpenPGP secret key
@@ -1604,7 +1614,7 @@ hashi backup save /path/to/validator.toml \
    sudo mv hashi-db-snapshot /var/lib/hashi/db
    ```
 
-4. **Put the config and key files back, if you are restoring them.** Install them at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths.
+4. **Put the config and key files back, if you are restoring them.** Inspect the recovered manifest and config, then install files at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. Never blindly follow archived absolute paths. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths, and update endpoints for the new host.
 
    ```bash
    cat hashi-backup-manifest.toml
@@ -1631,6 +1641,11 @@ hashi backup save /path/to/validator.toml \
 
    - **Back in the current epoch:** the node logs `recover_mpc_state: recovered vk=...`.
    - **Waiting for the next epoch:** the node logs `no DB encryption or signing key matches the current committee record; registering fresh keys for epoch <N> so the node rejoins at that reconfig`, and `hashi_mpc_committee_key_lost_total` increases. Nothing more is needed from you. Leave the node running and it rejoins at that reconfiguration.
+
+   After restart, check catch-up and committee participation, then scheduled backup
+   completions. S3 adoption gauges only show configuration; a local completion does
+   not imply an upload. Remote completions show successful scheduled uploads in
+   this process, not current retention or decryptability.
 
 8. **Delete the extracted copy.** The directory from step 2 holds decrypted keys and nothing cleans it up for you. Do the same with `db.old` once the node is healthy.
 

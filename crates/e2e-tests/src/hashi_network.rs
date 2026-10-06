@@ -27,9 +27,10 @@ const TEST_WEIGHT_DIVISOR: u16 = 100;
 
 pub struct HashiNodeHandle {
     config: HashiConfig,
+    pub(crate) config_path: Option<std::path::PathBuf>,
     /// The running service and Hashi instance. Both are dropped together on shutdown
     /// to ensure the database lock is released before a new instance can be created.
-    service: Option<(Service, Arc<Hashi>)>,
+    service: Option<(Service, Arc<Hashi>, prometheus::Registry)>,
 }
 
 impl Drop for HashiNodeHandle {
@@ -78,6 +79,7 @@ impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         Ok(Self {
             config,
+            config_path: None,
             service: None,
         })
     }
@@ -86,9 +88,10 @@ impl HashiNodeHandle {
         if self.service.is_some() {
             anyhow::bail!("Hashi node already started");
         }
-        let hashi = Self::create_hashi_retry(&self.config).await?;
+        let (hashi, registry) =
+            Self::create_hashi_retry(&self.config, self.config_path.as_deref()).await?;
         let service = hashi.clone().start().await?;
-        self.service = Some((service, hashi));
+        self.service = Some((service, hashi, registry));
         Ok(())
     }
 
@@ -96,20 +99,32 @@ impl HashiNodeHandle {
         self.service.is_some()
     }
 
-    fn create_hashi(config: &HashiConfig) -> Result<Arc<Hashi>> {
+    fn create_hashi(
+        config: &HashiConfig,
+        config_path: Option<&Path>,
+    ) -> Result<(Arc<Hashi>, prometheus::Registry)> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
-        Hashi::new_with_registry(server_version, None, config.clone(), &registry)
+        let hashi = Hashi::new_with_registry(
+            server_version,
+            config_path.map(Path::to_path_buf),
+            config.clone(),
+            &registry,
+        )?;
+        Ok((hashi, registry))
     }
 
     /// Create a Hashi instance with retry logic for database lock contention.
     ///
     /// After shutdown, there may be a brief delay before the database lock is released.
-    async fn create_hashi_retry(config: &HashiConfig) -> Result<Arc<Hashi>> {
+    async fn create_hashi_retry(
+        config: &HashiConfig,
+        config_path: Option<&Path>,
+    ) -> Result<(Arc<Hashi>, prometheus::Registry)> {
         const MAX_ATTEMPTS: u32 = 10;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            match Self::create_hashi(config) {
+            match Self::create_hashi(config, config_path) {
                 Ok(hashi) => return Ok(hashi),
                 Err(e) if attempt == MAX_ATTEMPTS => return Err(e),
                 Err(e) => {
@@ -124,7 +139,7 @@ impl HashiNodeHandle {
     }
 
     pub async fn shutdown(&mut self) {
-        let Some((service, _hashi)) = self.service.take() else {
+        let Some((service, _hashi, _registry)) = self.service.take() else {
             tracing::warn!("Hashi node not running, cannot shutdown");
             return;
         };
@@ -176,6 +191,11 @@ impl HashiNodeHandle {
 
     pub fn hashi(&self) -> &Arc<Hashi> {
         &self.service.as_ref().expect("Hashi node not started").1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metrics_registry(&self) -> &prometheus::Registry {
+        &self.service.as_ref().expect("Hashi node not started").2
     }
 
     pub fn endpoint_url(&self) -> &str {
