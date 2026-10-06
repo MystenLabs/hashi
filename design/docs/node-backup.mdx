@@ -373,8 +373,42 @@ archives currently retained locally or in S3.
 
 ### Restore and infrastructure limits
 
-Restore still accepts local archive paths only; restoring directly from an S3 URI
-is unsupported. Download an S3 object separately before using the existing local
-restore commands. Configuring uploads does not provision buckets, IAM roles or
-policies, or bucket lifecycle rules. Operators must supply that infrastructure
-and manage remote retention separately from local cleanup.
+Restore an object directly using its full S3 URI and an explicit region, without
+the original node configuration:
+
+```bash
+hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region us-east-1 --backup-pgp-secret-key /secure/secret-key.asc \
+  --output-dir /private/restore
+
+# Select an exact object version and decrypt with a local or forwarded gpg-agent:
+hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region us-east-1 --version-id '<version-id>' \
+  --use-gpg-agent --gpg-homedir /secure/gnupghome --output-dir /private/restore
+
+# Plaintext .tar objects need no decryptor:
+hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar \
+  --region us-east-1 --output-dir /private/restore
+```
+
+`--region` is required and nonempty for S3 restores. `--version-id` optionally
+selects a nonempty S3 object version; without it, S3 returns the current object.
+Both flags are rejected for local archive paths, whose existing restore behavior
+is unchanged. Keys are literal AWS object keys, not percent-decoded URL paths;
+use `--version-id`, not a query string. Restore uses the default AWS credential
+chain (for example, environment credentials, profiles, or an instance role).
+Credentials need object read access, including version read access when selecting
+a version. Encrypted objects still require exactly one of
+`--backup-pgp-secret-key` and `--use-gpg-agent`; S3 credentials do not decrypt them.
+
+The download is streamed in one attempt with finite deadlines into a private
+temporary directory under `--output-dir` (0700 directory, 0600 file on Unix).
+The downloaded archive is removed on success, error, or cancellation. Object key
+prefixes never become local directories. The existing validated, staged restore
+refuses an existing destination and only publishes a complete extraction; it
+does not overwrite or install config, keys, or databases at their original paths.
+Inspect the extracted files and install them manually at trusted destinations.
+
+Configuring uploads does not provision buckets, IAM roles or policies, or bucket
+lifecycle rules. Operators must supply that infrastructure and manage remote
+retention separately from local cleanup.

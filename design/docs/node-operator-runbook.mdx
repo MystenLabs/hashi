@@ -86,7 +86,7 @@ These details trip up most operators:
 | [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
 | [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
-| [12. Backup limitations](#12-backup-limitations) | Remote restore and cloud infrastructure boundaries |
+| [12. Backup limitations](#12-backup-limitations) | Cloud infrastructure and retention boundaries |
 | [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
@@ -891,6 +891,9 @@ hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-di
 
 # Restore an unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
+
+# Restore an S3 object; optionally pin its version:
+hashi backup restore s3://<bucket>/<key>.tar.asc --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 ```
 
 `backup save` publishes locally first, then uploads when `[backup-s3]` is
@@ -898,6 +901,11 @@ configured. Add `--local-only` to skip S3 client initialization and upload. With
 S3 configuration, no S3 client or requests are created. A configured upload
 failure returns a nonzero exit status and reports the retained local archive
 path and intended S3 URI; it does not delete the local archive.
+
+S3 restore requires a nonempty `--region`; optional `--version-id` selects an
+exact object version. Neither flag is accepted with a local archive path.
+The default AWS credential chain supplies S3 access, separately from the selected
+decryptor. The original node configuration is not needed.
 
 `--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
 
@@ -1236,6 +1244,15 @@ hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
 hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
   --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
   --output-dir /var/lib/hashi/restore
+
+# Restore directly from S3 with the same local-key or gpg-agent decryptors:
+hashi backup restore s3://<bucket>/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region <aws-region> --backup-pgp-secret-key /path/to/secret-key.asc \
+  --output-dir /var/lib/hashi/restore
+hashi backup restore s3://<bucket>/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region <aws-region> --version-id '<version-id>' \
+  --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
+  --output-dir /var/lib/hashi/restore
 ```
 
 ---
@@ -1459,9 +1476,18 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 
 ## 12. Backup limitations
 
-S3 upload is available, but remote restore is not: `backup restore` accepts local
-archive paths, not S3 URIs. Download an object separately before following the
-existing restore procedure.
+`backup restore` accepts local archive paths and `s3://bucket/key` sources.
+S3 input requires an explicit `--region` and optionally accepts `--version-id`;
+these flags are invalid for local inputs. Plaintext `.tar` objects need no key,
+while `.tar.asc` uses the same local-secret-key or gpg-agent backend as local
+restore. No original node configuration is required.
+
+Downloads use the default AWS credential chain, stream with finite deadlines
+and no retries, and use a private temporary directory under the output directory
+(0700 directory and 0600 file on Unix). Downloaded files are removed on success,
+failure, or cancellation. Restore validates and stages extraction, refuses an
+existing destination, and never installs files at original manifest paths.
+Local restore behavior is unchanged. Inspect and install extracted files manually.
 
 Upload configuration does not provision buckets, IAM roles or policies, or
 bucket lifecycle rules. Operators must supply this infrastructure and manage
