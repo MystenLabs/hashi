@@ -94,6 +94,7 @@ pub struct BackupService {
 
 impl BackupService {
     pub fn new(hashi: Arc<Hashi>) -> (Self, BackupHandle) {
+        hashi.metrics.record_backup_s3_config(&hashi.config);
         let (sender, receiver) = mpsc::unbounded_channel();
         let service = Self {
             inner: hashi,

@@ -43,6 +43,10 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
+    // Remote-backup adoption only; these do not report S3 reachability or health.
+    backup_s3_configured: IntGauge,
+    backup_s3_bucket_info: IntGaugeVec,
+
     // TRM AML screening metrics
     pub trm_enabled: IntGauge,
     pub trm_screenings_total: IntCounterVec,
@@ -474,6 +478,19 @@ impl Metrics {
                 "hashi_mpc_bytes_received_total",
                 "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
                 &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            backup_s3_configured: register_int_gauge_with_registry!(
+                "hashi_backup_s3_configured",
+                "Whether an S3 backup target is configured (not a health check)",
+                registry,
+            )
+            .unwrap(),
+            backup_s3_bucket_info: register_int_gauge_vec_with_registry!(
+                "hashi_backup_s3_bucket_info",
+                "Configured S3 backup bucket (not a health check)",
+                &["bucket_uri"],
                 registry,
             )
             .unwrap(),
@@ -1589,6 +1606,19 @@ impl Metrics {
         metrics
     }
 
+    /// Publish configuration adoption without contacting S3.
+    /// The caller must validate the configuration before recording it.
+    pub fn record_backup_s3_config(&self, config: &crate::config::Config) {
+        self.backup_s3_configured
+            .set(i64::from(config.backup_s3.is_some()));
+        self.backup_s3_bucket_info.reset();
+        if let Some(bucket_uri) = config.backup_s3_bucket_uri() {
+            self.backup_s3_bucket_info
+                .with_label_values(&[&bucket_uri])
+                .set(1);
+        }
+    }
+
     pub fn record_limiter_state(
         &self,
         state: &hashi_types::guardian::LimiterState,
@@ -2246,6 +2276,88 @@ mod tests {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
         }
+    }
+
+    #[test]
+    fn backup_s3_metrics_unconfigured() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+        let config = crate::config::Config::new_for_testing();
+        config.validate_backup_s3().unwrap();
+        metrics.record_backup_s3_config(&config);
+
+        let families = registry.gather();
+        let configured = families
+            .iter()
+            .find(|family| family.name() == "hashi_backup_s3_configured")
+            .unwrap();
+        assert_eq!(configured.get_metric().len(), 1);
+        assert!(configured.get_metric()[0].label.is_empty());
+        assert_eq!(
+            configured.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .expect("gauge")
+                .value(),
+            0.0
+        );
+        assert!(
+            families
+                .iter()
+                .all(|family| family.name() != "hashi_backup_s3_bucket_info")
+        );
+    }
+
+    #[test]
+    fn backup_s3_metrics_configured() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+        let mut config = crate::config::Config::new_for_testing();
+        config.backup_s3 = Some(crate::config::BackupS3Config {
+            bucket: "hashi-test-backups".to_owned(),
+            region: "us-west-2".to_owned(),
+        });
+        config.sui_chain_id = Some("aB12Cd34".to_owned());
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: "0x1".parse().unwrap(),
+            hashi_object_id: "0x2".parse().unwrap(),
+        });
+        config.validator_address = Some("0x3".parse().unwrap());
+        config.validate_backup_s3().unwrap();
+        metrics.record_backup_s3_config(&config);
+
+        let families = registry.gather();
+        let configured = families
+            .iter()
+            .find(|family| family.name() == "hashi_backup_s3_configured")
+            .unwrap();
+        assert_eq!(configured.get_metric().len(), 1);
+        assert!(configured.get_metric()[0].label.is_empty());
+        assert_eq!(
+            configured.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .expect("gauge")
+                .value(),
+            1.0
+        );
+        let bucket_info = families
+            .iter()
+            .find(|family| family.name() == "hashi_backup_s3_bucket_info")
+            .unwrap();
+        assert_eq!(bucket_info.get_metric().len(), 1);
+        let bucket = &bucket_info.get_metric()[0];
+        assert_eq!(bucket.get_gauge().as_ref().expect("gauge").value(), 1.0);
+        assert_eq!(bucket.label.len(), 1);
+        assert_eq!(bucket.label[0].name(), "bucket_uri");
+        assert_eq!(
+            bucket.label[0].value(),
+            concat!(
+                "s3://hashi-test-backups/aB12Cd34/",
+                "0x0000000000000000000000000000000000000000000000000000000000000002/",
+                "0x0000000000000000000000000000000000000000000000000000000000000003/",
+            )
+        );
     }
 
     #[test]
