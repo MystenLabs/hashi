@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! One-shot uploads of already-published local backup archives.
+//! One-shot transfers of backup archives.
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,15 +13,37 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::primitives::ByteStream;
+use tokio::io::AsyncWriteExt;
 
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 pub struct BackupS3Client {
     client: aws_sdk_s3::Client,
+}
+
+/// Parse an S3 object URI without decoding or normalizing its literal object key.
+pub fn parse_s3_uri(uri: &str) -> anyhow::Result<(&str, &str)> {
+    let (bucket, key) = uri
+        .strip_prefix("s3://")
+        .and_then(|path| path.split_once('/'))
+        .context("expected s3://bucket/key")?;
+    anyhow::ensure!(
+        !bucket.is_empty()
+            && bucket
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)),
+        "S3 URI must contain a bucket name, not credentials, a port, or an encoded authority"
+    );
+    anyhow::ensure!(!key.is_empty(), "S3 URI must contain an object key");
+    anyhow::ensure!(
+        !key.contains(['?', '#']) && !key.chars().any(char::is_control),
+        "S3 URI key must not contain a query, fragment, or control characters; use --version-id for versions"
+    );
+    Ok((bucket, key))
 }
 
 impl BackupS3Client {
@@ -61,7 +83,7 @@ impl BackupS3Client {
         let uri = format!("s3://{bucket}/{key}");
         // The outer deadline also covers credential resolution and opening/streaming
         // the file, not just the SDK's HTTP request. Never remove the local archive.
-        let result = tokio::time::timeout(UPLOAD_TIMEOUT, async {
+        let result = tokio::time::timeout(TRANSFER_TIMEOUT, async {
             let body = ByteStream::from_path(archive)
                 .await
                 .context("failed to open backup archive for upload")?;
@@ -88,6 +110,64 @@ impl BackupS3Client {
         Ok(uri)
     }
 
+    /// Stream an object into a caller-owned file. The caller owns private file
+    /// creation and cleanup, including cleanup if this future is cancelled.
+    pub async fn download(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        destination: &mut tokio::fs::File,
+    ) -> anyhow::Result<()> {
+        // Include credentials, response body consumption, and file writes in the
+        // deadline: SDK operation timeouts alone only cover the response headers.
+        tokio::time::timeout(TRANSFER_TIMEOUT, async {
+            let mut response = self
+                .client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .set_version_id(version_id.map(str::to_owned))
+                .send()
+                .await
+                .context("S3 backup GetObject failed")?;
+            let expected_length = response.content_length();
+            let mut downloaded = 0_u64;
+            while let Some(chunk) = response
+                .body
+                .try_next()
+                .await
+                .context("failed to read S3 backup body")?
+            {
+                destination
+                    .write_all(&chunk)
+                    .await
+                    .context("failed to write downloaded backup")?;
+                downloaded += chunk.len() as u64;
+            }
+            if let Some(expected) = expected_length {
+                anyhow::ensure!(
+                    u64::try_from(expected).ok() == Some(downloaded),
+                    "incomplete S3 backup body: expected {expected} bytes, received {downloaded}"
+                );
+            }
+            destination
+                .flush()
+                .await
+                .context("failed to flush downloaded backup")?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("S3 backup download deadline exceeded")
+        .and_then(|result| result)
+        .with_context(|| match version_id {
+            Some(version) => {
+                format!("failed to download backup from s3://{bucket}/{key} (version {version})")
+            }
+            None => format!("failed to download backup from s3://{bucket}/{key}"),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test_endpoint(endpoint: &str) -> Self {
         let builder = Builder::new()
@@ -112,8 +192,8 @@ fn timeouts() -> TimeoutConfig {
     TimeoutConfig::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
-        .operation_timeout(UPLOAD_TIMEOUT)
-        .operation_attempt_timeout(UPLOAD_TIMEOUT)
+        .operation_timeout(TRANSFER_TIMEOUT)
+        .operation_attempt_timeout(TRANSFER_TIMEOUT)
         .build()
 }
 
@@ -128,17 +208,21 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::body::Bytes;
+    use axum::extract::Query;
     use axum::extract::State;
     use axum::http::HeaderMap;
     use axum::http::StatusCode;
     use axum::routing::put;
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
     use tokio::sync::Mutex;
 
     #[derive(Default)]
     struct ObjectStore {
         requests: usize,
         object: Option<Bytes>,
+        versions: HashMap<String, Bytes>,
         fail: bool,
     }
 
@@ -168,6 +252,33 @@ mod tests {
         (StatusCode::OK, "")
     }
 
+    async fn get_object(
+        State(store): State<Arc<Mutex<ObjectStore>>>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> (StatusCode, Bytes) {
+        let mut store = store.lock().await;
+        store.requests += 1;
+        if store.fail {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from_static(
+                    b"<Error><Code>SlowDown</Code><Message>try later</Message></Error>",
+                ),
+            );
+        }
+        let object = match query.get("versionId") {
+            Some(version) => store.versions.get(version),
+            None => store.object.as_ref(),
+        };
+        match object {
+            Some(bytes) => (StatusCode::OK, bytes.clone()),
+            None => (
+                StatusCode::NOT_FOUND,
+                Bytes::from_static(b"<Error><Code>NoSuchKey</Code></Error>"),
+            ),
+        }
+    }
+
     async fn server(
         fail: bool,
     ) -> (
@@ -182,7 +293,7 @@ mod tests {
         let router = Router::new()
             .route(
                 "/backup-bucket/testnet/validator/epoch-7.tar",
-                put(put_object),
+                put(put_object).get(get_object),
             )
             .with_state(store.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -247,5 +358,138 @@ mod tests {
         assert_eq!(store.requests, 1);
         assert!(store.object.is_none());
         server.abort();
+    }
+
+    #[test]
+    fn s3_uri_preserves_literal_keys() {
+        let uri = String::from("s3://backup-bucket/a%2Fb/../archive%20name.tar");
+        let (bucket, key) = parse_s3_uri(&uri).unwrap();
+        assert_eq!(bucket, "backup-bucket");
+        assert_eq!(key, "a%2Fb/../archive%20name.tar");
+        assert_eq!(
+            parse_s3_uri("s3://bucket/key with spaces.tar").unwrap().1,
+            "key with spaces.tar"
+        );
+    }
+
+    #[test]
+    fn s3_uri_rejects_ambiguous_authorities_and_keys() {
+        for uri in [
+            "",
+            "https://bucket/key",
+            "s3://bucket",
+            "s3:///key",
+            "s3://bucket/",
+            "s3://user:password@bucket/key",
+            "s3://user@bucket/key",
+            "s3://bucket:443/key",
+            "s3://bucket%2Fother/key",
+            "s3://bucket\\other/key",
+            "s3://bucket?query/key",
+            "s3://bucket#fragment/key",
+            "s3://bucket/key?versionId=old",
+            "s3://bucket/key#fragment",
+            "s3://bucket/key\n.tar",
+        ] {
+            assert!(parse_s3_uri(uri).is_err(), "{uri:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn download_selects_stored_older_version_instead_of_latest() {
+        let (client, store, server) = server(false).await;
+        let older = Bytes::from_static(b"older archived database snapshot");
+        let latest = Bytes::from_static(b"latest different database snapshot");
+        {
+            let mut store = store.lock().await;
+            store
+                .versions
+                .insert("old+/version".to_owned(), older.clone());
+            store.object = Some(latest.clone());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for (version, expected) in [(None, latest), (Some("old+/version"), older)] {
+            let path = directory.path().join("download");
+            let mut destination = tokio::fs::File::create(&path).await.unwrap();
+            client
+                .download(
+                    "backup-bucket",
+                    "testnet/validator/epoch-7.tar",
+                    version,
+                    &mut destination,
+                )
+                .await
+                .unwrap();
+            assert_eq!(tokio::fs::read(path).await.unwrap(), expected);
+        }
+        assert_eq!(store.lock().await.requests, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn download_service_failure_is_not_retried() {
+        let (client, store, server) = server(true).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        let mut destination = tokio::fs::File::create(&path).await.unwrap();
+        let error = client
+            .download(
+                "backup-bucket",
+                "testnet/validator/epoch-7.tar",
+                Some("old-version"),
+                &mut destination,
+            )
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("s3://backup-bucket/testnet/validator/epoch-7.tar"));
+        assert!(message.contains("old-version"));
+        assert!(message.contains("SlowDown"));
+        assert!(message.contains("try later"));
+        assert_eq!(store.lock().await.requests, 1);
+        assert!(tokio::fs::read(path).await.unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn download_rejects_truncated_response_body() {
+        // Raw HTTP deliberately closes after a partial body. A framework would
+        // repair Content-Length or reject this malformed response on our behalf.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
+                )
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let client = BackupS3Client::for_test_endpoint(&endpoint);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        let mut destination = tokio::fs::File::create(&path).await.unwrap();
+        let error = client
+            .download("backup-bucket", "archive.tar", None, &mut destination)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("s3://backup-bucket/archive.tar"));
+        assert!(
+            message.contains("failed to read S3 backup body")
+                || message.contains("incomplete S3 backup body"),
+            "{message}"
+        );
+        assert!(tokio::fs::metadata(path).await.unwrap().len() < 100);
+        server.await.unwrap();
     }
 }

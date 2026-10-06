@@ -18,6 +18,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::backup;
+use crate::backup_s3::BackupS3Client;
+use crate::backup_s3::parse_s3_uri;
 use crate::cli::print_success;
 use crate::config::Config;
 use crate::db::Database;
@@ -114,6 +116,131 @@ pub(crate) fn resolve_backup_recipient(
         })
         .transpose()?
         .unwrap_or_else(|| node_config.backup_pgp_cert.clone()))
+}
+
+/// Identify remote input without requiring local paths to be UTF-8.
+pub(crate) fn s3_restore_source(
+    source: &Path,
+    region: Option<&str>,
+    version_id: Option<&str>,
+) -> Result<bool> {
+    let remote = source
+        .to_str()
+        .is_some_and(|source| source.starts_with("s3://"));
+    if remote {
+        anyhow::ensure!(
+            region.is_some_and(|region| !region.trim().is_empty()),
+            "S3 restore requires a nonempty --region"
+        );
+        anyhow::ensure!(
+            version_id.is_none_or(|version| !version.is_empty()),
+            "--version-id must not be empty"
+        );
+    } else {
+        anyhow::ensure!(
+            region.is_none() && version_id.is_none(),
+            "--region and --version-id are only valid for S3 restores"
+        );
+    }
+    Ok(remote)
+}
+
+fn remote_restore_archive(uri: &str) -> Result<(&str, &str, &Path)> {
+    let (bucket, key) = parse_s3_uri(uri)?;
+    // S3 key prefixes are never interpreted as local directories.
+    let name = key.rsplit('/').next().unwrap_or_default();
+    anyhow::ensure!(
+        !name.is_empty() && !name.contains(['\\', '\0']),
+        "S3 backup key must end in a safe archive file name"
+    );
+    Ok((bucket, key, Path::new(name)))
+}
+
+fn validate_remote_restore(
+    archive: &Path,
+    decryptor: &RestoreDecryptor,
+    output_dir: &Path,
+) -> Result<()> {
+    let format = backup::archive_format(archive)?;
+    let extract_dir = output_dir.join(backup::extract_dir_name(archive)?);
+    anyhow::ensure!(
+        matches!(
+            (format, decryptor),
+            (
+                backup::BackupArchiveFormat::Unencrypted,
+                RestoreDecryptor::Unencrypted
+            ) | (
+                backup::BackupArchiveFormat::Encrypted,
+                RestoreDecryptor::LocalSecretKey { .. }
+            ) | (
+                backup::BackupArchiveFormat::Encrypted,
+                RestoreDecryptor::GpgAgent { .. }
+            )
+        ),
+        "Restore backend does not match the backup archive format"
+    );
+    anyhow::ensure!(
+        !extract_dir
+            .try_exists()
+            .with_context(|| format!("Failed to stat {}", extract_dir.display()))?,
+        "Refusing to overwrite existing extract directory: {}",
+        extract_dir.display()
+    );
+    Ok(())
+}
+
+/// Download one S3 object and restore it without needing the original node config.
+pub async fn restore_from_s3(
+    uri: &str,
+    region: &str,
+    version_id: Option<&str>,
+    decryptor: RestoreDecryptor,
+    output_dir: &Path,
+) -> Result<()> {
+    s3_restore_source(Path::new(uri), Some(region), version_id)?;
+    let (_, _, archive) = remote_restore_archive(uri)?;
+    validate_remote_restore(archive, &decryptor, output_dir)?;
+    let client = BackupS3Client::connect(region).await?;
+    restore_from_s3_with_client(&client, uri, version_id, decryptor, output_dir).await
+}
+
+async fn restore_from_s3_with_client(
+    client: &BackupS3Client,
+    uri: &str,
+    version_id: Option<&str>,
+    decryptor: RestoreDecryptor,
+    output_dir: &Path,
+) -> Result<()> {
+    let (bucket, key, archive) = remote_restore_archive(uri)?;
+    validate_remote_restore(archive, &decryptor, output_dir)?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
+    // TempDir owns cleanup across download errors, cancellation, and restore errors.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".hashi-download-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let download_dir = builder
+        .tempdir_in(output_dir)
+        .context("Failed to create private backup download directory")?;
+    let archive_path = download_dir.path().join(archive);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&archive_path)
+        .context("Failed to create private backup download file")?;
+    let mut file = tokio::fs::File::from_std(file);
+    client.download(bucket, key, version_id, &mut file).await?;
+    drop(file);
+    restore(&archive_path, decryptor, output_dir)
 }
 
 pub fn restore(
@@ -323,6 +450,221 @@ mod tests {
         let mut output = File::create(&tarball).unwrap();
         io::copy(&mut decrypted, &mut output).unwrap();
         tarball
+    }
+
+    async fn serve_download(
+        body: Vec<u8>,
+        status: &str,
+        extra_length: usize,
+    ) -> (BackupS3Client, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len() + extra_length
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+            }
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        (BackupS3Client::for_test_endpoint(&endpoint), server)
+    }
+
+    #[test]
+    fn restore_source_flags_are_remote_only() {
+        let uri = Path::new("s3://bucket/backup.tar");
+        assert!(s3_restore_source(uri, None, None).is_err());
+        assert!(s3_restore_source(uri, Some(" \t"), None).is_err());
+        assert!(s3_restore_source(uri, Some("us-east-1"), Some("")).is_err());
+        assert!(s3_restore_source(uri, Some("us-east-1"), Some("version")).unwrap());
+        for (region, version) in [(Some("us-east-1"), None), (None, Some("version"))] {
+            assert!(s3_restore_source(Path::new("backup.tar"), region, version).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff/backup.tar"));
+            assert!(!s3_restore_source(path, None, None).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_restore_rejects_invalid_input_before_connecting() {
+        let out = tempfile::tempdir().unwrap();
+        for uri in [
+            "s3://bucket/",
+            "s3://bucket/backup.tar?versionId=x",
+            "s3://bucket/backup.zip",
+            "s3://bucket/.tar",
+            "s3://bucket/...tar",
+            "s3://bucket/unsafe\\backup.tar",
+        ] {
+            assert!(
+                restore_from_s3(
+                    uri,
+                    "us-east-1",
+                    None,
+                    RestoreDecryptor::Unencrypted,
+                    out.path()
+                )
+                .await
+                .is_err(),
+                "{uri}"
+            );
+        }
+        assert!(
+            restore_from_s3(
+                "s3://bucket/backup.tar.asc",
+                "us-east-1",
+                None,
+                RestoreDecryptor::Unencrypted,
+                out.path()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_restore_downloads_encrypted_and_plaintext_archives() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture).await;
+        let plaintext = write_unencrypted_tar_backup(&backup);
+        for (tarball, decryptor) in [
+            (&backup.tarball, local_secret_key_decryptor(&backup)),
+            (&plaintext, RestoreDecryptor::Unencrypted),
+        ] {
+            let name = tarball.file_name().unwrap().to_str().unwrap();
+            let uri = format!("s3://bucket/nested/prefix/{name}");
+            let (client, server) = serve_download(fs::read(tarball).unwrap(), "200 OK", 0).await;
+            let out = tempfile::tempdir().unwrap();
+            restore_from_s3_with_client(&client, &uri, Some("version-1"), decryptor, out.path())
+                .await
+                .unwrap();
+            server.await.unwrap();
+            let extract_dir = expected_extract_dir(tarball, out.path());
+            assert!(extract_dir.join("config.toml").is_file());
+            assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
+            assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+            assert!(!out.path().join("nested").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_restore_cleans_failed_downloads_and_invalid_archives() {
+        for (status, extra_length) in [("403 Forbidden", 0), ("200 OK", 100), ("200 OK", 0)] {
+            let (client, server) =
+                serve_download(b"not a tar archive".to_vec(), status, extra_length).await;
+            let out = tempfile::tempdir().unwrap();
+            fs::write(out.path().join("keep"), b"unchanged").unwrap();
+            assert!(
+                restore_from_s3_with_client(
+                    &client,
+                    "s3://bucket/backup.tar",
+                    None,
+                    RestoreDecryptor::Unencrypted,
+                    out.path()
+                )
+                .await
+                .is_err()
+            );
+            server.await.unwrap();
+            assert_file_eq(&out.path().join("keep"), b"unchanged");
+            assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_restore_refuses_existing_output_before_connecting() {
+        let out = tempfile::tempdir().unwrap();
+        let existing = out.path().join("backup");
+        fs::create_dir(&existing).unwrap();
+        fs::write(existing.join("keep"), b"unchanged").unwrap();
+        let error = restore_from_s3(
+            "s3://bucket/backup.tar",
+            "us-east-1",
+            None,
+            RestoreDecryptor::Unencrypted,
+            out.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Refusing to overwrite"));
+        assert_file_eq(&existing.join("keep"), b"unchanged");
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_restore_cancellation_removes_private_download() {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial")
+                .await
+                .unwrap();
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let out = tempfile::tempdir().unwrap();
+        let output_dir = out.path().to_path_buf();
+        let download = tokio::spawn(async move {
+            let client = BackupS3Client::for_test_endpoint(&endpoint);
+            restore_from_s3_with_client(
+                &client,
+                "s3://bucket/nested/backup.tar",
+                None,
+                RestoreDecryptor::Unencrypted,
+                &output_dir,
+            )
+            .await
+        });
+        received.await.unwrap();
+        let staging = fs::read_dir(out.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let archive = staging.join("backup.tar");
+        assert!(archive.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&staging).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&archive).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        download.abort();
+        assert!(download.await.unwrap_err().is_cancelled());
+        server.abort();
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
     }
 
     fn assert_file_eq(path: &Path, expected: &[u8]) {
