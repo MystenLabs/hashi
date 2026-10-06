@@ -14,7 +14,9 @@ use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::LogType;
 use hashi_types::guardian::OperatorInitInfo;
+use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
+use hashi_types::guardian::VersionedLogMessage;
 use tracing::error;
 use tracing::info;
 
@@ -297,12 +299,28 @@ impl VerifiedLogEntry {
         &self.entry
     }
 
+    pub fn session_id(&self) -> &SessionID {
+        self.entry.session_id()
+    }
+
     pub fn build_pcrs(&self) -> &BuildPcrs {
         &self.build_pcrs
     }
 
     pub fn into_entry(self) -> LogEntry {
         self.entry
+    }
+
+    /// Extract the expected message.
+    /// If extraction fails, return an error with the expected message type and object key.
+    pub fn extract<T>(
+        self,
+        expected: &str,
+        extract: impl FnOnce(VersionedLogMessage) -> Option<T>,
+    ) -> GuardianResult<T> {
+        let key = self.entry.object_key().to_owned();
+        extract(self.entry.into_message())
+            .ok_or_else(|| InvalidS3Log(format!("expected a {expected} log at {key}")))
     }
 }
 
@@ -325,7 +343,6 @@ mod tests {
     use hashi_types::guardian::S3BucketInfo;
     use hashi_types::guardian::S3ObjectLockPolicy;
     use hashi_types::guardian::S3RetentionEnvironment;
-    use hashi_types::guardian::SessionID;
     use hashi_types::guardian::ShareID;
 
     #[test]

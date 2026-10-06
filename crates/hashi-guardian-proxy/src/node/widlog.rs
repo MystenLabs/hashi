@@ -20,6 +20,7 @@
 use crate::log_store::LogStore;
 use crate::metrics::ProxyMetrics;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
+use hashi_types::guardian::s3::S3NumericDirectory;
 use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalID;
@@ -86,17 +87,16 @@ pub async fn find_withdrawal_record<L: LogStore>(
                             }
                         }
 
-                        let bucket_max = keys.iter().rev().find_map(|k| parse_withdrawal_seq(k));
-                        match bucket_max {
-                            Some(max) if max < threshold => {
-                                strikes += 1;
-                                if strikes >= 2 {
-                                    return Ok(None);
-                                }
+                        // An hour whose highest seq is below `threshold` cannot contain this wid.
+                        // Stop after two such hours in a row. Thus one hour with a wrong clock
+                        // label cannot end the search.
+                        if bucket_max_seq(&keys)? < threshold {
+                            strikes += 1;
+                            if strikes >= 2 {
+                                return Ok(None);
                             }
-                            Some(_) => strikes = 0,
-                            // Only unparseable withdrawal keys: indeterminate.
-                            None => {}
+                        } else {
+                            strikes = 0;
                         }
                     }
                 }
@@ -116,10 +116,8 @@ async fn list_desc<L: LogStore>(
     lists_used: &mut usize,
 ) -> Result<Vec<String>, WidLogError> {
     charge_list(lists_used)?;
-    let mut dirs = log.list_dirs(prefix).await.map_err(WidLogError::Store)?;
-    dirs.sort_unstable();
-    dirs.reverse();
-    Ok(dirs)
+    let dirs = log.list_dirs(prefix).await.map_err(WidLogError::Store)?;
+    S3NumericDirectory::sort_desc(dirs).map_err(WidLogError::Store)
 }
 
 async fn list_keys_capped<L: LogStore>(
@@ -139,10 +137,17 @@ fn charge_list(lists_used: &mut usize) -> Result<(), WidLogError> {
     Ok(())
 }
 
-/// Parse the zero-padded seq out of a `.../{seq:020}-...` key.
-fn parse_withdrawal_seq(key: &str) -> Option<u64> {
-    let name = key.rsplit('/').next()?;
-    name.get(..20)?.parse().ok()
+/// Return the highest withdrawal seq in the keys of one hour directory.
+/// Return an error if a key does not have the withdrawal key format.
+fn bucket_max_seq(keys: &[String]) -> Result<u64, WidLogError> {
+    let mut max = 0;
+    for key in keys {
+        let seq = WithdrawalLogMessage::seq_from_object_key(key).ok_or_else(|| {
+            WidLogError::Store(anyhow::anyhow!("noncanonical withdrawal key {key}"))
+        })?;
+        max = max.max(seq);
+    }
+    Ok(max)
 }
 
 fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundWithdrawal> {
@@ -364,6 +369,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn noncanonical_key_is_an_error_not_a_miss() {
+        let store = MemStore::default();
+        let (key, _) = withdrawal_record_json(wid(0xbb), 3, TS_HOUR_A, mock_response());
+        let (dir, _) = key.rsplit_once('/').unwrap();
+        store.insert(format!("{dir}/junk.json"), b"{}".to_vec());
+
+        let result = find_withdrawal_record(&store, &wid(0xaa), 7, &test_metrics()).await;
+        assert!(matches!(result, Err(WidLogError::Store(_))));
+    }
+
+    #[tokio::test]
     async fn scan_cap_is_an_error_not_a_miss() {
         let store = MemStore::default();
         // A deep history whose seqs all clear the threshold (never a strike):
@@ -384,9 +400,11 @@ mod tests {
     #[test]
     fn withdrawal_seq_parses_from_real_key_shape() {
         let (key, _) = withdrawal_record_json(wid(0xaa), 42, TS_HOUR_A, mock_response());
-        assert_eq!(parse_withdrawal_seq(&key), Some(42));
+        assert_eq!(WithdrawalLogMessage::seq_from_object_key(&key), Some(42));
         assert_eq!(
-            parse_withdrawal_seq("withdraw/2023/11/14/22/unknown-s-wid0xaa.json"),
+            WithdrawalLogMessage::seq_from_object_key(
+                "withdraw/2023/11/14/22/unknown-s-wid0xaa.json"
+            ),
             None
         );
     }

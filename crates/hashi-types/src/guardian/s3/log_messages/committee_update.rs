@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::log_layout::S3_DIR_COMMITTEE_UPDATE;
+use super::super::log_layout::S3SequencedKey;
 use crate::committee::CommitteeSignature;
+use crate::guardian::GuardianResult;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -25,10 +27,12 @@ impl CommitteeUpdateLogMessage {
     /// Keys lead with the zero-padded new epoch, so the lexicographically last
     /// key identifies the latest applied committee.
     pub fn object_key(&self) -> String {
-        format!(
-            "{}{:020}.json",
-            Self::object_key_dir(),
-            self.new_committee.epoch,
-        )
+        S3SequencedKey::format(&Self::object_key_dir(), self.new_committee.epoch)
+    }
+
+    /// Return the greatest canonical key, or `None` for an empty list.
+    /// Return an error if any key has an invalid prefix, numeric field, or suffix.
+    pub fn latest_key(keys: Vec<String>) -> GuardianResult<Option<String>> {
+        S3SequencedKey::latest_key(&Self::object_key_dir(), keys)
     }
 }

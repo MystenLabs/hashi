@@ -40,6 +40,23 @@ impl LimiterState {
             next_seq: 0,
         }
     }
+
+    /// Limit the available tokens to the capacity in `config`.
+    /// Used when a new guardian session changes the limiter config.
+    pub fn capped_to(mut self, config: &LimiterConfig) -> Self {
+        self.num_tokens_available = self.num_tokens_available.min(config.max_bucket_capacity);
+        self
+    }
+
+    /// Return the tokens available at `timestamp`: the stored tokens plus the refill, up to the capacity.
+    /// A timestamp before `last_updated_at` gives no refill.
+    pub fn capacity_at(&self, config: &LimiterConfig, timestamp: u64) -> u64 {
+        let elapsed = timestamp.saturating_sub(self.last_updated_at);
+        let refilled = elapsed.saturating_mul(config.refill_rate);
+        self.num_tokens_available
+            .saturating_add(refilled)
+            .min(config.max_bucket_capacity)
+    }
 }
 
 /// Token bucket rate limiter. Tokens refill linearly over time.
@@ -88,17 +105,7 @@ impl RateLimiter {
             )));
         }
 
-        // Refill tokens based on elapsed time.
-        let elapsed = timestamp
-            .checked_sub(self.state.last_updated_at)
-            .expect("timestamp checked above");
-        let refilled = elapsed.saturating_mul(self.config.refill_rate);
-        let capacity = self
-            .state
-            .num_tokens_available
-            .saturating_add(refilled)
-            .min(self.config.max_bucket_capacity);
-
+        let capacity = self.state.capacity_at(&self.config, timestamp);
         if capacity < amount_sats {
             return Err(RateLimitExceeded);
         }
@@ -174,5 +181,35 @@ mod test {
         limiter.consume(0, 100, 1_000).unwrap();
         // Old timestamp.
         assert!(limiter.consume(1, 50, 1_000).is_err());
+    }
+
+    #[test]
+    fn capacity_at_refills_and_caps() {
+        let (config, mut state) = make_limiter();
+        state.num_tokens_available = 100_000;
+        state.last_updated_at = 10;
+
+        assert_eq!(state.capacity_at(&config, 15), 105_000);
+        assert_eq!(state.capacity_at(&config, u64::MAX), 2_000_000);
+        // A timestamp before `last_updated_at` gives no refill.
+        assert_eq!(state.capacity_at(&config, 5), 100_000);
+    }
+
+    #[test]
+    fn capped_to_caps_tokens_only() {
+        let config = LimiterConfig {
+            refill_rate: 10,
+            max_bucket_capacity: 500,
+        };
+        let state = LimiterState {
+            num_tokens_available: 1_000,
+            last_updated_at: 100,
+            next_seq: 7,
+        };
+        let got = state.capped_to(&config);
+
+        assert_eq!(got.num_tokens_available, 500);
+        assert_eq!(got.last_updated_at, 100);
+        assert_eq!(got.next_seq, 7);
     }
 }

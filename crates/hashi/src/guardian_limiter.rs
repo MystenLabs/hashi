@@ -21,7 +21,7 @@ pub struct LimiterView {
 
 impl LimiterView {
     pub fn capacity_at(&self, timestamp_secs: u64) -> u64 {
-        project_capacity(&self.config, &self.state, timestamp_secs)
+        self.state.capacity_at(&self.config, timestamp_secs)
     }
 }
 
@@ -161,10 +161,7 @@ impl LocalLimiter {
             return None;
         }
         guard.config = config;
-        guard.state.num_tokens_available = guard
-            .state
-            .num_tokens_available
-            .min(config.max_bucket_capacity);
+        guard.state = guard.state.capped_to(&config);
         Some(previous)
     }
 
@@ -186,21 +183,12 @@ impl LocalLimiter {
             return false;
         }
         let common = guard.state.last_updated_at.max(state.last_updated_at);
-        if guard.capacity_at(common) == project_capacity(&guard.config, &state, common) {
+        if guard.capacity_at(common) == state.capacity_at(&guard.config, common) {
             return false;
         }
         guard.state = state;
         true
     }
-}
-
-fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs: u64) -> u64 {
-    let elapsed = timestamp_secs.saturating_sub(state.last_updated_at);
-    let refilled = elapsed.saturating_mul(config.refill_rate);
-    state
-        .num_tokens_available
-        .saturating_add(refilled)
-        .min(config.max_bucket_capacity)
 }
 
 /// Defer when the local limiter is behind a guardian-consumed seq for a

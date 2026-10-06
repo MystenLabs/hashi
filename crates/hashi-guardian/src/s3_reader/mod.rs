@@ -24,6 +24,7 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
+use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -47,7 +48,27 @@ pub struct GuardianReader {
 }
 
 impl GuardianReader {
-    /// Check the S3 connection and Object Lock support, then create a reader.
+    // ========================================================================
+    // Construction
+    // ========================================================================
+
+    /// Create a reader from an existing S3 client, including the enclave's configured client.
+    /// The client must use the same deployment configuration.
+    /// This method does not repeat the S3 connection and Object Lock checks.
+    pub(crate) fn from_s3_client(
+        s3: GuardianS3Client,
+        expected_deployment: DeploymentConfig,
+    ) -> Self {
+        Self {
+            s3,
+            expected_deployment,
+            sessions: HashMap::new(),
+        }
+    }
+
+    /// Create a reader outside the enclave, using standard networking.
+    /// Check the S3 connection and Object Lock support before returning the reader.
+    /// Inside the enclave, use `from_s3_client()` with the configured S3 client.
     pub async fn new(
         expected_deployment: DeploymentConfig,
         credentials: S3Credentials,
@@ -61,18 +82,9 @@ impl GuardianReader {
         Ok(Self::from_s3_client(s3, expected_deployment))
     }
 
-    /// The client must use the same deployment configuration.
-    /// This method does not check the S3 connection again.
-    pub(crate) fn from_s3_client(
-        s3: GuardianS3Client,
-        expected_deployment: DeploymentConfig,
-    ) -> Self {
-        Self {
-            s3,
-            expected_deployment,
-            sessions: HashMap::new(),
-        }
-    }
+    // ========================================================================
+    // Session information
+    // ========================================================================
 
     /// Read and verify the session attestation and operator initialization logs on first use.
     async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
@@ -85,43 +97,7 @@ impl GuardianReader {
         Ok(())
     }
 
-    async fn verify_record(&mut self, record: SignedLogEntry) -> GuardianResult<VerifiedLogEntry> {
-        self.ensure_session_info_loaded(record.session_id()).await?;
-        let session_info = self
-            .sessions
-            .get_mut(record.session_id())
-            .expect("session info was loaded above");
-        session_info.verify_record(&self.s3, record).await
-    }
-
-    async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogEntry> {
-        let record = self.s3.get_log_record(key).await?;
-        self.verify_record(record).await
-    }
-
-    /// Read and verify each immutable record in a directory for one hour.
-    ///
-    /// A directory can contain records from more than one build.
-    /// Each result includes the build PCR values verified by the session attestation.
-    pub async fn read_logs_in_dir(
-        &mut self,
-        dir: &S3HourDirectory,
-    ) -> GuardianResult<Vec<VerifiedLogEntry>> {
-        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
-
-        let mut out = Vec::with_capacity(all_logs.len());
-        for record in all_logs {
-            let verified_record = self.verify_record(record).await?;
-            out.push(verified_record);
-        }
-        info!(
-            directory = %dir,
-            record_count = out.len(),
-            "Read and verified the S3 log directory"
-        );
-        Ok(out)
-    }
-
+    /// Return verified session information and require the current build.
     pub async fn get_current_session_info(
         &mut self,
         session_id: &str,
@@ -137,77 +113,91 @@ impl GuardianReader {
         Ok(session_info.clone())
     }
 
-    /// Read and verify the latest ceremony log and return it with its session ID.
-    /// Return `None` if no ceremony log exists.
-    ///
-    /// Each ceremony key starts with a `sharing_seq` value padded with leading zeros.
-    /// The last key in lexicographic order identifies the latest ceremony.
-    async fn read_latest_ceremony_log(
+    // ========================================================================
+    // Log verification and directory reads
+    // ========================================================================
+
+    async fn verify_record(
         &mut self,
+        log: SignedLogEntry,
         require_current: bool,
-    ) -> GuardianResult<Option<(CeremonyLogMessage, SessionID)>> {
-        let keys = self
-            .s3
-            .list_keys(&CeremonyLogMessage::object_key_dir())
-            .await?;
-        let Some(key) = keys.into_iter().max() else {
-            info!("No completed ceremony log found");
-            return Ok(None);
-        };
-        let verified_record = self.read_verified_record(&key).await?;
+    ) -> GuardianResult<VerifiedLogEntry> {
+        self.ensure_session_info_loaded(log.session_id()).await?;
+        let session_info = self
+            .sessions
+            .get_mut(log.session_id())
+            .expect("session info was loaded above");
+        let verified_log = session_info.verify_record(&self.s3, log).await?;
         if require_current {
             self.expected_deployment
                 .pcr_allowlist
-                .require_current_build(verified_record.build_pcrs())?;
+                .require_current_build(verified_log.build_pcrs())?;
         }
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = verified_record
-            .into_entry()
-            .into_message()
-            .into_ceremony()
-            .ok_or_else(|| InvalidS3Log(format!("expected a ceremony log at {key}")))?;
-        log_verified_read(&key, &session_id);
-        Ok(Some((*msg, session_id)))
+        Ok(verified_log)
     }
 
-    /// Return the next unused sharing sequence number.
-    /// It must exceed each sequence number used by a completed ceremony or an existing share directory.
-    /// Return zero if neither source contains a sequence number.
-    /// Writers publish shares before they write the ceremony record.
-    /// An interrupted write can leave a share directory without a ceremony record.
-    ///
-    /// This method assumes that only one writer creates ceremonies.
-    /// It does not reserve the sequence number.
-    /// Conditional writes reject records that compete for the same key.
-    pub(crate) async fn next_sharing_seq(&mut self) -> GuardianResult<u64> {
-        let mut highest = self
-            .read_latest_ceremony_log(false)
-            .await?
-            .map(|(ceremony, _)| ceremony.sharing_seq());
-        // Count occupied directories even if their records are unreadable or
-        // delete-marked: an interrupted ceremony may have left shares here.
-        let shares_dir = KpShareStateLogMessage::root_dir();
-        let proposals_dir = CeremonyProposalLogMessage::object_key_dir();
-        for directory in self.s3.list_common_prefixes(&shares_dir).await? {
-            if directory == proposals_dir {
-                continue;
-            }
-            let seq = KpShareStateLogMessage::sharing_seq_from_dir(&directory)
-                .map_err(|err| InvalidS3Log(err.to_string()))?;
-            highest = Some(highest.map_or(seq, |previous| previous.max(seq)));
-        }
-        let next_seq = match highest {
-            None => Ok(0),
-            Some(seq) => seq
-                .checked_add(1)
-                .ok_or_else(|| InvalidS3Log("sharing_seq exhausted".into())),
-        }?;
+    async fn read_log(
+        &mut self,
+        key: &str,
+        require_current: bool,
+    ) -> GuardianResult<VerifiedLogEntry> {
+        let log = self.s3.get_log_record(key).await?;
+        let verified_log = self.verify_record(log, require_current).await?;
         info!(
-            highest_used_sharing_seq = ?highest,
-            next_sharing_seq = next_seq,
-            "Selected the next ceremony sharing sequence"
+            key,
+            session_id = %verified_log.session_id(),
+            "Read and verified the S3 log record"
         );
-        Ok(next_seq)
+        Ok(verified_log)
+    }
+
+    /// Read and verify each immutable record in a directory for one hour.
+    ///
+    /// A directory can contain records from more than one build.
+    /// Each result includes the build PCR values verified by the session attestation.
+    pub async fn read_logs_in_dir(
+        &mut self,
+        dir: &S3HourDirectory,
+    ) -> GuardianResult<Vec<VerifiedLogEntry>> {
+        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
+
+        let mut out = Vec::with_capacity(all_logs.len());
+        for log in all_logs {
+            let verified_log = self.verify_record(log, false).await?;
+            out.push(verified_log);
+        }
+        info!(
+            directory = %dir,
+            record_count = out.len(),
+            "Read and verified the S3 log directory"
+        );
+        Ok(out)
+    }
+
+    // ========================================================================
+    // KP-share reads
+    // ========================================================================
+
+    /// Verify the KP-share record without requiring an active S3 lock, because these locks can expire.
+    async fn read_kp_share_state_log_at_key(
+        &mut self,
+        key: &str,
+        require_current: bool,
+    ) -> GuardianResult<KpShareStateLogMessage> {
+        // KP-share locks are expected to expire, so authenticate the record
+        // without claiming that S3 still makes it immutable.
+        let log = self
+            .s3
+            .get_log_record_inner(key, ImmutabilityCheck::Skipped)
+            .await?;
+        let verified_log = self.verify_record(log, require_current).await?;
+        info!(
+            key,
+            session_id = %verified_log.session_id(),
+            "Read and verified the S3 log record"
+        );
+        let msg = verified_log.extract("kp-shares", VersionedLogMessage::into_kp_share_state)?;
+        Ok(*msg)
     }
 
     /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
@@ -221,24 +211,22 @@ impl GuardianReader {
         sharing_seq: u64,
         require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
-        let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_keys_allowing_mutations(&prefix).await?;
-        let Some(key) = keys.into_iter().max() else {
+        let keys = self
+            .s3
+            .list_keys_allowing_mutations(&KpShareStateLogMessage::object_key_dir(sharing_seq))
+            .await?;
+        if keys.is_empty() {
             info!(
                 sharing_seq,
                 "No KP-share state log found for the sharing sequence"
             );
             return Ok(None);
-        };
+        }
+        let key = KpShareStateLogMessage::latest_key(sharing_seq, keys)?
+            .expect("the key list is nonempty");
         let msg = self
             .read_kp_share_state_log_at_key(&key, require_current)
             .await?;
-        if msg.sharing_seq != sharing_seq {
-            return Err(InvalidS3Log(format!(
-                "sharing_seq mismatch: {} != {}",
-                msg.sharing_seq, sharing_seq
-            )));
-        }
         Ok(Some(msg))
     }
 
@@ -252,84 +240,32 @@ impl GuardianReader {
         self.read_kp_share_state_log_at_key(&key, true).await
     }
 
-    /// Require the current build and an active S3 Compliance lock for the proposal.
-    pub async fn read_live_ceremony_proposal(
-        &mut self,
-        session_id: &SessionID,
-    ) -> GuardianResult<CeremonyState> {
-        let key = CeremonyProposalLogMessage::object_key(session_id);
-        // A live proposal has just been published, so its short-lived Compliance
-        // lock must still be active.
-        let verified_record = self.read_verified_record(&key).await?;
-        self.expected_deployment
-            .pcr_allowlist
-            .require_current_build(verified_record.build_pcrs())?;
-        let writing_session_id = verified_record.entry().session_id().clone();
-        let proposal = *verified_record
-            .into_entry()
-            .into_message()
-            .into_ceremony_proposal()
-            .ok_or_else(|| InvalidS3Log(format!("expected a ceremony proposal log at {key}")))?;
-        let state = CeremonyState::from_proposal(proposal).map_err(|error| {
-            InvalidS3Log(format!("invalid ceremony proposal at {key}: {error}"))
-        })?;
-        log_verified_read(&key, &writing_session_id);
-        Ok(state)
-    }
+    // ========================================================================
+    // Ceremony reads and sequence selection
+    // ========================================================================
 
-    /// Verify the KP-share record without requiring an active S3 lock, because these locks can expire.
-    async fn read_kp_share_state_log_at_key(
+    /// Read and verify the latest ceremony log and return it with its session ID.
+    /// Return `None` if no ceremony log exists.
+    ///
+    /// Each ceremony key starts with a `sharing_seq` value padded with leading zeros.
+    /// The last key in lexicographic order identifies the latest ceremony.
+    async fn read_latest_ceremony_log(
         &mut self,
-        key: &str,
         require_current: bool,
-    ) -> GuardianResult<KpShareStateLogMessage> {
-        // KP-share locks are expected to expire, so authenticate the record
-        // without claiming that S3 still makes it immutable.
-        let record = self
+    ) -> GuardianResult<Option<(CeremonyLogMessage, SessionID)>> {
+        let keys = self
             .s3
-            .get_log_record_inner(key, ImmutabilityCheck::Skipped)
+            .list_keys(&CeremonyLogMessage::object_key_dir())
             .await?;
-        let verified_record = self.verify_record(record).await?;
-        if require_current {
-            self.expected_deployment
-                .pcr_allowlist
-                .require_current_build(verified_record.build_pcrs())?;
+        if keys.is_empty() {
+            info!("No completed ceremony log found");
+            return Ok(None);
         }
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = *verified_record
-            .into_entry()
-            .into_message()
-            .into_kp_share_state()
-            .ok_or_else(|| InvalidS3Log(format!("expected a kp-shares log at {key}")))?;
-        log_verified_read(key, &session_id);
-        Ok(msg)
-    }
-
-    /// Read the latest ceremony and the latest KP-share state for its `sharing_seq`.
-    /// Accept any build in the allowlist.
-    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_requirement(false)
-            .await
-            .map(|(state, _dealer)| state)
-    }
-
-    /// Read the latest ceremony and the latest KP-share state for its `sharing_seq`.
-    /// Both records must come from the current build.
-    pub async fn read_latest_ceremony_state_from_current_build(
-        &mut self,
-    ) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_requirement(true)
-            .await
-            .map(|(state, _dealer)| state)
-    }
-
-    /// Return the result of [`Self::read_latest_ceremony_state_from_current_build`] with the dealer session ID.
-    /// The dealer session wrote the `ceremony/` record.
-    pub async fn read_latest_ceremony_state_with_dealer(
-        &mut self,
-    ) -> GuardianResult<(CeremonyState, SessionID)> {
-        self.read_latest_ceremony_state_with_build_requirement(true)
-            .await
+        let key = CeremonyLogMessage::latest_key(keys)?.expect("the key list is nonempty");
+        let verified_log = self.read_log(&key, require_current).await?;
+        let session_id = verified_log.session_id().clone();
+        let msg = verified_log.extract("ceremony", VersionedLogMessage::into_ceremony)?;
+        Ok(Some((*msg, session_id)))
     }
 
     /// Read the latest ceremony and its KP-share state with the specified build policy.
@@ -365,18 +301,89 @@ impl GuardianReader {
         Ok((state, dealer))
     }
 
-    /// Read the latest committee in service.
-    ///
-    /// Use the latest `committee-update/` record if one exists.
-    /// Otherwise, use the bootstrap record at `genesis/record.json`, which the KPs authorize.
-    /// Return `None` if neither record exists.
-    pub async fn read_latest_committee(&mut self) -> GuardianResult<Option<Committee>> {
-        if let Some(committee) = self.read_latest_committee_update().await? {
-            return Ok(Some(committee));
-        }
-        info!("No committee update log found; checking the genesis record");
-        Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
+    /// Read the latest ceremony and the latest KP-share state for its `sharing_seq`.
+    /// Accept any build in the allowlist.
+    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
+        self.read_latest_ceremony_state_with_build_requirement(false)
+            .await
+            .map(|(state, _dealer)| state)
     }
+
+    /// Read the latest ceremony and its KP-share state. Return the state and dealer session ID.
+    /// Both records must come from the current build.
+    /// The dealer session wrote the `ceremony/` record.
+    pub async fn read_latest_ceremony_state_from_current_build(
+        &mut self,
+    ) -> GuardianResult<(CeremonyState, SessionID)> {
+        self.read_latest_ceremony_state_with_build_requirement(true)
+            .await
+    }
+
+    /// Require the current build and an active S3 Compliance lock for the proposal.
+    pub async fn read_live_ceremony_proposal(
+        &mut self,
+        session_id: &SessionID,
+    ) -> GuardianResult<CeremonyState> {
+        let key = CeremonyProposalLogMessage::object_key(session_id);
+        // A live proposal has just been published, so its short-lived Compliance
+        // lock must still be active.
+        let verified_log = self.read_log(&key, true).await?;
+        let proposal = verified_log.extract(
+            "ceremony proposal",
+            VersionedLogMessage::into_ceremony_proposal,
+        )?;
+        CeremonyState::from_proposal(*proposal)
+            .map_err(|error| InvalidS3Log(format!("invalid ceremony proposal at {key}: {error}")))
+    }
+
+    /// Return the next unused sharing sequence number.
+    /// It must exceed each sequence number used by a completed ceremony or an existing share directory.
+    /// Return zero if neither source contains a sequence number.
+    /// Note that writers publish shares before they write the ceremony record.
+    /// So an interrupted write can leave a share directory without a ceremony record.
+    ///
+    /// This method assumes that only one writer creates ceremonies.
+    /// It does not reserve the sequence number.
+    /// Conditional writes reject records that compete for the same key.
+    pub(crate) async fn next_sharing_seq(&mut self) -> GuardianResult<u64> {
+        let max_ceremony_sharing_seq = self
+            .read_latest_ceremony_log(false)
+            .await?
+            .map(|(ceremony, _)| ceremony.sharing_seq());
+        // Count occupied directories even if their records are unreadable or
+        // delete-marked: an interrupted ceremony may have left shares here.
+        // Directory names are not authenticated. An operator with S3 write access
+        // can increase the next sequence or exhaust it by adding a directory.
+        let shares_dir = KpShareStateLogMessage::root_dir();
+        let proposals_dir = CeremonyProposalLogMessage::object_key_dir();
+        let mut max_kp_share_sharing_seq: Option<u64> = None;
+        for directory in self.s3.list_common_prefixes(&shares_dir).await? {
+            if directory == proposals_dir {
+                continue;
+            }
+            let seq = KpShareStateLogMessage::sharing_seq_from_dir(&directory)
+                .map_err(|err| InvalidS3Log(err.to_string()))?;
+            max_kp_share_sharing_seq = max_kp_share_sharing_seq.max(Some(seq));
+        }
+        let highest = max_ceremony_sharing_seq.max(max_kp_share_sharing_seq);
+        let next_seq = match highest {
+            None => Ok(0),
+            Some(seq) => seq
+                .checked_add(1)
+                .ok_or_else(|| InvalidS3Log("sharing_seq exhausted".into())),
+        }?;
+        info!(
+            max_ceremony_sharing_seq = ?max_ceremony_sharing_seq,
+            max_kp_share_sharing_seq = ?max_kp_share_sharing_seq,
+            next_sharing_seq = next_seq,
+            "Selected the next ceremony sharing sequence"
+        );
+        Ok(next_seq)
+    }
+
+    // ========================================================================
+    // Committee and genesis reads
+    // ========================================================================
 
     /// Read and verify the applied committee with the highest epoch.
     /// Return `None` if no committee update exists.
@@ -388,17 +395,15 @@ impl GuardianReader {
             .s3
             .list_keys(&CommitteeUpdateLogMessage::object_key_dir())
             .await?;
-        let Some(key) = keys.into_iter().max() else {
+        if keys.is_empty() {
             return Ok(None);
-        };
-        let verified_record = self.read_verified_record(&key).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let msg = verified_record
-            .into_entry()
-            .into_message()
-            .into_committee_update()
-            .ok_or_else(|| InvalidS3Log(format!("expected a committee-update log at {key}")))?;
-        log_verified_read(&key, &session_id);
+        }
+        let key = CommitteeUpdateLogMessage::latest_key(keys)?.expect("the key list is nonempty");
+        let verified_log = self.read_log(&key, false).await?;
+        let msg = verified_log.extract(
+            "committee-update",
+            VersionedLogMessage::into_committee_update,
+        )?;
         Ok(Some(msg.new_committee))
     }
 
@@ -420,20 +425,23 @@ impl GuardianReader {
                 "expected exactly one genesis record at {key}, found {keys:?}"
             )));
         }
-        let verified_record = self.read_verified_record(&key).await?;
-        let session_id = verified_record.entry().session_id().clone();
-        let genesis = verified_record
-            .into_entry()
-            .into_message()
-            .into_genesis()
-            .ok_or_else(|| InvalidS3Log(format!("expected a genesis log at {key}")))?;
-        log_verified_read(&key, &session_id);
+        let verified_log = self.read_log(&key, false).await?;
+        let genesis = verified_log.extract("genesis", VersionedLogMessage::into_genesis)?;
         Ok(Some(genesis))
     }
-}
 
-fn log_verified_read(key: &str, session_id: &SessionID) {
-    info!(key, session_id = %session_id, "Read and verified the S3 log record");
+    /// Read the latest committee in service.
+    ///
+    /// Use the latest `committee-update/` record if one exists.
+    /// Otherwise, use the bootstrap record at `genesis/record.json`, which the KPs authorize.
+    /// Return `None` if neither record exists.
+    pub async fn read_latest_committee(&mut self) -> GuardianResult<Option<Committee>> {
+        if let Some(committee) = self.read_latest_committee_update().await? {
+            return Ok(Some(committee));
+        }
+        info!("No committee update log found; checking the genesis record");
+        Ok(self.read_genesis().await?.map(|genesis| genesis.committee))
+    }
 }
 
 /// Create a reader with mock S3 responses for one optional record and additional keys.
@@ -441,7 +449,7 @@ fn log_verified_read(key: &str, session_id: &SessionID) {
 /// Reads still verify the record signature and apply the S3 checks required by the read method.
 #[cfg(test)]
 pub(crate) fn reader_with_record_for_test(
-    record: Option<SignedLogEntry>,
+    log: Option<SignedLogEntry>,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
 ) -> GuardianReader {
@@ -462,8 +470,8 @@ pub(crate) fn reader_with_record_for_test(
     use std::sync::Mutex;
 
     let mut keys = extra_keys;
-    if let Some(record) = &record {
-        keys.push(record.object_key().to_string());
+    if let Some(log) = &log {
+        keys.push(log.object_key().to_string());
     }
     let request = Arc::new(Mutex::new((String::new(), false)));
     let captured_request = request.clone();
@@ -506,17 +514,15 @@ pub(crate) fn reader_with_record_for_test(
         });
     let config = InitConfig::mock_for_testing();
     let policy = S3ObjectLockPolicy::for_environment(config.deployment().retention_environment);
-    let record_key = record
-        .as_ref()
-        .map(|record| record.object_key().to_string());
+    let log_key = log.as_ref().map(|log| log.object_key().to_string());
     let get = mock!(Client::get_object)
-        .match_requests(move |req| req.key() == record_key.as_deref())
+        .match_requests(move |req| req.key() == log_key.as_deref())
         .then_output(move || {
-            let record = record.as_ref().unwrap();
+            let log = log.as_ref().unwrap();
             GetObjectOutput::builder()
                 .object_lock_mode(ObjectLockMode::Compliance)
-                .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
-                .body(ByteStream::from(serde_json::to_vec(record).unwrap()))
+                .object_lock_retain_until_date(DateTime::from(log.object_lock_expiry(policy)))
+                .body(ByteStream::from(serde_json::to_vec(log).unwrap()))
                 .build()
         });
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list, &get]);
@@ -565,7 +571,7 @@ mod tests {
         )
         .unwrap();
         let signing_key = GuardianSignKeyPair::from([42; 32]);
-        let record = SignedLogEntry::new(
+        let log = SignedLogEntry::new(
             SessionID::from_signing_pubkey(&signing_key.verification_key()),
             LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                 instance,
@@ -574,7 +580,7 @@ mod tests {
             &signing_key,
         );
         reader_with_record_for_test(
-            Some(record),
+            Some(log),
             signing_key.verification_key(),
             keys.iter().map(|key| key.to_string()).collect(),
         )

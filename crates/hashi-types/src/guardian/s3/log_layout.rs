@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::guardian::GuardianError::InvalidS3Log;
+use crate::guardian::GuardianResult;
 use crate::guardian::time::UnixSeconds;
 use anyhow::Context;
 use std::convert::TryFrom;
@@ -75,11 +77,84 @@ impl S3NumericDirectory {
             path: path.to_string(),
         })
     }
+
+    /// Return the paths in order from the highest to the lowest numeric value.
+    /// Return an error if a path does not have the numeric format.
+    pub fn sort_desc(paths: Vec<String>) -> anyhow::Result<Vec<String>> {
+        let mut dirs = Vec::with_capacity(paths.len());
+        for path in &paths {
+            dirs.push(Self::from_path(path)?);
+        }
+        dirs.sort();
+        dirs.reverse();
+        Ok(dirs.into_iter().map(|dir| dir.path).collect())
+    }
 }
 
 impl fmt::Display for S3NumericDirectory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.path)
+    }
+}
+
+/// A validated S3 object key for a log record ordered by a numeric sequence.
+///
+/// Each key has the form `<prefix><sequence>.json`. The prefix is a directory path
+/// with a final `/`. The sequence is a `u64` written as 20 decimal digits with leading zeros.
+///
+/// For example, `kp-shares/00000000000000000009/00000000000000000002.json` has:
+///
+/// - Prefix: `kp-shares/00000000000000000009/`.
+/// - Sequence: `2`.
+///
+/// The final number orders records within that directory. Ceremony keys use the
+/// sharing sequence as this number. Committee-update keys use the new committee epoch.
+pub struct S3SequencedKey {
+    object_key: String,
+    sequence: u64,
+}
+
+impl S3SequencedKey {
+    pub fn format(prefix: &str, sequence: u64) -> String {
+        format!("{prefix}{sequence:020}.json")
+    }
+
+    /// Require the exact prefix, a 20-digit `u64` sequence, and the `.json` suffix.
+    /// The caller supplies the complete directory prefix, including the final `/`.
+    fn parse(prefix: &str, key: String) -> GuardianResult<Self> {
+        let sequence = key
+            .strip_prefix(prefix)
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .ok_or_else(|| {
+                InvalidS3Log(format!(
+                    "noncanonical S3 object key {key} for prefix {prefix}"
+                ))
+            })?;
+        let expected_key = Self::format(prefix, sequence);
+        if key != expected_key {
+            return Err(InvalidS3Log(format!(
+                "noncanonical S3 object key: got {key}, expected {expected_key}"
+            )));
+        }
+        Ok(Self {
+            object_key: key,
+            sequence,
+        })
+    }
+
+    /// Return the object key with the highest sequence number under `prefix`.
+    /// Return an error if any key has an invalid format or a different prefix.
+    /// Return `None` if the list is empty.
+    pub fn latest_key(prefix: &str, keys: Vec<String>) -> GuardianResult<Option<String>> {
+        let keys = keys
+            .into_iter()
+            .map(|key| Self::parse(prefix, key))
+            .collect::<GuardianResult<Vec<_>>>()?;
+        Ok(keys
+            .into_iter()
+            .max_by_key(|key| key.sequence)
+            .map(|key| key.object_key))
     }
 }
 
@@ -221,6 +296,13 @@ mod tests {
     use super::DIR_WRITES_COMPLETION_DELAY;
     use super::S3HourDirectory;
     use super::S3NumericDirectory;
+    use crate::guardian::CeremonyLogMessage;
+    use crate::guardian::CommitteeUpdateLogMessage;
+    use crate::guardian::GuardianResult;
+    use crate::guardian::KpShareStateLogMessage;
+    use crate::guardian::SecretSharingInstance;
+    use crate::guardian::SetupNewKeyResponse;
+    use crate::guardian::StandardWithdrawalRequest;
 
     #[test]
     fn numeric_directory_sort_preserves_original_paths() {
@@ -417,5 +499,135 @@ mod tests {
             dir = dir.next_dir().unwrap();
         }
         assert_eq!(dir.to_string(), "withdraw/1970/01/02/00/");
+    }
+
+    #[test]
+    fn latest_key_validates_all_keys() {
+        type SelectKey = fn(Vec<String>) -> GuardianResult<Option<String>>;
+        let streams: [(&str, SelectKey); 3] = [
+            ("ceremony/", CeremonyLogMessage::latest_key),
+            ("committee-update/", CommitteeUpdateLogMessage::latest_key),
+            ("kp-shares/00000000000000000009/", |keys| {
+                KpShareStateLogMessage::latest_key(9, keys)
+            }),
+        ];
+        for (prefix, select) in streams {
+            let valid_key = format!("{prefix}18446744073709551615.json");
+            assert_eq!(select(vec![]).unwrap(), None);
+            assert_eq!(
+                select(vec![valid_key.clone()]).unwrap(),
+                Some(valid_key.clone())
+            );
+            assert_eq!(
+                select(vec![valid_key.clone(), valid_key.clone()]).unwrap(),
+                Some(valid_key.clone())
+            );
+
+            let mut invalid_keys: Vec<String> = [
+                "",
+                "9.json",
+                "0000000000000000009.json",
+                "000000000000000000009.json",
+                "+0000000000000000009.json",
+                "-0000000000000000009.json",
+                "18446744073709551616.json",
+                "00000000000000000009",
+                "00000000000000000009.json.bak",
+                "nested/00000000000000000009.json",
+                "not-a-number.json",
+            ]
+            .into_iter()
+            .map(|suffix| format!("{prefix}{suffix}"))
+            .collect();
+            invalid_keys.push("other/00000000000000000009.json".into());
+            invalid_keys.push(KpShareStateLogMessage::object_key_for_sequences(8, 0));
+
+            for invalid_key in invalid_keys {
+                for keys in [
+                    vec![invalid_key.clone(), valid_key.clone()],
+                    vec![valid_key.clone(), invalid_key.clone()],
+                ] {
+                    assert!(select(keys).is_err(), "accepted {invalid_key}");
+                }
+            }
+        }
+    }
+
+    fn assert_numeric_key_order(
+        mut key_for: impl FnMut(u64) -> String,
+        select: impl Fn(Vec<String>) -> GuardianResult<Option<String>>,
+    ) {
+        let boundaries = std::iter::once((0, 1))
+            .chain((1..=19).map(|exponent| {
+                let power = 10u64.pow(exponent);
+                (power - 1, power)
+            }))
+            .chain(std::iter::once((u64::MAX - 1, u64::MAX)));
+
+        for (lower, upper) in boundaries {
+            let lower_key = key_for(lower);
+            let upper_key = key_for(upper);
+            assert!(
+                lower_key < upper_key,
+                "numeric order differs from key order: {lower_key} >= {upper_key}"
+            );
+            for keys in [
+                vec![lower_key.clone(), upper_key.clone()],
+                vec![upper_key.clone(), lower_key.clone()],
+            ] {
+                assert_eq!(select(keys).unwrap(), Some(upper_key.clone()));
+            }
+        }
+    }
+
+    #[test]
+    fn ceremony_keys_follow_sharing_sequence_order() {
+        let setup = SetupNewKeyResponse::mock_for_testing();
+        let instance = setup.secret_sharing_instance;
+        assert_numeric_key_order(
+            |sharing_seq| {
+                CeremonyLogMessage::NewKey {
+                    instance: SecretSharingInstance::new(
+                        instance.commitments().clone(),
+                        instance.num_shares(),
+                        instance.threshold(),
+                        sharing_seq,
+                    )
+                    .unwrap(),
+                    btc_master_pubkey: setup.btc_master_pubkey,
+                }
+                .object_key()
+            },
+            CeremonyLogMessage::latest_key,
+        );
+    }
+
+    #[test]
+    fn kp_share_keys_follow_numeric_sequence_order() {
+        assert_numeric_key_order(
+            |cert_seq| KpShareStateLogMessage::object_key_for_sequences(9, cert_seq),
+            |keys| KpShareStateLogMessage::latest_key(9, keys),
+        );
+    }
+
+    #[test]
+    fn committee_update_keys_follow_epoch_order() {
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(
+                bitcoin::Network::Regtest,
+            );
+        let (request_sign, _) = signed_request.into_parts();
+        let mut message = CommitteeUpdateLogMessage {
+            from_epoch: 0,
+            new_committee: (&committee).into(),
+            request_sign,
+        };
+        assert_numeric_key_order(
+            |epoch| {
+                message.new_committee.epoch = epoch;
+                message.object_key()
+            },
+            CommitteeUpdateLogMessage::latest_key,
+        );
     }
 }
