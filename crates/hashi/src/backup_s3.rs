@@ -12,6 +12,7 @@ use aws_sdk_s3::config::Builder;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
+use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use tokio::io::AsyncWriteExt;
 
@@ -68,7 +69,12 @@ impl BackupS3Client {
         .context("timed out loading S3 backup configuration")
     }
 
-    pub async fn upload(&self, bucket: &str, key: &str, archive: &Path) -> anyhow::Result<()> {
+    pub async fn upload(
+        &self,
+        bucket: &str,
+        key: &str,
+        archive: &Path,
+    ) -> anyhow::Result<PutObjectOutput> {
         // The outer deadline also covers credential resolution and opening/streaming
         // the file, not just the SDK's HTTP request. Never remove the local archive.
         tokio::time::timeout(TRANSFER_TIMEOUT, async {
@@ -83,8 +89,7 @@ impl BackupS3Client {
                 .body(body)
                 .send()
                 .await
-                .context("S3 backup PutObject failed")?;
-            Ok::<(), anyhow::Error>(())
+                .context("S3 backup PutObject failed")
         })
         .await
         .context("S3 backup upload deadline exceeded")

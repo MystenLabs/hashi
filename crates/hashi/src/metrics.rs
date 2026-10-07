@@ -43,12 +43,12 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
-    // Remote-backup adoption only; these do not report S3 reachability or health.
+    // Remote-backup adoption only; this does not report S3 reachability or health.
     backup_s3_configured: IntGauge,
-    backup_s3_bucket_info: IntGaugeVec,
-    // Completed scheduled backups only; manual saves do not increment these.
+    // Scheduled backup outcomes only; manual saves do not increment these.
     pub(crate) backup_scheduled_local_successes: IntCounter,
     pub(crate) backup_scheduled_remote_successes: IntCounter,
+    pub(crate) backup_scheduled_remote_failures: IntCounter,
 
     // TRM AML screening metrics
     pub trm_enabled: IntGauge,
@@ -490,13 +490,6 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            backup_s3_bucket_info: register_int_gauge_vec_with_registry!(
-                "hashi_backup_s3_bucket_info",
-                "Configured S3 backup bucket (not a health check)",
-                &["bucket_uri"],
-                registry,
-            )
-            .unwrap(),
             backup_scheduled_local_successes: register_int_counter_with_registry!(
                 "hashi_backup_scheduled_local_successes_total",
                 "Scheduled local backup archives successfully published",
@@ -506,6 +499,12 @@ impl Metrics {
             backup_scheduled_remote_successes: register_int_counter_with_registry!(
                 "hashi_backup_scheduled_remote_successes_total",
                 "Scheduled backup archives successfully uploaded to S3",
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_remote_failures: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_remote_failures_total",
+                "Scheduled S3 backup stages that failed after local publication",
                 registry,
             )
             .unwrap(),
@@ -1626,12 +1625,6 @@ impl Metrics {
     pub fn record_backup_s3_config(&self, config: &crate::config::Config) {
         self.backup_s3_configured
             .set(i64::from(config.backup_s3.is_some()));
-        self.backup_s3_bucket_info.reset();
-        if let Some(bucket_uri) = config.backup_s3_bucket_uri() {
-            self.backup_s3_bucket_info
-                .with_label_values(&[&bucket_uri])
-                .set(1);
-        }
     }
 
     pub fn record_limiter_state(
@@ -2301,6 +2294,7 @@ mod tests {
         for name in [
             "hashi_backup_scheduled_local_successes_total",
             "hashi_backup_scheduled_remote_successes_total",
+            "hashi_backup_scheduled_remote_failures_total",
         ] {
             let family = families
                 .iter()
@@ -2345,7 +2339,9 @@ mod tests {
         assert!(
             families
                 .iter()
-                .all(|family| family.name() != "hashi_backup_s3_bucket_info")
+                .filter(|family| family.name().starts_with("hashi_backup_"))
+                .flat_map(|family| family.get_metric())
+                .all(|metric| metric.label.is_empty())
         );
     }
 
@@ -2382,22 +2378,12 @@ mod tests {
                 .value(),
             1.0
         );
-        let bucket_info = families
-            .iter()
-            .find(|family| family.name() == "hashi_backup_s3_bucket_info")
-            .unwrap();
-        assert_eq!(bucket_info.get_metric().len(), 1);
-        let bucket = &bucket_info.get_metric()[0];
-        assert_eq!(bucket.get_gauge().as_ref().expect("gauge").value(), 1.0);
-        assert_eq!(bucket.label.len(), 1);
-        assert_eq!(bucket.label[0].name(), "bucket_uri");
-        assert_eq!(
-            bucket.label[0].value(),
-            concat!(
-                "s3://hashi-test-backups/aB12Cd34/",
-                "0x0000000000000000000000000000000000000000000000000000000000000002/",
-                "0x0000000000000000000000000000000000000000000000000000000000000003/",
-            )
+        assert!(
+            families
+                .iter()
+                .filter(|family| family.name().starts_with("hashi_backup_"))
+                .flat_map(|family| family.get_metric())
+                .all(|metric| metric.label.is_empty())
         );
     }
 
