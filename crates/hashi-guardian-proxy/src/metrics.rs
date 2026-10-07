@@ -26,7 +26,7 @@ pub struct ProxyMetrics {
     pub requests: IntCounterVec,
     /// Wids in the index.
     pub widlog_index_size: IntGauge,
-    /// Seconds the index tail trails the clock. Normally less than 70 minutes.
+    /// Seconds the index tail trails the clock. Normally less than 75 minutes.
     pub widlog_cursor_lag_seconds: IntGauge,
     /// Tail ticks that did not list an hour directory.
     pub widlog_tail_failures: IntCounter,

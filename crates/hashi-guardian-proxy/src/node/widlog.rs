@@ -54,7 +54,7 @@ use std::time::Duration;
 use tracing::error;
 use tracing::warn;
 
-const TAIL_INTERVAL: Duration = Duration::from_secs(30);
+const TAIL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const RETENTION: Duration = Duration::from_hours(30 * 24);
 
 /// A LIST or GET failed. The lookup is indeterminate.
