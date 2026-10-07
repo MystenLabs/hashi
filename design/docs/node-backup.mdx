@@ -296,8 +296,22 @@ region = "us-east-1"
 ```
 
 Uploads and restores use the AWS default credential chain (environment, profiles,
-or IAM roles), not credentials in the node config. Operators provision the bucket
-and IAM permissions and manage remote retention separately from local cleanup.
+or IAM roles), not credentials in the node config. Operators must configure:
+
+- S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+  with **bucket-default retention**; Hashi does not set retention per object.
+- A node role restricted to `s3:PutObject` within its prefix, without object
+  read/delete, bucket/retention administration, or governance-retention bypass.
+  Keep separate recovery credentials off-node.
+- Bounded [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
+  for current **and noncurrent** versions, coordinated with Object Lock.
+  Expiring only current objects can leave historical versions behind. Agree the
+  window with MPC/security owners: archives retain old share material, and
+  recovery depends on epoch-limited certificate history. Local cleanup does not
+  define the remote retention window.
+
+Hashi does not verify these bucket settings. Its conditional writes prevent
+accidental overwrites, not misuse of compromised credentials.
 
 The destination is derived from the node identity, with no custom prefix:
 
@@ -331,8 +345,9 @@ hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc
 ```
 
 Use `--version-id '<version-id>'` to select an exact object version. Keys are
-literal object keys, not URL-decoded paths. AWS credentials need read access,
-including version read access when applicable.
+literal object keys, not URL-decoded paths. Recovery credentials need
+`s3:GetObject` for the current object or `s3:GetObjectVersion` for a pinned version;
+inspecting version history also requires `s3:ListBucketVersions`.
 
 For encrypted archives, choose `--backup-pgp-secret-key` or `--use-gpg-agent`
 (with optional `--gpg-homedir`); plaintext `.tar` archives need neither.
@@ -344,7 +359,12 @@ destination, and does not install files at their original paths.
 
 ### Machine-loss recovery
 
-Keep the backup URI, region, and decryption-key access outside the node.
+Keep backup URI/version receipts, the region, and decryption-key access outside
+the node. After compromise, use independently retained receipts and incident/audit
+history to select a known-good pre-compromise version, then pin it with
+`--version-id`. Neither the newest object nor successful decryption proves its
+origin. Unexpected versions or delete markers warrant investigation, but
+lifecycle rules and authorized administrators can also create them.
 
 1. Stop or fence the old node. Restore on a trusted replacement host into a
    private directory (`umask 077`); no original config or database is needed.
