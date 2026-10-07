@@ -3,7 +3,7 @@
 
 //! The wid index over the S3 withdrawal log of the guardian. The enclave
 //! writes one record for each signed withdrawal before it releases the
-//! signatures (`withdraw_mode/standard_withdrawal.rs`). Thus each wid that
+//! signatures (`withdraw_mode/standard_withdrawal.rs`). So each wid that
 //! the enclave signed has a record. The proxy does not write.
 //!
 //! A background tail lists each hour directory when its writes are complete
@@ -73,9 +73,8 @@ struct State {
 
 impl State {
     /// Keep one entry for a wid. Two seqs mean the enclave signed the wid
-    /// twice: a proxy bug, or a retry after the first record left the
-    /// retention window. The highest seq wins. At one seq, a response
-    /// replaces a key, and two different keys or responses are an error.
+    /// twice, so log an error and keep the highest seq. At one seq, a
+    /// response replaces a key. Two different keys or responses are an error.
     // Note(sid): does this need a metric to catch in alerts?
     fn put(&mut self, wid: WithdrawalID, entry: Entry) {
         let Some(existing) = self.entries.get(&wid) else {
@@ -273,9 +272,8 @@ impl<L: LogStore> WidLogIndex<L> {
             .map_err(WidLogError)
     }
 
-    // The critical section does not span an `.await`, so a sync `std::sync::Mutex`
-    // keeps the handler future `Send`. A panic aborts the process (see
-    // `abort_on_panic` in main), so a poisoned lock does not occur.
+    // No critical section spans an `.await`, so a sync mutex keeps the handler
+    // future `Send`. A panic aborts the process (`abort_on_panic` in main).
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("wid index mutex poisoned")
     }
@@ -337,9 +335,9 @@ fn synthesize_response(found: &FoundWithdrawal) -> proto::SignedStandardWithdraw
                 .collect(),
         }),
         timestamp_ms: Some(found.timestamp_ms),
-        // The record predates the response envelope: the enclave signs it
-        // after the S3 write. Nodes require a 64-byte value but do not verify
-        // it (`into_data_unchecked`). Zeros cannot pass as a real signature.
+        // The enclave signs the response envelope after the S3 write, so the
+        // record has no envelope signature. Nodes require 64 bytes but do not
+        // verify them (`into_data_unchecked`). Zeros are not a valid signature.
         signature: Some(vec![0u8; 64].into()),
     }
 }
@@ -638,8 +636,8 @@ mod tests {
 
     #[test]
     fn wid_suffix_matches_the_real_key_shape() {
-        // The suffix filter of the lookup must match the withdrawal key
-        // pattern exactly. A drift here disables the in-progress tier silently.
+        // The key parser must accept the exact key shape that the enclave
+        // writes. A drift here makes the index skip each key.
         let w = wid(0xcd);
         let (key, _) = withdrawal_record_json(w, 7, ms(HOUR_0), mock_response());
         assert!(key.ends_with(&format!("-wid{w}.json")));

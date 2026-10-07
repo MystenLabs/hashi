@@ -16,10 +16,10 @@
 //! When the index cannot answer, the proxy fails closed with `UNAVAILABLE`.
 //! It cannot tell "never signed" from "signed but unreadable", and a blind
 //! forward of the second case signs the withdrawal again and debits the
-//! limiter twice. A record that the enclave signed but then reverted (a
-//! lost-ack S3 write) still replays. The stall reconcile of the node snaps
-//! its mirror back to the guardian seq (`hashi/src/guardian_limiter.rs`),
-//! so a served orphan heals at a bounded one-withdrawal limiter under-count.
+//! limiter twice. If the enclave wrote a record and then lost the S3 ack,
+//! the proxy still replays that record. The node then reconciles its limiter
+//! mirror to the guardian seq (`hashi/src/guardian_limiter.rs`). The cost is
+//! one limiter under-count for one withdrawal.
 //!
 //! `GetGuardianInfo` is answered from [`crate::guardian_info`].
 
@@ -40,10 +40,9 @@ use tonic::Status;
 use tracing::error;
 use tracing::info;
 
-/// The fail-closed error when the index cannot answer. Keep it clear of
-/// "seq mismatch" and "Rate limit exceeded": the node classifies guardian
-/// errors by those substrings (`crates/hashi/src/leader/guardian.rs`), and
-/// this one must land in its retriable bucket.
+/// The fail-closed error when the index cannot answer. Do not use the words
+/// "seq mismatch" or "Rate limit exceeded". The node sorts guardian errors by
+/// those substrings, and this error must stay retriable (`leader/guardian.rs`).
 pub const WID_CACHE_UNAVAILABLE_MSG: &str = "wid cache unavailable; retry";
 
 fn unavailable() -> Status {
@@ -427,9 +426,8 @@ mod tests {
     #[tokio::test]
     async fn bumped_seq_for_same_wid_is_idempotent() {
         // A retry of the same wid at a different seq must replay the cached
-        // response. Example: the local limiter mirror reconciled forward to
-        // the advanced next_seq of the guardian. A second consumption drains
-        // the bucket for a withdrawal that is already signed.
+        // response. A second consumption drains the bucket for a withdrawal
+        // that is already signed.
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
 
@@ -624,8 +622,8 @@ mod tests {
         assert_eq!(replayed, again);
     }
 
-    /// A new proxy instance serves a wid whose record predates it. It does
-    /// not touch the enclave. Against the MinIO of the local replica:
+    /// A new proxy instance serves a wid whose record is older than the
+    /// instance. It does not touch the enclave. Run it against the local MinIO:
     ///
     /// ```text
     /// GUARDIAN_LOG_BUCKET=hashi-guardian-dev GUARDIAN_LOG_REGION=us-east-1 \

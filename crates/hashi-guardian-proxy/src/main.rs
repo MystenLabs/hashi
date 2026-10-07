@@ -50,9 +50,9 @@ async fn main() -> Result<()> {
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
 
-    // The source of the wid index and the roster source of the relay. Prove
-    // bucket access before you serve: a proxy that cannot read the log fails
-    // each withdrawal closed.
+    // The source of the wid index and the roster source of the relay. Test
+    // bucket access first. A proxy that cannot read the log fails each
+    // withdrawal closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
     probe_with_retries(&log_store).await?;
 
@@ -216,10 +216,8 @@ async fn probe_with_retries(log_store: &S3LogStore) -> Result<()> {
     unreachable!("loop returns on success or final error")
 }
 
-/// Make each panic abort the process instead of an unwind. The wid index
-/// uses a std `Mutex`. Its `.expect("wid index mutex poisoned")` assumes that
-/// a poisoned lock does not occur. This is true only if a panic aborts and
-/// does not unwind past the lock guard. (Same rationale as the `main` of the enclave.)
+/// Make each panic abort the process. The `.expect("wid index mutex poisoned")`
+/// in the wid index assumes that no panic unwinds past the lock guard.
 fn abort_on_panic() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
