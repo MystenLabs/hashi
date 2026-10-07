@@ -42,6 +42,7 @@ use anyhow::Context as _;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
@@ -75,7 +76,16 @@ struct Entry {
     /// The S3 key of the record. The first hit fetches it.
     key: String,
     /// The parsed record, after the first hit.
-    record: Option<Record>,
+    record: Option<LogEntry>,
+}
+
+impl Entry {
+    /// Cache `record` if it is the record for this entry's key.
+    fn add_withdrawal_log(&mut self, record: LogEntry) {
+        if record.object_key() == self.key {
+            self.record = Some(record);
+        }
+    }
 }
 
 struct State {
@@ -107,6 +117,7 @@ impl State {
             return;
         }
         if entry.key != existing.key {
+            // TODO: A real error?
             error!(
                 %wid,
                 seq = entry.seq,
@@ -246,16 +257,15 @@ impl<L: LogStore> WidLogIndex<L> {
             if let Some(record) = &entry.record {
                 return Ok(Some(Hit {
                     consumed_seq: entry.seq,
-                    response: synthesize_response(record),
+                    response: synthesize_response(record).map_err(WidLogError)?,
                 }));
             }
             (entry.seq, entry.key.clone())
         };
         let record = self.fetch(&key, wid).await?;
-        let response = synthesize_response(&record);
-        let mut state = self.lock();
-        if let Some(entry) = state.entries.get_mut(wid).filter(|e| e.key == key) {
-            entry.record = Some(record);
+        let response = synthesize_response(&record).map_err(WidLogError)?;
+        if let Some(entry) = self.lock().entries.get_mut(wid) {
+            entry.add_withdrawal_log(record);
         }
         Ok(Some(Hit {
             consumed_seq: seq,
@@ -265,7 +275,7 @@ impl<L: LogStore> WidLogIndex<L> {
 
     /// GET and parse one record. A record that does not parse is an error:
     /// the enclave signed the wid, so a forward would sign it again.
-    async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<Record, WidLogError> {
+    async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<LogEntry, WidLogError> {
         let bytes = self.log.get(key).await.map_err(WidLogError)?;
         parse_withdrawal(&bytes, wid)
             .inspect_err(|_| self.metrics.record_parse_failures.inc())
@@ -294,50 +304,44 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 }
 
-/// A parsed withdrawal record from the S3 log.
-struct Record {
-    /// The timestamp of the log record. The replayed response uses it.
-    timestamp_ms: u64,
-    message: WithdrawalLogMessage,
-}
-
-fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<Record> {
-    let record: SignedLogEntry = serde_json::from_slice(bytes)?;
-    let entry = record.into_entry_unchecked();
-    let timestamp_ms = entry.timestamp_ms();
-    let message = entry
-        .into_message()
-        .into_withdrawal()
-        .ok_or_else(|| anyhow::anyhow!("not a withdrawal record"))?;
+fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<LogEntry> {
+    let record = serde_json::from_slice::<SignedLogEntry>(bytes)?.into_entry_unchecked();
+    let message = withdrawal_message(&record)?;
     anyhow::ensure!(
         message.request_data.wid == *wid,
         "record is for wid {}, expected {}",
         message.request_data.wid,
         wid
     );
-    Ok(Record {
-        timestamp_ms,
-        message: *message,
-    })
+    Ok(record)
 }
 
-fn synthesize_response(record: &Record) -> proto::SignedStandardWithdrawalResponse {
-    proto::SignedStandardWithdrawalResponse {
+fn withdrawal_message(record: &LogEntry) -> anyhow::Result<&WithdrawalLogMessage> {
+    record
+        .message()
+        .as_withdrawal()
+        .ok_or_else(|| anyhow::anyhow!("not a withdrawal record"))
+}
+
+fn synthesize_response(
+    record: &LogEntry,
+) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
+    let message = withdrawal_message(record)?;
+    Ok(proto::SignedStandardWithdrawalResponse {
         data: Some(proto::StandardWithdrawalResponseData {
-            enclave_signatures: record
-                .message
+            enclave_signatures: message
                 .response
                 .enclave_signatures
                 .iter()
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(record.timestamp_ms),
+        timestamp_ms: Some(record.timestamp_ms()),
         // The enclave signs the response envelope after the S3 write, so the
         // record has no envelope signature. Nodes require 64 bytes but do not
         // verify them (`into_data_unchecked`). Zeros are not a valid signature.
         signature: Some(vec![0u8; 64].into()),
-    }
+    })
 }
 
 #[cfg(test)]

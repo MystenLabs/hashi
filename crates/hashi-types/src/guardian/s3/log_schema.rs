@@ -156,6 +156,14 @@ impl VersionedLogMessage {
         }
     }
 
+    /// Return a reference to the withdrawal message, or `None` for another message type.
+    pub fn as_withdrawal(&self) -> Option<&WithdrawalLogMessage> {
+        match self {
+            Self::V1(LogMessageV1::Withdrawal(message)) => Some(message.as_ref()),
+            Self::V1(_) => None,
+        }
+    }
+
     /// Consume a withdrawal payload, or return `None` for another message kind.
     pub fn into_withdrawal(self) -> Option<Box<WithdrawalLogMessage>> {
         match self {
