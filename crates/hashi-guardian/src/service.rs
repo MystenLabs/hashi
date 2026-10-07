@@ -7,6 +7,10 @@
 //! The service owns the control mutex; domain handlers only borrow the enclave.
 //!
 //! RPCs and heartbeats use the same control lock, including every S3 write.
+//! RPCs also hold a one-at-a-time turnstile for their whole run. The heartbeat
+//! skips the turnstile. Invariant: at most one RPC holds or waits on the
+//! control lock at any time. Bound: a heartbeat waits for at most the one
+//! running operation, never for queued RPCs.
 
 use crate::ceremony_mode::confirm;
 use crate::ceremony_mode::rotate;
@@ -49,12 +53,16 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct GuardianService {
     enclave: Arc<tokio::sync::Mutex<Enclave>>,
+    /// RPC turnstile, held for the whole RPC. Only one RPC may hold or wait on
+    /// the enclave lock. The heartbeat skips it. Lock order: `rpc_turn`, `enclave`.
+    rpc_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GuardianService {
     pub fn new(enclave: Enclave) -> Self {
         Self {
             enclave: Arc::new(tokio::sync::Mutex::new(enclave)),
+            rpc_turn: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -66,7 +74,9 @@ impl GuardianService {
 
     /// Spawn before locking so accepted work survives caller cancellation,
     /// including while queued. Domain handlers receive only the borrowed enclave.
-    async fn run<Output, Task>(&self, task: Task) -> GuardianResult<Output>
+    /// Hold the turnstile until the task ends, so no other RPC reaches the
+    /// enclave lock queue while this one runs.
+    async fn run_rpc<Output, Task>(&self, task: Task) -> GuardianResult<Output>
     where
         Output: Send + 'static,
         Task: for<'a> FnOnce(
@@ -77,7 +87,9 @@ impl GuardianService {
             + 'static,
     {
         let enclave = self.enclave.clone();
+        let rpc_turn = self.rpc_turn.clone();
         tokio::spawn(async move {
+            let _turn = rpc_turn.lock().await;
             let mut enclave = enclave.lock().await;
             task(&mut enclave).await
         })
@@ -89,13 +101,13 @@ impl GuardianService {
     /// lifecycle advances. Serialize status requests with those operations so info
     /// responses cannot expose partially committed state, without per-stage masking.
     pub async fn get_guardian_info(&self) -> GuardianResult<GuardianResponse<GuardianInfo>> {
-        self.run(|enclave| Box::pin(async move { Ok(info::get_guardian_info(enclave)) }))
+        self.run_rpc(|enclave| Box::pin(async move { Ok(info::get_guardian_info(enclave)) }))
             .await
     }
 
     /// Generate a fresh attestation under the same control lock as ordinary info reads.
     pub async fn get_attested_guardian_info(&self) -> GuardianResult<AttestedGuardianInfo> {
-        self.run(|enclave| Box::pin(async move { info::get_attested_guardian_info(enclave) }))
+        self.run_rpc(|enclave| Box::pin(async move { info::get_attested_guardian_info(enclave) }))
             .await
     }
 
@@ -103,7 +115,7 @@ impl GuardianService {
         &self,
         request: SetupNewKeyRequest,
     ) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
-        self.run(move |enclave| Box::pin(setup::setup_new_key(enclave, request)))
+        self.run_rpc(move |enclave| Box::pin(setup::setup_new_key(enclave, request)))
             .await
     }
 
@@ -111,7 +123,7 @@ impl GuardianService {
         &self,
         request: BatchProvisionerRotateKpSetRequest,
     ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
-        self.run(move |enclave| Box::pin(rotate::rotate_kp_set(enclave, request)))
+        self.run_rpc(move |enclave| Box::pin(rotate::rotate_kp_set(enclave, request)))
             .await
     }
 
@@ -119,12 +131,12 @@ impl GuardianService {
         &self,
         signed: KpSigned<CeremonyConfirmationRequest>,
     ) -> GuardianResult<CeremonyConfirmationResponse> {
-        self.run(move |enclave| Box::pin(confirm::confirm_ceremony(enclave, signed)))
+        self.run_rpc(move |enclave| Box::pin(confirm::confirm_ceremony(enclave, signed)))
             .await
     }
 
     pub async fn operator_init(&self, request: OperatorInitRequest) -> GuardianResult<()> {
-        self.run(move |enclave| Box::pin(operator_init::operator_init(enclave, request)))
+        self.run_rpc(move |enclave| Box::pin(operator_init::operator_init(enclave, request)))
             .await
     }
 
@@ -132,20 +144,22 @@ impl GuardianService {
         &self,
         request: BatchProvisionerInitRequest,
     ) -> GuardianResult<()> {
-        self.run(move |enclave| Box::pin(provisioner_init::provisioner_init(enclave, request)))
+        self.run_rpc(move |enclave| Box::pin(provisioner_init::provisioner_init(enclave, request)))
             .await
     }
 
     pub async fn operator_activate(&self, request: OperatorActivateRequest) -> GuardianResult<()> {
-        self.run(move |enclave| Box::pin(operator_activate::operator_activate(enclave, request)))
-            .await
+        self.run_rpc(move |enclave| {
+            Box::pin(operator_activate::operator_activate(enclave, request))
+        })
+        .await
     }
 
     pub async fn provisioner_rotate_cert(
         &self,
         signed_request: KpSigned<ProvisionerRotateCertRequest>,
     ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
-        self.run(move |enclave| {
+        self.run_rpc(move |enclave| {
             Box::pin(provisioner_rotate_cert::provisioner_rotate_cert(
                 enclave,
                 signed_request,
@@ -158,7 +172,7 @@ impl GuardianService {
         &self,
         request: SignedStandardWithdrawalRequestWire,
     ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
-        self.run(move |enclave| {
+        self.run_rpc(move |enclave| {
             Box::pin(standard_withdrawal::standard_withdrawal(enclave, request))
         })
         .await
@@ -168,7 +182,7 @@ impl GuardianService {
         &self,
         signed: HashiSigned<CommitteeTransitionRequest>,
     ) -> GuardianResult<u64> {
-        self.run(move |enclave| Box::pin(committee_update::update_committee(enclave, signed)))
+        self.run_rpc(move |enclave| Box::pin(committee_update::update_committee(enclave, signed)))
             .await
     }
 
@@ -176,7 +190,7 @@ impl GuardianService {
         &self,
         transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
     ) -> GuardianResult<u64> {
-        self.run(move |enclave| {
+        self.run_rpc(move |enclave| {
             Box::pin(committee_update::update_committee_chain(
                 enclave,
                 transitions,
@@ -187,13 +201,20 @@ impl GuardianService {
 
     /// Run the heartbeat loop started once at boot. Ticks are no-ops until
     /// withdraw-mode initialization completes and remain no-ops in ceremony mode.
-    /// Sleep after each tick, so delayed ticks do not accumulate. Long control
-    /// operations may delay heartbeats until the existing write fence forces a stop.
+    /// Sleep after each tick, so delayed ticks do not accumulate. The heartbeat
+    /// skips the RPC turnstile, so it waits for at most the one running
+    /// operation. One long operation may still delay it until the existing
+    /// write fence forces a stop.
     pub async fn run_heartbeats(self) {
         loop {
-            self.run(|enclave| Box::pin(enclave.heartbeat()))
-                .await
-                .expect("heartbeat write failed unexpectedly");
+            let enclave = self.enclave.clone();
+            tokio::spawn(async move {
+                let mut enclave = enclave.lock().await;
+                enclave.heartbeat().await
+            })
+            .await
+            .expect("heartbeat task failed")
+            .expect("heartbeat write failed unexpectedly");
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
         }
     }
