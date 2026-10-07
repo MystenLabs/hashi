@@ -18,13 +18,19 @@
 //! This is the resolution the enclave performs
 //! (`hashi-guardian::s3_reader::read_latest_ceremony_state`), and the relay has
 //! to agree with it or it rejects the very KPs the enclave would accept.
+//!
+//! A ceremony commits only once every KP has confirmed it, so the KPs
+//! confirming one are named by its session's proposal instead,
+//! `kp-shares/proposed/{session_id}.json` (`CeremonyProposal`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use hashi_types::guardian::log::CeremonyLogMessage;
+use hashi_types::guardian::log::CeremonyProposalLogMessage;
 use hashi_types::guardian::log::KpShareStateLogMessage;
+use hashi_types::guardian::SessionID;
 use hashi_types::pgp::Fingerprint;
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -117,6 +123,32 @@ impl<L: LogStore> RosterCache<L> {
         }
     }
 
+    /// Admit `signer` to confirm the ceremony `session_id` proposed, only if
+    /// that proposal names it. Read on every call: a ceremony takes one
+    /// confirmation per KP.
+    pub async fn authorize_confirmation(
+        &self,
+        session_id: &SessionID,
+        signer: &Fingerprint,
+    ) -> Result<(), Status> {
+        let roster = proposed_kp_roster(&self.store, session_id)
+            .await
+            .map_err(|e| {
+                warn!(error = %format!("{e:#}"), "KP ceremony proposal read failed");
+                Status::unavailable("KP roster unavailable; retry")
+            })?;
+        match roster {
+            Some(roster) if roster.contains(signer) => Ok(()),
+            Some(_) => Err(Status::permission_denied(format!(
+                "signer {signer} is not in the KP roster guardian session {session_id} proposed"
+            ))),
+            None => Err(Status::failed_precondition(format!(
+                "guardian session {session_id} has proposed no ceremony; run the operator's \
+                 ceremony step first"
+            ))),
+        }
+    }
+
     /// One read of the share log, cached whatever it finds.
     async fn read(&self, state: &mut State) -> Result<Option<Arc<Vec<Fingerprint>>>, Status> {
         let roster = latest_kp_roster(&self.store)
@@ -138,10 +170,9 @@ impl<L: LogStore> RosterCache<L> {
 pub(crate) mod test_utils {
     use crate::log_store::test_store::MemStore;
 
-    /// Commit a one-cert-per-share roster at `sharing_seq`, in the layout the
-    /// enclave writes today.
-    pub(crate) fn seed_roster(store: &MemStore, sharing_seq: u64, fingerprints: &[&str]) {
-        let shares: Vec<serde_json::Value> = fingerprints
+    /// Scalar shares used by the current log schema.
+    pub(super) fn single_cert_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
+        fingerprints
             .iter()
             .enumerate()
             .map(|(i, fp)| {
@@ -151,14 +182,19 @@ pub(crate) mod test_utils {
                     "armored_ciphertext": "",
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    /// Commit a one-cert-per-share roster at `sharing_seq`, in the layout the
+    /// enclave writes today.
+    pub(crate) fn seed_roster(store: &MemStore, sharing_seq: u64, fingerprints: &[&str]) {
         let record = serde_json::json!({
             "session_id": "test-session",
             "timestamp_ms": 0,
             "message": { "KpShareState": {
                 "sharing_seq": sharing_seq,
                 "cert_seq": 0,
-                "encrypted_shares": shares,
+                "encrypted_shares": single_cert_shares(fingerprints),
             }},
             "signature": null,
         });
@@ -167,6 +203,23 @@ pub(crate) mod test_utils {
             serde_json::to_vec(&record).unwrap(),
         );
         store.insert(format!("ceremony/{sharing_seq:020}.json"), b"{}".to_vec());
+    }
+
+    /// Propose a one-cert-per-share roster from `session_id`, as a ceremony
+    /// does before any KP has confirmed it.
+    pub(crate) fn seed_proposal(store: &MemStore, session_id: &str, fingerprints: &[&str]) {
+        let record = serde_json::json!({
+            "session_id": session_id,
+            "timestamp_ms": 0,
+            "message": { "CeremonyProposal": {
+                "encrypted_shares": single_cert_shares(fingerprints),
+            }},
+            "signature": null,
+        });
+        store.insert(
+            format!("kp-shares/proposed/{session_id}.json"),
+            serde_json::to_vec(&record).unwrap(),
+        );
     }
 }
 
@@ -179,6 +232,23 @@ pub async fn latest_kp_roster<L: LogStore>(log: &L) -> anyhow::Result<Option<Vec
     };
     let bytes = log.get(&key).await?;
     let roster = parse_roster(&bytes).with_context(|| format!("parse share log {key}"))?;
+    Ok(Some(roster))
+}
+
+/// Recipient fingerprints of the ceremony `session_id` proposed. `Ok(None)`
+/// means that session proposed none; any `Err` is indeterminate and the caller
+/// must fail closed.
+pub async fn proposed_kp_roster<L: LogStore>(
+    log: &L,
+    session_id: &SessionID,
+) -> anyhow::Result<Option<Vec<Fingerprint>>> {
+    let key = CeremonyProposalLogMessage::object_key(session_id);
+    if !log.list_keys(&key).await?.contains(&key) {
+        return Ok(None);
+    }
+    let bytes = log.get(&key).await?;
+    let roster =
+        parse_proposed_roster(&bytes).with_context(|| format!("parse ceremony proposal {key}"))?;
     Ok(Some(roster))
 }
 
@@ -238,10 +308,31 @@ struct LabeledShare {
     recipient_fingerprint: String,
 }
 
+/// Like [`ShareLogRecord`], for the one message a proposal key carries.
+#[derive(Deserialize)]
+struct ProposalLogRecord {
+    message: ProposalLogMessage,
+}
+
+#[derive(Deserialize)]
+enum ProposalLogMessage {
+    CeremonyProposal { encrypted_shares: Vec<LabeledShare> },
+}
+
 fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
     let record: ShareLogRecord = serde_json::from_slice(bytes)?;
     let ShareLogMessage::KpShareState { encrypted_shares } = record.message;
-    encrypted_shares
+    recipient_fingerprints(&encrypted_shares)
+}
+
+fn parse_proposed_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
+    let record: ProposalLogRecord = serde_json::from_slice(bytes)?;
+    let ProposalLogMessage::CeremonyProposal { encrypted_shares } = record.message;
+    recipient_fingerprints(&encrypted_shares)
+}
+
+fn recipient_fingerprints(shares: &[LabeledShare]) -> anyhow::Result<Vec<Fingerprint>> {
+    shares
         .iter()
         .map(|share| parse_recipient_fingerprint(&share.recipient_fingerprint))
         .collect()
@@ -259,7 +350,9 @@ fn parse_recipient_fingerprint(label: &str) -> anyhow::Result<Fingerprint> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_utils::seed_proposal;
     use super::test_utils::seed_roster;
+    use super::test_utils::single_cert_shares;
     use super::*;
     use crate::log_store::test_store::MemStore;
     use std::sync::atomic::Ordering;
@@ -269,21 +362,6 @@ mod tests {
 
     fn fp(hex: &str) -> Fingerprint {
         hex.parse().unwrap()
-    }
-
-    /// Scalar shares used by the current log schema.
-    fn single_cert_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
-        fingerprints
-            .iter()
-            .enumerate()
-            .map(|(i, fp)| {
-                serde_json::json!({
-                    "id": i + 1,
-                    "recipient_fingerprint": fp,
-                    "armored_ciphertext": "",
-                })
-            })
-            .collect()
     }
 
     /// Mark `sharing_seq` as completed. Only the key matters — the reader takes
@@ -597,5 +675,120 @@ mod tests {
         let err = cache.authorize(&fp(FP_A)).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         cache.authorize(&fp(FP_B)).await.unwrap();
+    }
+
+    /// The proposal fixture the log schema pins, with its placeholder share
+    /// labels swapped for fingerprints.
+    fn proposal_fixture() -> (SessionID, Vec<Fingerprint>, Vec<u8>) {
+        let mut record = include_str!(
+            "../../../hashi-types/src/guardian/s3/fixtures/v1/ceremony-proposal/new-key.json"
+        )
+        .to_string();
+        let fingerprints: Vec<String> = (0..5)
+            .map(|i| format!("AAAABBBBCCCCDDDDEEEE111122223333444{i}0000"))
+            .collect();
+        for (i, fingerprint) in fingerprints.iter().enumerate() {
+            let label = format!("DUMMY FINGERPRINT {i}");
+            assert!(record.contains(&label), "fixture lost share label {label}");
+            record = record.replace(&label, fingerprint);
+        }
+        (
+            "d54207da194977dc".into(),
+            fingerprints.iter().map(|hex| fp(hex)).collect(),
+            record.into_bytes(),
+        )
+    }
+
+    /// A first ceremony commits nothing until every KP has confirmed, so the
+    /// committed roster refuses its KPs and the proposal has to admit them.
+    #[tokio::test]
+    async fn a_proposal_admits_its_kps_before_the_ceremony_commits() {
+        let (session, fingerprints, record) = proposal_fixture();
+        let store = MemStore::default();
+        store.insert(CeremonyProposalLogMessage::object_key(&session), record);
+        let cache = RosterCache::new(store);
+
+        for fingerprint in &fingerprints {
+            cache
+                .authorize_confirmation(&session, fingerprint)
+                .await
+                .unwrap();
+            let err = cache.authorize(fingerprint).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        }
+
+        let err = cache
+            .authorize_confirmation(&session, &fp(FP_B))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn a_proposal_admits_only_its_own_session() {
+        let store = MemStore::default();
+        seed_proposal(&store, "sess-a", &[FP_A]);
+        let cache = RosterCache::new(store);
+
+        cache
+            .authorize_confirmation(&"sess-a".into(), &fp(FP_A))
+            .await
+            .unwrap();
+        // A session id that only prefixes a proposal's key names no proposal.
+        for session in ["sess-b", "sess-", ""] {
+            let err = cache
+                .authorize_confirmation(&session.into(), &fp(FP_A))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{session:?}");
+        }
+    }
+
+    /// A committed roster does not stand in for a proposal: its KPs confirmed
+    /// that ceremony already, and a later one may deal to a different set.
+    #[tokio::test]
+    async fn a_committed_roster_admits_no_confirmation() {
+        let store = MemStore::default();
+        seed_roster(&store, 0, &[FP_A]);
+        let cache = RosterCache::new(store);
+        cache.authorize(&fp(FP_A)).await.unwrap();
+
+        let err = cache
+            .authorize_confirmation(&"test-session".into(), &fp(FP_A))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_cannot_be_read_fails_closed() {
+        let session: SessionID = "sess-a".into();
+        let key = CeremonyProposalLogMessage::object_key(&session);
+
+        // A share-state record is not a proposal, wherever it is stored.
+        let (_, share_state) = kp_shares_record(0, 0, &[FP_A]);
+        for bytes in [b"not json".to_vec(), share_state] {
+            let store = MemStore::default();
+            store.insert(key.clone(), bytes);
+            let err = RosterCache::new(store)
+                .authorize_confirmation(&session, &fp(FP_A))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unavailable);
+        }
+
+        for fail in [
+            |store: &MemStore| store.fail_lists.store(true, Ordering::SeqCst),
+            |store: &MemStore| store.fail_gets.store(true, Ordering::SeqCst),
+        ] {
+            let store = MemStore::default();
+            seed_proposal(&store, &session, &[FP_A]);
+            fail(&store);
+            let err = RosterCache::new(store)
+                .authorize_confirmation(&session, &fp(FP_A))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unavailable);
+        }
     }
 }
