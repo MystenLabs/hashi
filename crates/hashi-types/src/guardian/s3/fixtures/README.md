@@ -1,8 +1,9 @@
 # Guardian log fixtures
 
 `v1/` contains deterministic dummy records for the single log schema introduced
-at the testnet wipe. These replace the old deployed V1/V2 compatibility fixtures;
-they are not records from a running guardian.
+at the testnet wipe and re-established at mainnet's fresh start (below). These
+replace the old deployed V1/V2 compatibility fixtures; they are not records from
+a running guardian.
 
 The corpus covers all 15 cases, including both ceremony-proposal variants and
 both ceremony/withdraw initialization variants in OI records, with withdraw
@@ -24,9 +25,11 @@ cargo test -p hashi-types regenerate_log_fixtures -- --ignored --nocapture
 The ignored generator uses the same dummy messages as the writer round-trip
 test. `dummy_log_fixtures_round_trip_and_verify` checks the checked-in JSON
 against those messages, round-trips it, and verifies Guardian signatures.
-The testnet wipe establishes a fresh V1 baseline: pre-wipe records and signatures
-need not remain readable. Regeneration is allowed while establishing this baseline.
-After deployment, preserve the existing fixtures and signatures as described below.
+Mainnet's fresh start re-establishes the V1 baseline with new withdrawal request
+fields, which testnet-1.0's records lack, so testnet runs older builds until it is
+republished. Regeneration is allowed while establishing this baseline. After
+mainnet's deployment, preserve the existing fixtures and signatures as described
+below.
 Keep files pretty-printed with a final newline, organized by log type under the
 corresponding schema-version directory.
 

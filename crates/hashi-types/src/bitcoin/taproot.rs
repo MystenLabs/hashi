@@ -206,6 +206,7 @@ mod bitcoin_tests {
     use super::*;
     use crate::bitcoin::BTC_LIB;
     use crate::bitcoin::BitcoinKeypair;
+    use crate::bitcoin::ConstructionVersion;
     use crate::bitcoin::HashiMasterG;
     use crate::bitcoin::InputUTXO;
     use crate::bitcoin::OutputUTXOWire;
@@ -370,6 +371,7 @@ mod bitcoin_tests {
 
         // C) Enclave signs the transaction.
         let tx_info = TxUTXOs::new(
+            ConstructionVersion::V1,
             vec![input_utxo.clone()],
             vec![
                 // 100 sats sent externally; the rest (minus fee) returns as change.

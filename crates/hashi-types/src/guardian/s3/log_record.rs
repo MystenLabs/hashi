@@ -307,6 +307,10 @@ impl SignedLogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitcoin::ConstructionVersion;
+    use crate::bitcoin::OutputUTXOWire;
+    use crate::bitcoin::SighashType;
+    use crate::bitcoin::TemplateId;
     use crate::guardian::CeremonyLogMessage;
     use crate::guardian::CeremonyProposalLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
@@ -594,6 +598,34 @@ mod tests {
                 .validate(&signing_key.verification_key())
                 .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
         }
+    }
+
+    #[test]
+    fn withdrawal_record_with_unknown_construction_values_parses_and_verifies() {
+        let signing_key = fixture_signing_key();
+        let mut withdrawal = dummy_log_messages()
+            .into_iter()
+            .find_map(|message| match message {
+                LogMessage::Withdrawal(withdrawal) => Some(withdrawal),
+                _ => None,
+            })
+            .unwrap();
+        let utxos = &mut withdrawal.request_data.utxos;
+        utxos.construction_version = ConstructionVersion(u16::MAX);
+        for input in &mut utxos.inputs {
+            input.template_id = TemplateId(u16::MAX);
+            input.sighash_type = SighashType(u8::MAX);
+        }
+        for output in &mut utxos.outputs {
+            if let OutputUTXOWire::Internal(change) = output {
+                change.template_id = TemplateId(u16::MAX);
+            }
+        }
+
+        let json =
+            serde_json::to_string(&dummy_log_record(LogMessage::Withdrawal(withdrawal))).unwrap();
+        let decoded: SignedLogEntry = serde_json::from_str(&json).unwrap();
+        decoded.validate(&signing_key.verification_key()).unwrap();
     }
 
     #[test]

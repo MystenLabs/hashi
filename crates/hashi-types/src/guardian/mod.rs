@@ -983,8 +983,13 @@ impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequ
     ) -> GuardianResult<Self> {
         Ok(Self {
             wid: value.wid,
-            utxos: TxUTXOs::new(value.utxos.inputs, value.utxos.outputs, network)
-                .map_err(|e| InvalidInputs(e.to_string()))?,
+            utxos: TxUTXOs::new(
+                value.utxos.construction_version,
+                value.utxos.inputs,
+                value.utxos.outputs,
+                network,
+            )
+            .map_err(|e| InvalidInputs(e.to_string()))?,
             timestamp_secs: value.timestamp_secs,
             seq: value.seq,
         })

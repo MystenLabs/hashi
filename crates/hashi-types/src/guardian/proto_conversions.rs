@@ -64,12 +64,15 @@ use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::BitcoinSignature;
+use crate::bitcoin::ConstructionVersion;
 use crate::bitcoin::DerivationPath;
 use crate::bitcoin::ExternalOutputUTXOWire;
 use crate::bitcoin::HashiMasterG;
 use crate::bitcoin::InputUTXO;
 use crate::bitcoin::InternalOutputUTXO;
 use crate::bitcoin::OutputUTXOWire;
+use crate::bitcoin::SighashType;
+use crate::bitcoin::TemplateId;
 use crate::bitcoin::TxUTXOsWire;
 use crate::move_types::CommitteeSignature;
 use crate::pgp::PgpPublicCert;
@@ -1074,6 +1077,11 @@ fn missing(field: &str) -> GuardianError {
     InvalidInputs(format!("missing {field}"))
 }
 
+fn required_narrow<T: TryFrom<u32>>(value: Option<u32>, field: &str) -> GuardianResult<T> {
+    let value = value.ok_or_else(|| missing(field))?;
+    T::try_from(value).map_err(|_| InvalidInputs(format!("invalid {field}: {value} out of range")))
+}
+
 impl TryFrom<pb::CommitteeSignature> for CommitteeSignature {
     type Error = GuardianError;
 
@@ -1629,6 +1637,11 @@ impl TryFrom<pb::TxUtxos> for TxUTXOsWire {
     type Error = GuardianError;
 
     fn try_from(utxos_pb: pb::TxUtxos) -> Result<Self, Self::Error> {
+        let construction_version = ConstructionVersion(required_narrow(
+            utxos_pb.construction_version,
+            "construction_version",
+        )?);
+
         let inputs = utxos_pb
             .inputs
             .into_iter()
@@ -1641,7 +1654,11 @@ impl TryFrom<pb::TxUtxos> for TxUTXOsWire {
             .map(OutputUTXOWire::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(Self { inputs, outputs })
+        Ok(Self {
+            construction_version,
+            inputs,
+            outputs,
+        })
     }
 }
 
@@ -1665,11 +1682,16 @@ impl TryFrom<pb::InputUtxo> for InputUTXO {
         let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
             .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
 
-        Ok(Self::new(
+        let template_id = TemplateId(required_narrow(input_pb.template_id, "template_id")?);
+        let sighash_type = SighashType(required_narrow(input_pb.sighash_type, "sighash_type")?);
+
+        Ok(Self {
             outpoint,
-            Amount::from_sat(amount),
+            amount: Amount::from_sat(amount),
             derivation_path,
-        ))
+            template_id,
+            sighash_type,
+        })
     }
 }
 
@@ -1700,11 +1722,13 @@ impl TryFrom<pb::OutputUtxo> for OutputUTXOWire {
                         InvalidInputs("invalid derivation_path: expected 32 bytes".into())
                     })?;
                 let amount = int.amount.ok_or_else(|| missing("amount"))?;
+                let template_id = TemplateId(required_narrow(int.template_id, "template_id")?);
 
-                Ok(Self::Internal(InternalOutputUTXO::new(
+                Ok(Self::Internal(InternalOutputUTXO {
                     derivation_path,
-                    Amount::from_sat(amount),
-                )))
+                    amount: Amount::from_sat(amount),
+                    template_id,
+                }))
             }
         }
     }
@@ -1729,6 +1753,7 @@ fn tx_utxos_wire_to_pb(utxos: TxUTXOsWire) -> pb::TxUtxos {
             .into_iter()
             .map(output_utxo_wire_to_pb)
             .collect(),
+        construction_version: Some(utxos.construction_version.0.into()),
     }
 }
 
@@ -1740,6 +1765,8 @@ fn input_utxo_to_pb(input: InputUTXO) -> pb::InputUtxo {
         }),
         amount: Some(input.amount.to_sat()),
         derivation_path: Some(input.derivation_path.into_inner().to_vec().into()),
+        template_id: Some(input.template_id.0.into()),
+        sighash_type: Some(input.sighash_type.0.into()),
     }
 }
 
@@ -1755,6 +1782,7 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
             pb::output_utxo::Output::Internal(pb::InternalOutputUtxo {
                 derivation_path: Some(int.derivation_path.into_inner().to_vec().into()),
                 amount: Some(int.amount.to_sat()),
+                template_id: Some(int.template_id.0.into()),
             })
         }
     };

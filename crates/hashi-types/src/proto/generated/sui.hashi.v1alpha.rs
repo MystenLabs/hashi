@@ -4900,6 +4900,9 @@ pub struct TxUtxos {
     pub inputs: ::prost::alloc::vec::Vec<InputUtxo>,
     #[prost(message, repeated, tag = "2")]
     pub outputs: ::prost::alloc::vec::Vec<OutputUtxo>,
+    /// How the transaction is built from its UTXOs.
+    #[prost(uint32, optional, tag = "3")]
+    pub construction_version: ::core::option::Option<u32>,
 }
 /// (Hashi+Guardian)-owned input UTXO.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4914,6 +4917,12 @@ pub struct InputUtxo {
     /// tap leaf hash are derived from it inside the enclave.
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub derivation_path: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Spend template the UTXO was created under.
+    #[prost(uint32, optional, tag = "4")]
+    pub template_id: ::core::option::Option<u32>,
+    /// BIP-341 sighash type byte the input is signed with.
+    #[prost(uint32, optional, tag = "5")]
+    pub sighash_type: ::core::option::Option<u32>,
 }
 /// Output UTXO (either external or internal).
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4950,4 +4959,7 @@ pub struct InternalOutputUtxo {
     /// Amount in satoshis.
     #[prost(uint64, optional, tag = "2")]
     pub amount: ::core::option::Option<u64>,
+    /// Spend template the output is created under.
+    #[prost(uint32, optional, tag = "3")]
+    pub template_id: ::core::option::Option<u32>,
 }

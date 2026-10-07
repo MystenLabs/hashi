@@ -2412,6 +2412,7 @@ pub fn build_guardian_withdrawal_request(
     timestamp_secs: u64,
     seq: u64,
 ) -> anyhow::Result<hashi_types::guardian::StandardWithdrawalRequest> {
+    use hashi_types::bitcoin::ConstructionVersion;
     use hashi_types::bitcoin::InputUTXO;
     use hashi_types::bitcoin::OutputUTXOWire;
     use hashi_types::bitcoin::TxUTXOs;
@@ -2446,7 +2447,7 @@ pub fn build_guardian_withdrawal_request(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let utxos = TxUTXOs::new(inputs, outputs, network)
+    let utxos = TxUTXOs::new(ConstructionVersion::V1, inputs, outputs, network)
         .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))?;
 
     // The on-chain `WithdrawalTransaction` UID doubles as the guardian-side `wid`.
