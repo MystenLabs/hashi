@@ -303,12 +303,12 @@ or IAM roles), not credentials in the node config. Operators must configure:
 - A node role restricted to `s3:PutObject` within its prefix, without object
   read/delete, bucket/retention administration, or governance-retention bypass.
   Keep separate recovery credentials off-node.
-- Bounded [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
+- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
   for current **and noncurrent** versions, coordinated with Object Lock.
-  Expiring only current objects can leave historical versions behind. Agree the
-  window with MPC/security owners: archives retain old share material, and
-  recovery depends on epoch-limited certificate history. Local cleanup does not
-  define the remote retention window.
+  Expiring only current objects can leave historical versions behind. This is
+  an operational default, not guaranteed deletion on day 14 or a guaranteed
+  recovery window: Object Lock sets a minimum protected period, expiration is
+  asynchronous, and recovery depends on epoch-limited certificate history.
 
 Hashi does not verify these bucket settings. Its conditional writes prevent
 accidental overwrites, not misuse of compromised credentials.
