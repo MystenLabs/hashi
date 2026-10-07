@@ -39,9 +39,13 @@
 use crate::log_store::LogStore;
 use crate::metrics::ProxyMetrics;
 use anyhow::Context as _;
+use hashi_types::guardian::proto_conversions::standard_withdrawal_response_signed_to_pb;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::GuardianResponse;
+use hashi_types::guardian::GuardianSignature;
+use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::WithdrawalID;
@@ -322,21 +326,14 @@ fn synthesize_response(
     withdrawal_log: &LogEntry,
 ) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
     let message = withdrawal_message(withdrawal_log)?;
-    Ok(proto::SignedStandardWithdrawalResponse {
-        data: Some(proto::StandardWithdrawalResponseData {
-            enclave_signatures: message
-                .response
-                .enclave_signatures
-                .iter()
-                .map(|sig| sig.to_vec().into())
-                .collect(),
-        }),
-        timestamp_ms: Some(withdrawal_log.timestamp_ms()),
-        // The enclave signs the response envelope after the S3 write, so the
-        // withdrawal log has no envelope signature. Nodes require 64 bytes but
-        // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
-        signature: Some(vec![0u8; 64].into()),
-    })
+    let response = GuardianResponse::new(message.response.clone(), withdrawal_log.timestamp_ms());
+    // The enclave signs the response envelope after the S3 write, so the
+    // withdrawal log has no envelope signature. Nodes require 64 bytes but
+    // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
+    let signature = GuardianSignature::from([0u8; 64]);
+    Ok(standard_withdrawal_response_signed_to_pb(
+        GuardianSigned::from_parts(response, signature),
+    ))
 }
 
 #[cfg(test)]
