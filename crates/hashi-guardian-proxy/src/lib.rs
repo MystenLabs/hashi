@@ -8,8 +8,8 @@
 //! always forwards to the enclave without caching. The rest is grouped by who calls it:
 //!
 //! - [`node`]: [`node::cache`] makes `StandardWithdrawal` responses idempotent
-//!   by `wid` — an in-process LRU in front of the guardian's own S3 withdrawal
-//!   log ([`node::widlog`]) as the durable, read-only tier.
+//!   by `wid`. It answers from an index over the guardian's own S3 withdrawal
+//!   log ([`node::widlog`]), which the proxy only reads.
 //!   [`node::member_auth`] gates every route: node RPCs are served only to
 //!   current or pending committee members ([`node::members`]), who present
 //!   their registered TLS key as a client certificate.
@@ -123,6 +123,7 @@ mod tests {
     use crate::metrics::ProxyMetrics;
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
+    use crate::node::widlog::WidLogIndex;
     use crate::tls::test_utils::node_identity;
     use crate::tls::test_utils::test_cert;
     use crate::tls::test_utils::TestCert;
@@ -201,8 +202,7 @@ mod tests {
         let roster = Arc::new(RosterCache::new(MemStore::default()));
         let guardian = CachingGuardianGrpc::new(
             Forwarding::new(backend.clone(), backend.clone(), roster.clone()),
-            MemStore::default(),
-            bitcoin::Network::Regtest,
+            WidLogIndex::ready_for_tests(MemStore::default(), metrics.clone()).await,
             metrics.clone(),
         );
         let relay = Relay::new(backend.clone(), roster);

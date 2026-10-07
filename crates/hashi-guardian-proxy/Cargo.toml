@@ -10,7 +10,6 @@ anyhow.workspace = true
 tracing.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
-lru.workspace = true
 hashi-types = { path = "../hashi-types" }
 aws-config.workspace = true
 aws-sdk-s3.workspace = true

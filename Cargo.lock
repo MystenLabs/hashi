@@ -3133,7 +3133,6 @@ dependencies = [
  "ed25519-dalek",
  "hashi-types",
  "hex",
- "lru 0.16.3",
  "pkcs8 0.10.2",
  "prometheus",
  "prost",

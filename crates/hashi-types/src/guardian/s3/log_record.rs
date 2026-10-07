@@ -332,6 +332,8 @@ mod tests {
     use crate::guardian::TESTNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::WithdrawalID;
     use crate::guardian::WithdrawalLogMessage;
+    use crate::guardian::s3::S3HourDirectory;
+    use crate::guardian::unix_millis_to_seconds;
     use bitcoin::Network;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash as _;
@@ -558,10 +560,14 @@ mod tests {
                 continue;
             };
             let seq = withdrawal.request_data.seq;
+            let wid = withdrawal.request_data.wid;
             let record = dummy_log_record(message);
+            let prefix = S3HourDirectory::withdraw(unix_millis_to_seconds(record.timestamp_ms()))
+                .unwrap()
+                .to_string();
             assert_eq!(
-                WithdrawalLogMessage::seq_from_object_key(record.object_key()),
-                Some(seq)
+                WithdrawalLogMessage::parse_object_key(&prefix, record.object_key()).unwrap(),
+                (seq, wid)
             );
         }
     }
