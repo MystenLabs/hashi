@@ -162,23 +162,18 @@ fn validate_remote_restore(
     output_dir: &Path,
 ) -> Result<()> {
     let format = backup::archive_format(archive)?;
-    let extract_dir = output_dir.join(backup::extract_dir_name(archive)?);
+    anyhow::ensure!(
+        matches!(format, backup::BackupArchiveFormat::Encrypted),
+        "S3 restore requires an encrypted .tar.asc archive; restore plaintext .tar archives from a local path"
+    );
     anyhow::ensure!(
         matches!(
-            (format, decryptor),
-            (
-                backup::BackupArchiveFormat::Unencrypted,
-                RestoreDecryptor::Unencrypted
-            ) | (
-                backup::BackupArchiveFormat::Encrypted,
-                RestoreDecryptor::LocalSecretKey { .. }
-            ) | (
-                backup::BackupArchiveFormat::Encrypted,
-                RestoreDecryptor::GpgAgent { .. }
-            )
+            decryptor,
+            RestoreDecryptor::LocalSecretKey { .. } | RestoreDecryptor::GpgAgent { .. }
         ),
         "Restore backend does not match the backup archive format"
     );
+    let extract_dir = output_dir.join(backup::extract_dir_name(archive)?);
     anyhow::ensure!(
         !extract_dir
             .try_exists()
@@ -357,6 +352,9 @@ mod tests {
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
     const CLI_CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
@@ -456,7 +454,11 @@ mod tests {
         body: Vec<u8>,
         status: &str,
         extra_length: usize,
-    ) -> (BackupS3Client, tokio::task::JoinHandle<()>) {
+    ) -> (
+        BackupS3Client,
+        tokio::task::JoinHandle<()>,
+        Arc<AtomicUsize>,
+    ) {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -465,8 +467,11 @@ mod tests {
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len() + extra_length
         );
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_connections = Arc::clone(&connections);
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            server_connections.fetch_add(1, Ordering::Relaxed);
             let mut request = Vec::new();
             let mut byte = [0];
             while !request.ends_with(b"\r\n\r\n") {
@@ -477,12 +482,16 @@ mod tests {
             socket.write_all(&body).await.unwrap();
             socket.shutdown().await.unwrap();
         });
-        (BackupS3Client::for_test_endpoint(&endpoint), server)
+        (
+            BackupS3Client::for_test_endpoint(&endpoint),
+            server,
+            connections,
+        )
     }
 
     #[test]
     fn restore_source_flags_are_remote_only() {
-        let uri = Path::new("s3://bucket/backup.tar");
+        let uri = Path::new("s3://bucket/backup.tar.asc");
         assert!(s3_restore_source(uri, None, None).is_err());
         assert!(s3_restore_source(uri, Some(" \t"), None).is_err());
         assert!(s3_restore_source(uri, Some("us-east-1"), Some("")).is_err());
@@ -537,27 +546,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_restore_downloads_encrypted_and_plaintext_archives() {
+    async fn remote_restore_downloads_encrypted_archive() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture).await;
+        let name = backup.tarball.file_name().unwrap().to_str().unwrap();
+        let uri = format!("s3://bucket/nested/prefix/{name}");
+        let (client, server, _) =
+            serve_download(fs::read(&backup.tarball).unwrap(), "200 OK", 0).await;
+        let out = tempfile::tempdir().unwrap();
+        restore_from_s3_with_client(
+            &client,
+            &uri,
+            Some("version-1"),
+            local_secret_key_decryptor(&backup),
+            out.path(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
+        assert!(extract_dir.join("config.toml").is_file());
+        assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+        assert!(!out.path().join("nested").exists());
+    }
+
+    #[tokio::test]
+    async fn remote_restore_rejects_valid_plaintext_without_downloading() {
         let fixture = TestFixture::new();
         let backup = save_with_fresh_pgp_key(&fixture).await;
         let plaintext = write_unencrypted_tar_backup(&backup);
-        for (tarball, decryptor) in [
-            (&backup.tarball, local_secret_key_decryptor(&backup)),
-            (&plaintext, RestoreDecryptor::Unencrypted),
+        let name = plaintext.file_name().unwrap().to_str().unwrap();
+        let uri = format!("s3://bucket/{name}");
+        for decryptor in [
+            RestoreDecryptor::Unencrypted,
+            local_secret_key_decryptor(&backup),
         ] {
-            let name = tarball.file_name().unwrap().to_str().unwrap();
-            let uri = format!("s3://bucket/nested/prefix/{name}");
-            let (client, server) = serve_download(fs::read(tarball).unwrap(), "200 OK", 0).await;
+            let (client, server, connections) =
+                serve_download(fs::read(&plaintext).unwrap(), "200 OK", 0).await;
             let out = tempfile::tempdir().unwrap();
-            restore_from_s3_with_client(&client, &uri, Some("version-1"), decryptor, out.path())
-                .await
-                .unwrap();
-            server.await.unwrap();
-            let extract_dir = expected_extract_dir(tarball, out.path());
-            assert!(extract_dir.join("config.toml").is_file());
-            assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
-            assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
-            assert!(!out.path().join("nested").exists());
+            assert!(
+                restore_from_s3_with_client(&client, &uri, None, decryptor, out.path())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+            assert_eq!(connections.load(Ordering::Relaxed), 0);
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
         }
     }
 
@@ -565,22 +601,21 @@ mod tests {
     async fn remote_restore_cleans_failed_downloads_and_invalid_archives() {
         let fixture = TestFixture::new();
         let backup = save_with_fresh_pgp_key(&fixture).await;
-        let plaintext = write_unencrypted_tar_backup(&backup);
         // A complete valid archive must still fail when the HTTP body is truncated.
         for (status, body, extra_length) in [
             ("403 Forbidden", b"access denied".to_vec(), 0),
-            ("200 OK", fs::read(&plaintext).unwrap(), 100),
+            ("200 OK", fs::read(&backup.tarball).unwrap(), 100),
             ("200 OK", b"not a tar archive".to_vec(), 0),
         ] {
-            let (client, server) = serve_download(body, status, extra_length).await;
+            let (client, server, _) = serve_download(body, status, extra_length).await;
             let out = tempfile::tempdir().unwrap();
             fs::write(out.path().join("keep"), b"unchanged").unwrap();
             assert!(
                 restore_from_s3_with_client(
                     &client,
-                    "s3://bucket/backup.tar",
+                    "s3://bucket/backup.tar.asc",
                     None,
-                    RestoreDecryptor::Unencrypted,
+                    local_secret_key_decryptor(&backup),
                     out.path()
                 )
                 .await
@@ -595,15 +630,17 @@ mod tests {
 
     #[tokio::test]
     async fn remote_restore_refuses_existing_output_before_connecting() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture).await;
         let out = tempfile::tempdir().unwrap();
         let existing = out.path().join("backup");
         fs::create_dir(&existing).unwrap();
         fs::write(existing.join("keep"), b"unchanged").unwrap();
         let error = restore_from_s3(
-            "s3://bucket/backup.tar",
+            "s3://bucket/backup.tar.asc",
             "us-east-1",
             None,
-            RestoreDecryptor::Unencrypted,
+            local_secret_key_decryptor(&backup),
             out.path(),
         )
         .await
@@ -617,6 +654,14 @@ mod tests {
     async fn remote_restore_cancellation_removes_private_download() {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture).await;
+        let decryptor = local_secret_key_decryptor(&backup);
+        let body = fs::read(&backup.tarball).unwrap();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len() + 100
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (ready, received) = tokio::sync::oneshot::channel();
@@ -628,10 +673,8 @@ mod tests {
                 assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
                 request.push(byte[0]);
             }
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial")
-                .await
-                .unwrap();
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
             ready.send(()).unwrap();
             std::future::pending::<()>().await;
         });
@@ -641,9 +684,9 @@ mod tests {
             let client = BackupS3Client::for_test_endpoint(&endpoint);
             restore_from_s3_with_client(
                 &client,
-                "s3://bucket/nested/backup.tar",
+                "s3://bucket/nested/backup.tar.asc",
                 None,
-                RestoreDecryptor::Unencrypted,
+                decryptor,
                 &output_dir,
             )
             .await
@@ -655,7 +698,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .path();
-        let archive = staging.join("backup.tar");
+        let archive = staging.join("backup.tar.asc");
         assert!(archive.is_file());
         #[cfg(unix)]
         {

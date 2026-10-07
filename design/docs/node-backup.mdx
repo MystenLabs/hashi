@@ -349,8 +349,9 @@ literal object keys, not URL-decoded paths. Recovery credentials need
 `s3:GetObject` for the current object or `s3:GetObjectVersion` for a pinned version;
 inspecting version history also requires `s3:ListBucketVersions`.
 
-For encrypted archives, choose `--backup-pgp-secret-key` or `--use-gpg-agent`
-(with optional `--gpg-homedir`); plaintext `.tar` archives need neither.
+S3 restore accepts only encrypted `.tar.asc` archives. Choose
+`--backup-pgp-secret-key` or `--use-gpg-agent` (with optional `--gpg-homedir`).
+Local restores also accept plaintext `.tar` archives, which need neither decryptor.
 `--region` is required for S3; it and `--version-id` are invalid for local restores.
 
 Downloads use private temporary storage under `--output-dir` and are removed

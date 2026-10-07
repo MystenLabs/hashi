@@ -498,7 +498,7 @@ pub enum BackupCommands {
     /// Files are extracted only into the selected output directory. Original
     /// paths recorded in the manifest are metadata, not restore destinations.
     Restore {
-        /// Local path or s3://bucket/key (.tar.asc encrypted or .tar unencrypted)
+        /// Local .tar or .tar.asc path, or s3://bucket/key (.tar.asc only)
         backup_tarball: std::path::PathBuf,
 
         /// AWS region (required for S3 restores; not accepted for local files)

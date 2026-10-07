@@ -882,7 +882,7 @@ Executing the proposal changes the onchain value, but a running node keeps the g
 
 ### 6.7 Backup
 
-Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself.
+Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`.
 
 ```bash
 # Create a backup (uses the required configured cert unless overridden inline/by path).
@@ -893,7 +893,7 @@ hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] 
 hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-dir <private-staging-dir>
 
-# Restore an unencrypted .tar — no key needed
+# Restore a local unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 
 # Restore an S3 object; optionally pin its version:
@@ -1191,7 +1191,7 @@ hashi committee start-reconfig
 
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Restore also accepts a `.tar` you decrypted yourself. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 The optional `[backup-s3]` table in the [config template](#31-validator-config)
 enables uploads using the AWS default credential chain. Without it, backups
