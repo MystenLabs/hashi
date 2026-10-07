@@ -288,18 +288,56 @@ mod tests {
             wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0]).await?;
         }
 
+        // The on-chain epoch can advance before node 0 prepares its next
+        // keys. Wait for both records before stopping it for a manual save.
+        // The scheduled archive already has this ordering: next-epoch key
+        // preparation precedes the backup request.
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let node = &test_networks.hashi_network().nodes()[0];
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if node
+                    .hashi()
+                    .db
+                    .get_encryption_key(initial_epoch + 2)?
+                    .is_some()
+                    && node
+                        .hashi()
+                        .db
+                        .get_signing_key(initial_epoch + 2)?
+                        .is_some()
+                {
+                    return Ok::<(), anyhow::Error>(());
+                }
+            }
+        })
+        .await
+        .context("Node 0 did not prepare its next-epoch private keys before backup")??;
+
         // 2. Stop node 0.
         test_networks.hashi_network_mut().nodes_mut()[0]
             .shutdown()
             .await;
 
-        // `shutdown()` can return slightly before the DB lock is observable as
-        // released. Reopen the DB here to reuse the existing retry logic and
-        // only proceed to `backup::save` once the lock is definitely gone.
-        {
+        // Reopening also waits for shutdown to release the DB lock. Capture
+        // only the current and next epoch's private keys: both must precede
+        // the selected archive, unlike arbitrary later DB writes.
+        let archived_key_epochs = [initial_epoch + 1, initial_epoch + 2];
+        let expected_keys = {
             let db = test_networks.hashi_network().nodes()[0].open_db()?;
-            drop(db);
-        }
+            let mut keys = Vec::with_capacity(archived_key_epochs.len());
+            for epoch in archived_key_epochs {
+                let encryption_key = db
+                    .get_encryption_key(epoch)?
+                    .with_context(|| format!("Source DB lacks encryption key for epoch {epoch}"))?;
+                let signing_key = db
+                    .get_signing_key(epoch)?
+                    .with_context(|| format!("Source DB lacks signing key for epoch {epoch}"))?;
+                keys.push((epoch, encryption_key, bcs::to_bytes(&signing_key)?));
+            }
+            keys
+        };
 
         // Snapshot the config now, before any deletion below touches the
         // filesystem layout.
@@ -406,6 +444,28 @@ mod tests {
             node_config_path.display()
         );
 
+        // Check actual archived private keys before startup can generate
+        // replacements or recover fresh shares from the other validators.
+        {
+            let db = Database::open(&original_db_path)?;
+            for (epoch, expected_encryption_key, expected_signing_key) in &expected_keys {
+                let encryption_key = db.get_encryption_key(*epoch)?.with_context(|| {
+                    format!("Restored DB lacks encryption key for epoch {epoch}")
+                })?;
+                let signing_key = db
+                    .get_signing_key(*epoch)?
+                    .with_context(|| format!("Restored DB lacks signing key for epoch {epoch}"))?;
+                assert_eq!(
+                    &encryption_key, expected_encryption_key,
+                    "Recovery changed the encryption private key for epoch {epoch}",
+                );
+                assert!(
+                    bcs::to_bytes(&signing_key)? == *expected_signing_key,
+                    "Recovery changed the signing private key for epoch {epoch}",
+                );
+            }
+        } // Drop the DB handle before restarting node 0.
+
         // 7. Restart node 0. It may not have valid shares for the current
         //    epoch yet — that's fine, we just need the server up so the
         //    upcoming rotation can deliver fresh shares.
@@ -418,6 +478,15 @@ mod tests {
             .wait_for_mpc_key(ROTATION_TIMEOUT)
             .await
             .ok();
+        assert_eq!(
+            test_networks.hashi_network().nodes()[0]
+                .hashi()
+                .metrics
+                .mpc_committee_key_lost_total
+                .get(),
+            0,
+            "Restored node must not replace lost committee keys before rejoining",
+        );
 
         // 8. Force one more rotation; node 0 rejoins as a catching-up
         //    member and must end up with the same MPC pubkey as the rest.
@@ -444,6 +513,15 @@ mod tests {
                 .unwrap(),
             original_mpc_key,
             "Recovery must preserve the original MPC public key",
+        );
+        assert_eq!(
+            test_networks.hashi_network().nodes()[0]
+                .hashi()
+                .metrics
+                .mpc_committee_key_lost_total
+                .get(),
+            0,
+            "Restored node must rejoin without replacing lost committee keys",
         );
         Ok(())
     }
