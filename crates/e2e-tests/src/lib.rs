@@ -348,7 +348,7 @@ impl TestNetworksBuilder {
             None => {
                 let harness =
                     guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
-                let guardian_btc_pubkey = harness.ensure_btc_pubkey()?;
+                let guardian_btc_pubkey = harness.ensure_btc_pubkey().await?;
                 let guardian_config = hashi::publish::GuardianConfig {
                     // The harness has no public endpoint, and an unroutable one
                     // proves the nodes dial `node_url`.

@@ -70,7 +70,7 @@ mod tests {
     const TEST_T: usize = 2;
 
     struct TestContext {
-        enclave: Arc<Enclave>,
+        enclave: Enclave,
         ceremony_artifacts_digest: [u8; 32],
         roster: KpCertRoster,
         secret_keys: MockKpSecretKeys,
@@ -80,14 +80,14 @@ mod tests {
     async fn setup_context() -> TestContext {
         let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
         let response = setup_new_key(
-            enclave.clone(),
+            &mut enclave,
             SetupNewKeyRequest::new(roster.clone(), TEST_N, TEST_T).unwrap(),
         )
         .await
         .unwrap()
-        .verify_into_data(&enclave.signing_pubkey())
+        .verify_into_data(&enclave.config.signing_pubkey())
         .unwrap()
         .response;
         let ceremony_artifacts_digest = CeremonyArtifacts {
@@ -108,7 +108,7 @@ mod tests {
         fn signed_confirmation(&self, index: usize) -> KpSigned<CeremonyConfirmationRequest> {
             self.signed_confirmation_with(
                 index,
-                self.enclave.s3_session_id(),
+                self.enclave.config.s3_session_id(),
                 self.ceremony_artifacts_digest,
             )
         }
@@ -120,7 +120,7 @@ mod tests {
         ) -> KpSigned<CeremonyConfirmationRequest> {
             self.signed_confirmation_with(
                 index,
-                self.enclave.s3_session_id(),
+                self.enclave.config.s3_session_id(),
                 ceremony_artifacts_digest,
             )
         }
@@ -143,34 +143,35 @@ mod tests {
 
     #[tokio::test]
     async fn requires_every_kp_confirmation() {
-        let context = setup_context().await;
+        let mut context = setup_context().await;
         assert_eq!(
-            context.enclave.lifecycle(),
+            context.enclave.state.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
         assert_eq!(context.captures.lock().unwrap().len(), 1);
 
         let first = context.signed_confirmation(0);
-        let status = confirm_ceremony(context.enclave.clone(), first.clone())
+        let status = confirm_ceremony(&mut context.enclave, first.clone())
             .await
             .unwrap();
         assert_eq!(status.have, 1);
         assert!(!status.completed);
-        let repeated = confirm_ceremony(context.enclave.clone(), first)
-            .await
-            .unwrap();
+        let repeated = confirm_ceremony(&mut context.enclave, first).await.unwrap();
         assert_eq!(repeated.have, 1);
 
         for index in 1..TEST_N {
-            let status =
-                confirm_ceremony(context.enclave.clone(), context.signed_confirmation(index))
-                    .await
-                    .unwrap();
+            let signed = context.signed_confirmation(index);
+            let status = confirm_ceremony(&mut context.enclave, signed)
+                .await
+                .unwrap();
             assert_eq!(status.have as usize, index + 1);
             assert_eq!(status.need as usize, TEST_N);
             assert_eq!(status.completed, index + 1 == TEST_N);
         }
-        assert_eq!(context.enclave.lifecycle(), CeremonyStage::Completed.into());
+        assert_eq!(
+            context.enclave.state.lifecycle(),
+            CeremonyStage::Completed.into()
+        );
         {
             let captured = context.captures.lock().unwrap();
             assert_eq!(captured.len(), 3);
@@ -181,21 +182,19 @@ mod tests {
             );
             assert_eq!(captured[2].0, "ceremony/00000000000000000000.json");
         }
-        let error = confirm_ceremony(
-            context.enclave.clone(),
-            context.signed_confirmation(TEST_N - 1),
-        )
-        .await
-        .unwrap_err();
+        let signed = context.signed_confirmation(TEST_N - 1);
+        let error = confirm_ceremony(&mut context.enclave, signed)
+            .await
+            .unwrap_err();
         assert!(matches!(error, GuardianError::LifecycleMismatch { .. }));
         assert_eq!(context.captures.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn rejects_wrong_ceremony_artifacts_digest() {
-        let context = setup_context().await;
+        let mut context = setup_context().await;
         let signed = context.signed_confirmation_with_digest(0, [0; 32]);
-        let error = confirm_ceremony(context.enclave.clone(), signed)
+        let error = confirm_ceremony(&mut context.enclave, signed)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -206,13 +205,13 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_wrong_session() {
-        let context = setup_context().await;
+        let mut context = setup_context().await;
         let signed = context.signed_confirmation_with(
             0,
             "other-session".into(),
             context.ceremony_artifacts_digest,
         );
-        let error = confirm_ceremony(context.enclave.clone(), signed)
+        let error = confirm_ceremony(&mut context.enclave, signed)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -224,15 +223,15 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unrostered_signer() {
-        let context = setup_context().await;
+        let mut context = setup_context().await;
         let (cert, secret) = mock_attested_kp_keypair();
         let request = CeremonyConfirmationRequest::new(
-            context.enclave.s3_session_id(),
+            context.enclave.config.s3_session_id(),
             context.ceremony_artifacts_digest,
         );
         let signature = sign_detached_in_process(&secret, &KpSigned::signed_bytes(&request));
         let error = confirm_ceremony(
-            context.enclave.clone(),
+            &mut context.enclave,
             KpSigned::from_parts(request, cert, signature),
         )
         .await

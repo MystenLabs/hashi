@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
 use hashi_guardian::Enclave;
+use hashi_guardian::GuardianService;
 use hashi_guardian::OperatorInitTestArgs;
 use hashi_guardian::activate_enclave_for_testing;
 use hashi_guardian::rpc::GuardianGrpc;
@@ -20,7 +21,6 @@ use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -28,7 +28,7 @@ use tonic::transport::Server;
 
 /// In-process guardian reachable over gRPC on a local TCP socket.
 pub struct GuardianHarness {
-    enclave: Arc<Enclave>,
+    service: GuardianService,
     endpoint: String,
     network: Network,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -40,7 +40,7 @@ impl GuardianHarness {
     /// and provisioner-init both run in [`Self::finalize`] once DKG output exists
     /// (operator-init now carries the committee + BTC master key).
     pub async fn start(network: Network) -> Result<Self> {
-        let enclave = Enclave::create_with_random_keys();
+        let service = GuardianService::new(Enclave::create_with_random_keys());
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -50,7 +50,7 @@ impl GuardianHarness {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let svc = GuardianGrpc {
-            enclave: enclave.clone(),
+            service: service.clone(),
         };
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let server_handle = tokio::spawn(async move {
@@ -66,7 +66,7 @@ impl GuardianHarness {
         });
 
         Ok(Self {
-            enclave,
+            service,
             endpoint,
             network,
             shutdown_tx: Some(shutdown_tx),
@@ -87,18 +87,19 @@ impl GuardianHarness {
         hashi_object_id: sui_sdk_types::Address,
     ) -> Result<()> {
         let config = InitConfig::from_parts_for_testing(limiter_config, self.network);
-        self.enclave.install_operator_init_for_testing(
+        let mut enclave = self.service.enclave_for_testing().await;
+        enclave.install_operator_init_for_testing(
             OperatorInitTestArgs::default()
                 .with_config(config)
                 .with_genesis_bindings(hashi_object_id, master_pubkey),
         );
-        hashi_guardian::test_utils::finalize_enclave(&self.enclave)
+        hashi_guardian::test_utils::finalize_enclave(&mut enclave)
             .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
-        activate_enclave_for_testing(&self.enclave, committee, limiter_config, limiter_state)
+        activate_enclave_for_testing(&mut enclave, committee, limiter_config, limiter_state)
             .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
-            self.enclave.require_fully_initialized().is_ok(),
+            enclave.require_fully_initialized().is_ok(),
             "guardian did not reach active state"
         );
         Ok(())
@@ -108,15 +109,15 @@ impl GuardianHarness {
         &self.endpoint
     }
 
-    pub fn enclave(&self) -> &Arc<Enclave> {
-        &self.enclave
+    pub async fn enclave(&self) -> tokio::sync::MutexGuard<'_, Enclave> {
+        self.service.enclave_for_testing().await
     }
 
     /// Generate (or return the already-generated) enclave BTC pubkey
     /// without running provisioner-init. Used by e2e setup to publish
     /// the pubkey on-chain before hashi DKG completes.
-    pub fn ensure_btc_pubkey(&self) -> Result<BitcoinPubkey> {
-        hashi_guardian::test_utils::set_or_get_enclave_btc_pubkey(&self.enclave)
+    pub async fn ensure_btc_pubkey(&self) -> Result<BitcoinPubkey> {
+        hashi_guardian::test_utils::set_or_get_enclave_btc_pubkey(&mut *self.enclave().await)
             .map_err(|e| anyhow::anyhow!("set_or_get_enclave_btc_pubkey: {e:?}"))
     }
 }

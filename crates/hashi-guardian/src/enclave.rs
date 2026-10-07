@@ -723,21 +723,28 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_is_a_noop_before_operator_init() {
-        let mut writer = HeartbeatWriter::new(Enclave::create_with_random_keys());
-        writer.tick().await.unwrap();
-        assert_eq!(writer.next_seq, 0);
+        let mut enclave = Enclave::create_with_random_keys();
+        enclave.heartbeat().await.unwrap();
+        assert_eq!(enclave.state.next_heartbeat_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_a_noop_in_ceremony_mode() {
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
+        enclave.heartbeat().await.unwrap();
+        assert_eq!(enclave.state.next_heartbeat_seq, 0);
+        assert!(captures.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn heartbeat_advances_after_durable_write() {
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
+        let mut enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_s3_logger(logger),
-        )
-        .await;
-        let mut writer = HeartbeatWriter::new(enclave);
-        writer.tick().await.unwrap();
-        assert_eq!(writer.next_seq, 1);
+        );
+        enclave.heartbeat().await.unwrap();
+        assert_eq!(enclave.state.next_heartbeat_seq, 1);
 
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 1, "heartbeat tick should write one record");
@@ -748,23 +755,5 @@ mod tests {
             panic!("expected V1 heartbeat record");
         };
         assert_eq!(message.seq, 0);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "heartbeats are only supported in withdraw mode")]
-    async fn ceremony_mode_rejects_heartbeats() {
-        Enclave::create_operator_initialized_ceremony(crate::test_utils::mock_logger())
-            .log_heartbeat(HeartbeatLogMessage::new(0))
-            .await
-            .unwrap();
-    }
-    #[tokio::test]
-    async fn heartbeat_writer_stays_idle_in_ceremony_mode() {
-        let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let mut writer =
-            HeartbeatWriter::new(Enclave::create_operator_initialized_ceremony(logger));
-        writer.tick().await.unwrap();
-        assert_eq!(writer.next_seq, 0);
-        assert!(captures.lock().unwrap().is_empty());
     }
 }

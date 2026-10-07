@@ -848,7 +848,7 @@ mod tests {
             .guardian_harness
             .as_ref()
             .expect("harness present after 2-of-2 cutover");
-        assert!(harness.enclave().require_fully_initialized().is_ok());
+        assert!(harness.enclave().await.require_fully_initialized().is_ok());
 
         let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -955,6 +955,7 @@ mod tests {
             .as_ref()
             .expect("harness present after 2-of-2 cutover")
             .enclave()
+            .await
             .state
             .limiter_state()
             .expect("guardian limiter state present after a successful withdrawal");
