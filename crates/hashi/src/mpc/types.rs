@@ -1263,7 +1263,6 @@ pub enum ComplaintsToProcessKey {
 pub enum MessageResponsesKey {
     Dkg { sender: Address },
     Rotation { sender: Address },
-    NonceGeneration { batch_index: u32, sender: Address },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

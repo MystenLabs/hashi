@@ -35,6 +35,7 @@ mod tests {
     use crate::TestNetworksBuilder;
 
     use crate::test_helpers::BackgroundMiner;
+    use crate::test_helpers::assert_no_member_refusals;
     use crate::test_helpers::assert_no_unrouted_objects;
     use crate::test_helpers::assert_tob_mirror_parity;
     use crate::test_helpers::create_deposit_and_wait;
@@ -991,6 +992,7 @@ mod tests {
 
         assert_no_unrouted_objects(&networks);
         assert_tob_mirror_parity(&networks).await?;
+        assert_no_member_refusals(&networks);
 
         info!("=== Bitcoin Withdrawal E2E Test Passed ===");
         Ok(())
@@ -1883,6 +1885,7 @@ mod tests {
         // and the guardian's committee-handoff-derived thresholds.
         create_deposit_and_wait(&mut networks, 100_000).await?;
         crate::test_helpers::create_withdrawal_and_wait(&mut networks, 30_000).await?;
+        assert_no_member_refusals(&networks);
 
         Ok(())
     }

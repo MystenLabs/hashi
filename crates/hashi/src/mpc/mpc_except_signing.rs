@@ -549,12 +549,9 @@ impl MpcManager {
         }
         self.reject_kind_mismatch(sender, &request.messages)?;
         let cache_key = match &request.messages {
-            Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
-            Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
-            Messages::NonceGenerationAvid(avid) => MessageResponsesKey::NonceGeneration {
-                batch_index: avid.batch_index,
-                sender,
-            },
+            Messages::Dkg(_) => Some(MessageResponsesKey::Dkg { sender }),
+            Messages::Rotation(_) => Some(MessageResponsesKey::Rotation { sender }),
+            Messages::NonceGenerationAvid(_) => None,
             Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         };
         let existing = self.accepted_dealer_messages(request.messages.protocol_type(), &sender)?;
@@ -567,7 +564,7 @@ impl MpcManager {
                     reason: "Dealer sent different messages".to_string(),
                 });
             }
-            if let Some(cached) = self.message_responses.get(&cache_key) {
+            if let Some(cached) = cache_key.and_then(|key| self.message_responses.get(&key)) {
                 return cached.clone();
             }
             tracing::info!(
@@ -594,8 +591,10 @@ impl MpcManager {
             Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         }
         .map(|signature| SendMessagesResponse { signature });
-        if !matches!(result, Err(MpcError::InvalidConfig(_))) {
-            self.message_responses.insert(cache_key, result.clone());
+        if let Some(key) = cache_key
+            && !matches!(result, Err(MpcError::InvalidConfig(_)))
+        {
+            self.message_responses.insert(key, result.clone());
         }
         result
     }
@@ -4057,10 +4056,6 @@ impl MpcManager {
         mgr.dealer_avid_nonce_outputs
             .retain(|(b, _), _| *b >= cutoff);
         mgr.avid_held_echoes.retain(|(b, _), _| *b >= cutoff);
-        mgr.message_responses.retain(|k, _| match k {
-            MessageResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
-            _ => true,
-        });
         mgr.complaint_responses.retain(|k, _| match k {
             ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,

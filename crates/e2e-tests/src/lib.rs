@@ -2175,6 +2175,7 @@ mod tests {
             .await
             .expect("Node 0 should recover MPC key after restart");
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+        crate::test_helpers::assert_no_member_refusals(&test_networks);
 
         Ok(())
     }
@@ -2266,6 +2267,7 @@ mod tests {
             proxy_allowlist().await?.members,
             tls_keys(test_networks.hashi_network().nodes())?
         );
+        crate::test_helpers::assert_no_member_refusals(&test_networks);
 
         Ok(())
     }
@@ -2340,6 +2342,7 @@ mod tests {
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 2).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
+        crate::test_helpers::assert_no_member_refusals(&test_networks);
 
         Ok(())
     }
@@ -2694,6 +2697,7 @@ mod tests {
             .await
             .expect("Node 0 should recover MPC key after restart");
         force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+        crate::test_helpers::assert_no_member_refusals(&test_networks);
 
         Ok(())
     }

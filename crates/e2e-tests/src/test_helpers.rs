@@ -19,6 +19,7 @@ use hashi_types::move_types::DealerSubmissionV1;
 use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalConfirmed;
+use prometheus::core::Collector;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -634,6 +635,40 @@ pub fn assert_no_unrouted_objects(networks: &TestNetworks) {
             unrouted, 0,
             "node {index}'s mirror failed to route {unrouted} object(s); \
              check the 'could not route' warnings in its log"
+        );
+    }
+}
+
+pub fn assert_no_member_refusals(networks: &TestNetworks) {
+    for (index, node) in networks.hashi_network.nodes().iter().enumerate() {
+        if !node.is_running() {
+            continue;
+        }
+        let refusals: Vec<String> = node
+            .hashi()
+            .metrics
+            .mpc_rpc_caller_refused_total
+            .collect()
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "not_member")
+            })
+            .map(|metric| {
+                let labels: Vec<_> = metric
+                    .get_label()
+                    .iter()
+                    .map(|label| format!("{}={}", label.name(), label.value()))
+                    .collect();
+                format!("{} x{}", labels.join(","), metric.get_counter().value())
+            })
+            .collect();
+        assert!(
+            refusals.is_empty(),
+            "node {index} refused MPC RPC callers as non-members: {refusals:?}"
         );
     }
 }

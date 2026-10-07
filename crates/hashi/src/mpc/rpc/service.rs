@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::caller_membership;
 use crate::grpc::HttpService;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
@@ -82,6 +83,7 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
+        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let to_status = |e: MpcError| {
                 match &e {
@@ -101,6 +103,22 @@ impl MpcService for HttpService {
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
+                caller_membership::check_current_or_previous(
+                    &requester,
+                    internal_request.epoch,
+                    mgr.mpc_config.epoch,
+                    &mgr.committee,
+                    mgr.previous_committee.as_ref(),
+                )
+                .map_err(|refusal| {
+                    caller_membership::refuse(
+                        &refused,
+                        "retrieve_messages",
+                        &requester,
+                        &format!("epoch {}", internal_request.epoch),
+                        refusal,
+                    )
+                })?;
                 let outcome = mgr
                     .begin_retrieve(requester, &internal_request)
                     .map_err(to_status)?;
@@ -157,12 +175,23 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<GetPublicMpcOutputRequest>,
     ) -> Result<tonic::Response<GetPublicMpcOutputResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let internal_request = types::GetPublicMpcOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
+        let onchain_state = self.onchain_state_opt();
+        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
+            let epoch = internal_request.epoch;
+            // Resolved before the manager lock is taken, so the two locks never nest.
+            let membership = onchain_state.as_ref().map(|onchain_state| {
+                caller_membership::check_epoch_or_successor(
+                    onchain_state.state().hashi().committees.committees(),
+                    epoch,
+                    &caller,
+                )
+            });
             let output = {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.handle_get_public_mpc_output_request(&internal_request)
@@ -171,6 +200,15 @@ impl MpcService for HttpService {
                         mpc_error_to_status(e)
                     })?
             };
+            if let Some(Err(refusal)) = membership {
+                return Err(caller_membership::refuse(
+                    &refused,
+                    "get_public_mpc_output",
+                    &caller,
+                    &format!("epoch {epoch} or the committee after it"),
+                    refusal,
+                ));
+            }
             Ok(GetPublicMpcOutputResponse::from(&output))
         })
         .await?;
@@ -182,14 +220,19 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<GetReconfigCompletionSignatureRequest>,
     ) -> Result<tonic::Response<GetReconfigCompletionSignatureResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let epoch = external_request
             .epoch
             .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
-        let signature = self.get_reconfig_signature(epoch).map(Into::into);
+        let signature = self.get_reconfig_signature(epoch);
+        if signature.is_some() {
+            check_caller_in_epoch(self, "get_reconfig_completion_signature", &caller, epoch)?;
+        }
         Ok(tonic::Response::new(
-            GetReconfigCompletionSignatureResponse { signature },
+            GetReconfigCompletionSignatureResponse {
+                signature: signature.map(Into::into),
+            },
         ))
     }
 
@@ -198,7 +241,7 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<GetPresigDealerSetSignatureRequest>,
     ) -> Result<tonic::Response<GetPresigDealerSetSignatureResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let epoch = external_request
             .epoch
@@ -207,11 +250,12 @@ impl MpcService for HttpService {
             .batch_index
             .ok_or_else(|| Status::invalid_argument("batch_index: missing required field"))?;
         // Only present once this node has fixed the batch's dealer set.
-        let signature = self
-            .get_presig_seal_signature(epoch, batch_index)
-            .map(Into::into);
+        let signature = self.get_presig_seal_signature(epoch, batch_index);
+        if signature.is_some() {
+            check_caller_in_epoch(self, "get_presig_dealer_set_signature", &caller, epoch)?;
+        }
         Ok(tonic::Response::new(GetPresigDealerSetSignatureResponse {
-            signature,
+            signature: signature.map(Into::into),
         }))
     }
 
@@ -220,7 +264,7 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<GetPartialSignaturesRequest>,
     ) -> Result<tonic::Response<GetPartialSignaturesResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let internal_request = types::GetPartialSignaturesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -229,6 +273,17 @@ impl MpcService for HttpService {
             .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
         let response = {
             let signing_manager = self.signing_manager_for(request_epoch)?;
+            caller_membership::check_member(signing_manager.committee(), &caller).map_err(
+                |refusal| {
+                    caller_membership::refuse(
+                        &self.metrics().mpc_rpc_caller_refused_total,
+                        "get_partial_signatures",
+                        &caller,
+                        &format!("epoch {request_epoch}"),
+                        refusal,
+                    )
+                },
+            )?;
             signing_manager
                 .handle_get_partial_signatures_request(&internal_request)
                 .map_err(|e| {
@@ -255,6 +310,31 @@ fn authenticate_caller<T>(request: &tonic::Request<T>) -> Result<Address, Status
         .get::<Address>()
         .copied()
         .ok_or_else(|| Status::permission_denied("unknown validator"))
+}
+
+fn check_caller_in_epoch(
+    service: &HttpService,
+    handler: &str,
+    caller: &Address,
+    epoch: u64,
+) -> Result<(), Status> {
+    let Some(onchain_state) = service.onchain_state_opt() else {
+        return Ok(());
+    };
+    let membership = caller_membership::check_epoch(
+        onchain_state.state().hashi().committees.committees(),
+        epoch,
+        caller,
+    );
+    membership.map_err(|refusal| {
+        caller_membership::refuse(
+            &service.metrics().mpc_rpc_caller_refused_total,
+            handler,
+            caller,
+            &format!("epoch {epoch}"),
+            refusal,
+        )
+    })
 }
 
 fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Status> {

@@ -558,6 +558,10 @@ impl SigningManager {
         self.config.committee.epoch()
     }
 
+    pub(crate) fn committee(&self) -> &RuntimeCommittee {
+        &self.config.committee
+    }
+
     pub fn threshold(&self) -> u16 {
         self.config.params.t
     }

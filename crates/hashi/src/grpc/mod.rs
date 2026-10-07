@@ -59,6 +59,10 @@ impl HttpService {
         &self.inner.metrics
     }
 
+    pub(crate) fn onchain_state_opt(&self) -> Option<crate::onchain::OnchainState> {
+        self.inner.onchain_state_opt().cloned()
+    }
+
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
             let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();
