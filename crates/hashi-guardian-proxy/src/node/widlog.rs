@@ -3,8 +3,8 @@
 
 //! An in-memory index of the wids in the S3 withdrawal log.
 //!
-//! Why it exists: the enclave writes one record to S3 for each withdrawal
-//! that it signs, before it returns the signatures
+//! Why it exists: the enclave writes one withdrawal log to S3 for each
+//! withdrawal that it signs, before it returns the signatures
 //! (`withdraw_mode/standard_withdrawal.rs`). When a node retries a wid, the
 //! proxy must return the recorded response and must not ask the enclave to
 //! sign again. The proxy only reads the log. It never writes to it.
@@ -20,7 +20,7 @@
 //!
 //! How a lookup works:
 //! 1. Look in the index. On a hit, build the response from the cached
-//!    record. If there is none yet, fetch and cache the record first.
+//!    withdrawal log. If there is none yet, fetch and cache it first.
 //! 2. If not found, list the hour directories that the tail has not indexed
 //!    yet. These are the current hour, the hour after it, and sometimes the
 //!    hour before it. Add their keys to the index and look again.
@@ -33,7 +33,7 @@
 //! Assumptions:
 //! - The enclave clock is at most `DIR_WRITES_COMPLETION_DELAY` behind the
 //!   proxy clock, and at most one hour ahead of it.
-//! - A record is visible in S3 as soon as the PUT of the enclave returns.
+//! - A withdrawal log is visible in S3 as soon as the PUT of the enclave returns.
 //! - A node retries a wid within `RETENTION`.
 
 use crate::log_store::LogStore;
@@ -71,19 +71,19 @@ pub struct Hit {
 
 struct Entry {
     seq: u64,
-    /// The time when the record was written. The tail evicts entries older than `RETENTION`.
+    /// The time when the withdrawal log was written. The tail evicts entries older than `RETENTION`.
     written_at: UnixSeconds,
-    /// The S3 key of the record. The first hit fetches it.
+    /// The S3 key of the withdrawal log. The first hit fetches it.
     key: String,
-    /// The parsed record, after the first hit.
-    record: Option<LogEntry>,
+    /// The parsed withdrawal log, after the first hit.
+    withdrawal_log: Option<LogEntry>,
 }
 
 impl Entry {
-    /// Cache `record` if it is the record for this entry's key.
-    fn add_withdrawal_log(&mut self, record: LogEntry) {
-        if record.object_key() == self.key {
-            self.record = Some(record);
+    /// Cache `withdrawal_log` if it is the one for this entry's key.
+    fn add_withdrawal_log(&mut self, withdrawal_log: LogEntry) {
+        if withdrawal_log.object_key() == self.key {
+            self.withdrawal_log = Some(withdrawal_log);
         }
     }
 }
@@ -97,11 +97,11 @@ struct State {
 impl State {
     /// Keep one entry for a wid. Two seqs mean the enclave signed the wid
     /// twice, so log an error and keep the highest seq. Two different keys
-    /// at one seq are an error.
-    fn put(&mut self, wid: WithdrawalID, entry: Entry) {
+    /// at one seq must not occur, so return an error and fail the index.
+    fn put(&mut self, wid: WithdrawalID, entry: Entry) -> anyhow::Result<()> {
         let Some(existing) = self.entries.get(&wid) else {
             self.entries.insert(wid, entry);
-            return;
+            return Ok(());
         };
         if entry.seq != existing.seq {
             // Note(sid): is the error! sufficient to alert us?
@@ -109,23 +109,21 @@ impl State {
                 %wid,
                 seq = existing.seq,
                 other_seq = entry.seq,
-                "Wid has withdrawal records at two seqs; the enclave signed it twice."
+                "Wid has withdrawal logs at two seqs; the enclave signed it twice."
             );
             if entry.seq > existing.seq {
                 self.entries.insert(wid, entry);
             }
-            return;
+            return Ok(());
         }
-        if entry.key != existing.key {
-            // TODO: A real error?
-            error!(
-                %wid,
-                seq = entry.seq,
-                old = existing.key,
-                new = entry.key,
-                "Wid has two withdrawal records at one seq."
-            );
-        }
+        anyhow::ensure!(
+            entry.key == existing.key,
+            "wid {wid} has two withdrawal logs at seq {}: {} and {}",
+            entry.seq,
+            existing.key,
+            entry.key
+        );
+        Ok(())
     }
 }
 
@@ -214,9 +212,9 @@ impl<L: LogStore> WidLogIndex<L> {
                     seq,
                     written_at,
                     key,
-                    record: None,
+                    withdrawal_log: None,
                 },
-            );
+            )?;
         }
         Ok(())
     }
@@ -247,25 +245,25 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 
     /// Return the indexed withdrawal for `wid`. The first hit fetches the
-    /// record from S3 and caches it.
+    /// withdrawal log from S3 and caches it.
     async fn hit(&self, wid: &WithdrawalID) -> Result<Option<Hit>, WidLogError> {
         let (seq, key) = {
             let state = self.lock();
             let Some(entry) = state.entries.get(wid) else {
                 return Ok(None);
             };
-            if let Some(record) = &entry.record {
+            if let Some(withdrawal_log) = &entry.withdrawal_log {
                 return Ok(Some(Hit {
                     consumed_seq: entry.seq,
-                    response: synthesize_response(record).map_err(WidLogError)?,
+                    response: synthesize_response(withdrawal_log).map_err(WidLogError)?,
                 }));
             }
             (entry.seq, entry.key.clone())
         };
-        let record = self.fetch(&key, wid).await?;
-        let response = synthesize_response(&record).map_err(WidLogError)?;
+        let withdrawal_log = self.fetch(&key, wid).await?;
+        let response = synthesize_response(&withdrawal_log).map_err(WidLogError)?;
         if let Some(entry) = self.lock().entries.get_mut(wid) {
-            entry.add_withdrawal_log(record);
+            entry.add_withdrawal_log(withdrawal_log);
         }
         Ok(Some(Hit {
             consumed_seq: seq,
@@ -273,11 +271,11 @@ impl<L: LogStore> WidLogIndex<L> {
         }))
     }
 
-    /// GET and parse one record. A record that does not parse is an error:
-    /// the enclave signed the wid, so a forward would sign it again.
+    /// GET and parse one withdrawal log. A log that does not parse is an
+    /// error: the enclave signed the wid, so a forward would sign it again.
     async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<LogEntry, WidLogError> {
         let bytes = self.log.get(key).await.map_err(WidLogError)?;
-        parse_withdrawal(&bytes, wid)
+        parse_withdrawal_log(&bytes, wid)
             .inspect_err(|_| self.metrics.record_parse_failures.inc())
             .with_context(|| format!("parse {key}"))
             .map_err(WidLogError)
@@ -304,29 +302,29 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 }
 
-fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<LogEntry> {
-    let record = serde_json::from_slice::<SignedLogEntry>(bytes)?.into_entry_unchecked();
-    let message = withdrawal_message(&record)?;
+fn parse_withdrawal_log(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<LogEntry> {
+    let withdrawal_log = serde_json::from_slice::<SignedLogEntry>(bytes)?.into_entry_unchecked();
+    let message = withdrawal_message(&withdrawal_log)?;
     anyhow::ensure!(
         message.request_data.wid == *wid,
-        "record is for wid {}, expected {}",
+        "withdrawal log is for wid {}, expected {}",
         message.request_data.wid,
         wid
     );
-    Ok(record)
+    Ok(withdrawal_log)
 }
 
-fn withdrawal_message(record: &LogEntry) -> anyhow::Result<&WithdrawalLogMessage> {
-    record
+fn withdrawal_message(withdrawal_log: &LogEntry) -> anyhow::Result<&WithdrawalLogMessage> {
+    withdrawal_log
         .message()
         .as_withdrawal()
-        .ok_or_else(|| anyhow::anyhow!("not a withdrawal record"))
+        .ok_or_else(|| anyhow::anyhow!("not a withdrawal log"))
 }
 
 fn synthesize_response(
-    record: &LogEntry,
+    withdrawal_log: &LogEntry,
 ) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
-    let message = withdrawal_message(record)?;
+    let message = withdrawal_message(withdrawal_log)?;
     Ok(proto::SignedStandardWithdrawalResponse {
         data: Some(proto::StandardWithdrawalResponseData {
             enclave_signatures: message
@@ -336,10 +334,10 @@ fn synthesize_response(
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(record.timestamp_ms()),
+        timestamp_ms: Some(withdrawal_log.timestamp_ms()),
         // The enclave signs the response envelope after the S3 write, so the
-        // record has no envelope signature. Nodes require 64 bytes but do not
-        // verify them (`into_data_unchecked`). Zeros are not a valid signature.
+        // withdrawal log has no envelope signature. Nodes require 64 bytes but
+        // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
         signature: Some(vec![0u8; 64].into()),
     })
 }
@@ -358,7 +356,7 @@ pub(crate) mod test_utils {
 
     /// A genuine withdrawal `SignedLogEntry`, serialized as the enclave writes
     /// it, with the key from `SignedLogEntry::object_key()`.
-    pub(crate) fn withdrawal_record_json(
+    pub(crate) fn withdrawal_log_json(
         wid: WithdrawalID,
         seq: u64,
         timestamp_ms: u64,
@@ -371,7 +369,7 @@ pub(crate) mod test_utils {
         request_data.seq = seq;
 
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
-        let record = SignedLogEntry::new_at_timestamp(
+        let withdrawal_log = SignedLogEntry::new_at_timestamp(
             "test-session".into(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),
@@ -387,14 +385,14 @@ pub(crate) mod test_utils {
             &signing_key,
             timestamp_ms,
         );
-        let key = record.object_key().to_string();
-        (key, serde_json::to_vec(&record).unwrap())
+        let key = withdrawal_log.object_key().to_string();
+        (key, serde_json::to_vec(&withdrawal_log).unwrap())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_utils::withdrawal_record_json;
+    use super::test_utils::withdrawal_log_json;
     use super::*;
     use crate::log_store::test_store::MemStore;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -420,8 +418,8 @@ mod tests {
         }
     }
 
-    fn record(store: &MemStore, wid: WithdrawalID, seq: u64, at: UnixSeconds) {
-        let (key, bytes) = withdrawal_record_json(wid, seq, ms(at), mock_response());
+    fn write_log(store: &MemStore, wid: WithdrawalID, seq: u64, at: UnixSeconds) {
+        let (key, bytes) = withdrawal_log_json(wid, seq, ms(at), mock_response());
         store.insert(key, bytes);
     }
 
@@ -443,9 +441,9 @@ mod tests {
     async fn tail_indexes_complete_hours_and_stops_at_the_current_one() {
         let store = MemStore::default();
         // Three hours back: the reconcile case that the old seq-bounded walk missed.
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
-        record(&store, wid(0xbb), 8, HOUR_0 + HOUR);
-        record(&store, wid(0xcc), 9, NOW);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xbb), 8, HOUR_0 + HOUR);
+        write_log(&store, wid(0xcc), 9, NOW);
         let index = ready_index(store).await;
 
         assert_eq!(cursor(&index), HOUR_0 + 3 * HOUR);
@@ -470,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn tail_waits_for_the_completion_delay() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 2 * HOUR + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 2 * HOUR + 60);
         let index = index(store);
         // Five minutes into hour 3: hour 2 can still receive writes.
         let now = HOUR_0 + 3 * HOUR + 5 * 60;
@@ -493,10 +491,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_in_the_next_hour_is_found() {
+    async fn log_in_the_next_hour_is_found() {
         // The clock of the writer is ahead of the proxy clock.
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 4 * HOUR + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 4 * HOUR + 60);
         let index = ready_index(store).await;
         let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
         assert_eq!(hit.consumed_seq, 7);
@@ -505,8 +503,8 @@ mod tests {
     #[tokio::test]
     async fn open_hour_keys_are_indexed_by_a_lookup() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, NOW);
-        record(&store, wid(0xbb), 8, NOW);
+        write_log(&store, wid(0xaa), 7, NOW);
+        write_log(&store, wid(0xbb), 8, NOW);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
@@ -520,10 +518,10 @@ mod tests {
     #[tokio::test]
     async fn duplicate_wid_keeps_the_highest_seq() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 5, HOUR_0 + 60);
-        record(&store, wid(0xaa), 9, HOUR_0 + HOUR);
-        record(&store, wid(0xbb), 2, NOW);
-        record(&store, wid(0xbb), 4, NOW + 60);
+        write_log(&store, wid(0xaa), 5, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 9, HOUR_0 + HOUR);
+        write_log(&store, wid(0xbb), 2, NOW);
+        write_log(&store, wid(0xbb), 4, NOW + 60);
         let index = ready_index(store).await;
 
         let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
@@ -533,9 +531,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_hit_uses_the_cached_record() {
+    async fn second_hit_uses_the_cached_withdrawal_log() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
         let first = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
 
@@ -545,9 +543,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_keys_at_one_seq_fail_the_index() {
+        let store = MemStore::default();
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + HOUR + 60);
+        let index = index(store);
+
+        let error = index.tick(NOW).await.unwrap_err().to_string();
+        assert!(error.contains("two withdrawal logs at seq 7"), "{error}");
+        assert_eq!(cursor(&index), HOUR_0 + HOUR);
+        assert!(index.lookup(&wid(0xbb), NOW).await.is_err());
+    }
+
+    #[tokio::test]
     async fn tail_relists_a_key_that_a_lookup_indexed() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, NOW);
+        write_log(&store, wid(0xaa), 7, NOW);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
@@ -562,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn entries_are_evicted_after_retention() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
@@ -575,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn noncanonical_key_is_skipped_and_counted() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         store.insert("withdraw/2023/11/14/22/junk.json", b"{}".to_vec());
         let index = ready_index(store).await;
 
@@ -586,7 +597,7 @@ mod tests {
     #[tokio::test]
     async fn tail_list_failure_leaves_the_cursor_in_place() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         store.fail_lists.store(true, Ordering::SeqCst);
         let index = index(store);
         let start = cursor(&index);
@@ -601,11 +612,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreadable_record_is_an_error_not_a_miss() {
+    async fn unreadable_withdrawal_log_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        let (key, _) = withdrawal_record_json(wid(0xaa), 7, ms(HOUR_0 + 60), mock_response());
+        let (key, _) = withdrawal_log_json(wid(0xaa), 7, ms(HOUR_0 + 60), mock_response());
         store.insert(key, b"not json".to_vec());
-        let (key, _) = withdrawal_record_json(wid(0xbb), 8, ms(NOW), mock_response());
+        let (key, _) = withdrawal_log_json(wid(0xbb), 8, ms(NOW), mock_response());
         store.insert(key, b"not json".to_vec());
         let index = ready_index(store).await;
 
@@ -617,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn get_failure_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
         index.log.fail_gets.store(true, Ordering::SeqCst);
 
@@ -637,7 +648,7 @@ mod tests {
         // The key parser must accept the exact key shape that the enclave
         // writes. A drift here makes the index skip each key.
         let w = wid(0xcd);
-        let (key, _) = withdrawal_record_json(w, 7, ms(HOUR_0), mock_response());
+        let (key, _) = withdrawal_log_json(w, 7, ms(HOUR_0), mock_response());
         assert!(key.ends_with(&format!("-wid{w}.json")));
         assert_eq!(WithdrawalLogMessage::parse_object_key(&key), Some((7, w)));
     }

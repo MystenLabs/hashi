@@ -16,8 +16,8 @@
 //! When the index cannot answer, the proxy fails closed with `UNAVAILABLE`.
 //! It cannot tell "never signed" from "signed but unreadable", and a blind
 //! forward of the second case signs the withdrawal again and debits the
-//! limiter twice. If the enclave wrote a record and then lost the S3 ack,
-//! the proxy still replays that record. The node then reconciles its limiter
+//! limiter twice. If the enclave wrote a withdrawal log and then lost the S3
+//! ack, the proxy still replays it. The node then reconciles its limiter
 //! mirror to the guardian seq (`hashi/src/guardian_limiter.rs`). The cost is
 //! one limiter under-count for one withdrawal.
 //!
@@ -207,7 +207,7 @@ where
 mod tests {
     use super::*;
     use crate::log_store::test_store::MemStore;
-    use crate::node::widlog::test_utils::withdrawal_record_json;
+    use crate::node::widlog::test_utils::withdrawal_log_json;
     use hashi_types::guardian::time::now_timestamp_ms;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
@@ -386,9 +386,9 @@ mod tests {
         }
     }
 
-    /// A record that the enclave wrote for `wid` in the current hour.
-    fn fresh_record(wid: [u8; 32], seq: u64) -> (String, Vec<u8>) {
-        withdrawal_record_json(
+    /// A withdrawal log that the enclave wrote for `wid` in the current hour.
+    fn fresh_withdrawal_log(wid: [u8; 32], seq: u64) -> (String, Vec<u8>) {
+        withdrawal_log_json(
             WithdrawalID::new(wid),
             seq,
             now_timestamp_ms(),
@@ -398,13 +398,13 @@ mod tests {
         )
     }
 
-    /// The enclave writes the record before it returns the response.
+    /// The enclave writes the withdrawal log before it returns the response.
     fn enclave_wrote(cache: &CachingGuardianGrpc<StubGuardian, MemStore>, wid: [u8; 32], seq: u64) {
-        let (key, bytes) = fresh_record(wid, seq);
+        let (key, bytes) = fresh_withdrawal_log(wid, seq);
         cache.widlog.log().insert(key, bytes);
     }
 
-    /// The response that a replay builds from the record of `fresh_record`.
+    /// The response that a replay builds from the log of `fresh_withdrawal_log`.
     fn assert_replayed(response: &proto::SignedStandardWithdrawalResponse) {
         assert!(response
             .data
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_wid_and_seq_replays_the_record_after_first_call() {
+    async fn same_wid_and_seq_replays_the_log_after_first_call() {
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
 
@@ -503,7 +503,7 @@ mod tests {
         let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
         let info_calls = stub.info_calls.clone();
         let store = MemStore::default();
-        let (key, bytes) = fresh_record([0xcd; 32], 7);
+        let (key, bytes) = fresh_withdrawal_log([0xcd; 32], 7);
         store.insert(key, bytes);
         let cache = cache_over(stub, store).await;
 
@@ -614,10 +614,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn log_record_is_replayed_without_forwarding() {
+    async fn withdrawal_log_is_replayed_without_forwarding() {
         let (stub, count) = StubGuardian::ok();
         let store = MemStore::default();
-        let (key, bytes) = fresh_record([0xcd; 32], 7);
+        let (key, bytes) = fresh_withdrawal_log([0xcd; 32], 7);
         store.insert(key, bytes);
         let cache = cache_over(stub, store).await;
 
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(replayed, again);
     }
 
-    /// A new proxy instance serves a wid whose record is older than the
+    /// A new proxy instance serves a wid whose withdrawal log is older than the
     /// instance. It does not touch the enclave. Run it against the local MinIO:
     ///
     /// ```text
@@ -655,16 +655,16 @@ mod tests {
         let bucket = std::env::var("GUARDIAN_LOG_BUCKET").expect("GUARDIAN_LOG_BUCKET");
         let region = std::env::var("GUARDIAN_LOG_REGION").expect("GUARDIAN_LOG_REGION");
 
-        // Unique wid for each run: records persist across runs in a real bucket.
+        // Unique wid for each run: logs persist across runs in a real bucket.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
         let mut wid = [0x5a_u8; 32];
         wid[..4].copy_from_slice(&nanos.to_be_bytes());
-        let (record_key, record_bytes) = fresh_record(wid, 7);
+        let (record_key, record_bytes) = fresh_withdrawal_log(wid, 7);
 
-        // Write the record as the enclave does (plain put; the proxy is
+        // Write the withdrawal log as the enclave does (plain put; the proxy is
         // read-only on the bucket).
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region.clone()))
@@ -681,7 +681,7 @@ mod tests {
             .body(record_bytes.into())
             .send()
             .await
-            .expect("write the success record");
+            .expect("write the withdrawal log");
 
         // A new proxy instance: empty index, real S3LogStore.
         let store = crate::log_store::S3LogStore::connect(bucket, region).await;
