@@ -119,7 +119,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         request: Request<proto::SignedCeremonyConfirmationRequest>,
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
         let signed = kp::parse::<CeremonyConfirmationRequest, _>(request.get_ref())?;
-        kp::admit(&self.roster, &signed).await?;
+        kp::admit_confirmation(&self.roster, &signed).await?;
         self.ceremony_client.clone().confirm_ceremony(request).await
     }
 
