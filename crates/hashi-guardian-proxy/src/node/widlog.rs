@@ -76,8 +76,8 @@ pub struct Hit {
 
 struct Entry {
     seq: u64,
-    /// The time when the withdrawal log was written. The tail evicts entries older than `RETENTION`.
-    written_at: UnixSeconds,
+    /// The start of the hour directory of the key. The tail evicts entries older than `RETENTION`.
+    hour_start: UnixSeconds,
     /// The S3 key of the withdrawal log. The first hit fetches it.
     key: String,
     /// The response built from the withdrawal log, after the first hit.
@@ -120,6 +120,14 @@ impl State {
             entry.key
         );
         Ok(())
+    }
+
+    /// Move the cursor to the next hour directory.
+    fn advance_cursor(&mut self) {
+        self.cursor = self
+            .cursor
+            .next_dir()
+            .expect("hour directory within the calendar range");
     }
 
     /// Build the response from the withdrawal log fetched for `wid`, cache
@@ -167,19 +175,19 @@ impl State {
 }
 
 pub struct WidLogIndex<L> {
-    log: L,
+    store: L,
     state: Mutex<State>,
     metrics: Arc<ProxyMetrics>,
 }
 
 impl<L: LogStore> WidLogIndex<L> {
     /// Make an index that starts `RETENTION` before `now`. `tick` fills it.
-    pub fn new(log: L, metrics: Arc<ProxyMetrics>, now: UnixSeconds) -> Self {
+    pub fn new(store: L, metrics: Arc<ProxyMetrics>, now: UnixSeconds) -> Self {
         let start = now.saturating_sub(RETENTION.as_secs());
         let cursor =
             S3HourDirectory::withdraw(start).expect("current time is within the calendar range");
         Self {
-            log,
+            store,
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 cursor,
@@ -206,7 +214,7 @@ impl<L: LogStore> WidLogIndex<L> {
         let result = self.index_complete_hours(now).await;
         let mut state = self.lock();
         let oldest = now.saturating_sub(RETENTION.as_secs());
-        state.entries.retain(|_, entry| entry.written_at >= oldest);
+        state.entries.retain(|_, entry| entry.hour_start >= oldest);
         self.metrics
             .widlog_index_size
             .set(state.entries.len() as i64);
@@ -224,9 +232,7 @@ impl<L: LogStore> WidLogIndex<L> {
                 return Ok(());
             }
             self.index_hour(&cursor).await?;
-            self.lock().cursor = cursor
-                .next_dir()
-                .expect("hour directory within the calendar range");
+            self.lock().advance_cursor();
         }
     }
 
@@ -235,18 +241,18 @@ impl<L: LogStore> WidLogIndex<L> {
     async fn index_hour(&self, dir: &S3HourDirectory) -> anyhow::Result<()> {
         let prefix = dir.to_string();
         let keys = self
-            .log
+            .store
             .list_keys(&prefix)
             .await
             .with_context(|| format!("list {dir}"))?;
-        let written_at = dir.to_unix_seconds();
+        let hour_start = dir.to_unix_seconds();
         let entries = keys
             .into_iter()
             .map(|key| {
                 let (seq, wid) = WithdrawalLogMessage::parse_object_key(&prefix, &key)?;
                 let entry = Entry {
                     seq,
-                    written_at,
+                    hour_start,
                     key,
                     response: None,
                 };
@@ -301,7 +307,7 @@ impl<L: LogStore> WidLogIndex<L> {
             }
             entry.key.clone()
         };
-        let withdrawal_log = self.fetch(&key).await?;
+        let withdrawal_log = self.fetch_withdrawal_log(&key).await?;
         let hit = self
             .lock()
             .attach_withdrawal_log(wid, withdrawal_log)
@@ -311,8 +317,8 @@ impl<L: LogStore> WidLogIndex<L> {
 
     /// GET and parse one withdrawal log. A log that does not parse is an
     /// error: the enclave signed the wid, so a forward would sign it again.
-    async fn fetch(&self, key: &str) -> Result<LogEntry, WidLogError> {
-        let bytes = self.log.get(key).await.map_err(WidLogError)?;
+    async fn fetch_withdrawal_log(&self, key: &str) -> Result<LogEntry, WidLogError> {
+        let bytes = self.store.get(key).await.map_err(WidLogError)?;
         serde_json::from_slice::<SignedLogEntry>(&bytes)
             .map(SignedLogEntry::into_entry_unchecked)
             .with_context(|| format!("parse {key}"))
@@ -326,15 +332,15 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 
     #[cfg(test)]
-    pub(crate) fn log(&self) -> &L {
-        &self.log
+    pub(crate) fn store(&self) -> &L {
+        &self.store
     }
 
     /// An index that has tailed `log` to the current hour.
     #[cfg(test)]
-    pub(crate) async fn ready_for_tests(log: L, metrics: Arc<ProxyMetrics>) -> Arc<Self> {
+    pub(crate) async fn ready_for_tests(store: L, metrics: Arc<ProxyMetrics>) -> Arc<Self> {
         let now = now_timestamp_secs();
-        let index = Arc::new(Self::new(log, metrics, now));
+        let index = Arc::new(Self::new(store, metrics, now));
         index.tick(now).await.expect("tail an in-memory store");
         index
     }
@@ -416,7 +422,7 @@ mod tests {
         }
     }
 
-    fn write_log(store: &MemStore, wid: WithdrawalID, seq: u64, at: UnixSeconds) {
+    fn write_withdrawal_log(store: &MemStore, wid: WithdrawalID, seq: u64, at: UnixSeconds) {
         let (key, bytes) = withdrawal_log_json(wid, seq, ms(at), mock_response());
         store.insert(key, bytes);
     }
@@ -439,26 +445,26 @@ mod tests {
     async fn tail_indexes_complete_hours_and_stops_at_the_current_one() {
         let store = MemStore::default();
         // Three hours back: the reconcile case that the old seq-bounded walk missed.
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
-        write_log(&store, wid(0xbb), 8, HOUR_0 + HOUR);
-        write_log(&store, wid(0xcc), 9, NOW);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xbb), 8, HOUR_0 + HOUR);
+        write_withdrawal_log(&store, wid(0xcc), 9, NOW);
         let index = ready_index(store).await;
 
         assert_eq!(cursor(&index), HOUR_0 + 3 * HOUR);
         assert_eq!(index.metrics.widlog_index_size.get(), 2);
         assert_eq!(index.metrics.widlog_cursor_lag_seconds.get(), 20 * 60);
 
-        let lists_before = index.log.list_calls.load(Ordering::SeqCst);
+        let lists_before = index.store.list_calls.load(Ordering::SeqCst);
         let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
         assert_eq!(hit.consumed_seq, 7);
         assert_eq!(hit.response.timestamp_ms, Some(ms(HOUR_0 + 60)));
-        assert_eq!(index.log.list_calls.load(Ordering::SeqCst), lists_before);
+        assert_eq!(index.store.list_calls.load(Ordering::SeqCst), lists_before);
 
         // The current hour is not indexed, so the lookup lists hour 3 and hour 4.
         let hit = index.lookup(&wid(0xcc), NOW).await.unwrap().unwrap();
         assert_eq!(hit.consumed_seq, 9);
         assert_eq!(
-            index.log.list_calls.load(Ordering::SeqCst),
+            index.store.list_calls.load(Ordering::SeqCst),
             lists_before + 2
         );
     }
@@ -466,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn tail_waits_for_the_completion_delay() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 2 * HOUR + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 2 * HOUR + 60);
         let index = index(store);
         // Five minutes into hour 3: hour 2 can still receive writes.
         let now = HOUR_0 + 3 * HOUR + 5 * 60;
@@ -474,9 +480,9 @@ mod tests {
 
         assert_eq!(cursor(&index), HOUR_0 + 2 * HOUR);
         // Hours 2, 3, and 4 are listed.
-        let lists = index.log.list_calls.load(Ordering::SeqCst);
+        let lists = index.store.list_calls.load(Ordering::SeqCst);
         assert!(index.lookup(&wid(0xaa), now).await.unwrap().is_some());
-        assert_eq!(index.log.list_calls.load(Ordering::SeqCst), lists + 3);
+        assert_eq!(index.store.list_calls.load(Ordering::SeqCst), lists + 3);
 
         index.tick(NOW).await.unwrap();
         assert_eq!(cursor(&index), HOUR_0 + 3 * HOUR);
@@ -492,7 +498,7 @@ mod tests {
     async fn log_in_the_next_hour_is_found() {
         // The clock of the writer is ahead of the proxy clock.
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 4 * HOUR + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 4 * HOUR + 60);
         let index = ready_index(store).await;
         let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
         assert_eq!(hit.consumed_seq, 7);
@@ -501,25 +507,25 @@ mod tests {
     #[tokio::test]
     async fn open_hour_keys_are_indexed_by_a_lookup() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, NOW);
-        write_log(&store, wid(0xbb), 8, NOW);
+        write_withdrawal_log(&store, wid(0xaa), 7, NOW);
+        write_withdrawal_log(&store, wid(0xbb), 8, NOW);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
         // Both wids are now in the index, so no more LISTs.
-        let lists = index.log.list_calls.load(Ordering::SeqCst);
+        let lists = index.store.list_calls.load(Ordering::SeqCst);
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
         assert!(index.lookup(&wid(0xbb), NOW).await.unwrap().is_some());
-        assert_eq!(index.log.list_calls.load(Ordering::SeqCst), lists);
+        assert_eq!(index.store.list_calls.load(Ordering::SeqCst), lists);
     }
 
     #[tokio::test]
     async fn duplicate_wid_keeps_the_highest_seq() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 5, HOUR_0 + 60);
-        write_log(&store, wid(0xaa), 9, HOUR_0 + HOUR);
-        write_log(&store, wid(0xbb), 2, NOW);
-        write_log(&store, wid(0xbb), 4, NOW + 60);
+        write_withdrawal_log(&store, wid(0xaa), 5, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 9, HOUR_0 + HOUR);
+        write_withdrawal_log(&store, wid(0xbb), 2, NOW);
+        write_withdrawal_log(&store, wid(0xbb), 4, NOW + 60);
         let index = ready_index(store).await;
 
         let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
@@ -531,11 +537,11 @@ mod tests {
     #[tokio::test]
     async fn second_hit_uses_the_cached_response() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
         let first = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
 
-        index.log.fail_gets.store(true, Ordering::SeqCst);
+        index.store.fail_gets.store(true, Ordering::SeqCst);
         let second = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
         assert_eq!(second.response, first.response);
     }
@@ -543,8 +549,8 @@ mod tests {
     #[tokio::test]
     async fn two_keys_at_one_seq_fail_the_index() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
-        write_log(&store, wid(0xaa), 7, HOUR_0 + HOUR + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + HOUR + 60);
         let index = index(store);
 
         let error = index.tick(NOW).await.unwrap_err().to_string();
@@ -567,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn tail_relists_a_key_that_a_lookup_indexed() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, NOW);
+        write_withdrawal_log(&store, wid(0xaa), 7, NOW);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
@@ -582,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn entries_are_evicted_after_retention() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
@@ -595,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn noncanonical_key_fails_the_index() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         store.insert("withdraw/2023/11/14/22/junk.json", b"{}".to_vec());
         let index = index(store);
 
@@ -610,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn tail_list_failure_leaves_the_cursor_in_place() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         store.fail_lists.store(true, Ordering::SeqCst);
         let index = index(store);
         let start = cursor(&index);
@@ -618,7 +624,7 @@ mod tests {
         assert!(index.tick(NOW).await.is_err());
         assert_eq!(cursor(&index), start);
 
-        index.log.fail_lists.store(false, Ordering::SeqCst);
+        index.store.fail_lists.store(false, Ordering::SeqCst);
         index.tick(NOW).await.unwrap();
         assert_eq!(cursor(&index), HOUR_0 + 3 * HOUR);
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
@@ -640,9 +646,9 @@ mod tests {
     #[tokio::test]
     async fn get_failure_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
+        write_withdrawal_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
-        index.log.fail_gets.store(true, Ordering::SeqCst);
+        index.store.fail_gets.store(true, Ordering::SeqCst);
 
         assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
     }
@@ -650,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn lookup_list_failure_is_an_error_not_a_miss() {
         let index = ready_index(MemStore::default()).await;
-        index.log.fail_lists.store(true, Ordering::SeqCst);
+        index.store.fail_lists.store(true, Ordering::SeqCst);
 
         assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
     }

@@ -382,7 +382,7 @@ mod tests {
                 enclave_signatures: vec![],
             },
         );
-        proxy.widlog().log().insert(key, bytes);
+        proxy.widlog().store().insert(key, bytes);
         let r2 = proxy
             .standard_withdrawal(mock_request([0x11; 32], 1))
             .await

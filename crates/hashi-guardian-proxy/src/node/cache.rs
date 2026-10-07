@@ -406,7 +406,7 @@ mod tests {
     /// The enclave writes the withdrawal log before it returns the response.
     fn enclave_wrote(cache: &CachingGuardianGrpc<StubGuardian, MemStore>, wid: [u8; 32], seq: u64) {
         let (key, bytes) = fresh_withdrawal_log(wid, seq);
-        cache.widlog.log().insert(key, bytes);
+        cache.widlog.store().insert(key, bytes);
     }
 
     /// The response that a replay builds from the log of `fresh_withdrawal_log`.
@@ -603,7 +603,11 @@ mod tests {
     async fn log_store_failure_fails_closed_without_forwarding() {
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
-        cache.widlog.log().fail_lists.store(true, Ordering::SeqCst);
+        cache
+            .widlog
+            .store()
+            .fail_lists
+            .store(true, Ordering::SeqCst);
 
         let status = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
