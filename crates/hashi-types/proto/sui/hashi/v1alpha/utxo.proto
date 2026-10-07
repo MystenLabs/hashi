@@ -17,9 +17,6 @@ message Utxo {
 message TxUtxos {
   repeated InputUTXO inputs = 1;
   repeated OutputUTXO outputs = 2;
-
-  // How the transaction is built from its UTXOs.
-  optional uint32 construction_version = 3;
 }
 
 // (Hashi+Guardian)-owned input UTXO.
@@ -33,12 +30,6 @@ message InputUTXO {
   // Derivation path (Sui address format, 32 bytes). The spending address and
   // tap leaf hash are derived from it inside the enclave.
   optional bytes derivation_path = 3;
-
-  // Spend template the UTXO was created under.
-  optional uint32 template_id = 4;
-
-  // BIP-341 sighash type byte the input is signed with.
-  optional uint32 sighash_type = 5;
 }
 
 // Output UTXO (either external or internal).
@@ -65,7 +56,4 @@ message InternalOutputUTXO {
 
   // Amount in satoshis.
   optional uint64 amount = 2;
-
-  // Spend template the output is created under.
-  optional uint32 template_id = 3;
 }

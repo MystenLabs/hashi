@@ -51,7 +51,6 @@ use super::crypto::attestation::NITRO_PCR0_LEN;
 use crate::bitcoin::BTC_LIB;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinKeypair;
-use crate::bitcoin::ConstructionVersion;
 use crate::bitcoin::HashiMasterG;
 use crate::bitcoin::InputUTXO;
 use crate::bitcoin::OutputUTXOWire;
@@ -431,13 +430,8 @@ impl StandardWithdrawalRequest {
         let output_external = OutputUTXOWire::external(addr_unchecked, Amount::from_sat(9_000));
         let output_internal = OutputUTXOWire::internal([42u8; 32].into(), Amount::from_sat(500));
 
-        let utxos = TxUTXOs::new(
-            ConstructionVersion::V1,
-            vec![input],
-            vec![output_external, output_internal],
-            network,
-        )
-        .expect("valid TxUTXOs");
+        let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal], network)
+            .expect("valid TxUTXOs");
 
         StandardWithdrawalRequest::new(wid, utxos, 1_000_000, 0)
     }

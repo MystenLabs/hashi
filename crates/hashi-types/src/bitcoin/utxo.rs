@@ -8,8 +8,8 @@
 //! - `*Wire` types with unchecked addresses that implement both Serialize and Deserialize
 //!
 //! Untrusted input arrives as the `*Wire` form; `TxUTXOs::new` is the single gate
-//! that validates it (address-network, amounts, duplicates, fees, supported
-//! construction values) and converts it into the checked domain types.
+//! that validates it (address-network, amounts, duplicates, fees) and converts it
+//! into the checked domain types.
 //!
 //! Internal-output addresses are derived via `super::taproot`.
 
@@ -51,41 +51,12 @@ use std::collections::HashSet;
 //    Core Data Structures
 // ---------------------------------
 
-// Integers, not enums, so log readers parse values their build lacks; `TxUTXOs::new`
-// rejects those.
-
-/// How the withdrawal transaction is built from its UTXOs.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConstructionVersion(pub u16);
-
-/// The spend template a UTXO is created under.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TemplateId(pub u16);
-
-/// The BIP-341 sighash type byte of an input.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SighashType(pub u8);
-
-impl ConstructionVersion {
-    pub const V1: Self = Self(1);
-}
-
-impl TemplateId {
-    pub const V1: Self = Self(1);
-}
-
-impl SighashType {
-    pub const DEFAULT: Self = Self(0x00);
-}
-
 /// Bridge-owned input UTXO.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
     pub outpoint: OutPoint,
     pub amount: Amount,
     pub derivation_path: DerivationPath,
-    pub template_id: TemplateId,
-    pub sighash_type: SighashType,
 }
 
 /// Output UTXO belonging to a user. Internal to `TxUTXOs`: the checked address
@@ -113,7 +84,6 @@ pub struct InternalOutputUTXO {
     pub derivation_path: DerivationPath,
     /// Amount in satoshis
     pub amount: Amount,
-    pub template_id: TemplateId,
 }
 
 /// Withdrawal destination and amount. Internal to `TxUTXOs`; callers build the
@@ -136,7 +106,6 @@ pub enum OutputUTXOWire {
 /// All the UTXOs associated with a withdrawal transaction
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct TxUTXOs {
-    construction_version: ConstructionVersion,
     /// Inputs: internal
     inputs: Vec<InputUTXO>,
     /// Outputs: either external or internal
@@ -146,7 +115,6 @@ pub struct TxUTXOs {
 /// Copy of TxUTXOs with unchecked output addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxUTXOsWire {
-    pub construction_version: ConstructionVersion,
     /// Inputs: internal
     pub inputs: Vec<InputUTXO>,
     /// Outputs: either external or internal
@@ -166,14 +134,14 @@ impl InputUTXO {
             outpoint,
             amount,
             derivation_path,
-            template_id: TemplateId::V1,
-            sighash_type: SighashType::DEFAULT,
         }
     }
 
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
     ///
     /// The witness will be populated later after signing.
+    ///
+    /// The sequence is part of the withdrawal construction; see `construct_tx`.
     pub fn txin(&self) -> TxIn {
         TxIn {
             previous_output: self.outpoint,
@@ -226,7 +194,6 @@ impl InternalOutputUTXO {
         Self {
             derivation_path,
             amount,
-            template_id: TemplateId::V1,
         }
     }
 }
@@ -266,7 +233,6 @@ impl OutputUTXO {
             OutputUTXO::Internal(InternalOutputUTXO {
                 derivation_path,
                 amount,
-                ..
             }) => {
                 let scripts = taproot_script_pubkey_and_leaf_hash(
                     enclave_pubkey,
@@ -298,11 +264,9 @@ impl TxUTXOs {
     /// Constructs a `TxUTXOs`, validating every invariant in one place: external
     /// output addresses must be valid for `network`, amounts must be non-zero,
     /// input and output totals must not overflow,
-    /// inputs must be unique, fees must be positive, and construction values must
-    /// be supported. The single gate for both locally-built and wire-parsed UTXO
-    /// sets.
+    /// inputs must be unique, and fees must be positive. The single gate for both
+    /// locally-built and wire-parsed UTXO sets.
     pub fn new(
-        construction_version: ConstructionVersion,
         inputs: Vec<InputUTXO>,
         outputs: Vec<OutputUTXOWire>,
         network: Network,
@@ -312,35 +276,6 @@ impl TxUTXOs {
         }
         if outputs.is_empty() {
             anyhow::bail!("output utxos must not be empty");
-        }
-
-        anyhow::ensure!(
-            construction_version == ConstructionVersion::V1,
-            "unsupported construction version {}",
-            construction_version.0
-        );
-        for input in &inputs {
-            anyhow::ensure!(
-                input.template_id == TemplateId::V1,
-                "unsupported template id {} for input {}",
-                input.template_id.0,
-                input.outpoint
-            );
-            anyhow::ensure!(
-                input.sighash_type == SighashType::DEFAULT,
-                "unsupported sighash type {:#04x} for input {}",
-                input.sighash_type.0,
-                input.outpoint
-            );
-        }
-        for output in &outputs {
-            if let OutputUTXOWire::Internal(internal) = output {
-                anyhow::ensure!(
-                    internal.template_id == TemplateId::V1,
-                    "unsupported template id {} for a change output",
-                    internal.template_id.0
-                );
-            }
         }
 
         // Validate each external address against the network, turning untrusted
@@ -378,11 +313,7 @@ impl TxUTXOs {
             }
         }
 
-        let tx_info = Self {
-            construction_version,
-            inputs,
-            outputs,
-        };
+        let tx_info = Self { inputs, outputs };
 
         // Enforce the intended invariant: fees > 0.
         tx_info.assert_positive_fees()?;
@@ -505,6 +436,9 @@ pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSign
 /// Constructs a Bitcoin transaction with the given inputs and outputs.
 ///
 /// Uses BTC tx version 2 and disables lock time.
+///
+/// Nodes and the guardian rebuild withdrawals with this, so changing it needs a construction
+/// version first, carried in the guardian withdrawal request.
 pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     Transaction {
         // The latest BTC tx version
@@ -541,7 +475,6 @@ impl From<OutputUTXO> for OutputUTXOWire {
 impl From<TxUTXOs> for TxUTXOsWire {
     fn from(utxos: TxUTXOs) -> Self {
         Self {
-            construction_version: utxos.construction_version,
             inputs: utxos.inputs,
             outputs: utxos.outputs.into_iter().map(Into::into).collect(),
         }
@@ -554,7 +487,6 @@ mod tests {
 
     fn utxos(inputs: &[u64], outputs: &[u64]) -> anyhow::Result<TxUTXOs> {
         TxUTXOs::new(
-            ConstructionVersion::V1,
             inputs
                 .iter()
                 .enumerate()
@@ -586,38 +518,5 @@ mod tests {
         let max = u64::MAX;
         let tx = utxos(&[max - 1, 1], &[max - 1]).unwrap();
         assert_eq!(tx.gross_outflow_amount(), Amount::from_sat(1));
-    }
-
-    #[test]
-    fn rejects_construction_values_this_build_does_not_implement() {
-        let input = InputUTXO::new(OutPoint::null(), Amount::from_sat(10), DerivationPath::ZERO);
-        let change = InternalOutputUTXO::new(DerivationPath::ZERO, Amount::from_sat(5));
-        let build = |version, input: &InputUTXO, change: &InternalOutputUTXO| {
-            TxUTXOs::new(
-                version,
-                vec![input.clone()],
-                vec![OutputUTXOWire::Internal(change.clone())],
-                Network::Regtest,
-            )
-        };
-
-        assert!(build(ConstructionVersion::V1, &input, &change).is_ok());
-        assert!(build(ConstructionVersion(0), &input, &change).is_err());
-        assert!(build(ConstructionVersion(2), &input, &change).is_err());
-        let unknown_input_template = InputUTXO {
-            template_id: TemplateId(2),
-            ..input.clone()
-        };
-        assert!(build(ConstructionVersion::V1, &unknown_input_template, &change).is_err());
-        let sighash_all = InputUTXO {
-            sighash_type: SighashType(0x01),
-            ..input.clone()
-        };
-        assert!(build(ConstructionVersion::V1, &sighash_all, &change).is_err());
-        let unknown_change_template = InternalOutputUTXO {
-            template_id: TemplateId(0),
-            ..change.clone()
-        };
-        assert!(build(ConstructionVersion::V1, &input, &unknown_change_template).is_err());
     }
 }

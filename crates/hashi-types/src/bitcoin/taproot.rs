@@ -153,6 +153,9 @@ pub fn taproot_script_spend_sighashes(
 ///
 /// Both leaves are committed under a NUMS internal key, disabling meaningful
 /// key path spends.
+///
+/// Nodes and the guardian derive input and change scripts with this, so changing it needs a
+/// per-UTXO template first, carried in the guardian withdrawal request.
 fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -206,7 +209,6 @@ mod bitcoin_tests {
     use super::*;
     use crate::bitcoin::BTC_LIB;
     use crate::bitcoin::BitcoinKeypair;
-    use crate::bitcoin::ConstructionVersion;
     use crate::bitcoin::HashiMasterG;
     use crate::bitcoin::InputUTXO;
     use crate::bitcoin::OutputUTXOWire;
@@ -371,7 +373,6 @@ mod bitcoin_tests {
 
         // C) Enclave signs the transaction.
         let tx_info = TxUTXOs::new(
-            ConstructionVersion::V1,
             vec![input_utxo.clone()],
             vec![
                 // 100 sats sent externally; the rest (minus fee) returns as change.

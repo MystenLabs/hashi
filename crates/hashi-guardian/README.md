@@ -11,11 +11,9 @@ the session key it attests. Readers verify the attestation before trusting that
 key to verify log signatures.
 
 Guardians emit and read a single log schema, with `schema_version: 1` reset
-for the testnet wipe and again at mainnet's fresh start, when withdrawal requests
-gained new fields. Pre-wipe records, and withdrawal records from before mainnet,
-are no longer supported, so testnet runs older builds until it is republished.
-KP-share records carry one recipient fingerprint and one ciphertext per share.
-The `VersionedLogMessage` wrapper retains explicit version dispatch for future
+for the testnet wipe. Pre-wipe records are no longer supported. KP-share records
+carry one recipient fingerprint and one ciphertext per share. The
+`VersionedLogMessage` wrapper retains explicit version dispatch for future
 schema changes.
 
 ## Initialization and build identity

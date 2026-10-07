@@ -9,14 +9,11 @@
       "request_data": {
         "wid": "0xabababababababababababababababababababababababababababababababab",
         "utxos": {
-          "construction_version": 1,
           "inputs": [
             {
               "outpoint": "0909090909090909090909090909090909090909090909090909090909090909:0",
               "amount": 10000,
-              "derivation_path": "0x0707070707070707070707070707070707070707070707070707070707070707",
-              "template_id": 1,
-              "sighash_type": 0
+              "derivation_path": "0x0707070707070707070707070707070707070707070707070707070707070707"
             }
           ],
           "outputs": [
@@ -29,8 +26,7 @@
             {
               "Internal": {
                 "derivation_path": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
-                "amount": 500,
-                "template_id": 1
+                "amount": 500
               }
             }
           ]
@@ -40,7 +36,7 @@
       },
       "request_sign": {
         "epoch": 0,
-        "signature": "ojcRqnbm4Hc30uMwOjOB71NLPyf/j/qpBGUYamu7XRerpKjaPqrw6gl8tGB2RkZqGZeZR20Vt2LnyGFyY4+n63friW9Vz46Ew7Z9ys2yCvDuMk4u5YbNeGLhFaAq9Blg",
+        "signature": "j9INLrDB64BD+8u271tbwmszSdAOuzyCMfTs1UtlF7NSxC7HNDoFeE+QkdOWkiwICX134wuVDCDl5oYsw6tazzSYj2sq8Rv5eplA7NQ8HJH/JqAap8zhxNLVcHkKM1uy",
         "signers_bitmap": {
           "bitmap": [
             128
@@ -62,5 +58,5 @@
       }
     }
   },
-  "signature": "6e5dcb4b6447b4fd4152d897d5d8e2c8c31d2ee34c6fc73e2af7783c49d4da2775a6e4d6d5fbee58e48917e5729b6167f90989a70a59376a9017cef8af2bc70a"
+  "signature": "2b2634bda7789488db2ac7b2c235e10e63c01c956f0aea9900f95f68c7b556c38dd874a70ca897bdd0bf9746c4b608912f3f05faf2b01255a75b4950bd8b960a"
 }
