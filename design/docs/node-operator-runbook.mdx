@@ -1198,7 +1198,10 @@ The optional `[backup-s3]` table in the [config template](#31-validator-config)
 enables uploads using the AWS default credential chain. Without it, backups
 remain local-only. Each scheduled backup saves locally before one upload
 attempt; failed uploads retain the local archive and are not queued or retried.
-See [Cloud backup](node-backup.mdx#cloud-backup) for S3 keys and access setup.
+See [Cloud backup](node-backup.mdx#cloud-backup) for the server-side
+missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
+read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
+read access is unchanged; per-node AWS credentials remain to be provisioned.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
@@ -1219,8 +1222,21 @@ hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
   --output-dir /var/lib/hashi/restore
 ```
 
-For replacement-host installation and plaintext handling, follow
-[Machine-loss recovery](node-backup.mdx#machine-loss-recovery).
+For **accidental machine or disk loss without suspected compromise**, follow
+[Machine-loss recovery](node-backup.mdx#machine-loss-recovery) for installation
+and plaintext handling.
+
+For **suspected compromise**, assume host-held operator, TLS, and MPC private
+keys are exposed; even a pre-compromise backup can contain those same keys.
+For a single affected node with sufficient healthy peers, fence it, use the
+trusted validator account authority to revoke/replace its operator and TLS
+identities ([2.2](#22-tls-key-dedicated)–[2.4](#24-operator-key-day-to-day-signing)),
+then start a fresh machine with an empty DB to generate/register fresh MPC node
+keys and rejoin through [reconfiguration](#9-epoch-changes-reconfiguration).
+Do not restore possibly exposed keys. See
+[Suspected node compromise](node-backup.mdx#suspected-node-compromise).
+Quorum-wide or global MPC key compromise needs coordinated incident response:
+resharing preserves the global key and cannot repair a stolen global private key.
 
 ---
 

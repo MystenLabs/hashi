@@ -296,13 +296,21 @@ region = "us-east-1"
 ```
 
 Uploads and restores use the AWS default credential chain (environment, profiles,
-or IAM roles), not credentials in the node config. Operators must configure:
+or IAM roles), not credentials in the node config. The secure Mainnet baseline
+requires operators to configure:
 
-- S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+- A private bucket with S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
   with **bucket-default retention**; Hashi does not set retention per object.
+- A bucket policy explicitly denying object-creation `s3:PutObject` requests
+  without `If-None-Match: *` (`s3:if-none-match`), rather than relying on the
+  client's header alone.
 - A node role restricted to `s3:PutObject` within its prefix, without object
   read/delete, bucket/retention administration, or governance-retention bypass.
-  Keep separate recovery credentials off-node.
+  Restrict reads to approved recovery roles and keep their credentials off-node.
+- CloudTrail **read and write object data events** scoped to the backup bucket,
+  retained in an independent audit store outside backup writers' permissions.
+  Use per-node credentials for attribution: events identify the credential
+  principal, not a trusted archive creator.
 - A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
   for current **and noncurrent** versions, coordinated with Object Lock.
   Expiring only current objects can leave historical versions behind. This is
@@ -310,8 +318,10 @@ or IAM roles), not credentials in the node config. Operators must configure:
   recovery window: Object Lock sets a minimum protected period, expiration is
   asynchronous, and recovery depends on epoch-limited certificate history.
 
-Hashi does not verify these bucket settings. Its conditional writes prevent
-accidental overwrites, not misuse of compromised credentials.
+Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
+configuration defines the bucket and audit safeguards, but leaves read access
+unchanged. Recovery-only reads remain Mainnet rollout work; node credential
+provisioning is separate.
 
 The destination is derived from the node identity, with no custom prefix:
 
@@ -359,14 +369,17 @@ Downloads use private temporary storage under `--output-dir` and are removed
 afterward. Restore publishes a complete extraction, refuses an existing
 destination, and does not install files at their original paths.
 
+Keep backup URI/version receipts, the region, and decryption-key access outside
+the node. Use independently retained receipts and audit history to select an
+exact version, then pin it with `--version-id`. Neither the newest object nor
+successful decryption proves its origin: encryption does not authenticate the
+creator. Unexpected versions or delete markers warrant investigation, but
+lifecycle rules and authorized administrators can also create them.
+
 ### Machine-loss recovery
 
-Keep backup URI/version receipts, the region, and decryption-key access outside
-the node. After compromise, use independently retained receipts and incident/audit
-history to select a known-good pre-compromise version, then pin it with
-`--version-id`. Neither the newest object nor successful decryption proves its
-origin. Unexpected versions or delete markers warrant investigation, but
-lifecycle rules and authorized administrators can also create them.
+Use this path for accidental machine or disk loss without suspected compromise.
+For suspected compromise, use the separate procedure below, not a snapshot restore.
 
 1. Stop or fence the old node. Restore on a trusted replacement host into a
    private directory (`umask 077`); no original config or database is needed.
@@ -379,3 +392,27 @@ lifecycle rules and authorized administrators can also create them.
 4. Remove plaintext recovery output and temporary key copies when finished.
    Keep decryption-key access independent of the replacement host.
 
+### Suspected node compromise
+
+Assume host-held operator, TLS, and MPC private keys are exposed. Even a known
+pre-compromise snapshot can contain those same keys; its age does not make them
+safe to restore.
+
+For a **single compromised node with sufficient healthy peers**:
+
+1. Fence the old host. From trusted infrastructure, use the validator account
+   authority to revoke the old operator delegation and register fresh operator
+   and TLS identities in onchain metadata. Follow the runbook's
+   [key generation and registration](node-operator-runbook.mdx#22-tls-key-dedicated)
+   and [operator revocation](node-operator-runbook.mdx#24-operator-key-day-to-day-signing)
+   procedures with the replacement config; do not authorize recovery with the
+   compromised operator key.
+2. Provision a fresh machine with an **empty database**, not restored key material.
+   Startup generates fresh node encryption/signing keys and registers them;
+   see [server startup](node-operator-runbook.mdx#54-step-3-start-the-server).
+3. Rejoin through [reconfiguration](node-operator-runbook.mdx#9-epoch-changes-reconfiguration)
+   with the healthy peers, and confirm the replacement identities and participation.
+
+Suspected quorum-wide or global MPC key compromise requires coordinated incident
+response, not this single-node procedure. Resharing preserves the global Bitcoin
+key; it does not repair a stolen global private key.
