@@ -903,6 +903,7 @@ hashi backup restore s3://<bucket>/<key>.tar.asc --region <aws-region> [--versio
 With `[backup-s3]`, `backup save` uploads after saving locally; `--local-only`
 skips S3. Upload failure retains the local archive but exits nonzero, reporting
 its path and the intended S3 URI.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
 
 S3 restore requires `--region`; `--version-id` optionally selects an exact
 version. Neither flag applies to local paths. Use the secret-key flag above or

@@ -44,7 +44,19 @@ pub async fn save(
         )
     })?;
 
+    let has_recipient_override = backup_pgp_cert_override.is_some();
     let recipient = resolve_backup_recipient(&node_config, backup_pgp_cert_override)?;
+    if has_recipient_override
+        && node_config.backup_s3.is_some()
+        && !local_only
+        && !recipient.has_same_encryption_recipients(&node_config.backup_pgp_cert)
+    {
+        anyhow::bail!(
+            "--backup-pgp-cert has different usable encryption recipients from the configured \
+             backup-pgp-cert. Use --local-only for this backup or update the configured \
+             backup-pgp-cert before uploading to S3."
+        );
+    }
 
     let db_path = node_config.db.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -944,6 +956,36 @@ mod tests {
             .await
             .unwrap();
         assert!(tarball.is_file());
+    }
+
+    #[tokio::test]
+    async fn save_rejects_different_s3_recipient_before_creating_archive() {
+        let fixture = TestFixture::new();
+        let (public_cert, _) = mock_pgp_keypair();
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path().join("output");
+        let mut node_config = Config::load(&fixture.node_config_path).unwrap();
+        node_config.backup_dir = dir.path().join("configured-archives");
+        node_config.backup_s3 = Some(crate::config::BackupS3Config {
+            bucket: "hashi-recipient-mismatch-no-network".into(),
+            region: "us-west-2".into(),
+        });
+        node_config.save(&fixture.node_config_path).unwrap();
+
+        assert!(
+            save(
+                &fixture.node_config_path,
+                Some(public_cert),
+                &output_dir,
+                false,
+            )
+            .await
+            .is_err()
+        );
+
+        assert!(!output_dir.exists());
+        assert!(!node_config.backup_dir.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

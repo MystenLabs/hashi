@@ -333,6 +333,7 @@ hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
 
 This saves locally, then uploads if configured. Add `--local-only` to skip S3.
 Upload failure returns a nonzero exit status while preserving the local archive.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
 
 ### Restore and infrastructure limits
 
