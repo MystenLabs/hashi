@@ -14,12 +14,12 @@
 //! which is `DIR_WRITES_COMPLETION_DELAY` after the hour ends. Then it lists
 //! the keys in that directory and stores the wid and seq of each key. At
 //! startup, the proxy fills the index for the last `RETENTION` before it
-//! serves requests. A response that this proxy forwards is also stored, so
-//! a fast retry does not need S3.
+//! serves requests. The index does not store responses. A retry after a
+//! forward finds the new key in the current hour directory.
 //!
 //! How a lookup works:
-//! 1. Look in the index. On a hit, return the stored response, or fetch the
-//!    record from S3 and build the response from it.
+//! 1. Look in the index. On a hit, fetch the record from S3 and build the
+//!    response from it.
 //! 2. If not found, list the hour directories that the tail has not indexed
 //!    yet. These are the current hour, the hour after it, and sometimes the
 //!    hour before it. Add their keys to the index and look again.
@@ -55,7 +55,7 @@ use tracing::error;
 use tracing::warn;
 
 const TAIL_INTERVAL: Duration = Duration::from_secs(30);
-const RETENTION: Duration = Duration::from_hours(7 * 24);
+const RETENTION: Duration = Duration::from_hours(30 * 24);
 
 /// A LIST or GET failed. The lookup is indeterminate.
 #[derive(Debug)]
@@ -72,15 +72,8 @@ struct Entry {
     seq: u64,
     /// The time when the record was written. The tail evicts entries older than `RETENTION`.
     written_at: UnixSeconds,
-    body: Body,
-}
-
-#[derive(Clone)]
-enum Body {
-    /// Listed from S3. The lookup fetches the record on a hit.
-    Key(String),
-    /// Returned by the enclave through this proxy, or read from the log.
-    Response(proto::SignedStandardWithdrawalResponse),
+    /// The S3 key of the record. The lookup fetches it on a hit.
+    key: String,
 }
 
 struct State {
@@ -91,15 +84,15 @@ struct State {
 
 impl State {
     /// Keep one entry for a wid. Two seqs mean the enclave signed the wid
-    /// twice, so log an error and keep the highest seq. At one seq, a
-    /// response replaces a key. Two different keys or responses are an error.
-    // Note(sid): does this need a metric to catch in alerts?
+    /// twice, so log an error and keep the highest seq. Two different keys
+    /// at one seq are an error.
     fn put(&mut self, wid: WithdrawalID, entry: Entry) {
         let Some(existing) = self.entries.get(&wid) else {
             self.entries.insert(wid, entry);
             return;
         };
         if entry.seq != existing.seq {
+            // Note(sid): is the error! sufficient to alert us?
             error!(
                 %wid,
                 seq = existing.seq,
@@ -111,17 +104,14 @@ impl State {
             }
             return;
         }
-        match (&existing.body, &entry.body) {
-            (Body::Key(_), Body::Response(_)) => {
-                self.entries.insert(wid, entry);
-            }
-            (Body::Key(old), Body::Key(new)) if old != new => {
-                error!(%wid, seq = entry.seq, old, new, "Wid has two withdrawal records at one seq.");
-            }
-            (Body::Response(old), Body::Response(new)) if old != new => {
-                error!(%wid, seq = entry.seq, "Wid has two withdrawal responses at one seq.");
-            }
-            _ => {}
+        if entry.key != existing.key {
+            error!(
+                %wid,
+                seq = entry.seq,
+                old = existing.key,
+                new = entry.key,
+                "Wid has two withdrawal records at one seq."
+            );
         }
     }
 }
@@ -210,29 +200,11 @@ impl<L: LogStore> WidLogIndex<L> {
                 Entry {
                     seq,
                     written_at,
-                    body: Body::Key(key),
+                    key,
                 },
             );
         }
         Ok(())
-    }
-
-    /// Record a response that the enclave returned through this proxy.
-    pub fn insert(
-        &self,
-        wid: WithdrawalID,
-        seq: u64,
-        response: proto::SignedStandardWithdrawalResponse,
-        now: UnixSeconds,
-    ) {
-        self.lock().put(
-            wid,
-            Entry {
-                seq,
-                written_at: now,
-                body: Body::Response(response),
-            },
-        );
     }
 
     /// Find the withdrawal for `wid`. `Ok(None)` is a definite miss, so the
@@ -260,23 +232,20 @@ impl<L: LogStore> WidLogIndex<L> {
         self.hit(wid).await
     }
 
-    /// Return the indexed withdrawal for `wid`, with its record fetched if needed.
+    /// Return the indexed withdrawal for `wid`, with its record fetched from S3.
     async fn hit(&self, wid: &WithdrawalID) -> Result<Option<Hit>, WidLogError> {
         let entry = self
             .lock()
             .entries
             .get(wid)
-            .map(|entry| (entry.seq, entry.body.clone()));
-        let Some((seq, body)) = entry else {
+            .map(|entry| (entry.seq, entry.key.clone()));
+        let Some((seq, key)) = entry else {
             return Ok(None);
         };
-        let response = match body {
-            Body::Response(response) => response,
-            Body::Key(key) => synthesize_response(&self.fetch(&key, wid).await?),
-        };
+        let found = self.fetch(&key, wid).await?;
         Ok(Some(Hit {
             consumed_seq: seq,
-            response,
+            response: synthesize_response(&found),
         }))
     }
 
@@ -501,22 +470,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwarded_response_is_found_without_the_store() {
-        let index = index(MemStore::default());
-        let response = proto::SignedStandardWithdrawalResponse {
-            data: None,
-            timestamp_ms: Some(5),
-            signature: None,
-        };
-        index.insert(wid(0xaa), 3, response.clone(), NOW);
-
-        let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
-        assert_eq!(hit.consumed_seq, 3);
-        assert_eq!(hit.response, response);
-        assert_eq!(index.log.list_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn empty_log_is_a_definite_miss() {
         let index = ready_index(MemStore::default()).await;
         assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_none());
@@ -563,20 +516,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwarded_response_replaces_an_indexed_key() {
+    async fn tail_relists_a_key_that_a_lookup_indexed() {
         let store = MemStore::default();
-        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        record(&store, wid(0xaa), 7, NOW);
         let index = ready_index(store).await;
+        assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
 
-        let response = proto::SignedStandardWithdrawalResponse::default();
-        index.insert(wid(0xaa), 7, response.clone(), NOW);
-        index.log.fail_gets.store(true, Ordering::SeqCst);
-        let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
-        assert_eq!(hit.response, response);
-
-        index.insert(wid(0xaa), 8, response, NOW);
-        let hit = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
-        assert_eq!(hit.consumed_seq, 8);
+        // Two hours later the tail lists hour 3 and sees the same key again.
+        let later = NOW + 2 * HOUR;
+        index.tick(later).await.unwrap();
+        assert_eq!(index.metrics.widlog_index_size.get(), 1);
+        let hit = index.lookup(&wid(0xaa), later).await.unwrap().unwrap();
+        assert_eq!(hit.consumed_seq, 7);
     }
 
     #[tokio::test]

@@ -176,8 +176,7 @@ where
         let response_inner = self.inner.standard_withdrawal(request).await?.into_inner();
 
         self.info_cache.invalidate();
-        self.widlog.insert(wid, seq, response_inner.clone(), now);
-        info!(%wid, seq, "Indexed the forwarded StandardWithdrawal response.");
+        info!(%wid, seq, "Forwarded the StandardWithdrawal to the enclave.");
 
         Ok(Response::new(response_inner))
     }
@@ -399,16 +398,33 @@ mod tests {
         )
     }
 
+    /// The enclave writes the record before it returns the response.
+    fn enclave_wrote(cache: &CachingGuardianGrpc<StubGuardian, MemStore>, wid: [u8; 32], seq: u64) {
+        let (key, bytes) = fresh_record(wid, seq);
+        cache.widlog.log().insert(key, bytes);
+    }
+
+    /// The response that a replay builds from the record of `fresh_record`.
+    fn assert_replayed(response: &proto::SignedStandardWithdrawalResponse) {
+        assert!(response
+            .data
+            .as_ref()
+            .unwrap()
+            .enclave_signatures
+            .is_empty());
+        assert_eq!(response.signature, Some(vec![0u8; 64].into()));
+    }
+
     #[tokio::test]
-    async fn same_wid_and_seq_hits_cache_after_first_call() {
+    async fn same_wid_and_seq_replays_the_record_after_first_call() {
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
 
-        let r1 = cache
+        cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
-            .unwrap()
-            .into_inner();
+            .unwrap();
+        enclave_wrote(&cache, [0xaa; 32], 0);
         let r2 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
@@ -418,9 +434,9 @@ mod tests {
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,
-            "second call should hit cache"
+            "second call must not forward"
         );
-        assert_eq!(r1, r2);
+        assert_replayed(&r2);
     }
 
     #[tokio::test]
@@ -431,11 +447,11 @@ mod tests {
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
 
-        let r1 = cache
+        cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
-            .unwrap()
-            .into_inner();
+            .unwrap();
+        enclave_wrote(&cache, [0xaa; 32], 0);
         let r2 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 1))
             .await
@@ -445,9 +461,9 @@ mod tests {
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,
-            "same wid at a bumped seq must hit the cache, not re-consume"
+            "same wid at a bumped seq must replay, not re-consume"
         );
-        assert_eq!(r1, r2, "bumped-seq retry must replay the same response");
+        assert_replayed(&r2);
     }
 
     fn info_request() -> Request<proto::GetGuardianInfoRequest> {
@@ -549,7 +565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn distinct_wids_are_cached_independently() {
+    async fn distinct_wids_are_indexed_independently() {
         let (stub, count) = StubGuardian::ok();
         let cache = cache_over(stub, MemStore::default()).await;
 
@@ -557,14 +573,16 @@ mod tests {
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
             .unwrap();
+        enclave_wrote(&cache, [0xaa; 32], 0);
         cache
             .standard_withdrawal(mock_request([0xbb; 32], 0))
             .await
             .unwrap();
+        enclave_wrote(&cache, [0xbb; 32], 1);
         // Each wid is new, so both forward.
         assert_eq!(count.load(Ordering::SeqCst), 2);
 
-        // Hit both again. The cache serves them now.
+        // Hit both again. The log serves them now.
         cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
