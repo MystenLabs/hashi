@@ -123,6 +123,7 @@ mod tests {
     use crate::metrics::ProxyMetrics;
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
+    use crate::node::widlog::WidLogIndex;
     use crate::tls::test_utils::node_identity;
     use crate::tls::test_utils::test_cert;
     use crate::tls::test_utils::TestCert;
@@ -201,8 +202,7 @@ mod tests {
         let roster = Arc::new(RosterCache::new(MemStore::default()));
         let guardian = CachingGuardianGrpc::new(
             Forwarding::new(backend.clone(), backend.clone(), roster.clone()),
-            MemStore::default(),
-            bitcoin::Network::Regtest,
+            WidLogIndex::ready_for_tests(MemStore::default(), metrics.clone()).await,
             metrics.clone(),
         );
         let relay = Relay::new(backend.clone(), roster);

@@ -558,10 +558,11 @@ mod tests {
                 continue;
             };
             let seq = withdrawal.request_data.seq;
+            let wid = withdrawal.request_data.wid;
             let record = dummy_log_record(message);
             assert_eq!(
-                WithdrawalLogMessage::seq_from_object_key(record.object_key()),
-                Some(seq)
+                WithdrawalLogMessage::parse_object_key(record.object_key()),
+                Some((seq, wid))
             );
         }
     }

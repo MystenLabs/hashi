@@ -13,10 +13,12 @@ use hashi_guardian_proxy::node::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::node::member_auth::MemberGate;
 use hashi_guardian_proxy::node::members::ChainMemberSource;
 use hashi_guardian_proxy::node::members::MemberAllowlist;
+use hashi_guardian_proxy::node::widlog::WidLogIndex;
 use hashi_guardian_proxy::public::info;
 use hashi_guardian_proxy::remote_write;
 use hashi_guardian_proxy::tls;
 use hashi_guardian_proxy::tls::ServerCert;
+use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -48,9 +50,9 @@ async fn main() -> Result<()> {
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
 
-    // The wid cache's durable tier and the relay's roster source. Prove bucket
-    // access before serving: a proxy that can't read the log fails every retry
-    // closed.
+    // The source of the wid index and the roster source of the relay. Prove
+    // bucket access before you serve: a proxy that cannot read the log fails
+    // each withdrawal closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
     probe_with_retries(&log_store).await?;
 
@@ -97,12 +99,24 @@ async fn main() -> Result<()> {
         GuardianServiceClient::new(channel.clone()),
         config.info_cache_ttl,
     );
+    // Fill the wid index before the listeners open, so a miss is definite
+    // from the first request. The tail keeps it current.
+    let widlog = Arc::new(WidLogIndex::new(
+        log_store,
+        metrics.clone(),
+        now_timestamp_secs(),
+    ));
+    widlog
+        .tick(now_timestamp_secs())
+        .await
+        .context("backfill the wid index")?;
+    info!("Wid index backfilled.");
+    tokio::spawn(widlog.clone().tail_forever());
     // KPs confirm a ceremony to the guardian they are provisioning, so that
     // RPC follows the relay's backend.
     let guardian_svc = CachingGuardianGrpc::new(
         Forwarding::new(channel, relay_channel, roster),
-        log_store,
-        config.btc_network,
+        widlog,
         metrics.clone(),
     );
 
@@ -202,10 +216,10 @@ async fn probe_with_retries(log_store: &S3LogStore) -> Result<()> {
     unreachable!("loop returns on success or final error")
 }
 
-/// Make any panic abort the process instead of unwinding. The wid-keyed cache
-/// uses a std `Mutex` whose `.expect("cache mutex poisoned")` assumes a
-/// poisoned lock is unreachable — true only if a panic aborts rather than
-/// unwinds past the lock guard. (Same rationale as the enclave's `main`.)
+/// Make each panic abort the process instead of an unwind. The wid index
+/// uses a std `Mutex`. Its `.expect("wid index mutex poisoned")` assumes that
+/// a poisoned lock does not occur. This is true only if a panic aborts and
+/// does not unwind past the lock guard. (Same rationale as the `main` of the enclave.)
 fn abort_on_panic() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

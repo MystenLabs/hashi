@@ -329,21 +329,22 @@ mod tests {
     use super::test_utils::*;
     use super::*;
     use crate::node::cache::CachingGuardianGrpc;
+    use crate::node::widlog::WidLogIndex;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     type StubStore = crate::log_store::test_store::MemStore;
 
-    fn proxy_over(
+    async fn proxy_over(
         active: tonic::transport::Channel,
         ceremony: tonic::transport::Channel,
         store: StubStore,
     ) -> CachingGuardianGrpc<Forwarding<StubStore>, StubStore> {
+        let metrics = Arc::new(crate::metrics::ProxyMetrics::new());
         CachingGuardianGrpc::new(
             Forwarding::new(active, ceremony, Arc::new(RosterCache::new(store))),
-            StubStore::default(),
-            bitcoin::Network::Regtest,
-            std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
+            WidLogIndex::ready_for_tests(StubStore::default(), metrics.clone()).await,
+            metrics,
         )
     }
 
@@ -355,7 +356,7 @@ mod tests {
         CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
     ) {
         let (stub, channel) = spawn_stub().await;
-        (stub, proxy_over(channel.clone(), channel, store))
+        (stub, proxy_over(channel.clone(), channel, store).await)
     }
 
     #[tokio::test]

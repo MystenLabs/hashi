@@ -7,6 +7,7 @@ use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
 use crate::guardian::StandardWithdrawalResponse;
 use crate::guardian::UnixMillis;
+use crate::guardian::WithdrawalID;
 use crate::guardian::unix_millis_to_seconds;
 use bitcoin::Txid;
 use serde::Deserialize;
@@ -37,11 +38,14 @@ impl WithdrawalLogMessage {
         ))
     }
 
-    /// Return the sequence number in a key from [`Self::object_key`].
-    /// Return `None` if the file name does not start with 20 decimal digits.
-    pub fn seq_from_object_key(key: &str) -> Option<u64> {
+    /// Return the seq and the wid from a key that [`Self::object_key`] made.
+    /// Return `None` if the file name is not canonical.
+    pub fn parse_object_key(key: &str) -> Option<(u64, WithdrawalID)> {
         let name = key.rsplit('/').next()?;
-        name.get(..20)?.parse().ok()
+        let (seq, wid) = name.strip_suffix(".json")?.split_once("-wid")?;
+        let seq = seq.parse().ok()?;
+        let wid = WithdrawalID::from_hex(wid).ok()?;
+        (name == format!("{seq:020}-wid{wid}.json")).then_some((seq, wid))
     }
 }
 
@@ -49,30 +53,33 @@ impl WithdrawalLogMessage {
 mod tests {
     use super::*;
 
+    const WID: &str = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+
     #[test]
-    fn seq_from_object_key_reads_the_zero_padded_prefix() {
-        let key = "withdraw/2026/10/06/12/00000000000000000042-wid0xaa.json";
-        assert_eq!(WithdrawalLogMessage::seq_from_object_key(key), Some(42));
-        let max = format!("withdraw/2026/10/06/12/{:020}-wid0xaa.json", u64::MAX);
+    fn parse_object_key_reads_the_seq_and_wid() {
+        let key = format!("withdraw/2026/10/06/12/00000000000000000042-wid{WID}.json");
+        let (seq, wid) = WithdrawalLogMessage::parse_object_key(&key).unwrap();
+        assert_eq!(seq, 42);
+        assert_eq!(wid.to_string(), WID);
+        let max = format!("withdraw/2026/10/06/12/{:020}-wid{WID}.json", u64::MAX);
         assert_eq!(
-            WithdrawalLogMessage::seq_from_object_key(&max),
+            WithdrawalLogMessage::parse_object_key(&max).map(|(seq, _)| seq),
             Some(u64::MAX)
         );
     }
 
     #[test]
-    fn seq_from_object_key_rejects_other_file_names() {
+    fn parse_object_key_rejects_noncanonical_names() {
         for key in [
-            "withdraw/2026/10/06/12/unknown-s-wid0xaa.json",
-            "withdraw/2026/10/06/12/0042-wid0xaa.json",
-            "withdraw/2026/10/06/12/99999999999999999999-wid0xaa.json",
-            "withdraw/2026/10/06/12/",
+            format!("withdraw/2026/10/06/12/unknown-s-wid{WID}.json"),
+            format!("withdraw/2026/10/06/12/0042-wid{WID}.json"),
+            format!("withdraw/2026/10/06/12/99999999999999999999-wid{WID}.json"),
+            format!("withdraw/2026/10/06/12/00000000000000000042-wid{WID}"),
+            "withdraw/2026/10/06/12/00000000000000000042-wid0xaa.json".to_string(),
+            "withdraw/2026/10/06/12/00000000000000000042-widxyz.json".to_string(),
+            "withdraw/2026/10/06/12/".to_string(),
         ] {
-            assert_eq!(
-                WithdrawalLogMessage::seq_from_object_key(key),
-                None,
-                "{key}"
-            );
+            assert_eq!(WithdrawalLogMessage::parse_object_key(&key), None, "{key}");
         }
     }
 }

@@ -1,28 +1,25 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC: an
-//! in-process LRU in front of the guardian's own S3 withdrawal log
-//! ([`crate::node::widlog`]) as the durable, read-only tier.
+//! Idempotent `StandardWithdrawal` for the guardian. The proxy answers a
+//! request from the wid index over the S3 withdrawal log of the guardian
+//! ([`crate::node::widlog`]) when the wid is already signed. Otherwise it
+//! forwards the request to the enclave.
 //!
-//! Keyed by `wid`, not `(wid, seq)`: the guardian debits the limiter and
+//! The key is `wid`, not `(wid, seq)`. The guardian debits the limiter and
 //! advances `next_seq` when it signs, before hashi has the signed event
-//! on-chain. If hashi retries the same wid at a bumped seq (its limiter mirror
-//! reconciled forward while the event was still pending), re-consuming would
-//! drain the bucket for a withdrawal that was already signed. Replaying by
-//! `wid` avoids that — safe because a committed wid's inputs/outputs are
-//! immutable (only signatures change), so the response is stable.
+//! on-chain. If hashi retries the same wid at a bumped seq, a second
+//! consumption drains the bucket for a withdrawal that is already signed.
+//! A replay by `wid` prevents that. This is safe because the inputs and
+//! outputs of a committed wid do not change, so the response is stable.
 //!
-//! The enclave persists every signed withdrawal before releasing it, so the
-//! proxy has nothing durable of its own to lose. On a log hit it verifies the
-//! record's signatures spend the incoming request, then replays them (see
-//! `replay_from_log`); it does not reason about the limiter `seq`, which is the
-//! guardian's to own — the node's mirror self-heals any divergence
-//! (`hashi/src/guardian_limiter.rs`). When the log can't answer, the proxy
-//! fails closed with `UNAVAILABLE` rather than forwarding blind — it cannot
-//! distinguish "never signed" from "signed but unreadable", and forwarding the
-//! latter re-signs a withdrawal the guardian already durably signed, the
-//! double-debit the cache exists to prevent.
+//! When the index cannot answer, the proxy fails closed with `UNAVAILABLE`.
+//! It cannot tell "never signed" from "signed but unreadable", and a blind
+//! forward of the second case signs the withdrawal again and debits the
+//! limiter twice. A record that the enclave signed but then reverted (a
+//! lost-ack S3 write) still replays. The stall reconcile of the node snaps
+//! its mirror back to the guardian seq (`hashi/src/guardian_limiter.rs`),
+//! so a served orphan heals at a bounded one-withdrawal limiter under-count.
 //!
 //! `GetGuardianInfo` is answered from [`crate::guardian_info`].
 
@@ -30,276 +27,48 @@ use crate::guardian_info::GuardianInfoCache;
 use crate::log_store::LogStore;
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
-use crate::node::widlog::find_withdrawal_record;
-use crate::node::widlog::FoundWithdrawal;
 use crate::node::widlog::WidLogError;
-use bitcoin::Network;
-use hashi_types::bitcoin::BitcoinPubkey;
-use hashi_types::bitcoin::BitcoinSignature;
-use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::bitcoin::BTC_LIB;
-use hashi_types::guardian::AddressValidation;
-use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::GuardianResponse;
-use hashi_types::guardian::HashiSigned;
-use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
-use hashi_types::guardian::StandardWithdrawalRequest;
+use crate::node::widlog::WidLogIndex;
+use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_server::GuardianService;
-use lru::LruCache;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 use tracing::error;
 use tracing::info;
 
-// One entry per withdrawal would leak forever; 10k far exceeds the rate-limited
-// in-flight working set, so a hot wid always outlives its retry window.
-const CACHE_CAPACITY: usize = 10_000;
-
-/// Fail-closed error surfaced when the durable tier can't answer. Kept clear of
+/// The fail-closed error when the index cannot answer. Keep it clear of
 /// "seq mismatch" and "Rate limit exceeded": the node classifies guardian
-/// errors by those substrings (`crates/hashi/src/leader/guardian.rs`) and this
-/// one must land in its retriable bucket.
+/// errors by those substrings (`crates/hashi/src/leader/guardian.rs`), and
+/// this one must land in its retriable bucket.
 pub const WID_CACHE_UNAVAILABLE_MSG: &str = "wid cache unavailable; retry";
 
 fn unavailable() -> Status {
     Status::unavailable(WID_CACHE_UNAVAILABLE_MSG)
 }
 
-struct CacheEntry {
-    /// The seq the guardian consumed this wid at. Kept for observability only —
-    /// the cache is keyed by `wid`, so lookups ignore the requester's seq.
-    consumed_seq: u64,
-    response: proto::SignedStandardWithdrawalResponse,
-}
-
 pub struct CachingGuardianGrpc<S, L> {
     inner: Arc<S>,
-    l1: Mutex<LruCache<WithdrawalID, CacheEntry>>,
-    log: L,
-    /// Network the guardian validates requests against; needed to recompute
-    /// sighashes when verifying a log replay.
-    network: Network,
+    widlog: Arc<WidLogIndex<L>>,
     metrics: Arc<ProxyMetrics>,
-    /// Invalidated by every signed withdrawal: a leader reading after its finalize
-    /// must see the new seq.
+    /// Invalidated by each forwarded withdrawal. A leader that reads after
+    /// its finalize must see the new seq.
     info_cache: GuardianInfoCache<S>,
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
-    pub fn new(inner: S, log: L, network: Network, metrics: Arc<ProxyMetrics>) -> Self {
-        Self::with_capacity(
-            inner,
-            log,
-            network,
-            metrics,
-            NonZeroUsize::new(CACHE_CAPACITY).expect("CACHE_CAPACITY > 0"),
-        )
-    }
-
-    fn with_capacity(
-        inner: S,
-        log: L,
-        network: Network,
-        metrics: Arc<ProxyMetrics>,
-        capacity: NonZeroUsize,
-    ) -> Self {
+    pub fn new(inner: S, widlog: Arc<WidLogIndex<L>>, metrics: Arc<ProxyMetrics>) -> Self {
         let inner = Arc::new(inner);
         let info_cache = GuardianInfoCache::new(inner.clone());
         Self {
             inner,
-            l1: Mutex::new(LruCache::new(capacity)),
-            log,
-            network,
+            widlog,
             metrics,
             info_cache,
         }
-    }
-
-    // The critical section never spans an `.await`, so a sync `std::sync::Mutex`
-    // is the right tool and keeps the handler future `Send`. Panics abort the
-    // process (see `abort_on_panic` in main), so a poisoned lock is unreachable.
-    fn try_hit(
-        &self,
-        wid: &WithdrawalID,
-    ) -> Option<(u64, proto::SignedStandardWithdrawalResponse)> {
-        let mut cache = self.l1.lock().expect("cache mutex poisoned");
-        cache
-            .get(wid)
-            .map(|entry| (entry.consumed_seq, entry.response.clone()))
-    }
-
-    fn store(
-        &self,
-        wid: WithdrawalID,
-        consumed_seq: u64,
-        response: proto::SignedStandardWithdrawalResponse,
-    ) {
-        self.l1.lock().expect("cache mutex poisoned").put(
-            wid,
-            CacheEntry {
-                consumed_seq,
-                response,
-            },
-        );
-    }
-}
-
-impl<S, L> CachingGuardianGrpc<S, L>
-where
-    S: GuardianService,
-    L: LogStore,
-{
-    /// Serve a wid from the guardian's S3 withdrawal log. `Ok(None)` means
-    /// "definitively not in the log: forward"; `Err` is the fail-closed path.
-    async fn replay_from_log(
-        &self,
-        wid: &WithdrawalID,
-        requested_seq: u64,
-        request: &proto::SignedStandardWithdrawalRequest,
-    ) -> Result<Option<proto::SignedStandardWithdrawalResponse>, Status> {
-        let found = match find_withdrawal_record(&self.log, wid, requested_seq, &self.metrics).await
-        {
-            Ok(Some(found)) => found,
-            Ok(None) => return Ok(None),
-            Err(WidLogError::CapExceeded) => {
-                self.metrics.outcome(metrics::OUTCOME_UNAVAILABLE_SCAN_CAP);
-                error!(%wid, requested_seq, "Wid log scan hit its LIST cap; refusing to forward blind.");
-                return Err(unavailable());
-            }
-            Err(WidLogError::Store(e)) => {
-                self.metrics.outcome(metrics::OUTCOME_UNAVAILABLE_LOG_STORE);
-                error!(%wid, requested_seq, error = %e, "Wid log unavailable; refusing to forward blind.");
-                return Err(unavailable());
-            }
-        };
-
-        // Idempotency is by wid; the proxy does not gate on the limiter `seq`.
-        // A record the enclave signed but never committed (a lost-ack S3 write
-        // it then reverted) still replays here: the node's requested seq stays
-        // pinned to its mirror, and its stall reconcile snaps that mirror back
-        // to the guardian's authoritative seq (`hashi/src/guardian_limiter.rs`),
-        // so a served orphan self-heals — at worst a bounded one-withdrawal
-        // limiter under-count, which is the guardian's to close, not the proxy's.
-        //
-        // Integrity gate: never hand the node signatures that don't spend its
-        // transaction. Needs the guardian's live BTC key + master G (the enclave
-        // key rotates per instance, so it can't be cached across rotations).
-        let info = match self.guardian_info().await {
-            Ok(info) => info,
-            Err(e) => {
-                self.metrics
-                    .outcome(metrics::OUTCOME_UNAVAILABLE_GUARDIAN_INFO);
-                error!(%wid, error = %e, "Cannot fetch guardian info to verify a log replay.");
-                return Err(unavailable());
-            }
-        };
-        let (Some(enclave_btc_pubkey), Some(master_g)) =
-            (info.enclave_btc_pubkey, info.mpc_master_g)
-        else {
-            self.metrics
-                .outcome(metrics::OUTCOME_UNAVAILABLE_GUARDIAN_INFO);
-            error!(%wid, "Guardian info lacks BTC pubkey / master G; cannot verify a log replay.");
-            return Err(unavailable());
-        };
-
-        if let Err(e) = verify_recorded_signatures(
-            request,
-            &found.response.enclave_signatures,
-            &enclave_btc_pubkey,
-            &master_g,
-            self.network,
-        ) {
-            self.metrics
-                .outcome(metrics::OUTCOME_UNAVAILABLE_VERIFY_FAILED);
-            error!(
-                %wid,
-                error = %e,
-                "Log record signatures do not verify; possible bucket tampering or version skew."
-            );
-            return Err(unavailable());
-        }
-
-        let response = synthesize_response(&found);
-        // The forward that signed it may have failed or been dropped before invalidating.
-        self.info_cache.invalidate();
-        self.store(*wid, found.consumed_seq, response.clone());
-        self.metrics.outcome(metrics::OUTCOME_S3_HIT);
-        info!(
-            %wid,
-            requested_seq,
-            consumed_seq = found.consumed_seq,
-            "Replaying StandardWithdrawal response from the guardian's S3 log (idempotent by wid)."
-        );
-        Ok(Some(response))
-    }
-
-    async fn guardian_info(&self) -> anyhow::Result<GuardianInfo> {
-        let info_pb = self
-            .inner
-            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
-            .await
-            .map_err(|s| anyhow::anyhow!("get_guardian_info: {s}"))?
-            .into_inner();
-        let response = GuardianResponse::<GuardianInfo>::try_from(info_pb)
-            .map_err(|e| anyhow::anyhow!("parse guardian info: {e:?}"))?;
-        // The proxy reads self-reported info over its direct enclave channel;
-        // like the node, it uses the keys to check BTC signatures below.
-        Ok(response.response)
-    }
-}
-
-/// Verify recorded BTC signatures against the sighashes of the *incoming*
-/// request (the same immutable tx as the recorded one, by the wid invariant).
-fn verify_recorded_signatures(
-    request: &proto::SignedStandardWithdrawalRequest,
-    signatures: &[BitcoinSignature],
-    enclave_btc_pubkey: &BitcoinPubkey,
-    master_g: &HashiMasterG,
-    network: Network,
-) -> anyhow::Result<()> {
-    let wire = SignedStandardWithdrawalRequestWire::try_from(request.clone())
-        .map_err(|e| anyhow::anyhow!("parse request: {e:?}"))?;
-    let signed = HashiSigned::<StandardWithdrawalRequest>::validate_addr(wire, network)
-        .map_err(|e| anyhow::anyhow!("validate request: {e:?}"))?;
-    let (messages, _txid) = signed
-        .message()
-        .utxos()
-        .signing_messages_and_txid(enclave_btc_pubkey, master_g);
-    anyhow::ensure!(
-        messages.len() == signatures.len(),
-        "record has {} signatures for {} inputs",
-        signatures.len(),
-        messages.len()
-    );
-    for (i, (message, signature)) in messages.iter().zip(signatures).enumerate() {
-        BTC_LIB
-            .verify_schnorr(&signature.signature, message, enclave_btc_pubkey)
-            .map_err(|e| anyhow::anyhow!("input {i}: {e}"))?;
-    }
-    Ok(())
-}
-
-fn synthesize_response(found: &FoundWithdrawal) -> proto::SignedStandardWithdrawalResponse {
-    proto::SignedStandardWithdrawalResponse {
-        data: Some(proto::StandardWithdrawalResponseData {
-            enclave_signatures: found
-                .response
-                .enclave_signatures
-                .iter()
-                .map(|sig| sig.to_vec().into())
-                .collect(),
-        }),
-        timestamp_ms: Some(found.timestamp_ms),
-        // The record predates the response envelope (the enclave signs it after
-        // the S3 write). Nodes require a 64-byte value but never verify it
-        // (`into_data_unchecked`), so zeros can't pass for a real signature.
-        signature: Some(vec![0u8; 64].into()),
     }
 }
 
@@ -380,31 +149,36 @@ where
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
         let Some((wid, seq)) = extract_wid_and_seq(request.get_ref()) else {
-            // No wid to key on; let the enclave produce the precise rejection.
+            // No wid to key on. Let the enclave produce the precise rejection.
             return self.inner.standard_withdrawal(request).await;
         };
 
-        if let Some((consumed_seq, cached)) = self.try_hit(&wid) {
-            self.metrics.outcome(metrics::OUTCOME_L1_HIT);
-            info!(
-                %wid,
-                requested_seq = seq,
-                consumed_seq,
-                "Cache hit; replaying stored StandardWithdrawal response (idempotent by wid)."
-            );
-            return Ok(Response::new(cached));
-        }
-
-        if let Some(replayed) = self.replay_from_log(&wid, seq, request.get_ref()).await? {
-            return Ok(Response::new(replayed));
+        let now = now_timestamp_secs();
+        match self.widlog.lookup(&wid, now).await {
+            Ok(Some(hit)) => {
+                self.metrics.outcome(metrics::OUTCOME_HIT);
+                info!(
+                    %wid,
+                    requested_seq = seq,
+                    consumed_seq = hit.consumed_seq,
+                    "Replaying the StandardWithdrawal response from the guardian's S3 log (idempotent by wid)."
+                );
+                return Ok(Response::new(hit.response));
+            }
+            Ok(None) => {}
+            Err(WidLogError(e)) => {
+                self.metrics.outcome(metrics::OUTCOME_UNAVAILABLE_LOG_STORE);
+                error!(%wid, requested_seq = seq, error = %e, "Wid log unavailable; refusing to forward blind.");
+                return Err(unavailable());
+            }
         }
 
         self.metrics.outcome(metrics::OUTCOME_FORWARDED);
         let response_inner = self.inner.standard_withdrawal(request).await?.into_inner();
 
         self.info_cache.invalidate();
-        self.store(wid, seq, response_inner.clone());
-        info!(%wid, seq, "Stored StandardWithdrawal response in cache");
+        self.widlog.insert(wid, seq, response_inner.clone(), now);
+        info!(%wid, seq, "Indexed the forwarded StandardWithdrawal response.");
 
         Ok(Response::new(response_inner))
     }
@@ -436,14 +210,7 @@ mod tests {
     use super::*;
     use crate::log_store::test_store::MemStore;
     use crate::node::widlog::test_utils::withdrawal_record_json;
-    use hashi_types::bitcoin::sign_btc_tx;
-    use hashi_types::bitcoin::BitcoinKeypair;
-    use hashi_types::bitcoin::HashiMasterG;
-    use hashi_types::bitcoin::BTC_LIB;
-    use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
-    use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
-    use hashi_types::guardian::GuardianSignKeyPair;
-    use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::time::now_timestamp_ms;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -589,11 +356,14 @@ mod tests {
         Arc::new(ProxyMetrics::new())
     }
 
-    fn cache_over(
+    /// A cache whose index has tailed the store to the current hour.
+    async fn cache_over(
         stub: StubGuardian,
         store: MemStore,
     ) -> CachingGuardianGrpc<StubGuardian, MemStore> {
-        CachingGuardianGrpc::new(stub, store, Network::Regtest, test_metrics())
+        let metrics = test_metrics();
+        let widlog = WidLogIndex::ready_for_tests(store, metrics.clone()).await;
+        CachingGuardianGrpc::new(stub, widlog, metrics)
     }
 
     fn mock_request(wid: [u8; 32], seq: u64) -> Request<proto::SignedStandardWithdrawalRequest> {
@@ -618,92 +388,22 @@ mod tests {
         }
     }
 
-    /// A GuardianInfo pb carrying the given keys + next_seq.
-    fn stub_info_pb(
-        enclave_btc_pubkey: BitcoinPubkey,
-        master_g: HashiMasterG,
-        next_seq: u64,
-    ) -> proto::GetGuardianInfoResponse {
-        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
-        let info = GuardianInfo {
-            signing_pub_key: signing_key.verification_key(),
-            lifecycle: hashi_types::guardian::WithdrawStage::Activated.into(),
-            secret_sharing_instance: None,
-            deployment_info: Some(
-                hashi_types::guardian::DeploymentConfig::mock_for_testing().summary(),
-            ),
-            encryption_pubkey: vec![0u8; 32],
-            config_hash: None,
-            genesis_state_hash: None,
-            hashi_object_id: None,
-            enclave_btc_pubkey: Some(enclave_btc_pubkey),
-            limiter_state: Some(LimiterState {
-                num_tokens_available: 0,
-                last_updated_at: 0,
-                next_seq,
-            }),
-            limiter_config: None,
-            current_committee_epoch: None,
-            mpc_master_g: Some(master_g),
-        };
-        let domain = GuardianResponse::new(info, 1);
-        get_guardian_info_response_to_pb(domain)
-    }
-
-    /// A real request + a genuinely-signed Success record for it: the request pb
-    /// the node would send, and the log record whose signatures verify against
-    /// (enclave keypair, master G) over that request's sighashes.
-    struct ReplayFixture {
-        request: proto::SignedStandardWithdrawalRequest,
-        record_key: String,
-        record_bytes: Vec<u8>,
-        enclave_btc_pubkey: BitcoinPubkey,
-        master_g: HashiMasterG,
-        consumed_seq: u64,
-    }
-
-    fn replay_fixture(seq: u64) -> ReplayFixture {
-        let wid = WithdrawalID::new([0xcd; 32]);
-        let signed_request =
-            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
-
-        let enclave_kp =
-            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
-        let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
-            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
-                .expect("valid test secret key")
-                .x_only_public_key()
-                .0
-                .serialize(),
+    /// A record that the enclave wrote for `wid` in the current hour.
+    fn fresh_record(wid: [u8; 32], seq: u64) -> (String, Vec<u8>) {
+        withdrawal_record_json(
+            WithdrawalID::new(wid),
+            seq,
+            now_timestamp_ms(),
+            StandardWithdrawalResponse {
+                enclave_signatures: vec![],
+            },
         )
-        .expect("valid x-only public key");
-
-        let (messages, _txid) = signed_request
-            .message()
-            .utxos()
-            .signing_messages_and_txid(&enclave_btc_pubkey, &master_g);
-        let response = StandardWithdrawalResponse {
-            enclave_signatures: sign_btc_tx(&messages, &enclave_kp),
-        };
-
-        let request = signed_standard_withdrawal_request_to_pb(&signed_request);
-        let (record_key, record_bytes) =
-            withdrawal_record_json(wid, seq, 1_700_000_000_000, response);
-        ReplayFixture {
-            request,
-            record_key,
-            record_bytes,
-            enclave_btc_pubkey,
-            master_g,
-            consumed_seq: seq,
-        }
     }
 
     #[tokio::test]
     async fn same_wid_and_seq_hits_cache_after_first_call() {
         let (stub, count) = StubGuardian::ok();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         let r1 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
@@ -726,12 +426,12 @@ mod tests {
 
     #[tokio::test]
     async fn bumped_seq_for_same_wid_is_idempotent() {
-        // A retry of the same wid at a *different* seq (e.g. the local limiter
-        // mirror reconciled forward to the guardian's advanced next_seq) must
-        // replay the cached response without re-consuming the guardian limiter —
-        // otherwise the bucket drains for a withdrawal that was already signed.
+        // A retry of the same wid at a different seq must replay the cached
+        // response. Example: the local limiter mirror reconciled forward to
+        // the advanced next_seq of the guardian. A second consumption drains
+        // the bucket for a withdrawal that is already signed.
         let (stub, count) = StubGuardian::ok();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         let r1 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
@@ -763,7 +463,7 @@ mod tests {
             .with_info(proto::GetGuardianInfoResponse::default())
             .with_info_delay(Duration::from_millis(100));
         let info_calls = stub.info_calls.clone();
-        let cache = Arc::new(cache_over(stub, MemStore::default()));
+        let cache = Arc::new(cache_over(stub, MemStore::default()).await);
 
         // A withdrawal is signed while the first fetch is in flight.
         let in_flight = tokio::spawn({
@@ -784,27 +484,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn guardian_info_is_refetched_after_a_log_replay() {
-        let fixture = replay_fixture(7);
+    async fn log_replays_do_not_refetch_guardian_info() {
         let (stub, _) = StubGuardian::ok();
-        let stub = stub.with_info(stub_info_pb(
-            fixture.enclave_btc_pubkey,
-            fixture.master_g,
-            fixture.consumed_seq + 1,
-        ));
+        let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
         let info_calls = stub.info_calls.clone();
         let store = MemStore::default();
-        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
-        let cache = cache_over(stub, store);
+        let (key, bytes) = fresh_record([0xcd; 32], 7);
+        store.insert(key, bytes);
+        let cache = cache_over(stub, store).await;
 
         cache.get_guardian_info(info_request()).await.unwrap();
         cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
+            .standard_withdrawal(mock_request([0xcd; 32], 8))
             .await
             .unwrap();
         cache.get_guardian_info(info_request()).await.unwrap();
-        // Filling the cache, the replay's live integrity read, then the refetch.
-        assert_eq!(info_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(info_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -812,7 +507,7 @@ mod tests {
         let (stub, _) = StubGuardian::ok();
         let stub = stub.with_info(proto::GetGuardianInfoResponse::default());
         let info_calls = stub.info_calls.clone();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         cache.get_guardian_info(info_request()).await.unwrap();
         // The guardian answers an empty chain Ok, whoever sends it.
@@ -827,7 +522,7 @@ mod tests {
     #[tokio::test]
     async fn errors_are_not_cached() {
         let (stub, count) = StubGuardian::err();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         let r1 = cache.standard_withdrawal(mock_request([0xaa; 32], 0)).await;
         let r2 = cache.standard_withdrawal(mock_request([0xaa; 32], 0)).await;
@@ -839,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn missing_wid_falls_through_to_inner() {
         let (stub, count) = StubGuardian::ok();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         let req = Request::new(proto::SignedStandardWithdrawalRequest {
             data: Some(proto::StandardWithdrawalRequestData {
@@ -858,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_wids_are_cached_independently() {
         let (stub, count) = StubGuardian::ok();
-        let cache = cache_over(stub, MemStore::default());
+        let cache = cache_over(stub, MemStore::default()).await;
 
         cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
@@ -868,10 +563,10 @@ mod tests {
             .standard_withdrawal(mock_request([0xbb; 32], 0))
             .await
             .unwrap();
-        // Each wid is fresh, so both forward.
+        // Each wid is new, so both forward.
         assert_eq!(count.load(Ordering::SeqCst), 2);
 
-        // Re-hit both — should be served from cache now.
+        // Hit both again. The cache serves them now.
         cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
@@ -884,49 +579,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evicts_lru_entry_when_over_capacity() {
-        let (stub, count) = StubGuardian::ok();
-        let cache = CachingGuardianGrpc::with_capacity(
-            stub,
-            MemStore::default(),
-            Network::Regtest,
-            test_metrics(),
-            NonZeroUsize::new(2).unwrap(),
-        );
-
-        // Three distinct wids into a capacity-2 cache evicts the first (LRU).
-        for wid in [[0xa1; 32], [0xb2; 32], [0xc3; 32]] {
-            cache
-                .standard_withdrawal(mock_request(wid, 0))
-                .await
-                .unwrap();
-        }
-        assert_eq!(count.load(Ordering::SeqCst), 3);
-
-        // The evicted wid misses L1 and the (empty) log, and re-forwards; a
-        // still-cached wid keeps hitting.
-        cache
-            .standard_withdrawal(mock_request([0xa1; 32], 0))
-            .await
-            .unwrap();
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            4,
-            "evicted wid must re-forward"
-        );
-        cache
-            .standard_withdrawal(mock_request([0xc3; 32], 0))
-            .await
-            .unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 4, "cached wid must still hit");
-    }
-
-    #[tokio::test]
     async fn log_store_failure_fails_closed_without_forwarding() {
         let (stub, count) = StubGuardian::ok();
-        let store = MemStore::default();
-        store.fail_lists.store(true, Ordering::SeqCst);
-        let cache = cache_over(stub, store);
+        let cache = cache_over(stub, MemStore::default()).await;
+        cache.widlog.log().fail_lists.store(true, Ordering::SeqCst);
 
         let status = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
@@ -935,40 +591,32 @@ mod tests {
 
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert_eq!(count.load(Ordering::SeqCst), 0, "must not forward blind");
-        // The node classifies guardian errors by these substrings; the
+        // The node classifies guardian errors by these substrings. The
         // fail-closed error must land in its retriable bucket.
         assert!(!status.message().contains("seq mismatch"));
         assert!(!status.message().contains("Rate limit exceeded"));
     }
 
     #[tokio::test]
-    async fn log_replay_serves_verified_record_and_populates_l1() {
-        let fixture = replay_fixture(7);
+    async fn log_record_is_replayed_without_forwarding() {
         let (stub, count) = StubGuardian::ok();
-        let stub = stub.with_info(stub_info_pb(
-            fixture.enclave_btc_pubkey,
-            fixture.master_g,
-            // next_seq is carried in guardian info but no longer gated on.
-            fixture.consumed_seq + 1,
-        ));
         let store = MemStore::default();
-        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
-        let cache = cache_over(stub, store);
+        let (key, bytes) = fresh_record([0xcd; 32], 7);
+        store.insert(key, bytes);
+        let cache = cache_over(stub, store).await;
 
         let replayed = cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
+            .standard_withdrawal(mock_request([0xcd; 32], 8))
             .await
             .unwrap()
             .into_inner();
-
         assert_eq!(count.load(Ordering::SeqCst), 0, "served from the log");
-        let sigs = &replayed.data.as_ref().unwrap().enclave_signatures;
-        assert!(!sigs.is_empty());
+        assert!(replayed.data.is_some());
         assert_eq!(replayed.signature.as_ref().unwrap().len(), 64);
 
-        // Second retry is an L1 hit — same response, still no forward.
+        // The retry is an index hit: same response, still no forward.
         let again = cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
+            .standard_withdrawal(mock_request([0xcd; 32], 8))
             .await
             .unwrap()
             .into_inner();
@@ -976,94 +624,8 @@ mod tests {
         assert_eq!(replayed, again);
     }
 
-    #[tokio::test]
-    async fn record_at_or_above_next_seq_is_still_served_by_wid() {
-        // A record whose seq is not below the guardian's next_seq (e.g. a
-        // lost-ack S3 write the enclave reverted) still carries signatures the
-        // enclave really produced, so the proxy replays it by wid rather than
-        // forwarding. The proxy owns no seq logic; the node's stall reconcile
-        // self-heals any divergence (hashi/src/guardian_limiter.rs). Contrast
-        // the removed committed-gate, which forwarded here and re-signed.
-        let fixture = replay_fixture(7);
-        let (stub, count) = StubGuardian::ok();
-        let stub = stub.with_info(stub_info_pb(
-            fixture.enclave_btc_pubkey,
-            fixture.master_g,
-            fixture.consumed_seq, // next_seq == the record's seq
-        ));
-        let store = MemStore::default();
-        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
-        let cache = cache_over(stub, store);
-
-        let replayed = cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
-            .await
-            .unwrap()
-            .into_inner();
-
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            0,
-            "served from the log by wid, not forwarded"
-        );
-        assert!(!replayed
-            .data
-            .as_ref()
-            .unwrap()
-            .enclave_signatures
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn unverifiable_record_fails_closed() {
-        // Same record, but the guardian reports a different BTC key: the
-        // recorded signatures no longer verify — poisoned record or version
-        // skew — and the proxy must neither serve NOR forward.
-        let fixture = replay_fixture(7);
-        let wrong_key = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[42u8; 32])
-            .expect("valid test secret key")
-            .x_only_public_key()
-            .0;
-        let (stub, count) = StubGuardian::ok();
-        let stub = stub.with_info(stub_info_pb(
-            wrong_key,
-            fixture.master_g,
-            fixture.consumed_seq + 1,
-        ));
-        let store = MemStore::default();
-        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
-        let cache = cache_over(stub, store);
-
-        let status = cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
-            .await
-            .expect_err("must fail closed");
-
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn guardian_info_failure_fails_closed() {
-        // A record exists but the enclave can't be asked for its BTC key: the
-        // integrity gate can't run, so the proxy fails closed.
-        let fixture = replay_fixture(7);
-        let (stub, count) = StubGuardian::ok(); // no .with_info(..)
-        let store = MemStore::default();
-        store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
-        let cache = cache_over(stub, store);
-
-        let status = cache
-            .standard_withdrawal(Request::new(fixture.request.clone()))
-            .await
-            .expect_err("must fail closed");
-
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    /// A fresh proxy instance (empty L1) serves a wid whose record predates it,
-    /// without touching the enclave. Against the local replica's MinIO:
+    /// A new proxy instance serves a wid whose record predates it. It does
+    /// not touch the enclave. Against the MinIO of the local replica:
     ///
     /// ```text
     /// GUARDIAN_LOG_BUCKET=hashi-guardian-dev GUARDIAN_LOG_REGION=us-east-1 \
@@ -1077,43 +639,17 @@ mod tests {
         let bucket = std::env::var("GUARDIAN_LOG_BUCKET").expect("GUARDIAN_LOG_BUCKET");
         let region = std::env::var("GUARDIAN_LOG_REGION").expect("GUARDIAN_LOG_REGION");
 
-        // Unique wid per run: records persist across runs in a real bucket, and
-        // a stale record for a reused wid would carry signatures over a stale
-        // mock transaction.
+        // Unique wid for each run: records persist across runs in a real bucket.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let mut wid_bytes = [0x5a_u8; 32];
-        wid_bytes[..4].copy_from_slice(&nanos.to_be_bytes());
-        let wid = WithdrawalID::new(wid_bytes);
+        let mut wid = [0x5a_u8; 32];
+        wid[..4].copy_from_slice(&nanos.to_be_bytes());
+        let (record_key, record_bytes) = fresh_record(wid, 7);
 
-        let signed_request =
-            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
-        let enclave_kp =
-            BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[8u8; 32]).expect("valid test secret key");
-        let enclave_btc_pubkey = enclave_kp.x_only_public_key().0;
-        let master_g = HashiMasterG::with_even_y_from_x_be_bytes(
-            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
-                .expect("valid test secret key")
-                .x_only_public_key()
-                .0
-                .serialize(),
-        )
-        .expect("valid x-only public key");
-        let (messages, _txid) = signed_request
-            .message()
-            .utxos()
-            .signing_messages_and_txid(&enclave_btc_pubkey, &master_g);
-        let response = StandardWithdrawalResponse {
-            enclave_signatures: sign_btc_tx(&messages, &enclave_kp),
-        };
-        let request = signed_standard_withdrawal_request_to_pb(&signed_request);
-        let (record_key, record_bytes) =
-            withdrawal_record_json(wid, 7, 1_700_000_000_000, response);
-
-        // Write the record the way the enclave would have (plain put; the proxy
-        // itself is read-only on the bucket).
+        // Write the record as the enclave does (plain put; the proxy is
+        // read-only on the bucket).
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(region.clone()))
             .load()
@@ -1131,15 +667,16 @@ mod tests {
             .await
             .expect("write the success record");
 
-        // A brand-new proxy instance: empty L1, real S3LogStore.
+        // A new proxy instance: empty index, real S3LogStore.
         let store = crate::log_store::S3LogStore::connect(bucket, region).await;
         store.probe().await.expect("bucket must be readable");
         let (stub, count) = StubGuardian::ok();
-        let stub = stub.with_info(stub_info_pb(enclave_btc_pubkey, master_g, 8));
-        let cache = CachingGuardianGrpc::new(stub, store, Network::Regtest, test_metrics());
+        let metrics = test_metrics();
+        let widlog = WidLogIndex::ready_for_tests(store, metrics.clone()).await;
+        let cache = CachingGuardianGrpc::new(stub, widlog, metrics);
 
         let replayed = cache
-            .standard_withdrawal(Request::new(request))
+            .standard_withdrawal(mock_request(wid, 8))
             .await
             .unwrap()
             .into_inner();
@@ -1149,6 +686,6 @@ mod tests {
             0,
             "must be served from the S3 log, not the enclave"
         );
-        assert!(!replayed.data.unwrap().enclave_signatures.is_empty());
+        assert!(replayed.data.is_some());
     }
 }
