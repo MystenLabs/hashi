@@ -207,16 +207,23 @@ impl GuardianService {
     /// write fence forces a stop.
     pub async fn run_heartbeats(self) {
         loop {
-            let enclave = self.enclave.clone();
-            tokio::spawn(async move {
-                let mut enclave = enclave.lock().await;
-                enclave.heartbeat().await
-            })
-            .await
-            .expect("heartbeat task failed")
-            .expect("heartbeat write failed unexpectedly");
+            self.heartbeat_tick()
+                .await
+                .expect("heartbeat write failed unexpectedly");
             tokio::time::sleep(HEARTBEAT_INTERVAL).await;
         }
+    }
+
+    /// Run one heartbeat tick. Skip the RPC turnstile and lock the enclave
+    /// directly, so the tick waits for at most the one running operation.
+    async fn heartbeat_tick(&self) -> GuardianResult<()> {
+        let enclave = self.enclave.clone();
+        tokio::spawn(async move {
+            let mut enclave = enclave.lock().await;
+            enclave.heartbeat().await
+        })
+        .await
+        .expect("heartbeat task failed")
     }
 }
 
@@ -241,7 +248,7 @@ mod tests {
             let service = service.clone();
             tokio::spawn(async move {
                 service
-                    .run(move |_enclave| {
+                    .run_rpc(move |_enclave| {
                         Box::pin(async move {
                             started_tx.send(()).unwrap();
                             resume_rx.await.unwrap();
@@ -256,7 +263,7 @@ mod tests {
         let (second_started_tx, mut second_started_rx) = oneshot::channel();
         let second = tokio::spawn(async move {
             service
-                .run(move |_enclave| {
+                .run_rpc(move |_enclave| {
                     Box::pin(async move {
                         second_started_tx.send(()).unwrap();
                         Ok(())
@@ -284,7 +291,7 @@ mod tests {
             let service = service.clone();
             tokio::spawn(async move {
                 service
-                    .run(move |enclave| {
+                    .run_rpc(move |enclave| {
                         Box::pin(async move {
                             enclave
                                 .config
@@ -326,7 +333,7 @@ mod tests {
         let service = test_service();
         let guard = service.enclave.lock().await;
         let (finished_tx, finished_rx) = oneshot::channel();
-        let caller = service.run(move |_enclave| {
+        let caller = service.run_rpc(move |_enclave| {
             Box::pin(async move {
                 finished_tx.send(()).unwrap();
                 Ok(())
@@ -356,7 +363,7 @@ mod tests {
         );
         let service = GuardianService::new(enclave);
         let guard = service.enclave.lock().await;
-        let mut tick = Box::pin(service.run(|enclave| Box::pin(enclave.heartbeat())));
+        let mut tick = Box::pin(service.heartbeat_tick());
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut tick)
             .await
             .is_err());
@@ -367,6 +374,73 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(captures.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_waits_for_one_running_rpc_not_the_queue() {
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_with(
+            crate::OperatorInitTestArgs::default().with_s3_logger(logger),
+        );
+        let service = GuardianService::new(enclave);
+        let guard = service.enclave.lock().await;
+
+        // The first RPC takes the turnstile and queues at the enclave lock.
+        let first = {
+            let service = service.clone();
+            let captures = captures.clone();
+            tokio::spawn(async move {
+                service
+                    .run_rpc(move |_enclave| {
+                        Box::pin(async move {
+                            assert!(captures.lock().unwrap().is_empty());
+                            Ok(())
+                        })
+                    })
+                    .await
+            })
+        };
+        // Wait until the first RPC holds the turnstile. It queues at the
+        // enclave lock in the same poll, so it is ahead of the heartbeat.
+        assert!(tokio::time::timeout(Duration::from_secs(1), async {
+            while service.rpc_turn.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok());
+
+        // The second RPC blocks at the turnstile and never reaches the queue.
+        let second = {
+            let service = service.clone();
+            let captures = captures.clone();
+            tokio::spawn(async move {
+                service
+                    .run_rpc(move |_enclave| {
+                        Box::pin(async move {
+                            assert_eq!(captures.lock().unwrap().len(), 1);
+                            Ok(())
+                        })
+                    })
+                    .await
+            })
+        };
+
+        // The heartbeat queues at the enclave lock behind the first RPC only.
+        let mut tick = Box::pin(service.heartbeat_tick());
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut tick)
+            .await
+            .is_err());
+        drop(guard);
+
+        // Order: first RPC, heartbeat, second RPC. The RPC bodies assert it.
+        tokio::time::timeout(Duration::from_secs(1), tick)
+            .await
+            .unwrap()
+            .unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
         assert_eq!(captures.lock().unwrap().len(), 1);
     }
 }
