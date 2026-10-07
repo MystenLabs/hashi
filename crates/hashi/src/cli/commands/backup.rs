@@ -8,6 +8,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 use crate::backup;
 use crate::backup_s3::BackupS3Client;
 use crate::backup_s3::parse_s3_uri;
+use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::config::Config;
 use crate::db::Database;
@@ -103,12 +105,24 @@ pub async fn save(
     print_success(&format!("Backup completed: {}", output_path.display()));
     if !local_only {
         let mut client = None;
-        if let Some(uri) = backup::upload(&node_config, &mut client, &output_path).await? {
-            print_success(&format!("Backup uploaded: {uri}"));
+        if let Some((uri, receipt)) =
+            backup::upload(&node_config, &mut client, &output_path).await?
+        {
+            print_upload_receipt(&uri, &receipt);
         }
     }
 
     Ok(output_path)
+}
+
+fn print_upload_receipt(uri: &str, receipt: &PutObjectOutput) {
+    print_success(&format!("Backup uploaded: {uri}"));
+    if let Some(version_id) = receipt.version_id() {
+        print_info(&format!("Version ID: {version_id}"));
+    }
+    if let Some(e_tag) = receipt.e_tag() {
+        print_info(&format!("ETag: {e_tag}"));
+    }
 }
 
 pub(crate) fn resolve_backup_recipient(
@@ -966,16 +980,25 @@ mod tests {
         let output_dir = dir.path().join("output");
         let mut node_config = Config::load(&fixture.node_config_path).unwrap();
         node_config.backup_dir = dir.path().join("configured-archives");
+        node_config.sui_chain_id = Some("AbCdEF12".into());
+        node_config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: sui_sdk_types::Address::ZERO,
+            hashi_object_id: "0x1".parse().unwrap(),
+        });
+        node_config.validator_address = Some("0x2".parse().unwrap());
         node_config.backup_s3 = Some(crate::config::BackupS3Config {
             bucket: "hashi-recipient-mismatch-no-network".into(),
             region: "us-west-2".into(),
         });
         node_config.save(&fixture.node_config_path).unwrap();
+        let node_config = Config::load(&fixture.node_config_path).unwrap();
+        let recipient = PgpPublicCert::new(public_cert.clone()).unwrap();
+        assert!(!recipient.has_same_encryption_recipients(&node_config.backup_pgp_cert));
 
         assert!(
             save(
                 &fixture.node_config_path,
-                Some(public_cert),
+                Some(public_cert.clone()),
                 &output_dir,
                 false,
             )
@@ -986,6 +1009,18 @@ mod tests {
         assert!(!output_dir.exists());
         assert!(!node_config.backup_dir.exists());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // The same fixture and recipient can produce an archive when remote upload is disabled.
+        let tarball = save(
+            &fixture.node_config_path,
+            Some(public_cert),
+            &output_dir,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(tarball.is_file());
+        assert!(!node_config.backup_dir.exists());
     }
 
     #[tokio::test]

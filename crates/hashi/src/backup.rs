@@ -10,6 +10,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
 use std::collections::HashSet;
@@ -142,7 +143,7 @@ impl BackupService {
         .context("Epoch backup maintenance failed to join")??;
         if let Some(archive) = archive {
             match upload(&self.inner.config, &mut self.s3_client, &archive).await {
-                Ok(Some(uri)) => {
+                Ok(Some((uri, _receipt))) => {
                     self.inner.metrics.backup_scheduled_remote_successes.inc();
                     info!(epoch, %uri, "Scheduled remote backup completed");
                 }
@@ -163,7 +164,7 @@ pub(crate) async fn upload(
     config: &crate::config::Config,
     client: &mut Option<BackupS3Client>,
     archive: &Path,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, PutObjectOutput)>> {
     let Some(s3) = &config.backup_s3 else {
         return Ok(None);
     };
@@ -197,7 +198,7 @@ pub(crate) async fn upload(
         e_tag = receipt.e_tag(),
         "Remote backup uploaded"
     );
-    Ok(Some(uri))
+    Ok(Some((uri, receipt)))
 }
 
 /// Open `path` for writing with mode `0o600`, failing if anything already
