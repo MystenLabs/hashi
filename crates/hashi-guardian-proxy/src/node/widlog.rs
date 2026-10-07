@@ -84,34 +84,6 @@ struct Entry {
     response: Option<proto::SignedStandardWithdrawalResponse>,
 }
 
-impl Entry {
-    /// Build the response from `withdrawal_log`, cache it, and return it.
-    /// A log that names another key is an error.
-    fn add_withdrawal_log(
-        &mut self,
-        withdrawal_log: LogEntry,
-    ) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
-        anyhow::ensure!(
-            withdrawal_log.object_key() == self.key,
-            "withdrawal log names key {}, expected {}",
-            withdrawal_log.object_key(),
-            self.key
-        );
-        let message = withdrawal_message(&withdrawal_log)?;
-        let response =
-            GuardianResponse::new(message.response.clone(), withdrawal_log.timestamp_ms());
-        // The enclave signs the response envelope after the S3 write, so the
-        // withdrawal log has no envelope signature. Nodes require 64 bytes but
-        // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
-        let signature = GuardianSignature::from([0u8; 64]);
-        let response = standard_withdrawal_response_signed_to_pb(GuardianSigned::from_parts(
-            response, signature,
-        ));
-        self.response = Some(response.clone());
-        Ok(response)
-    }
-}
-
 struct State {
     entries: HashMap<WithdrawalID, Entry>,
     /// The first hour directory that the tail has not indexed.
@@ -148,6 +120,49 @@ impl State {
             entry.key
         );
         Ok(())
+    }
+
+    /// Build the response from the withdrawal log fetched for `wid`, cache
+    /// it on the entry, and return the hit. The log must name the entry's
+    /// key and must be a withdrawal log for `wid`.
+    fn add_withdrawal_log(
+        &mut self,
+        wid: &WithdrawalID,
+        withdrawal_log: LogEntry,
+    ) -> anyhow::Result<Hit> {
+        let entry = self
+            .entries
+            .get_mut(wid)
+            .ok_or_else(|| anyhow::anyhow!("wid {wid} left the index during the GET"))?;
+        anyhow::ensure!(
+            withdrawal_log.object_key() == entry.key,
+            "withdrawal log names key {}, expected {}",
+            withdrawal_log.object_key(),
+            entry.key
+        );
+        let message = withdrawal_log
+            .message()
+            .as_withdrawal()
+            .ok_or_else(|| anyhow::anyhow!("not a withdrawal log"))?;
+        anyhow::ensure!(
+            message.request_data.wid == *wid,
+            "withdrawal log is for wid {}, expected {wid}",
+            message.request_data.wid
+        );
+        let response =
+            GuardianResponse::new(message.response.clone(), withdrawal_log.timestamp_ms());
+        // The enclave signs the response envelope after the S3 write, so the
+        // withdrawal log has no envelope signature. Nodes require 64 bytes but
+        // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
+        let signature = GuardianSignature::from([0u8; 64]);
+        let response = standard_withdrawal_response_signed_to_pb(GuardianSigned::from_parts(
+            response, signature,
+        ));
+        entry.response = Some(response.clone());
+        Ok(Hit {
+            consumed_seq: entry.seq,
+            response,
+        })
     }
 }
 
@@ -273,7 +288,7 @@ impl<L: LogStore> WidLogIndex<L> {
     /// Return the indexed withdrawal for `wid`. The first hit fetches the
     /// withdrawal log from S3 and caches the response built from it.
     async fn hit(&self, wid: &WithdrawalID) -> Result<Option<Hit>, WidLogError> {
-        let (seq, key) = {
+        let key = {
             let state = self.lock();
             let Some(entry) = state.entries.get(wid) else {
                 return Ok(None);
@@ -284,27 +299,22 @@ impl<L: LogStore> WidLogIndex<L> {
                     response: response.clone(),
                 }));
             }
-            (entry.seq, entry.key.clone())
+            entry.key.clone()
         };
-        let withdrawal_log = self.fetch(&key, wid).await?;
-        let mut state = self.lock();
-        let entry = state.entries.get_mut(wid).ok_or_else(|| {
-            WidLogError(anyhow::anyhow!("wid {wid} left the index during the GET"))
-        })?;
-        let response = entry
-            .add_withdrawal_log(withdrawal_log)
+        let withdrawal_log = self.fetch(&key).await?;
+        let hit = self
+            .lock()
+            .add_withdrawal_log(wid, withdrawal_log)
             .map_err(WidLogError)?;
-        Ok(Some(Hit {
-            consumed_seq: seq,
-            response,
-        }))
+        Ok(Some(hit))
     }
 
     /// GET and parse one withdrawal log. A log that does not parse is an
     /// error: the enclave signed the wid, so a forward would sign it again.
-    async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<LogEntry, WidLogError> {
+    async fn fetch(&self, key: &str) -> Result<LogEntry, WidLogError> {
         let bytes = self.log.get(key).await.map_err(WidLogError)?;
-        parse_withdrawal_log(&bytes, wid)
+        serde_json::from_slice::<SignedLogEntry>(&bytes)
+            .map(SignedLogEntry::into_entry_unchecked)
             .with_context(|| format!("parse {key}"))
             .map_err(WidLogError)
     }
@@ -328,26 +338,6 @@ impl<L: LogStore> WidLogIndex<L> {
         index.tick(now).await.expect("tail an in-memory store");
         index
     }
-}
-
-/// Parse a withdrawal log that the enclave wrote for `wid`.
-fn parse_withdrawal_log(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<LogEntry> {
-    let withdrawal_log = serde_json::from_slice::<SignedLogEntry>(bytes)?.into_entry_unchecked();
-    let message = withdrawal_message(&withdrawal_log)?;
-    anyhow::ensure!(
-        message.request_data.wid == *wid,
-        "withdrawal log is for wid {}, expected {}",
-        message.request_data.wid,
-        wid
-    );
-    Ok(withdrawal_log)
-}
-
-fn withdrawal_message(withdrawal_log: &LogEntry) -> anyhow::Result<&WithdrawalLogMessage> {
-    withdrawal_log
-        .message()
-        .as_withdrawal()
-        .ok_or_else(|| anyhow::anyhow!("not a withdrawal log"))
 }
 
 #[cfg(test)]
