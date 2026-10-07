@@ -14,12 +14,13 @@
 //! which is `DIR_WRITES_COMPLETION_DELAY` after the hour ends. Then it lists
 //! the keys in that directory and stores the wid and seq of each key. At
 //! startup, the proxy fills the index for the last `RETENTION` before it
-//! serves requests. The index does not store responses. A retry after a
-//! forward finds the new key in the current hour directory.
+//! serves requests. The index does not store the responses that this proxy
+//! forwards. A retry after a forward finds the new key in the current hour
+//! directory.
 //!
 //! How a lookup works:
-//! 1. Look in the index. On a hit, fetch the record from S3 and build the
-//!    response from it.
+//! 1. Look in the index. On a hit, build the response from the cached
+//!    record. If there is none yet, fetch and cache the record first.
 //! 2. If not found, list the hour directories that the tail has not indexed
 //!    yet. These are the current hour, the hour after it, and sometimes the
 //!    hour before it. Add their keys to the index and look again.
@@ -42,7 +43,6 @@ use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::SignedLogEntry;
-use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::proto;
@@ -72,8 +72,10 @@ struct Entry {
     seq: u64,
     /// The time when the record was written. The tail evicts entries older than `RETENTION`.
     written_at: UnixSeconds,
-    /// The S3 key of the record. The lookup fetches it on a hit.
+    /// The S3 key of the record. The first hit fetches it.
     key: String,
+    /// The parsed record, after the first hit.
+    record: Option<Record>,
 }
 
 struct State {
@@ -201,6 +203,7 @@ impl<L: LogStore> WidLogIndex<L> {
                     seq,
                     written_at,
                     key,
+                    record: None,
                 },
             );
         }
@@ -232,26 +235,37 @@ impl<L: LogStore> WidLogIndex<L> {
         self.hit(wid).await
     }
 
-    /// Return the indexed withdrawal for `wid`, with its record fetched from S3.
+    /// Return the indexed withdrawal for `wid`. The first hit fetches the
+    /// record from S3 and caches it.
     async fn hit(&self, wid: &WithdrawalID) -> Result<Option<Hit>, WidLogError> {
-        let entry = self
-            .lock()
-            .entries
-            .get(wid)
-            .map(|entry| (entry.seq, entry.key.clone()));
-        let Some((seq, key)) = entry else {
-            return Ok(None);
+        let (seq, key) = {
+            let state = self.lock();
+            let Some(entry) = state.entries.get(wid) else {
+                return Ok(None);
+            };
+            if let Some(record) = &entry.record {
+                return Ok(Some(Hit {
+                    consumed_seq: entry.seq,
+                    response: synthesize_response(record),
+                }));
+            }
+            (entry.seq, entry.key.clone())
         };
-        let found = self.fetch(&key, wid).await?;
+        let record = self.fetch(&key, wid).await?;
+        let response = synthesize_response(&record);
+        let mut state = self.lock();
+        if let Some(entry) = state.entries.get_mut(wid).filter(|e| e.key == key) {
+            entry.record = Some(record);
+        }
         Ok(Some(Hit {
             consumed_seq: seq,
-            response: synthesize_response(&found),
+            response,
         }))
     }
 
     /// GET and parse one record. A record that does not parse is an error:
     /// the enclave signed the wid, so a forward would sign it again.
-    async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<FoundWithdrawal, WidLogError> {
+    async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<Record, WidLogError> {
         let bytes = self.log.get(key).await.map_err(WidLogError)?;
         parse_withdrawal(&bytes, wid)
             .inspect_err(|_| self.metrics.record_parse_failures.inc())
@@ -280,13 +294,14 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 }
 
-struct FoundWithdrawal {
+/// A parsed withdrawal record from the S3 log.
+struct Record {
     /// The timestamp of the log record. The replayed response uses it.
     timestamp_ms: u64,
-    response: StandardWithdrawalResponse,
+    message: WithdrawalLogMessage,
 }
 
-fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundWithdrawal> {
+fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<Record> {
     let record: SignedLogEntry = serde_json::from_slice(bytes)?;
     let entry = record.into_entry_unchecked();
     let timestamp_ms = entry.timestamp_ms();
@@ -294,34 +309,30 @@ fn parse_withdrawal(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundWit
         .into_message()
         .into_withdrawal()
         .ok_or_else(|| anyhow::anyhow!("not a withdrawal record"))?;
-    let WithdrawalLogMessage {
-        request_data,
-        response,
-        ..
-    } = *message;
     anyhow::ensure!(
-        request_data.wid == *wid,
+        message.request_data.wid == *wid,
         "record is for wid {}, expected {}",
-        request_data.wid,
+        message.request_data.wid,
         wid
     );
-    Ok(FoundWithdrawal {
+    Ok(Record {
         timestamp_ms,
-        response,
+        message: *message,
     })
 }
 
-fn synthesize_response(found: &FoundWithdrawal) -> proto::SignedStandardWithdrawalResponse {
+fn synthesize_response(record: &Record) -> proto::SignedStandardWithdrawalResponse {
     proto::SignedStandardWithdrawalResponse {
         data: Some(proto::StandardWithdrawalResponseData {
-            enclave_signatures: found
+            enclave_signatures: record
+                .message
                 .response
                 .enclave_signatures
                 .iter()
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(found.timestamp_ms),
+        timestamp_ms: Some(record.timestamp_ms),
         // The enclave signs the response envelope after the S3 write, so the
         // record has no envelope signature. Nodes require 64 bytes but do not
         // verify them (`into_data_unchecked`). Zeros are not a valid signature.
@@ -339,6 +350,7 @@ pub(crate) mod test_utils {
     use hashi_types::guardian::SignedLogEntry;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
+    use hashi_types::guardian::StandardWithdrawalResponse;
 
     /// A genuine withdrawal `SignedLogEntry`, serialized as the enclave writes
     /// it, with the key from `SignedLogEntry::object_key()`.
@@ -381,6 +393,7 @@ mod tests {
     use super::test_utils::withdrawal_record_json;
     use super::*;
     use crate::log_store::test_store::MemStore;
+    use hashi_types::guardian::StandardWithdrawalResponse;
     use std::sync::atomic::Ordering;
 
     const HOUR: UnixSeconds = 3_600;
@@ -513,6 +526,18 @@ mod tests {
         assert_eq!(hit.consumed_seq, 9);
         let hit = index.lookup(&wid(0xbb), NOW).await.unwrap().unwrap();
         assert_eq!(hit.consumed_seq, 4);
+    }
+
+    #[tokio::test]
+    async fn second_hit_uses_the_cached_record() {
+        let store = MemStore::default();
+        record(&store, wid(0xaa), 7, HOUR_0 + 60);
+        let index = ready_index(store).await;
+        let first = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
+
+        index.log.fail_gets.store(true, Ordering::SeqCst);
+        let second = index.lookup(&wid(0xaa), NOW).await.unwrap().unwrap();
+        assert_eq!(second.response, first.response);
     }
 
     #[tokio::test]
