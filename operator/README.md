@@ -13,8 +13,10 @@ files through an upload-only S3 bucket:
    [KP guide](../key-provisioner/provision.md#provide-the-public-artifacts-to-the-operator).
 3. `download-kp-pubkeys.sh` fetches every upload, verifies each certificate and
    its YubiKey attestations exactly as ceremony commands do, and prints a roster.
-4. `revoke-kp-upload-key.sh` deletes the upload key once every KP has confirmed
-   the roster.
+4. `publish-kp-config.sh` publishes the guardian configuration to the same
+   bucket for the KPs' ceremony and provisioning steps.
+5. `revoke-kp-upload-key.sh` deletes the access key once the guardian is
+   provisioned.
 
 Each script takes a `<name>` that identifies one collection, such as `mainnet`.
 It selects the bucket `mysten-hashi-kp-pubkeys-<name>` in `us-west-2` and the
@@ -69,13 +71,58 @@ several minutes, and then reports that there are no uploads yet.
 ### After the meeting
 
 ```sh
-./operator/scripts/revoke-kp-upload-key.sh mainnet
 ./operator/scripts/download-kp-pubkeys.sh mainnet
 ```
 
 The final download must print the same roster you posted. Keep its directory,
 which holds the verified certificates and `roster.txt`. The bucket keeps every
 uploaded version.
+
+If the KPs take no further part, revoke the access key now with
+`./operator/scripts/revoke-kp-upload-key.sh mainnet`. Otherwise keep it until
+the guardian is provisioned: the KPs use it for the steps below.
+
+## Publish the guardian configuration
+
+KPs run `key-provisioner ceremony` and `key-provisioner provision` with the same
+`deployment`, `hashi`, `kp_roster` and `limiter_config` as the operator.
+`publish-kp-config.sh` puts that configuration in the bucket, under `_config/`,
+and each KP fetches it with `key-provisioner/scripts/download-config.sh`, as
+described in the
+[KP guide](../key-provisioner/provision.md#taking-part-in-guardian-operations).
+
+Prepare a directory that holds:
+
+- `guardian-init.yaml`: the configuration the operator commands use, with the
+  public proxy URL as `guardian_endpoint` and `relay_endpoint`, without
+  `s3_credentials` and `kp_pgp_cert_path`, and with `current_build` listed
+  before `prev_builds`. Its `current_build.git_revision` is the full commit the
+  guardian runs, which the KPs check out.
+- `certs/`: every certificate in `kp_roster` and its three attestation files,
+  from the verified download, listed in the configuration as
+  `certs/<user-id>-kp-pubkey.asc`.
+
+Then publish it, naming the guardian's log bucket:
+
+```sh
+./operator/scripts/publish-kp-config.sh mainnet <config-dir> <guardian-bucket>
+```
+
+The script verifies every certificate, refuses a configuration that holds an
+AWS access key, and prints the guardian commit and a configuration digest. It
+also lets the KPs' access key read `_config/` and the guardian's log bucket,
+and stops it writing to `_config/`: the configuration names the guardian build
+every KP will trust.
+
+Post the commit and the digest. Each KP compares the digest with the one
+`download-config.sh` prints. Publish again after any change to the directory;
+the digest changes with the configuration.
+
+Once the guardian is provisioned and activated, revoke the access key:
+
+```sh
+./operator/scripts/revoke-kp-upload-key.sh mainnet
+```
 
 ### Fixing problems
 
