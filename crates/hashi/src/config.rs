@@ -421,19 +421,6 @@ impl Config {
         ))
     }
 
-    /// Canonical S3 URI, including the namespace and trailing slash.
-    /// Call `validate_backup_s3` before deriving a configured destination.
-    pub fn backup_s3_bucket_uri(&self) -> Option<String> {
-        let s3 = self.backup_s3.as_ref()?;
-        Some(format!(
-            "s3://{}/{}/{}/{}/",
-            s3.bucket,
-            self.sui_chain_id(),
-            self.hashi_ids?.hashi_object_id,
-            self.validator_address?,
-        ))
-    }
-
     pub fn tls_private_key(&self) -> Result<ed25519_dalek::SigningKey, anyhow::Error> {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
 
@@ -758,7 +745,6 @@ mod tests {
         let loaded = Config::load(&path).unwrap();
         assert!(loaded.backup_s3.is_none());
         assert!(loaded.backup_s3_namespace().is_none());
-        assert!(loaded.backup_s3_bucket_uri().is_none());
 
         config.backup_s3 = Some(BackupS3Config {
             bucket: "hashi-backups".into(),
@@ -795,13 +781,6 @@ mod tests {
         assert_eq!(
             loaded.backup_s3_namespace().unwrap(),
             "AbCdEF12/0x0000000000000000000000000000000000000000000000000000000000000001/0x0000000000000000000000000000000000000000000000000000000000000002/"
-        );
-        assert_eq!(
-            loaded.backup_s3_bucket_uri().unwrap(),
-            format!(
-                "s3://hashi-backups/{}",
-                loaded.backup_s3_namespace().unwrap()
-            )
         );
         config.sui_chain_id = None;
         let default_config = load(&config).unwrap();

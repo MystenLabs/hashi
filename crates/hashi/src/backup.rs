@@ -140,11 +140,18 @@ impl BackupService {
         })
         .await
         .context("Epoch backup maintenance failed to join")??;
-        if let Some(archive) = archive
-            && let Some(uri) = upload(&self.inner.config, &mut self.s3_client, &archive).await?
-        {
-            self.inner.metrics.backup_scheduled_remote_successes.inc();
-            info!(epoch, %uri, "Scheduled remote backup completed");
+        if let Some(archive) = archive {
+            match upload(&self.inner.config, &mut self.s3_client, &archive).await {
+                Ok(Some(uri)) => {
+                    self.inner.metrics.backup_scheduled_remote_successes.inc();
+                    info!(epoch, %uri, "Scheduled remote backup completed");
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.inner.metrics.backup_scheduled_remote_failures.inc();
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -167,7 +174,7 @@ pub(crate) async fn upload(
         .context("backup archive must have a UTF-8 filename")?;
     let key = format!("{namespace}{filename}");
     let uri = format!("s3://{}/{key}", s3.bucket);
-    async {
+    let receipt = async {
         if client.is_none() {
             *client = Some(BackupS3Client::connect(&s3.region).await?);
         }
@@ -184,6 +191,12 @@ pub(crate) async fn upload(
             archive.display()
         )
     })?;
+    info!(
+        %uri,
+        version_id = receipt.version_id(),
+        e_tag = receipt.e_tag(),
+        "Remote backup uploaded"
+    );
     Ok(Some(uri))
 }
 
@@ -1100,7 +1113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_success() {
+    async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_remote_results() {
         for (config_path_present, write_backup, remove_config) in [
             (true, false, false),
             (false, true, false),
@@ -1125,6 +1138,10 @@ mod tests {
                     .get(),
                 0
             );
+            assert_eq!(
+                service.inner.metrics.backup_scheduled_remote_failures.get(),
+                0
+            );
         }
     }
 
@@ -1143,6 +1160,10 @@ mod tests {
                 .metrics
                 .backup_scheduled_remote_successes
                 .get(),
+            0
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
             0
         );
         assert_eq!(
@@ -1191,6 +1212,7 @@ mod tests {
                         }
                         assert_eq!(hashi.metrics.backup_scheduled_local_successes.get(), 1);
                         assert_eq!(hashi.metrics.backup_scheduled_remote_successes.get(), 0);
+                        assert_eq!(hashi.metrics.backup_scheduled_remote_failures.get(), 0);
                         if fail {
                             (
                                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1222,6 +1244,10 @@ mod tests {
                     .backup_scheduled_remote_successes
                     .get(),
                 u64::from(!fail)
+            );
+            assert_eq!(
+                service.inner.metrics.backup_scheduled_remote_failures.get(),
+                u64::from(fail)
             );
             let archive = fs::read_dir(&service.inner.config.backup_dir)
                 .unwrap()
