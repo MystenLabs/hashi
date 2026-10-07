@@ -8,8 +8,8 @@
 //! always forwards to the enclave without caching. The rest is grouped by who calls it:
 //!
 //! - [`node`]: [`node::cache`] makes `StandardWithdrawal` responses idempotent
-//!   by `wid` — an in-process LRU in front of the guardian's own S3 withdrawal
-//!   log ([`node::widlog`]) as the durable, read-only tier.
+//!   by `wid`. It answers from an index over the guardian's own S3 withdrawal
+//!   log ([`node::widlog`]), which the proxy only reads.
 //!   [`node::member_auth`] gates every route: node RPCs are served only to
 //!   current or pending committee members ([`node::members`]), who present
 //!   their registered TLS key as a client certificate.

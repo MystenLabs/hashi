@@ -13,8 +13,8 @@
 //! task (the tail) waits until an hour directory can get no more writes,
 //! which is `DIR_WRITES_COMPLETION_DELAY` after the hour ends. Then it lists
 //! the keys in that directory and stores the wid and seq of each key. At
-//! startup, the proxy fills the index for the last `RETENTION` before it
-//! serves requests. The index does not store the responses that this proxy
+//! startup, the proxy fills the index for about the last `RETENTION` before
+//! it serves requests. The index does not store the responses that this proxy
 //! forwards. A retry after a forward finds the new key in the current hour
 //! directory.
 //!
@@ -32,8 +32,10 @@
 //! closed.
 //!
 //! Assumptions:
-//! - The enclave clock is at most `DIR_WRITES_COMPLETION_DELAY` behind the
-//!   proxy clock, and at most one hour ahead of it.
+//! - A withdrawal log is in its hour directory no later than
+//!   `DIR_WRITES_COMPLETION_DELAY` after that hour ends, by the proxy clock.
+//!   That delay covers PUT retries and an enclave clock that is behind.
+//! - The enclave clock is at most one hour ahead of the proxy clock.
 //! - A withdrawal log is visible in S3 as soon as the PUT of the enclave returns.
 //! - A node retries a wid within `RETENTION`.
 
@@ -237,7 +239,7 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 
     /// Index the seq and wid of each key in `dir`. A key that is not
-    /// canonical fails the index, and the hour adds no entries.
+    /// canonical fails the index before any key of the hour is stored.
     async fn index_hour(&self, dir: &S3HourDirectory) -> anyhow::Result<()> {
         let prefix = dir.to_string();
         let keys = self
