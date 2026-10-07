@@ -236,3 +236,62 @@ Find the row with your user ID and compare every group of four characters in
 its fingerprint with the printed fingerprint. Check that the roster has one
 row per participating KP. Confirm your row with the operator, or tell him
 immediately if anything differs.
+
+## Taking part in guardian operations
+
+Once every KP has confirmed the roster, the operator publishes the guardian
+configuration to the same bucket. Every KP then takes part in two steps: the
+key ceremony, which deals each KP an encrypted share of the guardian key, and
+provisioning, which hands those shares to a guardian.
+
+### Download the operator's configuration
+
+The operator posts a guardian commit and a configuration digest. Keep your
+YubiKey connected and run, from the repository root:
+
+```sh
+./key-provisioner/scripts/download-config.sh
+```
+
+Enter the bucket name, access key ID, and secret access key you used to upload
+your public files. The script downloads the configuration and every KP's
+public files, verifies them, selects your certificate from the connected
+YubiKey, and prints the directory it wrote them to.
+
+If the script reports that your checkout is at a different commit than the
+guardian, run the two `git` commands it prints, then run it again. The first
+run builds the guardian tools, which can take several minutes.
+
+Compare the configuration digest the script prints with the one the operator
+posted, and tell the operator that it matches. Stop if it differs.
+
+### Run the key ceremony
+
+When the operator asks for the key ceremony, run the `cd` command the script
+printed, then:
+
+```sh
+cargo run --release --locked -p hashi-guardian-init -- key-provisioner ceremony \
+  --config guardian-init.yaml --encrypted-shares-path kp-shares.json
+```
+
+Your YubiKey asks for its User PIN and a touch to decrypt your share, and again
+to sign your confirmation. Keep `kp-shares.json`: it holds every KP's encrypted
+share and is the recovery record for the guardian key.
+
+### Provision the guardian
+
+When the operator asks for provisioning, run from the same directory:
+
+```sh
+cargo run --release --locked -p hashi-guardian-init -- key-provisioner provision \
+  --config guardian-init.yaml
+```
+
+Add `--do-genesis` when the operator says this is the guardian's first
+deployment. If the command stops with `is not live in S3`, the guardian has not
+started its session yet: wait a minute and run it again.
+
+After each step, tell the operator that it finished and post the last line it
+printed. If a step fails, send the operator its last lines instead of working
+around it.
