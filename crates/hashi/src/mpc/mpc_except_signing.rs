@@ -6623,51 +6623,21 @@ fn build_reduced_nodes(
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-    let legacy_threshold_in_basis_points = committee
-        .config()
-        .legacy_pinned_mpc_threshold()
-        .map(|value| -> MpcResult<u16> {
-            match value {
-                hashi_types::move_types::ConfigValue::U64(bps) => {
-                    u16::try_from(*bps).map_err(|_| {
-                        MpcError::InvalidConfig(format!(
-                            "pinned mpc_threshold_in_basis_points {bps} exceeds u16::MAX"
-                        ))
-                    })
-                }
-                other => Err(MpcError::InvalidConfig(format!(
-                    "pinned mpc_threshold_in_basis_points is not a u64: {other:?}"
-                ))),
-            }
-        })
-        .transpose()?;
-    let (threshold, max_faulty, weight_reduction_allowed_delta) =
-        match legacy_threshold_in_basis_points {
-            Some(threshold_in_basis_points) => (
-                (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
-                    as u16,
-                (total_weight as u32 * max_faulty_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
-                    as u16,
-                weight_reduction_allowed_delta_in_basis_points,
-            ),
-            None => {
-                let max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
-                    / MAX_BASIS_POINTS)
-                    .max(1);
-                let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
-                if threshold <= max_faulty {
-                    return Err(MpcError::InvalidThreshold(format!(
-                        "threshold {threshold} must exceed max_faulty {max_faulty}: \
-                         max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
-                    )));
-                }
-                let delta = (total_weight as u32
-                    * weight_reduction_allowed_delta_in_basis_points as u32
-                    / MAX_BASIS_POINTS)
-                    .min(total_weight as u32) as u16;
-                (threshold as u16, max_faulty as u16, delta)
-            }
-        };
+    let (threshold, max_faulty, weight_reduction_allowed_delta) = {
+        let max_faulty =
+            (total_weight as u32 * max_faulty_in_basis_points as u32 / MAX_BASIS_POINTS).max(1);
+        let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
+        if threshold <= max_faulty {
+            return Err(MpcError::InvalidThreshold(format!(
+                "threshold {threshold} must exceed max_faulty {max_faulty}: \
+                 max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
+            )));
+        }
+        let delta = (total_weight as u32 * weight_reduction_allowed_delta_in_basis_points as u32
+            / MAX_BASIS_POINTS)
+            .min(total_weight as u32) as u16;
+        (threshold as u16, max_faulty as u16, delta)
+    };
     let lower_bound = if is_production_sui_chain(chain_id) {
         MIN_TOTAL_WEIGHT_AFTER_REDUCTION
     } else {
@@ -6680,7 +6650,6 @@ fn build_reduced_nodes(
         max_faulty,
         weight_reduction_allowed_delta,
         lower_bound,
-        legacy_pinned = legacy_threshold_in_basis_points.is_some(),
         "build_reduced_nodes: pre-reduction parameters"
     );
     if total_weight < lower_bound {
@@ -6688,34 +6657,16 @@ fn build_reduced_nodes(
             "total weight {total_weight} is below the reduction floor {lower_bound}"
         )));
     }
-    let (reducer, reduced) = if legacy_threshold_in_basis_points.is_some() {
-        (
-            "prop_reduce",
-            Nodes::prop_reduce(
-                nodes_vec,
-                threshold,
-                max_faulty,
-                weight_reduction_allowed_delta,
-                lower_bound,
-            ),
-        )
-    } else {
-        (
-            "knapsack_reduce",
-            Nodes::knapsack_reduce(
-                nodes_vec,
-                threshold,
-                max_faulty,
-                weight_reduction_allowed_delta,
-                lower_bound,
-            ),
-        )
-    };
-    let (nodes, reduced_threshold, reduced_max_faulty) =
-        reduced.map_err(|e| MpcError::CryptoError(e.to_string()))?;
+    let (nodes, reduced_threshold, reduced_max_faulty) = Nodes::knapsack_reduce(
+        nodes_vec,
+        threshold,
+        max_faulty,
+        weight_reduction_allowed_delta,
+        lower_bound,
+    )
+    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
     tracing::info!(
         committee_epoch = committee.epoch(),
-        reducer,
         reduced_total_weight = nodes.total_weight(),
         reduced_threshold,
         reduced_max_faulty,
