@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::task_spawner;
-use crate::Enclave;
+use crate::GuardianService;
 use hashi_types::guardian::proto_conversions;
-use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
@@ -17,16 +15,14 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
-use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::proto;
-use std::sync::Arc;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
 #[derive(Clone)]
 pub struct GuardianGrpc {
-    pub enclave: Arc<Enclave>,
+    pub service: GuardianService,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -85,9 +81,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_guardian_info(self.enclave.clone())
-            .await
-            .map_err(to_status)?;
+        let resp = self.service.get_guardian_info().await.map_err(to_status)?;
 
         let resp_pb = proto_conversions::get_guardian_info_response_to_pb(resp);
 
@@ -98,7 +92,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetAttestedGuardianInfoRequest>,
     ) -> Result<Response<proto::GetAttestedGuardianInfoResponse>, Status> {
-        let resp = task_spawner::get_attested_guardian_info(self.enclave.clone())
+        let resp = self
+            .service
+            .get_attested_guardian_info()
             .await
             .map_err(to_status)?;
         Ok(Response::new(
@@ -112,7 +108,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        let signed = task_spawner::setup_new_key(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .setup_new_key(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -127,7 +125,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
         let domain_req: KpSigned<CeremonyConfirmationRequest> =
             request.into_inner().try_into().map_err(to_status)?;
-        let response = task_spawner::confirm_ceremony(self.enclave.clone(), domain_req)
+        let response = self
+            .service
+            .confirm_ceremony(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -143,7 +143,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req: BatchProvisionerRotateKpSetRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
-        let signed = task_spawner::rotate_kp_set(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .rotate_kp_set(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -159,7 +161,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::OperatorInitResponse>, Status> {
         let domain_req: OperatorInitRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::operator_init(self.enclave.clone(), domain_req)
+        self.service
+            .operator_init(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -172,7 +175,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::provisioner_init(self.enclave.clone(), domain_req)
+        self.service
+            .provisioner_init(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -185,7 +189,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
         let domain_req: KpSigned<ProvisionerRotateCertRequest> =
             request.into_inner().try_into().map_err(to_status)?;
-        let signed = task_spawner::provisioner_rotate_cert(self.enclave.clone(), domain_req)
+        let signed = self
+            .service
+            .provisioner_rotate_cert(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -201,7 +207,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req: OperatorActivateRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
-        task_spawner::operator_activate(self.enclave.clone(), domain_req)
+        self.service
+            .operator_activate(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -216,14 +223,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let domain_req = SignedStandardWithdrawalRequestWire::try_from(request.into_inner())
             .map_err(to_status)?;
 
-        // validate address with network
-        let network = self.enclave.config.bitcoin_network().map_err(to_status)?;
-        let validated_req =
-            HashiSigned::<StandardWithdrawalRequest>::validate_addr(domain_req, network)
-                .map_err(to_status)?;
-
         // core withdraw call
-        let response = task_spawner::standard_withdrawal(self.enclave.clone(), validated_req)
+        let response = self
+            .service
+            .standard_withdrawal(domain_req)
             .await
             .map_err(to_status)?;
 
@@ -238,7 +241,9 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
         let signed = HashiSigned::<CommitteeTransitionRequest>::try_from(request.into_inner())
             .map_err(to_status)?;
-        let current_committee_epoch = task_spawner::update_committee(self.enclave.clone(), signed)
+        let current_committee_epoch = self
+            .service
+            .update_committee(signed)
             .await
             .map_err(to_status)?;
 
@@ -258,10 +263,11 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map(HashiSigned::<CommitteeTransitionRequest>::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_status)?;
-        let current_committee_epoch =
-            task_spawner::update_committee_chain(self.enclave.clone(), transitions)
-                .await
-                .map_err(to_status)?;
+        let current_committee_epoch = self
+            .service
+            .update_committee_chain(transitions)
+            .await
+            .map_err(to_status)?;
 
         Ok(Response::new(proto::UpdateCommitteeResponse {
             current_committee_epoch: Some(current_committee_epoch),
@@ -280,6 +286,7 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use crate::test_utils::OperatorInitTestArgs;
+    use crate::Enclave;
     use hashi_types::guardian::CeremonyArtifacts;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
@@ -288,6 +295,7 @@ mod tests {
     use hashi_types::guardian::ProvisionerInitRequest;
     use hashi_types::guardian::ProvisionerRotateKpSetRequest;
     use hashi_types::guardian::SecretSharingParams;
+    use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use proto::guardian_service_server::GuardianService;
 
@@ -302,18 +310,20 @@ mod tests {
     ) {
         let (roster, secrets) = mock_kp_certs_roster_with_secrets(3);
         let (logger, puts) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
         let response = crate::ceremony_mode::setup::setup_new_key(
-            enclave.clone(),
+            &mut enclave,
             SetupNewKeyRequest::new(roster.clone(), 3, 2).unwrap(),
         )
         .await
         .unwrap()
-        .verify_into_data(&enclave.signing_pubkey())
+        .verify_into_data(&enclave.config.signing_pubkey())
         .unwrap()
         .response;
         (
-            GuardianGrpc { enclave },
+            GuardianGrpc {
+                service: crate::GuardianService::new(enclave),
+            },
             response.into(),
             roster,
             secrets,
@@ -324,9 +334,10 @@ mod tests {
     #[tokio::test]
     async fn guardian_info_rpcs_separate_attestation_from_ordinary_info() {
         let enclave = Enclave::create_with_random_keys();
-        let expected_info = enclave.info().await;
+        let expected_info = enclave.info();
+        let signing_pubkey = enclave.config.signing_pubkey();
         let rpc = GuardianGrpc {
-            enclave: enclave.clone(),
+            service: crate::GuardianService::new(enclave),
         };
 
         let response = rpc
@@ -339,7 +350,7 @@ mod tests {
         >::try_from(response)
         .unwrap();
         assert_eq!(info.response, expected_info);
-        assert_eq!(info.response.signing_pub_key, enclave.signing_pubkey());
+        assert_eq!(info.response.signing_pub_key, signing_pubkey);
 
         let response = rpc
             .get_attested_guardian_info(Request::new(proto::GetAttestedGuardianInfoRequest {}))
@@ -353,7 +364,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             signed_info
-                .verify_signature(&enclave.signing_pubkey())
+                .verify_signature(&signing_pubkey)
                 .unwrap()
                 .response,
             expected_info
@@ -364,7 +375,9 @@ mod tests {
     async fn setup_rpc_rejects_missing_attestation_without_starting_ceremony() {
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_ceremony(logger),
+            service: crate::GuardianService::new(Enclave::create_operator_initialized_ceremony(
+                logger,
+            )),
         };
         let before_puts = puts.lock().unwrap().clone();
         let mut request = proto_conversions::setup_new_key_request_to_pb(
@@ -375,7 +388,13 @@ mod tests {
         let error = rpc.setup_new_key(Request::new(request)).await.unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert!(rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .state
+            .pending_ceremony()
+            .is_err());
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 
@@ -383,14 +402,17 @@ mod tests {
     async fn confirmation_rpc_rejects_untrusted_signer_without_recording_confirmation() {
         let (rpc, state, roster, secrets, puts) = pending_ceremony().await;
         let cert = roster.iter().next().unwrap().clone();
-        let request = CeremonyConfirmationRequest::new(
-            rpc.enclave.s3_session_id(),
-            CeremonyArtifacts {
-                deployment: rpc.enclave.config.deployment().unwrap().clone(),
-                ceremony_state: state,
-            }
-            .digest(),
-        );
+        let request = {
+            let enclave = rpc.service.enclave_for_testing().await;
+            CeremonyConfirmationRequest::new(
+                enclave.config.s3_session_id(),
+                CeremonyArtifacts {
+                    deployment: enclave.config.deployment().unwrap().clone(),
+                    ceremony_state: state,
+                }
+                .digest(),
+            )
+        };
         let signature = sign_detached_in_process(
             &secrets[&cert.fingerprint().to_hex()],
             &KpSigned::signed_bytes(&request),
@@ -403,12 +425,20 @@ mod tests {
             &KpSigned::signed_bytes(&request),
         );
         crate::ceremony_mode::confirm::confirm_ceremony(
-            rpc.enclave.clone(),
+            &mut *rpc.service.enclave_for_testing().await,
             KpSigned::from_parts(request, previous_cert, previous_signature),
         )
         .await
         .unwrap();
-        let before = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        let before = rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .state
+            .pending_ceremony()
+            .unwrap()
+            .status()
+            .unwrap();
         let before_puts = puts.lock().unwrap().clone();
 
         let error = rpc
@@ -417,7 +447,15 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        let after = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        let after = rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .state
+            .pending_ceremony()
+            .unwrap()
+            .status()
+            .unwrap();
         assert_eq!(
             (after.have, after.need, after.completed),
             (before.have, before.need, before.completed)
@@ -431,46 +469,57 @@ mod tests {
         let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_with(OperatorInitTestArgs {
-                s3_logger: logger,
-                ceremony_state: state.clone(),
-                ..Default::default()
-            })
-            .await,
+            service: crate::GuardianService::new(Enclave::create_operator_initialized_with(
+                OperatorInitTestArgs {
+                    s3_logger: logger,
+                    ceremony_state: state.clone(),
+                    ..Default::default()
+                },
+            )),
         };
-        let before = rpc.enclave.temporary_init_state().unwrap();
+        let before = rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .state
+            .temporary_init_state()
+            .unwrap()
+            .clone();
         let before_puts = puts.lock().unwrap().clone();
-        let submissions = shares
-            .iter()
-            .take(2)
-            .map(|share| {
-                let recipient = &state
-                    .encrypted_shares
-                    .iter()
-                    .find(|entry| entry.id == share.id)
-                    .unwrap()
-                    .recipient_fingerprint;
-                let cert = roster
-                    .cert_for_fingerprint(&recipient.parse().unwrap())
-                    .unwrap()
-                    .clone();
-                let request = ProvisionerInitRequest::build_from_share(
-                    rpc.enclave.s3_session_id(),
-                    before.config_hash,
-                    before.genesis_state.as_ref().map(|state| state.digest()),
-                    share,
-                    rpc.enclave.encryption_public_key(),
-                    &mut rand::thread_rng(),
-                );
-                let signature = sign_detached_in_process(
-                    &secrets[&cert.fingerprint().to_hex()],
-                    &KpSigned::signed_bytes(&request),
-                );
-                let signed = KpSigned::from_parts(request, cert, signature);
-                signed.verify_signature().unwrap();
-                signed.into()
-            })
-            .collect();
+        let submissions = {
+            let enclave = rpc.service.enclave_for_testing().await;
+            shares
+                .iter()
+                .take(2)
+                .map(|share| {
+                    let recipient = &state
+                        .encrypted_shares
+                        .iter()
+                        .find(|entry| entry.id == share.id)
+                        .unwrap()
+                        .recipient_fingerprint;
+                    let cert = roster
+                        .cert_for_fingerprint(&recipient.parse().unwrap())
+                        .unwrap()
+                        .clone();
+                    let request = ProvisionerInitRequest::build_from_share(
+                        enclave.config.s3_session_id(),
+                        before.config_hash,
+                        before.genesis_state.as_ref().map(|state| state.digest()),
+                        share,
+                        enclave.config.encryption_public_key(),
+                        &mut rand::thread_rng(),
+                    );
+                    let signature = sign_detached_in_process(
+                        &secrets[&cert.fingerprint().to_hex()],
+                        &KpSigned::signed_bytes(&request),
+                    );
+                    let signed = KpSigned::from_parts(request, cert, signature);
+                    signed.verify_signature().unwrap();
+                    signed.into()
+                })
+                .collect()
+        };
 
         let error = rpc
             .provisioner_init(Request::new(proto::BatchProvisionerInitRequest {
@@ -480,7 +529,12 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert!(!rpc.enclave.config.is_enclave_btc_keypair_set());
+        assert!(!rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .config
+            .is_enclave_btc_keypair_set());
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 
@@ -490,19 +544,20 @@ mod tests {
         let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_with(OperatorInitTestArgs {
-                s3_logger: logger,
-                ceremony_state: state.clone(),
-                ..Default::default()
-            })
-            .await,
+            service: crate::GuardianService::new(Enclave::create_operator_initialized_with(
+                OperatorInitTestArgs {
+                    s3_logger: logger,
+                    ceremony_state: state.clone(),
+                    ..Default::default()
+                },
+            )),
         };
-        finalize_enclave(&rpc.enclave).unwrap();
+        finalize_enclave(&mut *rpc.service.enclave_for_testing().await).unwrap();
         let (_, committee) = StandardWithdrawalRequest::mock_signed_and_committee_for_testing(
             bitcoin::Network::Regtest,
         );
         activate_enclave_for_testing(
-            &rpc.enclave,
+            &mut *rpc.service.enclave_for_testing().await,
             committee,
             LimiterConfig {
                 refill_rate: 0,
@@ -526,21 +581,24 @@ mod tests {
             .unwrap()
             .clone();
         let replacement = hashi_types::guardian::test_utils::mock_attested_kp_keypair().0;
-        let request = ProvisionerRotateCertRequest::new(
-            rpc.enclave.s3_session_id(),
-            state.cert_seq,
-            replacement,
-            &shares[0],
-            rpc.enclave.encryption_public_key(),
-            &mut rand::thread_rng(),
-        );
+        let request = {
+            let enclave = rpc.service.enclave_for_testing().await;
+            ProvisionerRotateCertRequest::new(
+                enclave.config.s3_session_id(),
+                state.cert_seq,
+                replacement,
+                &shares[0],
+                enclave.config.encryption_public_key(),
+                &mut rand::thread_rng(),
+            )
+        };
         let signature = sign_detached_in_process(
             &secrets[&cert.fingerprint().to_hex()],
             &KpSigned::signed_bytes(&request),
         );
         let signed = KpSigned::from_parts(request, cert, signature);
         signed.verify_signature().unwrap();
-        let lifecycle = rpc.enclave.lifecycle();
+        let lifecycle = rpc.service.enclave_for_testing().await.state.lifecycle();
         let before_puts = puts.lock().unwrap().clone();
 
         // Replacement decoding precedes signer decoding; this does not exercise
@@ -551,7 +609,10 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert_eq!(rpc.enclave.lifecycle(), lifecycle);
+        assert_eq!(
+            rpc.service.enclave_for_testing().await.state.lifecycle(),
+            lifecycle
+        );
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 
@@ -561,41 +622,46 @@ mod tests {
         let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
         let (logger, puts) = mock_logger_capturing();
         let rpc = GuardianGrpc {
-            enclave: Enclave::create_operator_initialized_ceremony(logger),
+            service: crate::GuardianService::new(Enclave::create_operator_initialized_ceremony(
+                logger,
+            )),
         };
-        let submissions = shares
-            .iter()
-            .take(2)
-            .map(|share| {
-                let recipient = &state
-                    .encrypted_shares
-                    .iter()
-                    .find(|entry| entry.id == share.id)
-                    .unwrap()
-                    .recipient_fingerprint;
-                let cert = roster
-                    .cert_for_fingerprint(&recipient.parse().unwrap())
-                    .unwrap()
-                    .clone();
-                let request = ProvisionerRotateKpSetRequest::build_from_share(
-                    rpc.enclave.s3_session_id(),
-                    rpc.enclave.config.deployment().unwrap().digest(),
-                    share,
-                    rpc.enclave.encryption_public_key(),
-                    roster.clone(),
-                    SecretSharingParams::new(3, 2).unwrap(),
-                    &mut rand::thread_rng(),
-                )
-                .unwrap();
-                let signature = sign_detached_in_process(
-                    &secrets[&cert.fingerprint().to_hex()],
-                    &KpSigned::signed_bytes(&request),
-                );
-                let signed = KpSigned::from_parts(request, cert, signature);
-                signed.verify_signature().unwrap();
-                signed.into()
-            })
-            .collect();
+        let submissions = {
+            let enclave = rpc.service.enclave_for_testing().await;
+            shares
+                .iter()
+                .take(2)
+                .map(|share| {
+                    let recipient = &state
+                        .encrypted_shares
+                        .iter()
+                        .find(|entry| entry.id == share.id)
+                        .unwrap()
+                        .recipient_fingerprint;
+                    let cert = roster
+                        .cert_for_fingerprint(&recipient.parse().unwrap())
+                        .unwrap()
+                        .clone();
+                    let request = ProvisionerRotateKpSetRequest::build_from_share(
+                        enclave.config.s3_session_id(),
+                        enclave.config.deployment().unwrap().digest(),
+                        share,
+                        enclave.config.encryption_public_key(),
+                        roster.clone(),
+                        SecretSharingParams::new(3, 2).unwrap(),
+                        &mut rand::thread_rng(),
+                    )
+                    .unwrap();
+                    let signature = sign_detached_in_process(
+                        &secrets[&cert.fingerprint().to_hex()],
+                        &KpSigned::signed_bytes(&request),
+                    );
+                    let signed = KpSigned::from_parts(request, cert, signature);
+                    signed.verify_signature().unwrap();
+                    signed.into()
+                })
+                .collect()
+        };
         let before_puts = puts.lock().unwrap().clone();
 
         // Signer decoding fails first, so this cannot cover the new roster's
@@ -608,7 +674,13 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert!(rpc
+            .service
+            .enclave_for_testing()
+            .await
+            .state
+            .pending_ceremony()
+            .is_err());
         assert_eq!(*puts.lock().unwrap(), before_puts);
     }
 

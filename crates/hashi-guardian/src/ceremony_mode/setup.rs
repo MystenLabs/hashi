@@ -6,7 +6,6 @@ use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::*;
 use k256::SecretKey;
-use std::sync::Arc;
 use tracing::info;
 
 /// Set up a new BTC key. Flow:
@@ -14,7 +13,7 @@ use tracing::info;
 ///     2. Operator calls setup_new_key
 ///     3. KPs fetch the proposed ceremony state from `kp-shares/proposed/`
 pub async fn setup_new_key(
-    enclave: Arc<Enclave>,
+    enclave: &mut Enclave,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
@@ -28,11 +27,15 @@ pub async fn setup_new_key(
         .await?;
     if !ceremony_keys.is_empty() {
         return Err(GuardianError::InvalidInputs(
-            "a completed ceremony already exists; rotate the KP set instead of setting up a new key"
-                .into(),
-        ));
+        "a completed ceremony already exists; rotate the KP set instead of setting up a new key"
+            .into(),
+    ));
     }
-    let sharing_seq = enclave.new_guardian_reader()?.next_sharing_seq().await?;
+    let sharing_seq = enclave
+        .config
+        .new_guardian_reader()?
+        .next_sharing_seq()
+        .await?;
 
     let params = request.params();
     let n = params.num_shares();
@@ -87,7 +90,9 @@ pub async fn setup_new_key(
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
     };
-    enclave.install_pending_ceremony(proposal)?;
+    enclave
+        .state
+        .install_pending_ceremony(enclave.config.deployment()?, proposal)?;
     let response = enclave.sign(response);
 
     enclave
@@ -125,16 +130,16 @@ mod tests {
             let logger = crate::test_utils::mock_logger_with_layout([format!(
                 "ceremony/{sharing_seq:020}.json"
             )]);
-            let enclave = Enclave::create_operator_initialized_ceremony(logger);
+            let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
             let (request, _) = mock_setup_new_key_request();
-            let error = setup_new_key(enclave.clone(), request).await.unwrap_err();
+            let error = setup_new_key(&mut enclave, request).await.unwrap_err();
             assert!(matches!(error, GuardianError::InvalidInputs(message)
                 if message.contains("completed ceremony already exists")));
             assert_eq!(
-                enclave.lifecycle(),
+                enclave.state.lifecycle(),
                 CeremonyStage::OperatorInitialized.into()
             );
-            assert!(enclave.pending_ceremony().is_err());
+            assert!(enclave.state.pending_ceremony().is_err());
         }
     }
 
@@ -143,12 +148,12 @@ mod tests {
         let logger = crate::test_utils::mock_logger_with_layout([
             "kp-shares/00000000000000000000/00000000000000000000.json".to_string(),
         ]);
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
         let (request, _) = mock_setup_new_key_request();
-        let response = setup_new_key(enclave.clone(), request)
+        let response = setup_new_key(&mut enclave, request)
             .await
             .unwrap()
-            .verify_into_data(&enclave.signing_pubkey())
+            .verify_into_data(&enclave.config.signing_pubkey())
             .unwrap()
             .response;
         assert_eq!(response.secret_sharing_instance.sharing_seq(), 1);
@@ -157,13 +162,13 @@ mod tests {
     #[tokio::test]
     async fn test_setup_new_key() {
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_ceremony(logger);
-        let verification_key = &enclave.signing_pubkey();
+        let mut enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let verification_key = &enclave.config.signing_pubkey();
         let (request, secret_keys) = mock_setup_new_key_request();
-        let resp = setup_new_key(enclave.clone(), request).await.unwrap();
+        let resp = setup_new_key(&mut enclave, request).await.unwrap();
         let validated_resp = resp.verify_into_data(verification_key).unwrap().response;
         assert_eq!(
-            enclave.lifecycle(),
+            enclave.state.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
 
@@ -198,7 +203,7 @@ mod tests {
         let (key, body) = &captured[0];
         assert_eq!(
             key,
-            &format!("kp-shares/proposed/{}.json", enclave.s3_session_id())
+            &format!("kp-shares/proposed/{}.json", enclave.config.s3_session_id())
         );
         let record: SignedLogEntry = serde_json::from_slice(body).unwrap();
         let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) =

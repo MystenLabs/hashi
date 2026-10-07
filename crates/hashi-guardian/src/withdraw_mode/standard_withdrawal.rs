@@ -4,15 +4,16 @@
 use super::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::guardian::now_timestamp_secs;
+use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
-use std::sync::Arc;
 use tracing::info;
 
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -20,11 +21,14 @@ const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
 const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
 pub async fn standard_withdrawal(
-    enclave: Arc<Enclave>,
-    signed_request: HashiSigned<StandardWithdrawalRequest>,
+    enclave: &mut Enclave,
+    signed_request: SignedStandardWithdrawalRequestWire,
 ) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
+    let network = enclave.config.bitcoin_network()?;
+    let signed_request =
+        HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_request, network)?;
     let wid = *signed_request.message().wid();
     // 0) Validation
     enclave.require_fully_initialized()?;
@@ -33,7 +37,11 @@ pub async fn standard_withdrawal(
     let committee = enclave.state.get_committee()?;
 
     info!("Verifying request certificate.");
-    verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
+    verify_hashi_cert(
+        enclave.config.hashi_object_id()?,
+        committee,
+        &signed_request,
+    )?;
     info!("Request certificate verified.");
 
     let (request_sign, request) = signed_request.into_parts();
@@ -130,12 +138,26 @@ mod tests {
     use hashi_types::guardian::WithdrawStage;
     use hashi_types::guardian::WithdrawalID;
 
+    fn wire(
+        request: HashiSigned<StandardWithdrawalRequest>,
+    ) -> SignedStandardWithdrawalRequestWire {
+        let (signature, request) = request.into_parts();
+        SignedStandardWithdrawalRequestWire {
+            data: request.into(),
+            signature: hashi_types::move_types::CommitteeSignature {
+                epoch: signature.epoch(),
+                signature: signature.signature_bytes().to_vec(),
+                signers_bitmap: signature.signers_bitmap_bytes().to_vec(),
+            },
+        }
+    }
+
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
         network: Network,
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
-    ) -> (Arc<Enclave>, crate::test_utils::CapturedPuts) {
+    ) -> (Enclave, crate::test_utils::CapturedPuts) {
         let hashi_kp =
             BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32]).expect("valid test secret key");
         let hashi_btc_master_pubkey =
@@ -153,7 +175,7 @@ mod tests {
         // operator_init installs standby config; test activation installs the
         // committee and limiter before withdrawals.
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
+        let mut enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default()
                 .with_s3_logger(logger)
                 .with_config(config)
@@ -161,8 +183,7 @@ mod tests {
                     hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
                     hashi_btc_master_pubkey,
                 ),
-        )
-        .await;
+        );
 
         // The reconstructed BTC keypair (set by provisioner_init in production).
         enclave
@@ -176,7 +197,7 @@ mod tests {
         enclave
             .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
             .expect("test setup should advance provisioner init lifecycle");
-        activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
+        activate_enclave_for_testing(&mut enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
         assert!(enclave.require_fully_initialized().is_ok());
@@ -185,14 +206,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_standard_withdrawal_requires_full_init() {
-        let enclave = Enclave::create_with_random_keys();
+        let mut enclave = Enclave::create_operator_initialized();
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
-        let result = standard_withdrawal(enclave, signed_request).await;
+        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
         assert!(matches!(
             result,
             Err(GuardianError::LifecycleMismatch {
                 expected: Some(EnclaveLifecycle::Withdraw(WithdrawStage::Activated)),
-                actual: None,
+                actual: Some(EnclaveLifecycle::Withdraw(
+                    WithdrawStage::OperatorInitialized
+                )),
             })
         ));
     }
@@ -212,10 +235,10 @@ mod tests {
             .gross_outflow_amount()
             .to_sat();
         // Set request amount as the max bucket capacity
-        let (enclave, _captures) =
+        let (mut enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let result = standard_withdrawal(enclave, signed_request).await;
+        let result = standard_withdrawal(&mut enclave, wire(signed_request)).await;
         assert!(result.is_ok());
     }
 
@@ -233,14 +256,14 @@ mod tests {
             .utxos()
             .gross_outflow_amount()
             .to_sat();
-        let (enclave, _captures) =
+        let (mut enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
         assert_eq!(
             enclave.state.limiter_state().expect("activated").next_seq,
             0
         );
 
-        standard_withdrawal(enclave.clone(), signed_request)
+        standard_withdrawal(&mut enclave, wire(signed_request))
             .await
             .expect("withdrawal succeeds");
 
@@ -261,10 +284,10 @@ mod tests {
         );
         let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
         // Bucket capacity == one withdrawal, so second will be rejected.
-        let (enclave, captures) =
+        let (mut enclave, captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
-        let first = standard_withdrawal(enclave.clone(), req1).await;
+        let first = standard_withdrawal(&mut enclave, wire(req1)).await;
         assert!(first.is_ok());
 
         // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
@@ -274,7 +297,7 @@ mod tests {
             timestamp_secs + 1,
             1,
         );
-        let second = standard_withdrawal(enclave, req2).await;
+        let second = standard_withdrawal(&mut enclave, wire(req2)).await;
         assert!(matches!(
             second.unwrap_err(),
             GuardianError::RateLimitExceeded

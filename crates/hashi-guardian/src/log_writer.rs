@@ -14,16 +14,15 @@ use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
 use std::future::Future;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::warn;
 
 const MAX_S3_WRITE_ATTEMPTS: usize = 5;
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Serializes every Guardian log write and owns the session-heartbeat fence.
+/// Owns the session-heartbeat fence. The service serializes all writes.
 pub(crate) struct LogWriter {
-    state: Mutex<LatestHeartbeatTime>,
+    state: LatestHeartbeatTime,
 }
 
 struct LatestHeartbeatTime(Option<Instant>);
@@ -58,26 +57,25 @@ impl LatestHeartbeatTime {
 impl LogWriter {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(LatestHeartbeatTime::new()),
+            state: LatestHeartbeatTime::new(),
         }
     }
 
     /// Construct and persist one serialized log record; see the README for fencing assumptions.
     pub(crate) async fn write(
-        &self,
+        &mut self,
         s3: &GuardianS3Client,
         session_id: SessionID,
         message: LogMessage,
         signing_key: &GuardianSignKeyPair,
     ) {
-        let mut state = self.state.lock().await;
         let write_started_at = Instant::now();
         let record = SignedLogEntry::new(session_id, message, signing_key);
-        let deadline = state.next_write_deadline();
+        let deadline = self.state.next_write_deadline();
 
         write_with_retries(s3, &record, deadline).await;
         if record.log_type() == LogType::Heartbeat {
-            state.renew(write_started_at);
+            self.state.renew(write_started_at);
         }
     }
 }
@@ -241,7 +239,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let mut writer = LogWriter::new();
         let signing_key = signing_key();
 
         writer
@@ -267,7 +265,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let mut writer = LogWriter::new();
         let signing_key = signing_key();
 
         writer
@@ -280,38 +278,6 @@ mod tests {
         assert_eq!(put_flaky.num_calls(), 5);
     }
 
-    #[tokio::test]
-    async fn write_waits_for_serialization_lock_before_put() {
-        let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-        let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
-        let signing_key = Arc::new(signing_key());
-        let state_guard = writer.state.lock().await;
-
-        let task = {
-            let writer = writer.clone();
-            let s3 = s3.clone();
-            let signing_key = signing_key.clone();
-            tokio::spawn(async move {
-                writer
-                    .write(
-                        &s3,
-                        session_id(&signing_key),
-                        oi_attestation(&signing_key),
-                        &signing_key,
-                    )
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
-
-        assert_eq!(put_ok.num_calls(), 0);
-        drop(state_guard);
-        task.await.unwrap();
-        assert_eq!(put_ok.num_calls(), 1);
-    }
-
     #[tokio::test(start_paused = true)]
     async fn write_panics_after_five_failures() {
         let put_fail = mock!(Client::put_object)
@@ -321,7 +287,7 @@ mod tests {
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_fail]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let mut writer = LogWriter::new();
         let signing_key = Arc::new(signing_key());
 
         let task = tokio::spawn(async move {
@@ -344,7 +310,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let mut writer = LogWriter::new();
         let signing_key = Arc::new(signing_key());
 
         writer
@@ -358,7 +324,6 @@ mod tests {
         .await;
 
         let task = {
-            let writer = writer.clone();
             let s3 = s3.clone();
             let signing_key = signing_key.clone();
             tokio::spawn(async move {
@@ -377,7 +342,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = Arc::new(mock_s3(client));
-        let writer = Arc::new(LogWriter::new());
+        let mut writer = LogWriter::new();
         let signing_key = Arc::new(signing_key());
 
         writer
@@ -404,7 +369,7 @@ mod tests {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
         let s3 = mock_s3(client);
-        let writer = LogWriter::new();
+        let mut writer = LogWriter::new();
         let signing_key = signing_key();
 
         writer
