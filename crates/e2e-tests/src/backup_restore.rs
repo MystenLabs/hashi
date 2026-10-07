@@ -130,6 +130,13 @@ mod tests {
         let node_dir = tempfile::tempdir()?;
         let recovery_dir = tempfile::tempdir()?;
         let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
+        // Armor headers do not change the configured encryption recipients.
+        let recipient_override = recipient.replacen(
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: Manual S3 backup override",
+            1,
+        );
+        assert_ne!(recipient_override, recipient);
         let db_path = node_dir.path().join("db");
         let archive_dir = node_dir.path().join("archives");
         let mut config = HashiConfig::new_for_testing();
@@ -151,7 +158,9 @@ mod tests {
             db.store_encryption_key(EPOCH, &original_key)?;
         }
 
-        let archive = commands::backup::save(&config_path, None, &archive_dir, false).await?;
+        let archive =
+            commands::backup::save(&config_path, Some(recipient_override), &archive_dir, false)
+                .await?;
         let uri = format!(
             "s3://{}/{}{}",
             s3.bucket,
