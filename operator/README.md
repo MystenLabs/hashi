@@ -82,6 +82,19 @@ If the KPs take no further part, revoke the access key now with
 `./operator/scripts/revoke-kp-upload-key.sh mainnet`. Otherwise keep it until
 the guardian is provisioned: the KPs use it for the steps below.
 
+### Fixing problems
+
+- **An extra row for an abandoned user ID:** remove its files with
+  `aws s3 rm --recursive s3://mysten-hashi-kp-pubkeys-<name>/<user-id>/`, then
+  download again.
+- **An unexpected object:** inspect it, remove it with `aws s3 rm`, then
+  download again.
+- **A re-upload note:** the latest upload is verified. Confirm with the KP that
+  they uploaded again.
+- **A failed `create-kp-upload-bucket.sh`:** follow the cleanup commands in its
+  error message.
+- **An expired AWS session:** run `aws sso login --profile admin` again.
+
 ## Publish the guardian configuration
 
 KPs run `key-provisioner ceremony` and `key-provisioner provision` with the same
@@ -123,16 +136,3 @@ Once the guardian is provisioned and activated, revoke the access key:
 ```sh
 ./operator/scripts/revoke-kp-upload-key.sh mainnet
 ```
-
-### Fixing problems
-
-- **An extra row for an abandoned user ID:** remove its files with
-  `aws s3 rm --recursive s3://mysten-hashi-kp-pubkeys-<name>/<user-id>/`, then
-  download again.
-- **An unexpected object:** inspect it, remove it with `aws s3 rm`, then
-  download again.
-- **A re-upload note:** the latest upload is verified. Confirm with the KP that
-  they uploaded again.
-- **A failed `create-kp-upload-bucket.sh`:** follow the cleanup commands in its
-  error message.
-- **An expired AWS session:** run `aws sso login --profile admin` again.
