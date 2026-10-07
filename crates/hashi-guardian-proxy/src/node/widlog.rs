@@ -91,10 +91,10 @@ struct State {
 }
 
 impl State {
-    /// Keep one entry for a wid. Two seqs mean the enclave signed the wid
-    /// twice, so log an error and keep the highest seq. Two different keys
-    /// at one seq must not occur, so return an error and fail the index.
-    fn put(&mut self, wid: WithdrawalID, entry: Entry) -> anyhow::Result<()> {
+    /// Add the entry for a listed key. Two seqs mean the enclave
+    /// signed the wid twice, so log an error and keep the highest seq. Two
+    /// different keys at one seq must not occur, so return an error.
+    fn add_entry(&mut self, wid: WithdrawalID, entry: Entry) -> anyhow::Result<()> {
         let Some(existing) = self.entries.get(&wid) else {
             self.entries.insert(wid, entry);
             return Ok(());
@@ -125,7 +125,7 @@ impl State {
     /// Build the response from the withdrawal log fetched for `wid`, cache
     /// it on the entry, and return the hit. The log must name the entry's
     /// key and must be a withdrawal log for `wid`.
-    fn add_withdrawal_log(
+    fn attach_withdrawal_log(
         &mut self,
         wid: &WithdrawalID,
         withdrawal_log: LogEntry,
@@ -255,7 +255,7 @@ impl<L: LogStore> WidLogIndex<L> {
             .collect::<anyhow::Result<Vec<_>>>()?;
         let mut state = self.lock();
         for (wid, entry) in entries {
-            state.put(wid, entry)?;
+            state.add_entry(wid, entry)?;
         }
         Ok(())
     }
@@ -304,7 +304,7 @@ impl<L: LogStore> WidLogIndex<L> {
         let withdrawal_log = self.fetch(&key).await?;
         let hit = self
             .lock()
-            .add_withdrawal_log(wid, withdrawal_log)
+            .attach_withdrawal_log(wid, withdrawal_log)
             .map_err(WidLogError)?;
         Ok(Some(hit))
     }
