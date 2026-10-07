@@ -2179,11 +2179,12 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for key rotation"))?;
         let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-        let onchain_mpc_key = hex::encode(onchain_state.mpc_public_key());
+        let onchain_mpc_key = onchain_state.mpc_public_key();
         let onchain_epoch = onchain_state.epoch();
         info!(
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
-             onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
+             onchain_epoch={onchain_epoch}, onchain_mpc_key={}",
+            hex::encode(&onchain_mpc_key),
         );
         let role = {
             let mgr = mpc_manager.read().unwrap();
@@ -2225,6 +2226,7 @@ impl MpcService {
         let output = MpcManager::run_key_rotation(
             &mpc_manager,
             &previous_certs,
+            &onchain_mpc_key,
             &p2p_channel,
             &mut tob_channel,
             &self.inner.metrics,
