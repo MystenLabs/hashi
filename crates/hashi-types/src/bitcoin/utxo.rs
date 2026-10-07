@@ -140,6 +140,8 @@ impl InputUTXO {
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
     ///
     /// The witness will be populated later after signing.
+    ///
+    /// The sequence is part of the withdrawal construction; see `construct_tx`.
     pub fn txin(&self) -> TxIn {
         TxIn {
             previous_output: self.outpoint,
@@ -434,6 +436,9 @@ pub fn sign_btc_tx(messages: &[Message], kp: &BitcoinKeypair) -> Vec<BitcoinSign
 /// Constructs a Bitcoin transaction with the given inputs and outputs.
 ///
 /// Uses BTC tx version 2 and disables lock time.
+///
+/// Nodes and the guardian rebuild withdrawals with this, so changing it needs a construction
+/// version first, carried in the guardian withdrawal request.
 pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     Transaction {
         // The latest BTC tx version

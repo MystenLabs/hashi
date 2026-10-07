@@ -153,6 +153,9 @@ pub fn taproot_script_spend_sighashes(
 ///
 /// Both leaves are committed under a NUMS internal key, disabling meaningful
 /// key path spends.
+///
+/// Nodes and the guardian derive input and change scripts with this, so changing it needs a
+/// per-UTXO template first, carried in the guardian withdrawal request.
 fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
