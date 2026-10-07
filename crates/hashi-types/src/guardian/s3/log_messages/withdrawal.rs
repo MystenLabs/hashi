@@ -3,6 +3,8 @@
 
 use super::super::log_layout::S3HourDirectory;
 use crate::committee::CommitteeSignature;
+use crate::guardian::GuardianError::InvalidS3Log;
+use crate::guardian::GuardianResult;
 use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
 use crate::guardian::StandardWithdrawalResponse;
@@ -38,14 +40,29 @@ impl WithdrawalLogMessage {
         ))
     }
 
-    /// Return the seq and the wid from a key that [`Self::object_key`] made.
-    /// Return `None` if the file name is not canonical.
-    pub fn parse_object_key(key: &str) -> Option<(u64, WithdrawalID)> {
-        let name = key.rsplit('/').next()?;
-        let (seq, wid) = name.strip_suffix(".json")?.split_once("-wid")?;
-        let seq = seq.parse().ok()?;
-        let wid = WithdrawalID::from_hex(wid).ok()?;
-        (name == format!("{seq:020}-wid{wid}.json")).then_some((seq, wid))
+    /// Return the seq and the wid from a key that [`Self::object_key`] made under `prefix`.
+    /// The caller supplies the complete directory prefix, including the final `/`.
+    /// Return an error if the key is not the exact canonical form.
+    pub fn parse_object_key(prefix: &str, key: &str) -> GuardianResult<(u64, WithdrawalID)> {
+        let parsed = key
+            .strip_prefix(prefix)
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|name| name.split_once("-wid"))
+            .and_then(|(seq, wid)| {
+                Some((seq.parse::<u64>().ok()?, WithdrawalID::from_hex(wid).ok()?))
+            });
+        let Some((seq, wid)) = parsed else {
+            return Err(InvalidS3Log(format!(
+                "noncanonical withdrawal log key {key} for prefix {prefix}"
+            )));
+        };
+        let expected_key = format!("{prefix}{seq:020}-wid{wid}.json");
+        if key != expected_key {
+            return Err(InvalidS3Log(format!(
+                "noncanonical withdrawal log key: got {key}, expected {expected_key}"
+            )));
+        }
+        Ok((seq, wid))
     }
 }
 
@@ -54,32 +71,34 @@ mod tests {
     use super::*;
 
     const WID: &str = "0x00000000000000000000000000000000000000000000000000000000000000aa";
+    const PREFIX: &str = "withdraw/2026/10/06/12/";
 
     #[test]
     fn parse_object_key_reads_the_seq_and_wid() {
-        let key = format!("withdraw/2026/10/06/12/00000000000000000042-wid{WID}.json");
-        let (seq, wid) = WithdrawalLogMessage::parse_object_key(&key).unwrap();
+        let key = format!("{PREFIX}00000000000000000042-wid{WID}.json");
+        let (seq, wid) = WithdrawalLogMessage::parse_object_key(PREFIX, &key).unwrap();
         assert_eq!(seq, 42);
         assert_eq!(wid.to_string(), WID);
-        let max = format!("withdraw/2026/10/06/12/{:020}-wid{WID}.json", u64::MAX);
-        assert_eq!(
-            WithdrawalLogMessage::parse_object_key(&max).map(|(seq, _)| seq),
-            Some(u64::MAX)
-        );
+        let max = format!("{PREFIX}{:020}-wid{WID}.json", u64::MAX);
+        let (seq, _) = WithdrawalLogMessage::parse_object_key(PREFIX, &max).unwrap();
+        assert_eq!(seq, u64::MAX);
     }
 
     #[test]
-    fn parse_object_key_rejects_noncanonical_names() {
+    fn parse_object_key_rejects_noncanonical_keys() {
         for key in [
-            format!("withdraw/2026/10/06/12/unknown-s-wid{WID}.json"),
-            format!("withdraw/2026/10/06/12/0042-wid{WID}.json"),
-            format!("withdraw/2026/10/06/12/99999999999999999999-wid{WID}.json"),
-            format!("withdraw/2026/10/06/12/00000000000000000042-wid{WID}"),
-            "withdraw/2026/10/06/12/00000000000000000042-wid0xaa.json".to_string(),
-            "withdraw/2026/10/06/12/00000000000000000042-widxyz.json".to_string(),
-            "withdraw/2026/10/06/12/".to_string(),
+            format!("{PREFIX}unknown-s-wid{WID}.json"),
+            format!("{PREFIX}0042-wid{WID}.json"),
+            format!("{PREFIX}99999999999999999999-wid{WID}.json"),
+            format!("{PREFIX}00000000000000000042-wid{WID}"),
+            format!("{PREFIX}00000000000000000042-wid0xaa.json"),
+            format!("{PREFIX}00000000000000000042-widxyz.json"),
+            format!("withdraw/2026/10/06/13/00000000000000000042-wid{WID}.json"),
+            format!("00000000000000000042-wid{WID}.json"),
+            PREFIX.to_string(),
         ] {
-            assert_eq!(WithdrawalLogMessage::parse_object_key(&key), None, "{key}");
+            let error = WithdrawalLogMessage::parse_object_key(PREFIX, &key).unwrap_err();
+            assert!(error.to_string().contains("noncanonical"), "{key}: {error}");
         }
     }
 }

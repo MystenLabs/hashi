@@ -191,21 +191,19 @@ impl<L: LogStore> WidLogIndex<L> {
         }
     }
 
-    /// Index the seq and wid of each key in `dir`. Skip a key that is not canonical.
+    /// Index the seq and wid of each key in `dir`. A key that is not
+    /// canonical fails the index.
     async fn index_hour(&self, dir: &S3HourDirectory) -> anyhow::Result<()> {
+        let prefix = dir.to_string();
         let keys = self
             .log
-            .list_keys(&dir.to_string())
+            .list_keys(&prefix)
             .await
             .with_context(|| format!("list {dir}"))?;
         let written_at = dir.to_unix_seconds();
         let mut state = self.lock();
         for key in keys {
-            let Some((seq, wid)) = WithdrawalLogMessage::parse_object_key(&key) else {
-                self.metrics.record_parse_failures.inc();
-                warn!(key, "Noncanonical withdrawal log key; skipping.");
-                continue;
-            };
+            let (seq, wid) = WithdrawalLogMessage::parse_object_key(&prefix, &key)?;
             state.put(
                 wid,
                 Entry {
@@ -276,7 +274,6 @@ impl<L: LogStore> WidLogIndex<L> {
     async fn fetch(&self, key: &str, wid: &WithdrawalID) -> Result<LogEntry, WidLogError> {
         let bytes = self.log.get(key).await.map_err(WidLogError)?;
         parse_withdrawal_log(&bytes, wid)
-            .inspect_err(|_| self.metrics.record_parse_failures.inc())
             .with_context(|| format!("parse {key}"))
             .map_err(WidLogError)
     }
@@ -584,14 +581,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noncanonical_key_is_skipped_and_counted() {
+    async fn noncanonical_key_fails_the_index() {
         let store = MemStore::default();
         write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         store.insert("withdraw/2023/11/14/22/junk.json", b"{}".to_vec());
-        let index = ready_index(store).await;
+        let index = index(store);
 
-        assert_eq!(index.metrics.record_parse_failures.get(), 1);
-        assert!(index.lookup(&wid(0xaa), NOW).await.unwrap().is_some());
+        let error = index.tick(NOW).await.unwrap_err().to_string();
+        assert!(error.contains("noncanonical withdrawal log key"), "{error}");
+        assert_eq!(cursor(&index), HOUR_0);
+        assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
     }
 
     #[tokio::test]
@@ -622,7 +621,6 @@ mod tests {
 
         assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
         assert!(index.lookup(&wid(0xbb), NOW).await.is_err());
-        assert_eq!(index.metrics.record_parse_failures.get(), 2);
     }
 
     #[tokio::test]
@@ -644,12 +642,15 @@ mod tests {
     }
 
     #[test]
-    fn wid_suffix_matches_the_real_key_shape() {
+    fn key_parser_accepts_the_real_key_shape() {
         // The key parser must accept the exact key shape that the enclave
-        // writes. A drift here makes the index skip each key.
+        // writes. A drift here fails the index on the first key.
         let w = wid(0xcd);
         let (key, _) = withdrawal_log_json(w, 7, ms(HOUR_0), mock_response());
-        assert!(key.ends_with(&format!("-wid{w}.json")));
-        assert_eq!(WithdrawalLogMessage::parse_object_key(&key), Some((7, w)));
+        let prefix = S3HourDirectory::withdraw(HOUR_0).unwrap().to_string();
+        assert_eq!(
+            WithdrawalLogMessage::parse_object_key(&prefix, &key).unwrap(),
+            (7, w)
+        );
     }
 }

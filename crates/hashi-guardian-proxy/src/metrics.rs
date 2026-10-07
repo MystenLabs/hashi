@@ -30,9 +30,6 @@ pub struct ProxyMetrics {
     pub widlog_cursor_lag_seconds: IntGauge,
     /// Tail ticks that did not list an hour directory.
     pub widlog_tail_failures: IntCounter,
-    /// Withdrawal log keys or records that did not parse (schema skew or garbage).
-    /// A record that does not parse fails its wid closed.
-    pub record_parse_failures: IntCounter,
     /// When the served TLS certificate expires, in unix seconds.
     pub tls_cert_not_after: IntGauge,
     /// Failed TLS certificate reloads; the proxy keeps serving the old one.
@@ -72,11 +69,6 @@ impl ProxyMetrics {
         let widlog_tail_failures = IntCounter::new(
             "guardian_proxy_widlog_tail_failures_total",
             "Withdrawal log index tail ticks that failed",
-        )
-        .expect("valid metric");
-        let record_parse_failures = IntCounter::new(
-            "guardian_proxy_widlog_parse_failures_total",
-            "Withdrawal log keys or records that failed to parse",
         )
         .expect("valid metric");
         let tls_cert_not_after = IntGauge::new(
@@ -126,9 +118,6 @@ impl ProxyMetrics {
             .register(Box::new(widlog_tail_failures.clone()))
             .expect("register");
         registry
-            .register(Box::new(record_parse_failures.clone()))
-            .expect("register");
-        registry
             .register(Box::new(tls_cert_not_after.clone()))
             .expect("register");
         registry
@@ -153,7 +142,6 @@ impl ProxyMetrics {
             widlog_index_size,
             widlog_cursor_lag_seconds,
             widlog_tail_failures,
-            record_parse_failures,
             tls_cert_not_after,
             tls_cert_reload_failures,
             member_refused,
