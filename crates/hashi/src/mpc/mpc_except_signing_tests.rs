@@ -1642,7 +1642,6 @@ fn test_mpc_manager_new_with_weighted_committee() {
     // With total_weight=15:
     // max_faulty = floor(15*3333/10000) = floor(4.9995) = 4
     // threshold  = 15 - 2*4 = 7
-    // (after prop_reduce with allowed_delta=0, no reduction)
     assert_eq!(manager.mpc_config.threshold, 7);
     assert_eq!(manager.mpc_config.max_faulty, 4);
 }
@@ -3425,8 +3424,6 @@ async fn test_run_as_party_exact_weight_threshold() {
 
 #[tokio::test]
 async fn test_run_as_party_with_reduced_weights() {
-    // 104 (not 100): reduction at allowed_delta = 0 needs a divisor that divides the weights,
-    // `t` and `f` exactly. With w=104 -> f=138, t=140, all even, so d=2 is feasible.
     let weights = vec![104, 104, 104, 104];
     let test_setup = setup_weight_based_test(weights.clone(), 0, None); // threshold computed automatically
 
@@ -3444,7 +3441,7 @@ async fn test_run_as_party_with_reduced_weights() {
 
     assert_ne!(
         original_weight, reduced_weight,
-        "Test requires weights to be reduced by Nodes::prop_reduce. \
+        "Test requires weights to be reduced by Nodes::knapsack_reduce. \
              Original: {}, Reduced: {}. If equal, this test won't catch the bug.",
         original_weight, reduced_weight
     );
@@ -18036,56 +18033,6 @@ fn derived_thresholds_are_accepted_by_the_reducer() {
 }
 
 #[test]
-fn a_legacy_pinned_committee_keeps_its_original_parameters() {
-    let setup = TestSetup::new(4);
-    let stakes: [u64; 4] = [25, 25, 25, 26];
-    let members: Vec<_> = setup
-        .committee()
-        .members()
-        .iter()
-        .zip(stakes)
-        .map(|(m, stake)| {
-            CommitteeMember::new(
-                m.validator_address(),
-                m.public_key().clone(),
-                m.encryption_public_key().clone(),
-                stake,
-            )
-        })
-        .collect();
-
-    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
-        (
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3334),
-        ),
-        (
-            "mpc_weight_reduction_allowed_delta".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-        (
-            "mpc_max_faulty_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3333),
-        ),
-        (
-            "mpc_nonce_accumulation_window_ms".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-    ]);
-    let legacy: RuntimeCommittee =
-        Committee::with_config(members.clone(), setup.epoch(), legacy_config).into();
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!(nodes.total_weight(), 101);
-    assert_eq!((t, f), (34, 34));
-
-    let fresh: RuntimeCommittee = Committee::new(members.clone(), setup.epoch(), 0, 3333).into();
-    assert!(fresh.config().legacy_pinned_mpc_threshold().is_none());
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!(nodes.total_weight(), 100);
-    assert_eq!((t, f), (26, 25));
-}
-
-#[test]
 fn an_underivable_previous_committee_does_not_block_startup() {
     let mut setup = TestSetup::new(4);
     let epoch = setup.epoch();
@@ -18094,8 +18041,8 @@ fn an_underivable_previous_committee_does_not_block_startup() {
         members,
         epoch - 1,
         hashi_types::move_types::Config::from_entries(vec![(
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::Bool(true),
+            "mpc_max_faulty_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::U64(5000),
         )]),
     );
     setup
@@ -18109,52 +18056,6 @@ fn an_underivable_previous_committee_does_not_block_startup() {
     assert!(manager.previous_reconfig_output_threshold.is_none());
     assert!(manager.previous_reconfig_output_max_faulty.is_none());
     assert!(manager.mpc_config.threshold > 0);
-}
-
-#[test]
-fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
-    let setup = TestSetup::new(4);
-    let stakes: [u64; 4] = [51, 52, 52, 52];
-    let members: Vec<_> = setup
-        .committee()
-        .members()
-        .iter()
-        .zip(stakes)
-        .map(|(m, stake)| {
-            CommitteeMember::new(
-                m.validator_address(),
-                m.public_key().clone(),
-                m.encryption_public_key().clone(),
-                stake,
-            )
-        })
-        .collect();
-    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
-        (
-            "mpc_threshold_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3334),
-        ),
-        (
-            "mpc_weight_reduction_allowed_delta".to_string(),
-            hashi_types::move_types::ConfigValue::U64(100),
-        ),
-        (
-            "mpc_max_faulty_in_basis_points".to_string(),
-            hashi_types::move_types::ConfigValue::U64(3333),
-        ),
-        (
-            "mpc_nonce_accumulation_window_ms".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        ),
-    ]);
-    let legacy: RuntimeCommittee =
-        Committee::with_config(members.clone(), setup.epoch(), legacy_config).into();
-    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!((nodes.total_weight(), t, f), (100, 35, 34));
-
-    let fresh: RuntimeCommittee = Committee::new(members, setup.epoch(), 100, 3333).into();
-    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!((nodes.total_weight(), t, f), (100, 26, 25));
 }
 
 #[test]
