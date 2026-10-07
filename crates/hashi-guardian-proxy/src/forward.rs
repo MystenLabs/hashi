@@ -329,7 +329,11 @@ mod tests {
     use super::test_utils::*;
     use super::*;
     use crate::node::cache::CachingGuardianGrpc;
+    use crate::node::widlog::test_utils::withdrawal_log_json;
     use crate::node::widlog::WidLogIndex;
+    use hashi_types::guardian::now_timestamp_ms;
+    use hashi_types::guardian::StandardWithdrawalResponse;
+    use hashi_types::guardian::WithdrawalID;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
@@ -360,23 +364,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_and_caches_over_real_grpc() {
+    async fn forwards_and_replays_over_real_grpc() {
         let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
-        // First withdrawal forwards to the stub; a same-wid retry at a bumped
-        // seq replays the cached response without re-calling the stub.
-        let r1 = proxy
+        // The first withdrawal forwards to the stub. The enclave writes the
+        // withdrawal log, so a same-wid retry at a bumped seq replays it
+        // without a second call to the stub.
+        proxy
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
-            .unwrap()
-            .into_inner();
+            .unwrap();
+        let (key, bytes) = withdrawal_log_json(
+            WithdrawalID::new([0x11; 32]),
+            0,
+            now_timestamp_ms(),
+            StandardWithdrawalResponse {
+                enclave_signatures: vec![],
+            },
+        );
+        proxy.widlog().log().insert(key, bytes);
         let r2 = proxy
             .standard_withdrawal(mock_request([0x11; 32], 1))
             .await
             .unwrap()
             .into_inner();
         assert_eq!(stub.standard_withdrawal_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(r1, r2);
+        assert!(r2.data.unwrap().enclave_signatures.is_empty());
 
         // A non-withdrawal node RPC passes through to the stub.
         proxy

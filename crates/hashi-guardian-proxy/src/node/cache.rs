@@ -59,6 +59,11 @@ pub struct CachingGuardianGrpc<S, L> {
 }
 
 impl<S, L> CachingGuardianGrpc<S, L> {
+    #[cfg(test)]
+    pub(crate) fn widlog(&self) -> &WidLogIndex<L> {
+        &self.widlog
+    }
+
     pub fn new(inner: S, widlog: Arc<WidLogIndex<L>>, metrics: Arc<ProxyMetrics>) -> Self {
         let inner = Arc::new(inner);
         let info_cache = GuardianInfoCache::new(inner.clone());

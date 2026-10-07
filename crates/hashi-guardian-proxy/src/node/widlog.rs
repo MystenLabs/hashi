@@ -19,8 +19,9 @@
 //! directory.
 //!
 //! How a lookup works:
-//! 1. Look in the index. On a hit, build the response from the cached
-//!    withdrawal log. If there is none yet, fetch and cache it first.
+//! 1. Look in the index. On a hit, return the cached response. If there is
+//!    none yet, fetch the withdrawal log from S3, build the response, and
+//!    cache it.
 //! 2. If not found, list the hour directories that the tail has not indexed
 //!    yet. These are the current hour, the hour after it, and sometimes the
 //!    hour before it. Add their keys to the index and look again.
@@ -79,16 +80,35 @@ struct Entry {
     written_at: UnixSeconds,
     /// The S3 key of the withdrawal log. The first hit fetches it.
     key: String,
-    /// The parsed withdrawal log, after the first hit.
-    withdrawal_log: Option<LogEntry>,
+    /// The response built from the withdrawal log, after the first hit.
+    response: Option<proto::SignedStandardWithdrawalResponse>,
 }
 
 impl Entry {
-    /// Cache `withdrawal_log` if it is the one for this entry's key.
-    fn add_withdrawal_log(&mut self, withdrawal_log: LogEntry) {
-        if withdrawal_log.object_key() == self.key {
-            self.withdrawal_log = Some(withdrawal_log);
-        }
+    /// Build the response from `withdrawal_log`, cache it, and return it.
+    /// A log that names another key is an error.
+    fn add_withdrawal_log(
+        &mut self,
+        withdrawal_log: LogEntry,
+    ) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
+        anyhow::ensure!(
+            withdrawal_log.object_key() == self.key,
+            "withdrawal log names key {}, expected {}",
+            withdrawal_log.object_key(),
+            self.key
+        );
+        let message = withdrawal_message(&withdrawal_log)?;
+        let response =
+            GuardianResponse::new(message.response.clone(), withdrawal_log.timestamp_ms());
+        // The enclave signs the response envelope after the S3 write, so the
+        // withdrawal log has no envelope signature. Nodes require 64 bytes but
+        // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
+        let signature = GuardianSignature::from([0u8; 64]);
+        let response = standard_withdrawal_response_signed_to_pb(GuardianSigned::from_parts(
+            response, signature,
+        ));
+        self.response = Some(response.clone());
+        Ok(response)
     }
 }
 
@@ -196,7 +216,7 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 
     /// Index the seq and wid of each key in `dir`. A key that is not
-    /// canonical fails the index.
+    /// canonical fails the index, and the hour adds no entries.
     async fn index_hour(&self, dir: &S3HourDirectory) -> anyhow::Result<()> {
         let prefix = dir.to_string();
         let keys = self
@@ -205,18 +225,22 @@ impl<L: LogStore> WidLogIndex<L> {
             .await
             .with_context(|| format!("list {dir}"))?;
         let written_at = dir.to_unix_seconds();
-        let mut state = self.lock();
-        for key in keys {
-            let (seq, wid) = WithdrawalLogMessage::parse_object_key(&prefix, &key)?;
-            state.put(
-                wid,
-                Entry {
+        let entries = keys
+            .into_iter()
+            .map(|key| {
+                let (seq, wid) = WithdrawalLogMessage::parse_object_key(&prefix, &key)?;
+                let entry = Entry {
                     seq,
                     written_at,
                     key,
-                    withdrawal_log: None,
-                },
-            )?;
+                    response: None,
+                };
+                Ok((wid, entry))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut state = self.lock();
+        for (wid, entry) in entries {
+            state.put(wid, entry)?;
         }
         Ok(())
     }
@@ -247,26 +271,29 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 
     /// Return the indexed withdrawal for `wid`. The first hit fetches the
-    /// withdrawal log from S3 and caches it.
+    /// withdrawal log from S3 and caches the response built from it.
     async fn hit(&self, wid: &WithdrawalID) -> Result<Option<Hit>, WidLogError> {
         let (seq, key) = {
             let state = self.lock();
             let Some(entry) = state.entries.get(wid) else {
                 return Ok(None);
             };
-            if let Some(withdrawal_log) = &entry.withdrawal_log {
+            if let Some(response) = &entry.response {
                 return Ok(Some(Hit {
                     consumed_seq: entry.seq,
-                    response: synthesize_response(withdrawal_log).map_err(WidLogError)?,
+                    response: response.clone(),
                 }));
             }
             (entry.seq, entry.key.clone())
         };
         let withdrawal_log = self.fetch(&key, wid).await?;
-        let response = synthesize_response(&withdrawal_log).map_err(WidLogError)?;
-        if let Some(entry) = self.lock().entries.get_mut(wid) {
-            entry.add_withdrawal_log(withdrawal_log);
-        }
+        let mut state = self.lock();
+        let entry = state.entries.get_mut(wid).ok_or_else(|| {
+            WidLogError(anyhow::anyhow!("wid {wid} left the index during the GET"))
+        })?;
+        let response = entry
+            .add_withdrawal_log(withdrawal_log)
+            .map_err(WidLogError)?;
         Ok(Some(Hit {
             consumed_seq: seq,
             response,
@@ -303,6 +330,7 @@ impl<L: LogStore> WidLogIndex<L> {
     }
 }
 
+/// Parse a withdrawal log that the enclave wrote for `wid`.
 fn parse_withdrawal_log(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<LogEntry> {
     let withdrawal_log = serde_json::from_slice::<SignedLogEntry>(bytes)?.into_entry_unchecked();
     let message = withdrawal_message(&withdrawal_log)?;
@@ -320,20 +348,6 @@ fn withdrawal_message(withdrawal_log: &LogEntry) -> anyhow::Result<&WithdrawalLo
         .message()
         .as_withdrawal()
         .ok_or_else(|| anyhow::anyhow!("not a withdrawal log"))
-}
-
-fn synthesize_response(
-    withdrawal_log: &LogEntry,
-) -> anyhow::Result<proto::SignedStandardWithdrawalResponse> {
-    let message = withdrawal_message(withdrawal_log)?;
-    let response = GuardianResponse::new(message.response.clone(), withdrawal_log.timestamp_ms());
-    // The enclave signs the response envelope after the S3 write, so the
-    // withdrawal log has no envelope signature. Nodes require 64 bytes but
-    // do not verify them (`into_data_unchecked`). Zeros are not a valid signature.
-    let signature = GuardianSignature::from([0u8; 64]);
-    Ok(standard_withdrawal_response_signed_to_pb(
-        GuardianSigned::from_parts(response, signature),
-    ))
 }
 
 #[cfg(test)]
@@ -525,7 +539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_hit_uses_the_cached_withdrawal_log() {
+    async fn second_hit_uses_the_cached_response() {
         let store = MemStore::default();
         write_log(&store, wid(0xaa), 7, HOUR_0 + 60);
         let index = ready_index(store).await;
@@ -547,6 +561,17 @@ mod tests {
         assert!(error.contains("two withdrawal logs at seq 7"), "{error}");
         assert_eq!(cursor(&index), HOUR_0 + HOUR);
         assert!(index.lookup(&wid(0xbb), NOW).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn withdrawal_log_under_another_key_is_an_error() {
+        let store = MemStore::default();
+        let (_, bytes) = withdrawal_log_json(wid(0xaa), 7, ms(HOUR_0 + 60), mock_response());
+        let (key, _) = withdrawal_log_json(wid(0xaa), 7, ms(HOUR_0 + HOUR), mock_response());
+        store.insert(key, bytes);
+        let index = ready_index(store).await;
+
+        assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
     }
 
     #[tokio::test]
@@ -587,7 +612,9 @@ mod tests {
         let error = index.tick(NOW).await.unwrap_err().to_string();
         assert!(error.contains("noncanonical withdrawal log key"), "{error}");
         assert_eq!(cursor(&index), HOUR_0);
+        // The hour added no entries, so the good wid is not served either.
         assert!(index.lookup(&wid(0xaa), NOW).await.is_err());
+        assert!(index.lookup(&wid(0xbb), NOW).await.is_err());
     }
 
     #[tokio::test]
