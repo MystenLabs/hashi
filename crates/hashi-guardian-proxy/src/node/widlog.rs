@@ -1,21 +1,39 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The wid index over the S3 withdrawal log of the guardian. The enclave
-//! writes one record for each signed withdrawal before it releases the
-//! signatures (`withdraw_mode/standard_withdrawal.rs`). So each wid that
-//! the enclave signed has a record. The proxy does not write.
+//! An in-memory index of the wids in the S3 withdrawal log.
 //!
-//! A background tail lists each hour directory when its writes are complete
-//! and indexes the wid of each key. The proxy fills the index before it
-//! serves. A lookup reads the index first. Then it lists the hours that the
-//! tail has not indexed. Only then is a miss definite. The index also holds
-//! the responses that this proxy forwards.
+//! Why it exists: the enclave writes one record to S3 for each withdrawal
+//! that it signs, before it returns the signatures
+//! (`withdraw_mode/standard_withdrawal.rs`). When a node retries a wid, the
+//! proxy must return the recorded response and must not ask the enclave to
+//! sign again. The proxy only reads the log. It never writes to it.
 //!
-//! Assumptions: the clock of a writer is not more than the directory
-//! completion delay behind the proxy clock, and not more than one hour
-//! ahead of it. A record is readable when the PUT of the enclave returns.
-//! A node retries a wid in less than `RETENTION`.
+//! How the index fills: the log has one directory per hour. A background
+//! task (the tail) waits until an hour directory can get no more writes,
+//! which is `DIR_WRITES_COMPLETION_DELAY` after the hour ends. Then it lists
+//! the keys in that directory and stores the wid and seq of each key. At
+//! startup, the proxy fills the index for the last `RETENTION` before it
+//! serves requests. A response that this proxy forwards is also stored, so
+//! a fast retry does not need S3.
+//!
+//! How a lookup works:
+//! 1. Look in the index. On a hit, return the stored response, or fetch the
+//!    record from S3 and build the response from it.
+//! 2. If not found, list the hour directories that the tail has not indexed
+//!    yet. These are the current hour, the hour after it, and sometimes the
+//!    hour before it. Add their keys to the index and look again.
+//! 3. If still not found, the wid is not in the log. The caller forwards the
+//!    request to the enclave.
+//!
+//! If S3 fails at any step, the lookup returns an error and the caller fails
+//! closed.
+//!
+//! Assumptions:
+//! - The enclave clock is at most `DIR_WRITES_COMPLETION_DELAY` behind the
+//!   proxy clock, and at most one hour ahead of it.
+//! - A record is visible in S3 as soon as the PUT of the enclave returns.
+//! - A node retries a wid within `RETENTION`.
 
 use crate::log_store::LogStore;
 use crate::metrics::ProxyMetrics;
