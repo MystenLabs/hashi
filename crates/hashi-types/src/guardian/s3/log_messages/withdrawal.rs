@@ -34,10 +34,15 @@ impl WithdrawalLogMessage {
     /// recover limiter state.
     pub fn object_key(&self, timestamp_ms: UnixMillis) -> anyhow::Result<String> {
         let directory = S3HourDirectory::withdraw(unix_millis_to_seconds(timestamp_ms))?;
-        Ok(format!(
-            "{directory}{:020}-wid{}.json",
-            self.request_data.seq, self.request_data.wid,
+        Ok(Self::format_object_key(
+            &directory.to_string(),
+            self.request_data.seq,
+            &self.request_data.wid,
         ))
+    }
+
+    fn format_object_key(prefix: &str, seq: u64, wid: &WithdrawalID) -> String {
+        format!("{prefix}{seq:020}-wid{wid}.json")
     }
 
     /// Return the seq and the wid from a key that [`Self::object_key`] made under `prefix`.
@@ -56,7 +61,7 @@ impl WithdrawalLogMessage {
                 "noncanonical withdrawal log key {key} for prefix {prefix}"
             )));
         };
-        let expected_key = format!("{prefix}{seq:020}-wid{wid}.json");
+        let expected_key = Self::format_object_key(prefix, seq, &wid);
         if key != expected_key {
             return Err(InvalidS3Log(format!(
                 "noncanonical withdrawal log key: got {key}, expected {expected_key}"
