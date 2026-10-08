@@ -50,6 +50,20 @@ group_by_four() {
   printf '%s' "$grouped$value"
 }
 
+# Prints one SHA-256 digest over every file under a directory. It is not shortened: a key
+# provisioner chooses bytes of a published file, so a shorter one could be made to collide.
+config_digest() {
+  local manifest digest
+  manifest="$(cd "$1" && find . -type f -exec shasum -a 256 {} + | sort -k 2)" || return 1
+  digest="$(printf '%s\n' "$manifest" | shasum -a 256)" || return 1
+  printf '%s' "${digest:0:64}"
+}
+
+# Prints the definition of config_digest in the script on standard input.
+digest_definition() {
+  sed -n '/^config_digest() {$/,/^}$/p'
+}
+
 cleanup() {
   if [[ -n "$WORK_DIR" ]]; then
     rm -rf -- "$WORK_DIR"
@@ -60,6 +74,7 @@ command_package() {
   case "$1" in
     aws) printf '%s' "AWS CLI v2" ;;
     cargo) printf '%s' "Rust toolchain (rustup)" ;;
+    git) printf '%s' "git" ;;
     mktemp | shasum) printf '%s' "standard system utilities" ;;
   esac
 }
@@ -104,7 +119,7 @@ BUCKET="mysten-hashi-kp-pubkeys-$NAME"
 IAM_USER="hashi-kp-pubkeys-$NAME-upload"
 CONFIG_FILE="$CONFIG_DIR/guardian-init.yaml"
 
-required_commands=(aws cargo mktemp shasum)
+required_commands=(aws cargo git mktemp shasum)
 missing_commands=()
 for required_command in "${required_commands[@]}"; do
   if ! command -v "$required_command" > /dev/null 2>&1; then
@@ -141,7 +156,7 @@ say "Check the configuration"
 if grep -qE '^(kp_pgp_cert_path|s3_credentials):' "$CONFIG_FILE"; then
   die "$CONFIG_FILE sets kp_pgp_cert_path or s3_credentials. Publish a copy without them."
 fi
-grep -qF -- "$GUARDIAN_BUCKET" "$CONFIG_FILE" \
+grep -qE -- "^[[:space:]]*name:[[:space:]]*\"?${GUARDIAN_BUCKET//./[.]}\"?[[:space:]]*\$" "$CONFIG_FILE" \
   || die "$CONFIG_FILE does not name the guardian bucket $GUARDIAN_BUCKET."
 HASHI_COMMIT=""
 commit_pattern='^[[:space:]]*git_revision:[[:space:]]*"?([0-9a-f]{40})"?[[:space:]]*$'
@@ -153,6 +168,14 @@ while IFS= read -r line; do
 done < "$CONFIG_FILE"
 [[ -n "$HASHI_COMMIT" ]] \
   || die "$CONFIG_FILE must list current_build before prev_builds, with a full commit as its git_revision."
+# Key provisioners run download-config.sh at the guardian's commit, while this script can be a later
+# one, so that copy must compute the digest exactly as this one does.
+if ! kp_script="$(git -C "$REPO_ROOT" show "$HASHI_COMMIT:key-provisioner/scripts/download-config.sh" 2>&1)"; then
+  die "Could not read download-config.sh at $HASHI_COMMIT, the commit the guardian runs: $kp_script"
+fi
+own_definition="$(digest_definition < "${BASH_SOURCE[0]}")"
+[[ -n "$own_definition" && "$(digest_definition <<< "$kp_script")" == "$own_definition" ]] \
+  || die "download-config.sh at $HASHI_COMMIT does not compute the configuration digest as this script does, so key provisioners could not check the one you post. Publish with this script as it is at that commit (git checkout $HASHI_COMMIT -- operator/scripts/publish-kp-config.sh), or deploy a guardian commit that includes this one."
 
 # Always build with default features: non-enclave-dev also trusts software attestation devices.
 say "Verify the key provisioner certificates"
@@ -183,8 +206,7 @@ leak_status=0
 leaked="$(grep -rlE 'AKIA[A-Z0-9]{16}' "$PUBLISH_DIR")" || leak_status=$?
 ((leak_status == 1)) \
   || die "Found an AWS access key ID, or could not check for one, so nothing was published: $leaked"
-DIGEST="$(shasum -a 256 "$PUBLISH_DIR/guardian-init.yaml")"
-DIGEST="${DIGEST:0:16}"
+DIGEST="$(config_digest "$PUBLISH_DIR")" || die "Could not digest the configuration, so nothing was published."
 printf '\nGuardian commit:      %s\nKey provisioners:     %d\nConfiguration digest: %s\n' \
   "$HASHI_COMMIT" "$cert_count" "$(group_by_four "$DIGEST")"
 
@@ -210,8 +232,8 @@ case "$publish_confirmation" in
   *) die "Publication not confirmed; nothing was published." ;;
 esac
 
-# The access key may write anywhere else in the bucket, so deny it this prefix before filling it:
-# the configuration tells every key provisioner which guardian build to trust.
+# A bucket made before create-kp-upload-bucket.sh denied this prefix lets the access key write it,
+# so deny it before filling it: the configuration tells every key provisioner which guardian to trust.
 say "Let the access key read the configuration"
 run_or_die "Could not add the read policy to $IAM_USER. Nothing was published." \
   aws iam put-user-policy --user-name "$IAM_USER" --policy-name read-guardian-config \
@@ -234,9 +256,9 @@ printf 'Published guardian-init.yaml and %d certificates.\n' "$cert_count"
 
 say "Publication complete"
 printf '%s\n' \
-  "Post the commit and the digest, so each key provisioner can compare them:" \
+  "Post the commit and the digest to the key provisioners:" \
   "  Guardian commit:      $HASHI_COMMIT" \
   "  Configuration digest: $(group_by_four "$DIGEST")" \
-  "Every key provisioner runs, from a hashi checkout at that commit:" \
+  "Each one checks that commit out and runs this, which asks for the digest:" \
   "  ./key-provisioner/scripts/download-config.sh"
 printf '\nConfiguration published successfully! It lists %d key provisioners.\n' "$cert_count"

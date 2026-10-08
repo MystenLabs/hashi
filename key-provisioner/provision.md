@@ -246,24 +246,30 @@ provisioning, which hands those shares to a guardian.
 
 ### Download the operator's configuration
 
-The operator posts a guardian commit and a configuration digest. Keep your
-YubiKey connected and run, from the repository root:
+The operator posts a guardian commit and a configuration digest. Check that
+commit out, keep your YubiKey connected, and run the download from the
+repository root:
 
 ```sh
+git fetch origin
+git checkout <commit>
 ./key-provisioner/scripts/download-config.sh
 ```
 
 Enter the bucket name, access key ID, and secret access key you used to upload
-your public files. The script downloads the configuration and every KP's
-public files, verifies them, selects your certificate from the connected
-YubiKey, and prints the directory it wrote them to.
+your public files, then the configuration digest. The script goes on only when
+the configuration it downloaded has that digest: the configuration names the
+guardian build your tools will trust and the certificates the key is shared
+between. If it refuses a digest you entered as posted, stop and tell the
+operator.
 
-If the script reports that your checkout is at a different commit than the
-guardian, run the two `git` commands it prints, then run it again. The first
-run builds the guardian tools, which can take several minutes.
+The script then verifies every KP's public files, selects your certificate
+from the connected YubiKey, and prints the directory it wrote them to. The
+first run builds the guardian tools, which can take several minutes. If it
+reports that your checkout is at a different commit than the guardian, run the
+two `git` commands it prints, then run it again.
 
-Compare the configuration digest the script prints with the one the operator
-posted, and tell the operator that it matches. Stop if it differs.
+Tell the operator when the download has finished.
 
 ### Run the key ceremony
 

@@ -186,10 +186,11 @@ Read `guardian-init.yaml` before you publish it. The Bitcoin network and the
 retention class in it come from your environment file, and they are fixed for
 the life of the guardian's key.
 
-Post the commit and the digest to the KPs. Each KP runs `download-config.sh`
-and compares the digest. Wait until every KP has confirmed it. If you render
-again, publish again and have every KP download again: the digest changes with
-the configuration.
+Post the commit and the digest to the KPs. Each KP checks the commit out and
+runs `download-config.sh`, which asks for the digest and refuses a download
+that does not have it. Wait until every KP reports that the download finished.
+If you render again, publish again and have every KP download again: the
+digest covers the configuration and every certificate.
 
 ## 8. Run the key ceremony
 
