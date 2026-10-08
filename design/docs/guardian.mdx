@@ -83,7 +83,8 @@ The main components are:
   registered TLS key as a client certificate. It forwards a committee handoff
   only once the chain stores it, which happens when its reconfiguration
   completes, so no node can move the guardian to a committee whose
-  reconfiguration is later aborted.
+  reconfiguration is later aborted. Both checks trust the proxy's Sui fullnode
+  for chain state, and assume nodes cannot reach the enclave directly.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,

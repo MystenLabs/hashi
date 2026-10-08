@@ -110,8 +110,8 @@ impl HandoffGate {
     }
 
     /// The epoch activated by the handoff the chain stores out of `from_epoch`.
-    /// A stored handoff is read once, so replaying the chain's history costs
-    /// no reads, and a request at most one that finds nothing.
+    /// A stored handoff is read once: replaying the chain's history costs no
+    /// reads, and each request at most one lookup that finds nothing.
     async fn stored_next_epoch(&self, from_epoch: u64) -> Result<Option<u64>, Refusal> {
         let known = self.stored().get(&from_epoch).copied();
         if known.is_some() {
@@ -233,8 +233,8 @@ async fn read_next_epoch(
         .deserialize()
         .context("decode the Hashi object")?;
 
-    // A Move type keeps the address of the package version that defined it,
-    // and the key is defined alongside `Hashi`.
+    // The key's address is the `Hashi` type's only because both are defined in
+    // the original package: a type added by an upgrade keeps that upgrade's.
     let key_type = TypeTag::Struct(Box::new(StructTag::new(
         *hashi_type.address(),
         Identifier::from_static("committee_set"),
