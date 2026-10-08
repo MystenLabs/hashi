@@ -11,7 +11,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 ATTESTATION_SUFFIXES=(attestation-device.pem attestation-sig.pem attestation-dec.pem)
 HOST_UNITS="hashi-guardian-enclave.service hashi-guardian-bridge.service hashi-vsock-proxy-8101.service hashi-vsock-proxy-8102.service hashi-vsock-proxy-8103.service"
 STEPS="measure [run-id] | deploy | host | proxy | render | publish | tunnel | info | ceremony | new-session | provision [--do-genesis] | activate"
-WORK_DIR=""
 
 say() {
   printf '\n== %s ==\n' "$1"
@@ -166,9 +165,10 @@ require_fresh_render() {
   [[ -f "$OPERATOR_CONFIG" ]] || die "No $OPERATOR_CONFIG. Run the render step first."
   WORK_DIR="$(mktemp -d)"
   render_into "$WORK_DIR"
-  for rendered in guardian-init.yaml operator.yaml certs; do
-    diff -r "$WORK_DIR/$rendered" "$OUT_DIR/$rendered" > /dev/null 2>&1 || stale+="${stale:+, }$rendered"
-  done
+  # Only the files a render writes: Finder, for one, adds its own to a directory it has shown.
+  while IFS= read -r rendered; do
+    cmp -s "$WORK_DIR/$rendered" "$OUT_DIR/$rendered" || stale+="${stale:+, }$rendered"
+  done < <(cd "$WORK_DIR" && find guardian-init.yaml operator.yaml certs -type f | sort)
   cleanup
   WORK_DIR=""
   [[ -z "$stale" ]] \
@@ -228,6 +228,8 @@ if ((${#missing_commands[@]} > 0)); then
   exit 1
 fi
 
+# Set after the environment file is read, so nothing in it can name what the exit removes.
+WORK_DIR=""
 trap cleanup EXIT
 OUT_DIR="$REPO_ROOT/.hashi/guardian/${GUARDIAN_STACK##*/}"
 OPERATOR_CONFIG="$OUT_DIR/operator.yaml"
@@ -257,7 +259,7 @@ case "$STEP" in
     fi
     [[ "$(grep -c -- "checkout --progress --force $HASHI_COMMIT" <<< "$run_log")" == 2 ]] \
       || die "Run $run_id did not build $HASHI_COMMIT on both runners."
-    if grep -qE 'FEATURES: [^[:space:]]' <<< "$run_log"; then
+    if grep -qE 'FEATURES:[[:space:]]+[^[:space:]]' <<< "$run_log"; then
       die "Run $run_id built with extra features, so it does not measure the guardian's image."
     fi
     pcrs_dir="$(mktemp -d)"
