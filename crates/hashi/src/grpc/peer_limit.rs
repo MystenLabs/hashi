@@ -22,6 +22,29 @@ use super::route_limits::RouteLimits;
 use crate::metrics::Metrics;
 
 const REQUEST_BUDGET: &str = "request";
+const MPC_WORK_BUDGET: &str = "work";
+
+tokio::task_local! {
+    static MPC_WORK: MpcWork;
+}
+
+enum MpcWork {
+    Guarded(Arc<MpcWorkGuard>),
+    Unguarded(IntCounter),
+}
+
+pub(crate) fn guard_blocking_mpc_work() -> Option<Arc<MpcWorkGuard>> {
+    MPC_WORK
+        .try_with(|work| match work {
+            MpcWork::Guarded(guard) => Some(guard.clone()),
+            MpcWork::Unguarded(unguarded) => {
+                unguarded.inc();
+                None
+            }
+        })
+        .ok()
+        .flatten()
+}
 
 #[derive(Clone)]
 pub(crate) struct PeerInflightLimiter(Arc<Inner>);
@@ -30,6 +53,7 @@ struct Inner {
     limit: u32,
     budget_bytes: u64,
     routes: RouteLimits,
+    mpc_work: HashMap<String, Histogram>,
     peers: RwLock<HashMap<Address, Arc<Peer>>>,
     metrics: Arc<Metrics>,
 }
@@ -41,32 +65,57 @@ struct Peer {
     at_admission: Histogram,
     max: IntGauge,
     shed: IntCounter,
-    reserved: AtomicU64,
-    reserved_high_water: AtomicU64,
-    reserved_publish: Mutex<()>,
-    reserved_max: IntGauge,
-    over_byte_budget: IntCounter,
+    request_bytes: ByteBudget,
+    work_inflight: AtomicU32,
+    work_shed: IntCounter,
+    work_bytes: ByteBudget,
     too_large: IntCounter,
 }
 
-impl Peer {
-    fn try_reserve(&self, bytes: u64, budget: u64) -> bool {
+struct ByteBudget {
+    reserved: AtomicU64,
+    high_water: AtomicU64,
+    publish: Mutex<()>,
+    max: IntGauge,
+    over: IntCounter,
+}
+
+impl ByteBudget {
+    fn new(metrics: &Metrics, peer: &str, budget: &str) -> Self {
+        Self {
+            reserved: AtomicU64::new(0),
+            high_water: AtomicU64::new(0),
+            publish: Mutex::new(()),
+            max: metrics
+                .peer_inflight_max_bytes
+                .with_label_values(&[peer, budget]),
+            over: metrics
+                .peer_requests_over_byte_budget_total
+                .with_label_values(&[peer, budget]),
+        }
+    }
+
+    fn try_reserve(&self, bytes: u64, limit: u64) -> bool {
         let Ok(before) =
             self.reserved
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
-                    reserved.checked_add(bytes).filter(|&now| now <= budget)
+                    reserved.checked_add(bytes).filter(|&now| now <= limit)
                 })
         else {
+            self.over.inc();
             return false;
         };
         let now = before + bytes;
-        if self.reserved_high_water.fetch_max(now, Ordering::AcqRel) < now {
-            let _publish = self.reserved_publish.lock().unwrap();
-            self.reserved_max.set(
-                i64::try_from(self.reserved_high_water.load(Ordering::Acquire)).unwrap_or(i64::MAX),
-            );
+        if self.high_water.fetch_max(now, Ordering::AcqRel) < now {
+            let _publish = self.publish.lock().unwrap();
+            self.max
+                .set(i64::try_from(self.high_water.load(Ordering::Acquire)).unwrap_or(i64::MAX));
         }
         true
+    }
+
+    fn release(&self, bytes: u64) {
+        self.reserved.fetch_sub(bytes, Ordering::AcqRel);
     }
 }
 
@@ -74,16 +123,16 @@ pub(super) struct RequestCharge {
     peer: Arc<Peer>,
     budget: u64,
     reserved: AtomicU64,
+    work: Option<Arc<MpcWorkGuard>>,
 }
 
 impl RequestCharge {
     pub(super) fn reserve(&self, bytes: u64) -> bool {
-        if !self.peer.try_reserve(bytes, self.budget) {
-            self.peer.over_byte_budget.inc();
+        if !self.peer.request_bytes.try_reserve(bytes, self.budget) {
             return false;
         }
         self.reserved.fetch_add(bytes, Ordering::AcqRel);
-        true
+        self.work.as_ref().is_none_or(|work| work.reserve(bytes))
     }
 
     pub(super) fn refuse_too_large(&self) {
@@ -93,9 +142,30 @@ impl RequestCharge {
 
 impl Drop for RequestCharge {
     fn drop(&mut self) {
-        self.peer
-            .reserved
-            .fetch_sub(*self.reserved.get_mut(), Ordering::AcqRel);
+        self.peer.request_bytes.release(*self.reserved.get_mut());
+    }
+}
+
+pub(crate) struct MpcWorkGuard {
+    peer: Arc<Peer>,
+    budget: u64,
+    reserved: AtomicU64,
+}
+
+impl MpcWorkGuard {
+    fn reserve(&self, bytes: u64) -> bool {
+        if !self.peer.work_bytes.try_reserve(bytes, self.budget) {
+            return false;
+        }
+        self.reserved.fetch_add(bytes, Ordering::AcqRel);
+        true
+    }
+}
+
+impl Drop for MpcWorkGuard {
+    fn drop(&mut self) {
+        self.peer.work_bytes.release(*self.reserved.get_mut());
+        self.peer.work_inflight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -106,10 +176,20 @@ impl PeerInflightLimiter {
         routes: RouteLimits,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let mpc_work = routes
+            .mpc_work_paths()
+            .map(|path| {
+                let at_admission = metrics
+                    .peer_mpc_work_at_admission
+                    .with_label_values(&[path]);
+                (path.to_owned(), at_admission)
+            })
+            .collect();
         Self(Arc::new(Inner {
             limit,
             budget_bytes,
             routes,
+            mpc_work,
             peers: RwLock::new(HashMap::new()),
             metrics,
         }))
@@ -138,15 +218,12 @@ impl PeerInflightLimiter {
                     shed: metrics
                         .peer_requests_shed_total
                         .with_label_values(&[&label]),
-                    reserved: AtomicU64::new(0),
-                    reserved_high_water: AtomicU64::new(0),
-                    reserved_publish: Mutex::new(()),
-                    reserved_max: metrics
-                        .peer_inflight_max_bytes
-                        .with_label_values(&[label.as_str(), REQUEST_BUDGET]),
-                    over_byte_budget: metrics
-                        .peer_requests_over_byte_budget_total
-                        .with_label_values(&[label.as_str(), REQUEST_BUDGET]),
+                    request_bytes: ByteBudget::new(metrics, &label, REQUEST_BUDGET),
+                    work_inflight: AtomicU32::new(0),
+                    work_shed: metrics
+                        .peer_mpc_work_shed_total
+                        .with_label_values(&[&label]),
+                    work_bytes: ByteBudget::new(metrics, &label, MPC_WORK_BUDGET),
                     too_large: metrics
                         .peer_requests_too_large_total
                         .with_label_values(&[&label]),
@@ -177,6 +254,25 @@ impl PeerInflightLimiter {
         Some(Slot(peer))
     }
 
+    fn try_admit_work(&self, peer: &Arc<Peer>, at_admission: &Histogram) -> Option<MpcWorkGuard> {
+        let limit = self.0.limit;
+        let Ok(before) =
+            peer.work_inflight
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < limit).then_some(n + 1)
+                })
+        else {
+            peer.work_shed.inc();
+            return None;
+        };
+        at_admission.observe(f64::from(before));
+        Some(MpcWorkGuard {
+            peer: peer.clone(),
+            budget: self.0.budget_bytes,
+            reserved: AtomicU64::new(0),
+        })
+    }
+
     #[cfg(test)]
     fn inflight(&self, address: Address) -> u32 {
         self.peer(address).inflight.load(Ordering::Acquire)
@@ -184,7 +280,23 @@ impl PeerInflightLimiter {
 
     #[cfg(test)]
     fn reserved(&self, address: Address) -> u64 {
-        self.peer(address).reserved.load(Ordering::Acquire)
+        self.peer(address)
+            .request_bytes
+            .reserved
+            .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn work_inflight(&self, address: Address) -> u32 {
+        self.peer(address).work_inflight.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn work_reserved(&self, address: Address) -> u64 {
+        self.peer(address)
+            .work_bytes
+            .reserved
+            .load(Ordering::Acquire)
     }
 }
 
@@ -201,18 +313,28 @@ pub(crate) async fn limit_per_peer(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let unguarded =
+        MpcWork::Unguarded(limiter.0.metrics.mpc_unguarded_spawn_blocking_total.clone());
     let Some(address) = request.extensions().get::<Address>().copied() else {
-        return next.run(request).await;
+        return MPC_WORK.scope(unguarded, next.run(request)).await;
     };
     let Some(slot) = limiter.try_admit(address) else {
         return shed(&request);
+    };
+    let path = request.uri().path();
+    let work = match limiter.0.mpc_work.get(path) {
+        Some(at_admission) => match limiter.try_admit_work(&slot.0, at_admission) {
+            Some(guard) => Some(Arc::new(guard)),
+            None => return shed(&request),
+        },
+        None => None,
     };
     let charge = Arc::new(RequestCharge {
         peer: slot.0.clone(),
         budget: limiter.0.budget_bytes,
         reserved: AtomicU64::new(0),
+        work: work.clone(),
     });
-    let path = request.uri().path();
     let request = match limiter.0.routes.limit(path) {
         Some(limit) => {
             let single_message = !super::route_limits::streams_requests(path);
@@ -223,8 +345,9 @@ pub(crate) async fn limit_per_peer(
         }
         None => request,
     };
+    let work = work.map_or(unguarded, MpcWork::Guarded);
     // Held across the handler, since tonic drops a unary body before calling it.
-    let response = next.run(request).await;
+    let response = MPC_WORK.scope(work, next.run(request)).await;
     drop(charge);
     response.map(|body| axum::body::Body::new(Guarded { body, _slot: slot }))
 }
@@ -321,8 +444,11 @@ impl Drop for CallerTaskSlot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Condvar;
+
     use axum::Router;
     use axum::routing::get;
+    use axum::routing::post;
     use tower::Service;
 
     use super::*;
@@ -433,8 +559,13 @@ mod tests {
     }
 
     const HEALTH: &str = "grpc.health.v1.Health";
+    const CHECK: &str = "/grpc.health.v1.Health/Check";
+    const WATCH: &str = "/grpc.health.v1.Health/Watch";
     const HEALTH_LIMIT: usize = 64 * 1024;
     const WATCH_CAP: usize = 16;
+    const WORK_SERVICE: &str = "test.Mpc";
+    const WORK: &str = "/test.Mpc/Work";
+    const OTHER: &str = "/test.Mpc/Other";
 
     fn health_routes() -> RouteLimits {
         let mut routes = RouteLimits::default();
@@ -443,31 +574,59 @@ mod tests {
         routes
     }
 
-    fn serve<S>(limiter: PeerInflightLimiter, health: S) -> sui_http::ServerHandle
-    where
-        S: tower::Service<
-                axum::extract::Request,
-                Response: axum::response::IntoResponse,
-                Error = std::convert::Infallible,
-            > + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        let router = Router::new()
-            .route_service(&format!("/{HEALTH}/{{*rest}}"), health)
-            .layer(
-                tower::ServiceBuilder::new()
-                    .layer(axum::middleware::from_fn(gate))
-                    .layer(axum::middleware::from_fn_with_state(
-                        limiter,
-                        limit_per_peer,
-                    )),
-            );
+    async fn health_router() -> Router {
+        let (reporter, health) = tonic_health::server::health_reporter();
+        reporter
+            .set_service_status("", tonic_health::ServingStatus::Serving)
+            .await;
+        Router::new().route_service(
+            &format!("/{HEALTH}/{{*rest}}"),
+            health.max_decoding_message_size(HEALTH_LIMIT),
+        )
+    }
+
+    fn serve(limiter: PeerInflightLimiter, router: Router) -> sui_http::ServerHandle {
+        let router = router.layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::middleware::from_fn(gate))
+                .layer(axum::middleware::from_fn_with_state(
+                    limiter,
+                    limit_per_peer,
+                )),
+        );
         sui_http::Builder::new()
             .serve(("127.0.0.1", 0), router)
             .unwrap()
+    }
+
+    #[derive(Clone, Default)]
+    struct Blocked {
+        started: Arc<AtomicU32>,
+        open: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    struct Release(Blocked);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let (open, opened) = &*self.0.open;
+            *open.lock().unwrap() = true;
+            opened.notify_all();
+        }
+    }
+
+    async fn blocking_work(
+        axum::extract::State(blocked): axum::extract::State<Blocked>,
+        request: axum::extract::Request,
+    ) -> &'static str {
+        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+        crate::mpc::spawn_blocking(move || {
+            blocked.started.fetch_add(1, Ordering::AcqRel);
+            let (open, opened) = &*blocked.open;
+            drop(opened.wait_while(open.lock().unwrap(), |open| !*open));
+        })
+        .await;
+        "ok"
     }
 
     async fn connect(address: std::net::SocketAddr) -> h2::client::SendRequest<bytes::Bytes> {
@@ -479,11 +638,11 @@ mod tests {
 
     async fn open(
         client: &h2::client::SendRequest<bytes::Bytes>,
-        method: &str,
+        path: &str,
         id: u8,
         grpc: bool,
     ) -> (h2::client::ResponseFuture, h2::SendStream<bytes::Bytes>) {
-        let mut request = http::Request::post(format!("http://localhost/{HEALTH}/{method}"))
+        let mut request = http::Request::post(format!("http://localhost{path}"))
             .header("te", "trailers")
             .header("x-peer", http::HeaderValue::from_bytes(&[id]).unwrap());
         if grpc {
@@ -538,20 +697,13 @@ mod tests {
             health_routes(),
             Arc::new(Metrics::new(&registry)),
         );
-        let (reporter, health) = tonic_health::server::health_reporter();
-        reporter
-            .set_service_status("", tonic_health::ServingStatus::Serving)
-            .await;
-        let server = serve(
-            limiter.clone(),
-            health.max_decoding_message_size(HEALTH_LIMIT),
-        );
+        let server = serve(limiter.clone(), health_router().await);
         let client = connect(*server.local_addr()).await;
 
         let stalled_len = 60 * 1024;
         let mut stalled = Vec::new();
         for _ in 0..2 {
-            let (response, mut stream) = open(&client, "Check", b'a', true).await;
+            let (response, mut stream) = open(&client, CHECK, b'a', true).await;
             let mut data = prefix(stalled_len);
             data.push(0);
             stream.send_data(data.into(), false).unwrap();
@@ -560,7 +712,7 @@ mod tests {
         let held = 2 * (prefix_len + u64::from(stalled_len));
         until(|| limiter.reserved(peer(b'a')) == held).await;
 
-        let (response, mut stream) = open(&client, "Check", b'a', true).await;
+        let (response, mut stream) = open(&client, CHECK, b'a', true).await;
         stream.send_data(prefix(stalled_len).into(), false).unwrap();
         let shed = grpc_status(response).await;
         assert_eq!(shed.code(), tonic::Code::Unavailable, "{shed:?}");
@@ -568,14 +720,14 @@ mod tests {
             shed.message()
                 .contains(crate::grpc::PEER_INFLIGHT_LIMIT_MSG)
         );
-        assert_eq!(limiter.peer(peer(b'a')).over_byte_budget.get(), 1);
+        assert_eq!(limiter.peer(peer(b'a')).request_bytes.over.get(), 1);
         assert_eq!(limiter.reserved(peer(b'a')), held);
 
-        let (response, mut stream) = open(&client, "Check", b'b', true).await;
+        let (response, mut stream) = open(&client, CHECK, b'b', true).await;
         stream.send_data(prefix(0).into(), true).unwrap();
         assert_eq!(grpc_status(response).await.code(), tonic::Code::Ok);
 
-        let (response, mut stream) = open(&client, "Check", b'c', true).await;
+        let (response, mut stream) = open(&client, CHECK, b'c', true).await;
         stream.send_data(vec![0, 0, 0].into(), false).unwrap();
         stream
             .send_data(vec![0, 3, 0x0a, 0x01, b'x', 9, 9, 9].into(), false)
@@ -584,7 +736,7 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
         drop(stream);
 
-        let (response, mut stream) = open(&client, "Watch", b'd', false).await;
+        let (response, mut stream) = open(&client, WATCH, b'd', false).await;
         stream
             .send_data(prefix(WATCH_CAP as u32 + 1).into(), false)
             .unwrap();
@@ -597,6 +749,67 @@ mod tests {
             stream.send_reset(h2::Reason::CANCEL);
         }
         until(|| limiter.reserved(peer(b'a')) == 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_mpc_request_holds_its_work_budget_until_its_blocking_work_ends() {
+        let prefix_len = crate::grpc::request_body::PREFIX_LEN;
+        let registry = prometheus::Registry::new();
+        let metrics = Arc::new(Metrics::new(&registry));
+        let mut routes = health_routes();
+        routes.service(WORK_SERVICE, HEALTH_LIMIT);
+        routes.mpc_work(WORK_SERVICE, "Work");
+        let limiter = PeerInflightLimiter::new(
+            2,
+            2 * (HEALTH_LIMIT as u64 + prefix_len),
+            routes,
+            metrics.clone(),
+        );
+        let blocked = Blocked::default();
+        let release = Release(blocked.clone());
+        let router = health_router().await.merge(
+            Router::new()
+                .route(WORK, post(blocking_work))
+                .route(OTHER, post(blocking_work))
+                .with_state(blocked.clone()),
+        );
+        let server = serve(limiter.clone(), router);
+        let client = connect(*server.local_addr()).await;
+
+        let message = [prefix(3), vec![1, 2, 3]].concat();
+        let mut cancelled = Vec::new();
+        for _ in 0..2 {
+            let (_, mut stream) = open(&client, WORK, b'a', true).await;
+            stream.send_data(message.clone().into(), true).unwrap();
+            cancelled.push(stream);
+        }
+        until(|| blocked.started.load(Ordering::Acquire) == 2).await;
+        for mut stream in cancelled {
+            stream.send_reset(h2::Reason::CANCEL);
+        }
+        until(|| limiter.inflight(peer(b'a')) == 0 && limiter.reserved(peer(b'a')) == 0).await;
+        assert_eq!(limiter.work_inflight(peer(b'a')), 2);
+        assert_eq!(limiter.work_reserved(peer(b'a')), 2 * (prefix_len + 3));
+
+        let (response, mut stream) = open(&client, WORK, b'a', true).await;
+        stream.send_data(message.clone().into(), true).unwrap();
+        let shed = grpc_status(response).await;
+        assert_eq!(shed.code(), tonic::Code::Unavailable, "{shed:?}");
+        assert_eq!(limiter.peer(peer(b'a')).work_shed.get(), 1);
+
+        let (response, mut stream) = open(&client, CHECK, b'a', true).await;
+        stream.send_data(prefix(0).into(), true).unwrap();
+        assert_eq!(grpc_status(response).await.code(), tonic::Code::Ok);
+
+        drop(release);
+        until(|| limiter.work_inflight(peer(b'a')) == 0 && limiter.work_reserved(peer(b'a')) == 0)
+            .await;
+        assert_eq!(metrics.mpc_unguarded_spawn_blocking_total.get(), 0);
+
+        let (response, mut stream) = open(&client, OTHER, b'b', true).await;
+        stream.send_data(message.into(), true).unwrap();
+        assert_eq!(response.await.unwrap().status(), http::StatusCode::OK);
+        assert_eq!(metrics.mpc_unguarded_spawn_blocking_total.get(), 1);
     }
 
     #[test]
