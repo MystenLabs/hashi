@@ -183,5 +183,5 @@ printf '%s\n' "Share these values in a code block over a private channel. Spaces
 printf '  Bucket:            %s\n' "$BUCKET"
 printf '  Access key ID:     %s\n' "$(group_by_four "$ACCESS_KEY_ID")"
 printf '  Secret access key: %s\n' "$(group_by_four "$SECRET_ACCESS_KEY")"
-printf '\nUpload bucket created successfully! Once every key provisioner confirms the roster, revoke the key with:\n  %s\n' \
+printf '\nUpload bucket created successfully! Once the key provisioners no longer need the key, revoke it with:\n  %s\n' \
   "$REVOKE_COMMAND"
