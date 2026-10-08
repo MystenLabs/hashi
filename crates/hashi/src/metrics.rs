@@ -34,6 +34,10 @@ pub struct Metrics {
     pub(crate) peer_inflight_at_admission: HistogramVec,
     pub(crate) peer_inflight_max: IntGaugeVec,
     pub(crate) peer_requests_shed_total: IntCounterVec,
+    pub(crate) peer_inflight_max_bytes: IntGaugeVec,
+    pub(crate) peer_requests_over_byte_budget_total: IntCounterVec,
+    pub(crate) peer_requests_too_large_total: IntCounterVec,
+    pub(crate) peer_inflight_limit_bytes: IntGauge,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
 
@@ -430,6 +434,33 @@ impl Metrics {
                 "hashi_peer_requests_shed_total",
                 "Requests shed because the peer was at its in-flight limit",
                 &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_inflight_max_bytes: register_int_gauge_vec_with_registry!(
+                "hashi_peer_inflight_max_bytes",
+                "Peak bytes a peer held reserved in one budget since start",
+                &["peer", "budget"],
+                registry,
+            )
+            .unwrap(),
+            peer_requests_over_byte_budget_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_requests_over_byte_budget_total",
+                "Requests shed because their declared bytes did not fit the peer's budget",
+                &["peer", "budget"],
+                registry,
+            )
+            .unwrap(),
+            peer_requests_too_large_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_requests_too_large_total",
+                "Requests refused because their declared length exceeds the route's limit",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_inflight_limit_bytes: register_int_gauge_with_registry!(
+                "hashi_peer_inflight_limit_bytes",
+                "Effective per-peer byte budget",
                 registry,
             )
             .unwrap(),
