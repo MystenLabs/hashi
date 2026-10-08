@@ -88,6 +88,16 @@ require_guardian_build() {
     || die "This checkout's crates differ from $HASHI_COMMIT, the commit the guardian runs. Check that commit out."
 }
 
+# gh reports the run a dispatch starts from 2.87 on, so check before dispatching one.
+require_run_urls() {
+  local version version_pattern='^gh version ([0-9]+)\.([0-9]+)'
+  version="$(gh --version)" || die "Could not read the GitHub CLI's version."
+  if [[ ! "$version" =~ $version_pattern ]] \
+    || ((BASH_REMATCH[1] < 2 || (BASH_REMATCH[1] == 2 && BASH_REMATCH[2] < 87))); then
+    die "This step needs GitHub CLI 2.87 or later, which reports the run it dispatches. Found: ${version%%$'\n'*}"
+  fi
+}
+
 # Everything the operator and the key provisioners must agree on, with the endpoint each one reaches the guardian by.
 write_config() {
   local guardian_endpoint="$1" cert
@@ -110,7 +120,7 @@ case "${1:-}" in
   -h | --help)
     printf '%s\n' "$USAGE" \
       "Runs one operator step of a guardian's first deployment against the stack <env-file> names." \
-      "See operator/README.md."
+      "See operator/deploy.md."
     exit 0
     ;;
 esac
@@ -156,6 +166,7 @@ case "$STEP" in
     say "Measure the guardian build at $HASHI_COMMIT"
     run_id="${1:-}"
     if [[ -z "$run_id" ]]; then
+      require_run_urls
       if ! run_url="$(gh workflow run guardian-enclave.yml --repo MystenLabs/hashi --ref main \
         -f git_revision="$HASHI_COMMIT")"; then
         die "Could not dispatch the measurement."
@@ -179,7 +190,11 @@ case "$STEP" in
     [[ "$measured" =~ ^2:([0-9a-f]{96})$ ]] || die "The two runners did not agree on one PCR0: $measured"
     measured="${BASH_REMATCH[1]}"
     printf 'PCR0: %s\n' "$measured"
-    configured="$(stack_config eif-pcr0 2> /dev/null || true)"
+    # config get fails for a key that is not set, as it does when the stack cannot be read.
+    if ! configured="$(pulumi -C "$GUARDIAN_PULUMI_DIR" config --stack "$GUARDIAN_STACK" --json \
+      | jq -r '."hashi-guardian-enclave:eif-pcr0".value // empty')"; then
+      die "Could not read the configuration of stack $GUARDIAN_STACK to compare its eif-pcr0."
+    fi
     [[ "$configured" == "$measured" ]] \
       || die "Stack $GUARDIAN_STACK has eif-pcr0 ${configured:-unset}. Set it to the PCR0 above in its Pulumi.<stack>.yaml."
     printf 'It is the eif-pcr0 stack %s configures.\n' "$GUARDIAN_STACK"
@@ -187,6 +202,8 @@ case "$STEP" in
   deploy)
     say "Deploy the guardian enclave stack $GUARDIAN_STACK"
     if ! plan="$(pulumi -C "$GUARDIAN_PULUMI_DIR" preview --stack "$GUARDIAN_STACK" --json)"; then
+      # With --json, Pulumi reports what failed inside the plan it prints.
+      jq -r '.diagnostics[]?.message // empty' <<< "$plan" >&2 || printf '%s\n' "$plan" >&2
       die "Could not preview stack $GUARDIAN_STACK."
     fi
     jq -r '.steps[] | select(.op != "same") | "  \(.op)  \(.urn | split("::") | .[-2:] | join("  "))"' <<< "$plan"
@@ -221,7 +238,7 @@ case "$STEP" in
     fi
     run_or_die "The deploy did not finish. Preview the stack before running this step again." \
       pulumi -C "$GUARDIAN_PULUMI_DIR" up --stack "$GUARDIAN_STACK" --yes
-    # Rotation state describes slots that no longer exist once every earlier instance is gone.
+    # Rotation state describes earlier instances, so it is stale once none of them is left.
     if ! remaining="$(pulumi -C "$GUARDIAN_PULUMI_DIR" stack export --stack "$GUARDIAN_STACK" \
       | jq -r '.deployment.resources[]? | select(.type == "aws:ec2/instance:Instance") | .id')"; then
       die "Deployed, but could not read the instances of stack $GUARDIAN_STACK."
@@ -232,7 +249,7 @@ case "$STEP" in
         survivors=$((survivors + 1))
       fi
     done
-    if [[ -n "$existing" ]] && ((survivors == 0)); then
+    if ((survivors == 0)); then
       if ! rotation_tags="$(pulumi -C "$GUARDIAN_PULUMI_DIR" stack tag ls --stack "$GUARDIAN_STACK" --json \
         | jq -r 'keys[] | select(startswith("rotation:"))')"; then
         die "Deployed, but could not list the stack's rotation tags. Clear them before the next rotation."
@@ -253,9 +270,12 @@ case "$STEP" in
     ;;
   proxy)
     say "Roll the guardian proxy to $HASHI_COMMIT"
+    require_run_urls
     # The workflow builds the image and applies the proxy stack from the sui-operations ref it runs on.
+    sui_operations_ref="${SUI_OPERATIONS_REF:-main}"
+    printf 'Proxy stack configuration: sui-operations %s\n' "$sui_operations_ref"
     if ! run_url="$(gh workflow run hashi-guardian-proxy-deploy.yaml --repo MystenLabs/sui-operations \
-      --ref "${SUI_OPERATIONS_REF:-main}" -f env="${GUARDIAN_STACK##*/}" -f hashi_commit="$HASHI_COMMIT")"; then
+      --ref "$sui_operations_ref" -f env="${GUARDIAN_STACK##*/}" -f hashi_commit="$HASHI_COMMIT")"; then
       die "Could not dispatch the proxy deploy."
     fi
     run_id="${run_url##*/}"
@@ -308,6 +328,7 @@ case "$STEP" in
     ;;
   publish)
     read_deployed
+    require_guardian_build
     exec "$(dirname "$0")/publish-kp-config.sh" "$KP_NAME" "$OUT_DIR" "$GUARDIAN_BUCKET"
     ;;
   tunnel)
@@ -319,10 +340,15 @@ case "$STEP" in
       --parameters "portNumber=3000,localPortNumber=$TUNNEL_PORT"
     ;;
   info)
+    require_guardian_build
     signing_key="$(guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT")" || die "$TUNNEL_DOWN"
-    printf 'Signing key: %s\nBTC key:     ' "$signing_key"
-    guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT" --field enclave-btc-pubkey 2> /dev/null \
-      || printf 'none; the guardian is not provisioned\n'
+    # The CLI fails for a guardian that has no BTC key yet; any other failure is not an answer.
+    if ! btc_key="$(guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT" --field enclave-btc-pubkey 2>&1)"; then
+      [[ "$btc_key" == *"did not return enclave_btc_pubkey"* ]] \
+        || die "Could not read the guardian's BTC key: $btc_key"
+      btc_key="none; the guardian is not provisioned"
+    fi
+    printf 'Signing key: %s\nBTC key:     %s\n' "$signing_key" "$btc_key"
     # Key provisioners and nodes reach whichever guardian the proxy fronts.
     if ! proxy_info="$(curl -fsS --max-time 15 "$GUARDIAN_PROXY_URL/info")" \
       || ! proxy_key="$(jq -r '.signingPubKey // empty' <<< "$proxy_info")"; then
@@ -337,7 +363,7 @@ case "$STEP" in
   ceremony | provision | activate)
     [[ -f "$OPERATOR_CONFIG" ]] || die "No $OPERATOR_CONFIG. Run the render step first."
     require_guardian_build
-    guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT" > /dev/null 2>&1 || die "$TUNNEL_DOWN"
+    guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT" > /dev/null || die "$TUNNEL_DOWN"
     # The configuration lists certificates relative to its own directory.
     cd "$OUT_DIR"
     exec cargo run --release --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p hashi-guardian-init -- \
@@ -360,9 +386,10 @@ case "$STEP" in
       die "No input received; nothing was restarted."
     fi
     [[ "$typed_id" == "$INSTANCE_ID" ]] || die "Not confirmed; nothing was restarted."
-    # Starting the enclave unit does not start the bridge that depends on it.
-    run_on_host "[\"systemctl restart hashi-guardian-enclave.service\",\"sleep 20\",\"systemctl start hashi-guardian-bridge.service\",\"systemctl is-active $HOST_UNITS\",\"nitro-cli describe-enclaves\"]" \
-      || die "The restart did not leave every unit running. Check the host step before going on."
+    # Starting the enclave unit does not start the bridge that depends on it. is-active succeeds
+    # when any one of several units is active, and the enclave unit is active while it retries.
+    run_on_host "[\"systemctl restart hashi-guardian-enclave.service\",\"sleep 20\",\"systemctl start hashi-guardian-bridge.service\",\"for unit in $HOST_UNITS; do systemctl is-active --quiet \$unit || { echo \$unit is not active; exit 1; }; done\",\"nitro-cli describe-enclaves\",\"nitro-cli describe-enclaves | grep -q RUNNING\"]" \
+      || die "The restart did not leave the enclave and its units running. Check the host step before going on."
     printf '\nGuardian restarted. Run the info step: its signing key must be new and its BTC key unset.\n'
     ;;
   *) die "Unknown step: $STEP. $USAGE" ;;

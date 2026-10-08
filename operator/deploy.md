@@ -32,12 +32,16 @@ You need:
   and `pulumi/services/hashi-guardian-proxy/Pulumi.<stack>.yaml`.
 - The Pulumi CLI at the version sui-operations' deploy workflows pin, first on
   your `PATH`, and access to the guardian stacks.
+- Go, which builds the enclave stack's Pulumi program.
 - The AWS CLI with the Session Manager plugin, logged in as an administrator of
   the guardian's AWS account: `aws sso login --profile admin`, then
   `export AWS_PROFILE=admin`. The session lasts some hours; log in again when
   a step reports an expired token.
-- The GitHub CLI, able to dispatch workflows in hashi and sui-operations.
+- The GitHub CLI at version 2.87 or later, which reports the run a dispatch
+  starts, able to dispatch workflows in hashi and sui-operations.
 - `cargo`, `jq` and `curl`.
+- The package ID and Hashi object ID of the published Hashi package, from the
+  publisher.
 
 Copy `operator/guardian.env.sample`, fill it in, and pass its path to every
 step:
@@ -110,8 +114,8 @@ it asks you to type that instance's ID, because the plan can destroy it and
 does not always say so: a new `s3-bucket-name` or `hashi-commit` replaces the
 instance. Type the ID only when ending that guardian is what you intend.
 
-It ends with `Deployed.` and the stack's new outputs. Then follow the host,
-which builds the enclave image itself when it boots:
+It prints the stack's new outputs and ends with `Deployed.` Then follow the
+host, which builds the enclave image itself when it boots:
 
 ```sh
 ./operator/scripts/guardian.sh guardian.env host
@@ -139,7 +143,8 @@ builds the proxy at `hashi-commit` and applies the proxy stack's configuration
 from the sui-operations branch named by `SUI_OPERATIONS_REF`. That workflow
 only runs from `main` or a `workflows-testing*` branch, so until your pull
 request merges, push your branch under such a name and set
-`SUI_OPERATIONS_REF` to it. The step waits for the workflow and ends with
+`SUI_OPERATIONS_REF` to it in your environment file. The step prints the
+branch it uses, waits for the workflow and ends with
 `The proxy answers at <url>.`
 
 ## 6. Reach the guardian
@@ -176,6 +181,10 @@ another: KPs and nodes reach whichever one the proxy does.
 for you, and `certs/`. `operator.yaml` holds the guardian's S3 key; never share
 it. `publish` uploads the KPs' copy and prints a guardian commit and a
 configuration digest.
+
+Read `guardian-init.yaml` before you publish it. The Bitcoin network and the
+retention class in it come from your environment file, and they are fixed for
+the life of the guardian's key.
 
 Post the commit and the digest to the KPs. Each KP runs `download-config.sh`
 and compares the digest. Wait until every KP has confirmed it. If you render
@@ -246,10 +255,10 @@ The committee then generates its own key. Go on once that has finished.
 ```
 
 This gives the guardian its limit, the ceremony's shares to expect and the
-first committee, read from chain. It ends with
+first committee, read from chain. It prints
 `Guardian operator provision complete.` If it stops with
-`no current committee on chain`, the committee has not finished generating its
-key: wait and run it again.
+`MPC public key not yet available on-chain`, the committee has not finished
+generating its key: wait and run it again.
 
 Wait a minute for the guardian's first heartbeat, then ask `KP_THRESHOLD` KPs
 to run the provisioning command from their guide with `--do-genesis`. Each one
@@ -272,15 +281,20 @@ guardian: start a fresh session (section 9) and run this section again.
 ./operator/scripts/guardian.sh guardian.env activate
 ```
 
-It ends with `Guardian operator activate complete.` and the guardian starts
+It prints `Guardian operator activate complete.` and the guardian starts
 serving withdrawals. Within a minute the `info` step shows
 `Serving: committee epoch <n>`, the epoch of the committee it was provisioned
 for.
+
+If you provisioned an earlier session and then started a fresh one, the step
+first waits until the earlier session has been silent for ten minutes.
 
 ## 13. Finish
 
 - Revoke the KPs' access key:
   `./operator/scripts/revoke-kp-upload-key.sh <name>`.
+- Delete `.hashi/guardian/<stack>/operator.yaml`, which holds the guardian's
+  S3 key. `render` writes it again when a step needs it.
 - Merge the sui-operations pull request, so the next deploy from `main` does
   not roll the guardian back.
 - Point whatever else pins the guardian's bucket or build, such as monitoring,
