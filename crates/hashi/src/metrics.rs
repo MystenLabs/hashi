@@ -58,6 +58,7 @@ pub struct Metrics {
     pub guardian_limiter_next_seq: IntGauge,
     pub guardian_limiter_last_updated_at_seconds: IntGauge,
     pub unknown_caller_refused_total: IntCounterVec,
+    pub mpc_rpc_caller_refused_total: IntCounterVec,
     pub validator_registration_aborts_total: IntCounterVec,
     pub guardian_bootstrap_attempts_total: IntCounter,
     pub guardian_bootstrap_outcomes_total: IntCounterVec,
@@ -584,6 +585,13 @@ impl Metrics {
                 "hashi_unknown_caller_refused_total",
                 "Requests refused before the body was decoded, because no registered validator could be resolved. Not counted in hashi_requests.",
                 &["reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_rpc_caller_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_rpc_caller_refused_total",
+                "MPC RPC calls refused by the committee membership check, by handler, caller and reason",
+                &["handler", "peer", "reason"],
                 registry,
             )
             .unwrap(),
