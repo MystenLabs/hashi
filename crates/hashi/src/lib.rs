@@ -1736,15 +1736,11 @@ mod test {
     }
 
     fn record_backup_context(hashi: &Hashi, epoch: u64) {
-        hashi
-            .db
-            .record_backup_recovery_context(&crate::db::BackupRecoveryContext {
-                recovery_epoch: epoch,
-                previous_committee_epoch: epoch.checked_sub(1),
-                mpc_public_key: "02".repeat(33),
-                deployment: crate::db::BackupDeployment::from_config(&hashi.config).unwrap(),
-            })
-            .unwrap();
+        let bundle = crate::mpc::recovery::test_recovery_bundle(
+            epoch,
+            crate::db::BackupDeployment::from_config(&hashi.config).unwrap(),
+        );
+        hashi.db.record_backup_recovery_bundle(&bundle).unwrap();
     }
 
     fn archive_name_days_ago(days: i64) -> String {

@@ -30,10 +30,14 @@ mod tests {
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
     use hashi::config::Config as HashiConfig;
+    use hashi::db::Database;
+    use hashi_types::move_types::ProtocolType;
+    use hashi_types::move_types::TobKey;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
 
     use crate::HashiNodeHandle;
     use crate::TestNetworksBuilder;
+    use crate::test_helpers::fetch_tob_certs_from_chain;
 
     // Duplicated from the main `lib.rs` tests module so this file is
     // self-contained. The values must stay in sync with `lib.rs`.
@@ -97,8 +101,8 @@ mod tests {
 
     /// Full round-trip test:
     ///
-    /// 1. DKG on 4 nodes + one key rotation so node 0's DB contains entries
-    ///    across multiple keyspaces.
+    /// 1. DKG on 4 nodes + two key rotations, retaining three committees
+    ///    and the current and predecessor rotation transcripts.
     /// 2. Shut down node 0. Serialise its config, generate an OpenPGP keypair,
     ///    and run `hashi backup save` to produce an encrypted tarball.
     /// 3. Delete node 0's on-disk state entirely (simulating "machine lost,
@@ -110,6 +114,8 @@ mod tests {
     /// 6. Restart node 0 and force one more rotation so it rejoins as a
     ///    catching-up member.
     /// 7. Assert all 4 nodes agree on the current MPC public key.
+    /// 8. Advance beyond TOB GC, prove both archived buckets are absent on
+    ///    chain, and verify the frozen archive's public inputs offline.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_backup_restore_round_trip_and_rejoin() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
@@ -145,11 +151,14 @@ mod tests {
             .current_epoch()
             .unwrap();
 
-        // One pre-backup rotation so the DB has rotation_messages rows, not
-        // just the initial DKG state.
+        // Two pre-backup rotations exercise a rotation whose predecessor is
+        // itself a rotation, requiring exactly three historical committees.
+        test_networks.sui_network.force_close_epoch().await?;
+        let previous_epoch =
+            wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
         test_networks.sui_network.force_close_epoch().await?;
         let recovery_epoch =
-            wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
+            wait_for_rotation(test_networks.hashi_network().nodes(), previous_epoch + 1).await;
         // The mirror and MPC public key can advance before local housekeeping.
         // Exact-epoch signing readiness follows its durable recovery-context
         // write; do not cancel the service by shutting down before that point.
@@ -174,6 +183,29 @@ mod tests {
                 .public_key()
                 .unwrap(),
         )?);
+        let trusted_mpc_public_key = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .mpc_public_key();
+        assert_eq!(mpc_public_key, Hex::encode(&trusted_mpc_public_key));
+
+        // Independent RPC observations, not copies of the database bundle.
+        // Buckets are walked in linked-table order by the chain oracle.
+        let mut trusted_transcripts = Vec::new();
+        for epoch in [previous_epoch, recovery_epoch] {
+            let submissions = fetch_tob_certs_from_chain(
+                &test_networks,
+                TobKey {
+                    epoch,
+                    batch_index: None,
+                    protocol_type: ProtocolType::KeyRotation,
+                },
+            )
+            .await?
+            .expect("completed rotation must have an on-chain certificate bucket");
+            assert!(!submissions.is_empty());
+            trusted_transcripts.push((epoch, submissions));
+        }
 
         // 2. Stop node 0.
         test_networks.hashi_network_mut().nodes_mut()[0]
@@ -220,7 +252,7 @@ mod tests {
         // 5. Two more rotations without node 0. The surviving nodes advance
         //    the Hashi epoch; node 0's backed-up DB is now several epochs
         //    stale relative to the live network state.
-        for target in 2..=3 {
+        for target in 3..=4 {
             test_networks.sui_network.force_close_epoch().await?;
             wait_for_rotation(
                 &test_networks.hashi_network().nodes()[1..],
@@ -236,7 +268,9 @@ mod tests {
             .tempdir_in(original_db_path.parent().expect("DB must have a parent"))?;
         commands::backup::restore(
             &tarball,
-            RestoreDecryptor::LocalSecretKey { secret_key_path },
+            RestoreDecryptor::LocalSecretKey {
+                secret_key_path: secret_key_path.clone(),
+            },
             restore_out_dir.path(),
         )?;
 
@@ -252,7 +286,7 @@ mod tests {
         assert_eq!(manifest.recovery.recovery_epoch, recovery_epoch);
         assert_eq!(
             manifest.recovery.previous_committee_epoch,
-            Some(initial_epoch)
+            Some(previous_epoch)
         );
         assert_eq!(manifest.recovery.mpc_public_key, mpc_public_key);
         assert_eq!(
@@ -305,19 +339,110 @@ mod tests {
         // 8. Force one more rotation; node 0 rejoins as a catching-up
         //    member and must end up with the same MPC pubkey as the rest.
         test_networks.sui_network.force_close_epoch().await?;
-        let nodes = test_networks.hashi_network().nodes();
-        let futs: Vec<_> = nodes
-            .iter()
-            .map(|n| n.wait_for_epoch(initial_epoch + 4, ROTATION_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(futs).await;
-        for (i, r) in results.into_iter().enumerate() {
-            r.unwrap_or_else(|e| {
-                panic!("Node {i} failed to reach epoch {}: {e}", initial_epoch + 4)
-            });
-        }
+        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 5).await;
 
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+
+        // Keep the original encrypted archive while the live network advances
+        // past the eight-epoch key-generation TOB retention window.
+        for target in (initial_epoch + 6)..=(recovery_epoch + 9) {
+            test_networks.sui_network.force_close_epoch().await?;
+            wait_for_rotation(test_networks.hashi_network().nodes(), target).await;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let mut gone = true;
+            for epoch in [previous_epoch, recovery_epoch] {
+                // Actual RPC absence is required; a missing mirror entry alone
+                // would not demonstrate on-chain garbage collection.
+                gone &= fetch_tob_certs_from_chain(
+                    &test_networks,
+                    TobKey {
+                        epoch,
+                        batch_index: None,
+                        protocol_type: ProtocolType::KeyRotation,
+                    },
+                )
+                .await?
+                .is_none();
+            }
+            if gone {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "leader did not garbage-collect archived rotation buckets"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Completed historical committees remain in the trusted chain mirror
+        // even though their certificate buckets have been destroyed.
+        let trusted_committees = {
+            let state = test_networks.hashi_network().nodes()[0]
+                .hashi()
+                .onchain_state()
+                .state();
+            [initial_epoch, previous_epoch, recovery_epoch]
+                .into_iter()
+                .map(|epoch| {
+                    let committee = state
+                        .hashi()
+                        .committees
+                        .raw_committee(epoch)
+                        .expect("completed historical committee must survive TOB GC");
+                    Ok((epoch, bcs::to_bytes(committee)?))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        // From here on restore/verification receives no node, RPC client, or
+        // TOB handle. Do not start a node from this historical snapshot: share
+        // recovery is a separate concern from retaining these public inputs.
+        let offline_restore_dir = tempfile::Builder::new()
+            .prefix("hashi-offline-restore-")
+            .tempdir()?;
+        commands::backup::restore(
+            &tarball,
+            RestoreDecryptor::LocalSecretKey { secret_key_path },
+            offline_restore_dir.path(),
+        )?;
+        let offline_db = Database::open(
+            &offline_restore_dir
+                .path()
+                .join(extract_dir_name(&tarball)?)
+                .join(DB_SNAPSHOT_TAR_PREFIX),
+        )?;
+        let bundle = offline_db
+            .backup_recovery_bundle()?
+            .expect("encrypted archive must preserve complete recovery inputs");
+        assert_eq!(bundle.context, manifest.recovery);
+        assert_eq!(bundle.committees.len(), 3);
+        assert_eq!(bundle.transcripts.len(), 2);
+        for (epoch, trusted_bytes) in trusted_committees {
+            let archived = bundle
+                .committees
+                .iter()
+                .find(|committee| committee.epoch == epoch)
+                .expect("archive must contain each required raw committee");
+            assert_eq!(bcs::to_bytes(archived)?, trusted_bytes);
+        }
+        for (epoch, trusted_submissions) in trusted_transcripts {
+            let archived = bundle
+                .transcripts
+                .iter()
+                .find(|transcript| transcript.epoch == epoch)
+                .expect("archive must contain both rotation transcripts");
+            assert_eq!(archived.protocol, ProtocolType::KeyRotation);
+            // Late submissions may extend a finalized bucket after capture.
+            // The saved sequence must be the exact ordered chain prefix,
+            // including every raw signature, bitmap, timestamp, and dealer.
+            assert!(archived.submissions.len() <= trusted_submissions.len());
+            assert_eq!(
+                bcs::to_bytes(&archived.submissions)?,
+                bcs::to_bytes(&trusted_submissions[..archived.submissions.len()])?,
+            );
+        }
         Ok(())
     }
 }

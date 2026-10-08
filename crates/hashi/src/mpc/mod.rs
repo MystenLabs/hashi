@@ -3,6 +3,7 @@
 
 mod mpc_except_signing;
 mod presig_seal;
+pub mod recovery;
 pub mod rpc;
 pub mod service;
 pub mod signing;

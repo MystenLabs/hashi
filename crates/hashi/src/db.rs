@@ -24,6 +24,9 @@ use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::RotationMessages;
 
+pub use crate::mpc::recovery::BackupRecoveryBundle;
+pub use crate::mpc::recovery::BackupRecoveryTranscript;
+
 pub struct Database {
     db: fjall::Database,
     // keyspaces
@@ -280,26 +283,41 @@ impl Database {
         self.db.snapshot()
     }
 
-    /// Record only a locally completed output checked against finalized chain state.
-    pub(crate) fn record_backup_recovery_context(
+    /// Atomically record a completed output and its verified public inputs.
+    pub(crate) fn record_backup_recovery_bundle(
         &self,
-        context: &BackupRecoveryContext,
+        bundle: &BackupRecoveryBundle,
     ) -> anyhow::Result<()> {
-        self.backup_recovery_context
-            .insert(BACKUP_RECOVERY_CONTEXT_KEY, bcs::to_bytes(context)?)?;
+        bundle.validate()?;
+        let mut batch = self.db.batch();
+        batch.insert(
+            &self.backup_recovery_context,
+            BACKUP_RECOVERY_CONTEXT_KEY,
+            bcs::to_bytes(bundle)?,
+        );
+        batch.commit()?;
         self.db.persist(fjall::PersistMode::SyncAll)?;
         Ok(())
     }
 
-    pub(crate) fn backup_recovery_context(
+    /// Read and validate the latest complete recovery point from one snapshot.
+    pub fn backup_recovery_bundle(&self) -> anyhow::Result<Option<BackupRecoveryBundle>> {
+        self.backup_recovery_bundle_from_snapshot(&self.snapshot())
+    }
+
+    pub(crate) fn backup_recovery_bundle_from_snapshot(
         &self,
         snapshot: &fjall::Snapshot,
-    ) -> anyhow::Result<Option<BackupRecoveryContext>> {
+    ) -> anyhow::Result<Option<BackupRecoveryBundle>> {
         use fjall::Readable;
-        snapshot
-            .get(&self.backup_recovery_context, BACKUP_RECOVERY_CONTEXT_KEY)?
-            .map(|bytes| bcs::from_bytes(&bytes).map_err(Into::into))
-            .transpose()
+        let Some(bytes) =
+            snapshot.get(&self.backup_recovery_context, BACKUP_RECOVERY_CONTEXT_KEY)?
+        else {
+            return Ok(None);
+        };
+        let bundle: BackupRecoveryBundle = bcs::from_bytes(&bytes)?;
+        bundle.validate()?;
+        Ok(Some(bundle))
     }
 
     /// Every keyspace, for whole-database maintenance. Add new keyspaces here.
@@ -704,11 +722,13 @@ impl Database {
         &self,
         cutoff_epoch: u64,
         pruning_references: &PruningReferences,
-        context: Option<&BackupRecoveryContext>,
-    ) -> Result<usize> {
-        // Recovery recording and pruning are owned by the serial MPC service.
-        // Publish all deletions and the corresponding context in one commit:
-        // snapshots see either the complete old recovery state or the new one.
+        bundle: Option<&BackupRecoveryBundle>,
+    ) -> anyhow::Result<usize> {
+        // Validate before any deletion. The complete recovery point and pruning
+        // become visible together, including to concurrent backup snapshots.
+        if let Some(bundle) = bundle {
+            bundle.validate()?;
+        }
         let mut batch = self.db.batch();
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
         // A key is retained if and only if its public key is referenced by a live committee or pending registration,
@@ -745,11 +765,11 @@ impl Database {
         deleted += prune_keyspace(&mut batch, &self.avid_round_states, cutoff_epoch)?;
         deleted += prune_keyspace(&mut batch, &self.avid_dealer_builders, cutoff_epoch)?;
         deleted += prune_keyspace(&mut batch, &self.avid_held_echoes, cutoff_epoch)?;
-        if let Some(context) = context {
+        if let Some(bundle) = bundle {
             batch.insert(
                 &self.backup_recovery_context,
                 BACKUP_RECOVERY_CONTEXT_KEY,
-                bcs::to_bytes(context).expect("recovery context serialization cannot fail"),
+                bcs::to_bytes(bundle)?,
             );
         } else {
             batch.remove(&self.backup_recovery_context, BACKUP_RECOVERY_CONTEXT_KEY);
@@ -2480,34 +2500,38 @@ mod backup_recovery_context_tests {
     use super::*;
     use fjall::Readable;
 
-    fn context(epoch: u64) -> BackupRecoveryContext {
-        BackupRecoveryContext {
-            recovery_epoch: epoch,
-            previous_committee_epoch: epoch.checked_sub(1),
-            mpc_public_key: "02".repeat(33),
-            deployment: BackupDeployment {
+    fn bundle(epoch: u64) -> BackupRecoveryBundle {
+        crate::mpc::recovery::test_recovery_bundle(
+            epoch,
+            BackupDeployment {
                 sui_chain_id: "sui-test".into(),
                 bitcoin_chain_id: "bitcoin-test".into(),
                 package_id: Address::new([1; 32]),
                 hashi_object_id: Address::new([2; 32]),
             },
-        }
+        )
     }
 
     #[test]
     fn pruning_commits_context_and_recovery_rows_at_one_snapshot_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
-        let old = context(1);
-        let new = context(20);
+        let old = bundle(1);
+        let new = bundle(20);
         let key = EncryptionPrivateKey::new(&mut rand::thread_rng());
         db.store_encryption_key(1, &key).unwrap();
-        db.record_backup_recovery_context(&old).unwrap();
+        db.record_backup_recovery_bundle(&old).unwrap();
         let before = db.snapshot();
         db.prune_messages_with_recovery_context(20, &PruningReferences::default(), Some(&new))
             .unwrap();
         let after = db.snapshot();
-        assert_eq!(db.backup_recovery_context(&before).unwrap(), Some(old));
+        assert_eq!(
+            db.backup_recovery_bundle_from_snapshot(&before)
+                .unwrap()
+                .unwrap()
+                .context,
+            old.context,
+        );
         assert!(
             before
                 .get(&db.encryption_epoch_index, 1u64.to_be_bytes())
@@ -2515,8 +2539,11 @@ mod backup_recovery_context_tests {
                 .is_some()
         );
         assert_eq!(
-            db.backup_recovery_context(&after).unwrap(),
-            Some(new.clone())
+            db.backup_recovery_bundle_from_snapshot(&after)
+                .unwrap()
+                .unwrap()
+                .context,
+            new.context,
         );
         assert!(
             after
@@ -2529,8 +2556,8 @@ mod backup_recovery_context_tests {
         drop(db);
         let db = Database::open(dir.path()).unwrap();
         assert_eq!(
-            db.backup_recovery_context(&db.snapshot()).unwrap(),
-            Some(new)
+            db.backup_recovery_bundle().unwrap().unwrap().context,
+            new.context,
         );
         assert!(db.get_encryption_key(1).unwrap().is_none());
     }
@@ -2539,18 +2566,65 @@ mod backup_recovery_context_tests {
     fn pruning_without_completed_output_invalidates_context_not_relabels_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
-        db.record_backup_recovery_context(&context(1)).unwrap();
+        let original = bundle(1);
+        db.record_backup_recovery_bundle(&original).unwrap();
         // Preparing future keys is not completion of that epoch.
         db.store_encryption_key(900, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
             .unwrap();
         assert_eq!(
-            db.backup_recovery_context(&db.snapshot()).unwrap(),
-            Some(context(1))
+            db.backup_recovery_bundle().unwrap().unwrap().context,
+            original.context,
         );
         db.prune_messages_with_recovery_context(20, &PruningReferences::default(), None)
             .unwrap();
-        assert_eq!(db.backup_recovery_context(&db.snapshot()).unwrap(), None);
+        assert!(db.backup_recovery_bundle().unwrap().is_none());
         assert!(db.get_encryption_key(900).unwrap().is_some());
+    }
+
+    #[test]
+    fn corrupted_or_invalid_stored_bundle_is_not_a_recovery_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.backup_recovery_context
+            .insert(BACKUP_RECOVERY_CONTEXT_KEY, [0xff])
+            .unwrap();
+        assert!(db.backup_recovery_bundle().is_err());
+
+        let mut invalid = bundle(1);
+        invalid.transcripts.clear();
+        db.backup_recovery_context
+            .insert(
+                BACKUP_RECOVERY_CONTEXT_KEY,
+                bcs::to_bytes(&invalid).unwrap(),
+            )
+            .unwrap();
+        assert!(db.backup_recovery_bundle().is_err());
+    }
+
+    #[test]
+    fn invalid_bundle_cannot_prune_or_replace_previous_recovery_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let original = bundle(1);
+        db.record_backup_recovery_bundle(&original).unwrap();
+        db.store_encryption_key(1, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
+            .unwrap();
+        let mut invalid = bundle(20);
+        invalid.transcripts.clear();
+        assert!(db.record_backup_recovery_bundle(&invalid).is_err());
+        assert!(
+            db.prune_messages_with_recovery_context(
+                20,
+                &PruningReferences::default(),
+                Some(&invalid),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.backup_recovery_bundle().unwrap().unwrap().context,
+            original.context,
+        );
+        assert!(db.get_encryption_key(1).unwrap().is_some());
     }
 
     #[test]

@@ -6604,7 +6604,7 @@ fn process_avss_message(
     }
 }
 
-fn build_reduced_nodes(
+pub(crate) fn build_reduced_nodes(
     committee: &RuntimeCommittee,
     test_weight_divisor: u16,
     chain_id: &str,

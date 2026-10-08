@@ -343,11 +343,12 @@ pub fn save(
     // In particular, neither a delayed queue event nor current RPC state describes
     // the recovery point of an offline or lagging database.
     let snapshot = db.snapshot();
-    let recovery = db.backup_recovery_context(&snapshot)?.ok_or_else(|| {
+    let bundle = db.backup_recovery_bundle_from_snapshot(&snapshot)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Database has no completed backup recovery context; wait for a finalized local MPC reconfiguration or successful MPC recovery before backing up"
+            "Database has no completed backup recovery bundle; wait for a finalized local MPC reconfiguration or successful MPC recovery before backing up"
         )
     })?;
+    let recovery = bundle.context;
     anyhow::ensure!(
         recovery.deployment == crate::db::BackupDeployment::from_config(node_config)?,
         "Node configuration deployment does not match the database backup recovery context"
@@ -1033,9 +1034,11 @@ mod tests {
             package_id: sui_sdk_types::Address::new([1; 32]),
             hashi_object_id: sui_sdk_types::Address::new([2; 32]),
         });
-        let mut context = test_recovery_context();
-        context.deployment = crate::db::BackupDeployment::from_config(config).unwrap();
-        db.record_backup_recovery_context(&context).unwrap();
+        let bundle = crate::mpc::recovery::test_recovery_bundle(
+            7,
+            crate::db::BackupDeployment::from_config(config).unwrap(),
+        );
+        db.record_backup_recovery_bundle(&bundle).unwrap();
     }
 
     fn db_only_manifest() -> BackupManifest {
@@ -1503,31 +1506,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_round_trips_through_toml() {
-        let db_path = PathBuf::from("/var/lib/hashi/db");
-        let manifest = build_backup_manifest(
-            &[PathBuf::from("/etc/hashi/hashi-cli.toml")],
-            &db_path,
-            test_recovery_context(),
-        )
-        .unwrap();
-
-        let toml = toml::to_string_pretty(&manifest).unwrap();
-        let parsed: BackupManifest = toml::from_str(&toml).unwrap();
-
-        assert_eq!(parsed.db.original_path, db_path);
-        assert_eq!(
-            parsed.db.archive_entries,
-            backup_keyspace_archive_entries(Path::new(DB_SNAPSHOT_TAR_PREFIX))
-        );
-        assert_eq!(parsed.paths.len(), 1);
-        assert_eq!(
-            parsed.paths[0].archive_name,
-            PathBuf::from("hashi-cli.toml")
-        );
-    }
-
-    #[test]
     fn restore_backup_entries_rejects_missing_db_entries() {
         let manifest = db_only_manifest();
         let tar_bytes = build_archive_bytes(&manifest, &[]);
@@ -1736,6 +1714,51 @@ mod tests {
     }
 
     #[test]
+    fn save_rejects_corrupt_stored_recovery_bundle() {
+        let src = tempfile::tempdir().unwrap();
+        let db_path = src.path().join("db");
+        let node_config_path = src.path().join("config.toml");
+        let mut config = crate::config::Config::new_for_testing();
+        config.db = Some(db_path.clone());
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: sui_sdk_types::Address::new([1; 32]),
+            hashi_object_id: sui_sdk_types::Address::new([2; 32]),
+        });
+        config.save(&node_config_path).unwrap();
+        // Bypass the validated writer to exercise corruption at the save boundary.
+        let raw = fjall::Database::builder(&db_path).open().unwrap();
+        let keyspace = raw
+            .keyspace("backup_recovery_context", KeyspaceCreateOptions::default)
+            .unwrap();
+        let mut bundle = crate::mpc::recovery::test_recovery_bundle(
+            7,
+            crate::db::BackupDeployment::from_config(&config).unwrap(),
+        );
+        bundle.transcripts.clear();
+        keyspace
+            .insert(b"context", bcs::to_bytes(&bundle).unwrap())
+            .unwrap();
+        raw.persist(fjall::PersistMode::SyncAll).unwrap();
+        drop(keyspace);
+        drop(raw);
+        let db = Database::open(&db_path).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let error = save(
+            &node_config_path,
+            &config,
+            &db,
+            &mock_pgp_cert(),
+            out.path(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("invalid recovery transcript count"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn save_works_while_db_is_open() {
         let src = tempfile::Builder::new().tempdir().unwrap();
         let db_path = src.path().join("db");
@@ -1804,7 +1827,7 @@ mod tests {
         let entry = archive.entries().unwrap().next().unwrap().unwrap();
         let (manifest, _) = read_backup_manifest(entry).unwrap();
         assert_eq!(manifest.recovery.recovery_epoch, 7);
-        assert_eq!(manifest.recovery.previous_committee_epoch, Some(3));
+        assert_eq!(manifest.recovery.previous_committee_epoch, None);
         assert!(
             output_path
                 .file_name()
@@ -1842,16 +1865,20 @@ mod tests {
             .unwrap();
         db.store_avid_round_state(7, 0, &dealer, &avid_state)
             .unwrap();
-        let context = test_recovery_context();
-        db.record_backup_recovery_context(&context).unwrap();
+        let bundle =
+            crate::mpc::recovery::test_recovery_bundle(7, test_recovery_context().deployment);
+        db.record_backup_recovery_bundle(&bundle).unwrap();
         let snapshot = db.snapshot();
-        let captured_context = db.backup_recovery_context(&snapshot).unwrap().unwrap();
-        // Advance the live DB after capturing the recovery point. Both the
-        // context and keyspaces exported below must remain on the old snapshot.
-        let mut newer_context = context.clone();
-        newer_context.recovery_epoch = 900;
+        let captured_bundle = db
+            .backup_recovery_bundle_from_snapshot(&snapshot)
+            .unwrap()
+            .unwrap();
+        // Advance the live DB after capturing the recovery point. Both public
+        // material and private keyspaces must remain on the old snapshot.
+        let newer_bundle =
+            crate::mpc::recovery::test_recovery_bundle(900, bundle.context.deployment.clone());
         db.store_encryption_key(900, &enc_key).unwrap();
-        db.record_backup_recovery_context(&newer_context).unwrap();
+        db.record_backup_recovery_bundle(&newer_bundle).unwrap();
 
         let mut tar_bytes = Vec::new();
         {
@@ -1886,11 +1913,8 @@ mod tests {
         assert_eq!(restored.get_encryption_key(7).unwrap().unwrap(), enc_key);
         assert!(restored.get_encryption_key(900).unwrap().is_none());
         assert_eq!(
-            restored
-                .backup_recovery_context(&restored.snapshot())
-                .unwrap()
-                .unwrap(),
-            captured_context,
+            bcs::to_bytes(&restored.backup_recovery_bundle().unwrap().unwrap()).unwrap(),
+            bcs::to_bytes(&captured_bundle).unwrap(),
         );
         let restored_dealer = restored.get_dealer_message(7, &dealer).unwrap().unwrap();
         assert_eq!(

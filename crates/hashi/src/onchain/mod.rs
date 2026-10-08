@@ -597,23 +597,7 @@ impl OnchainState {
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
     ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let key = move_types::TobKey {
-            epoch,
-            batch_index,
-            protocol_type,
-        };
-        let state = self.state();
-        let Some(bucket) = state.hashi.tob.buckets.get(&key) else {
-            return Ok(None);
-        };
-        let certs: Vec<(Address, move_types::DealerSubmissionV1)> = bucket
-            .complete_certs_in_order()
-            .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
-            .into_iter()
-            .map(|(dealer, submission)| (dealer, submission.clone()))
-            .collect();
-        ensure_tob_read_ordered(protocol_type, &certs)?;
-        Ok(Some(certs))
+        self.state().tob_certs(epoch, batch_index, protocol_type)
     }
 
     pub fn presig_seals(&self, epoch: u64) -> BTreeMap<u32, move_types::PresigSealV1> {
@@ -666,10 +650,6 @@ impl OnchainState {
             .keys()
             .next()
             .copied()
-    }
-
-    pub(crate) fn is_key_rotation_epoch(&self, epoch: u64) -> bool {
-        Self::epoch_after_first_committee(self.earliest_committee_epoch(), epoch)
     }
 
     pub(crate) fn epoch_after_first_committee(
@@ -1126,6 +1106,31 @@ impl State {
 
     pub fn hashi(&self) -> &types::Hashi {
         &self.hashi
+    }
+
+    /// Read a complete TOB transcript from this same committee-state snapshot.
+    pub(crate) fn tob_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let key = move_types::TobKey {
+            epoch,
+            batch_index,
+            protocol_type,
+        };
+        let Some(bucket) = self.hashi.tob.buckets.get(&key) else {
+            return Ok(None);
+        };
+        let certs = bucket
+            .complete_certs_in_order()
+            .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
+            .into_iter()
+            .map(|(dealer, submission)| (dealer, submission.clone()))
+            .collect::<Vec<_>>();
+        ensure_tob_read_ordered(protocol_type, &certs)?;
+        Ok(Some(certs))
     }
 
     /// Resolve version support from this snapshot against `supported` (the

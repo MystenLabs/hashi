@@ -38,6 +38,7 @@ use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::presig_seal;
+use crate::mpc::recovery::BackupRecoveryBundle;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::signing::IdentityInputs;
 use crate::mpc::types::CertificateV1;
@@ -351,7 +352,7 @@ impl MpcService {
         epoch_change_confirmed: bool,
         backup: Backup,
         output: Option<&MpcOutput>,
-        committed_context: Option<crate::db::BackupRecoveryContext>,
+        committed_context: Option<BackupRecoveryBundle>,
     ) {
         let current_epoch = self.inner.onchain_state().epoch();
         let tombstoned = if epoch_change_confirmed || current_epoch >= target_epoch {
@@ -360,19 +361,17 @@ impl MpcService {
                 let committees = &state.hashi().committees;
                 let context = committed_context.or_else(|| {
                     output.and_then(|output| {
-                        match finalized_backup_context(
+                        capture_backup_bundle(
+                            finalized_backup_context(
+                                &self.inner.config,
+                                committees,
+                                target_epoch,
+                                &bcs::to_bytes(&output.public_key)
+                                    .expect("public key serialization should succeed"),
+                            ),
+                            &state,
                             &self.inner.config,
-                            committees,
-                            target_epoch,
-                            &bcs::to_bytes(&output.public_key)
-                                .expect("public key serialization should succeed"),
-                        ) {
-                            Ok(context) => context,
-                            Err(e) => {
-                                error!("Cannot record backup recovery context: {e}");
-                                None
-                            }
-                        }
+                        )
                     })
                 });
                 (build_pruning_references(committees, target_epoch), context)
@@ -592,9 +591,21 @@ impl MpcService {
 
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
-        let epoch = onchain_state.epoch();
-        let is_key_rotation = onchain_state.is_key_rotation_epoch(epoch);
-        let onchain_mpc_key = onchain_state.mpc_public_key();
+        // Capture public inputs before recovery can await peers or the mirror
+        // can garbage-collect a dependency. All inputs share one read guard.
+        let (epoch, is_key_rotation, onchain_mpc_key, candidate) = {
+            let state = onchain_state.state();
+            let committees = &state.hashi().committees;
+            let epoch = committees.epoch();
+            let key = committees.mpc_public_key().to_vec();
+            let previous = committees.committees().range(..epoch).next_back();
+            let candidate = capture_backup_bundle(
+                finalized_backup_context(&self.inner.config, committees, epoch, &key),
+                &state,
+                &self.inner.config,
+            );
+            (epoch, previous.is_some(), key, candidate)
+        };
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
              onchain_mpc_key_len={}",
@@ -609,13 +620,18 @@ impl MpcService {
         // original output epoch and key against one fresh finalized state;
         // never label this output with the mirror's newer epoch.
         let state = self.inner.onchain_state().state();
-        if let Some(context) = finalized_backup_context(
-            &self.inner.config,
-            &state.hashi().committees,
-            epoch,
-            &bcs::to_bytes(&output.public_key)?,
-        )? {
-            self.inner.db.record_backup_recovery_context(&context)?;
+        if let Some(bundle) = candidate
+            && finalized_backup_context(
+                &self.inner.config,
+                &state.hashi().committees,
+                epoch,
+                &bcs::to_bytes(&output.public_key)?,
+            )?
+            .as_ref()
+                == Some(&bundle.context)
+            && let Err(e) = self.inner.db.record_backup_recovery_bundle(&bundle)
+        {
+            error!("Cannot record backup recovery material: {e:#}");
         }
         info!(
             "recover_mpc_state: recovered vk={}",
@@ -2281,7 +2297,7 @@ impl MpcService {
         &self,
         epoch: u64,
         output: &MpcOutput,
-    ) -> anyhow::Result<Option<crate::db::BackupRecoveryContext>> {
+    ) -> anyhow::Result<Option<BackupRecoveryBundle>> {
         let mpc_public_key =
             bcs::to_bytes(&output.public_key).expect("public key serialization should succeed");
         let (target_committee, candidate_context) = {
@@ -2292,20 +2308,13 @@ impl MpcService {
                 .get(&epoch)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no committee found for epoch {}", epoch))?;
-            // A candidate is not recovery metadata until the epoch/key-bound
-            // completion transaction below returns successful effects.
-            let candidate = match pending_backup_context(
+            // A captured public bundle is not recoverable backup material
+            // until the epoch/key-bound completion has successful effects.
+            let candidate = capture_backup_bundle(
+                pending_backup_context(&self.inner.config, committees, epoch, &mpc_public_key),
+                &state,
                 &self.inner.config,
-                committees,
-                epoch,
-                &mpc_public_key,
-            ) {
-                Ok(context) => context,
-                Err(e) => {
-                    error!("Cannot capture backup recovery context: {e}");
-                    None
-                }
-            };
+            );
             (target_committee, candidate)
         };
         let message = ReconfigCompletionMessage {
@@ -2373,9 +2382,17 @@ impl MpcService {
                         );
                         self.wait_for_pending_clear_visibility(epoch).await;
                         if self.get_pending_epoch_change() != Some(epoch) {
-                            // Another transaction won; housekeeping must match
-                            // this local output against finalized mirror state.
-                            return Ok(None);
+                            // Promote only the pre-await candidate, and only
+                            // after observing this exact finalized epoch/key.
+                            let state = self.inner.onchain_state().state();
+                            let finalized = finalized_backup_context(
+                                &self.inner.config,
+                                &state.hashi().committees,
+                                epoch,
+                                &mpc_public_key,
+                            )?;
+                            return Ok(candidate_context
+                                .filter(|bundle| finalized.as_ref() == Some(&bundle.context)));
                         }
                         warn!(
                             "end_reconfig for epoch {epoch} is complete on chain, but the watcher still reports it pending after the visibility wait; retrying"
@@ -2786,6 +2803,24 @@ mod presig_count_tests {
             expected,
             (total_weight - params.f as usize) * batch_size_per_weight as usize
         );
+    }
+}
+
+fn capture_backup_bundle(
+    context: anyhow::Result<Option<crate::db::BackupRecoveryContext>>,
+    state: &crate::onchain::State,
+    config: &crate::config::Config,
+) -> Option<BackupRecoveryBundle> {
+    match context.and_then(|context| {
+        context
+            .map(|context| BackupRecoveryBundle::capture(context, state, config))
+            .transpose()
+    }) {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            warn!("Cannot capture complete backup recovery material: {e:#}");
+            None
+        }
     }
 }
 
@@ -3354,86 +3389,51 @@ mod backup_context_tests {
     }
 
     #[test]
-    fn committed_completion_creates_recoverable_snapshot_before_mirror_catches_up() {
+    fn pending_candidate_requires_exact_finalized_output_to_match() {
         let mut config = Config::new_for_testing();
         config.hashi_ids = Some(HashiIds {
             package_id: Address::new([1; 32]),
             hashi_object_id: Address::new([2; 32]),
         });
-        let encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
-        let signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
-        let mut set = CommitteeSet::new(Address::ZERO, Address::ZERO);
-        set.set_epoch(3)
-            .set_mpc_public_key(vec![2; 33])
-            .set_pending_epoch_change(Some(20))
-            .set_committees(
-                [3, 20]
-                    .into_iter()
-                    .map(|epoch| {
-                        (
-                            epoch,
-                            Committee::new(
-                                vec![CommitteeMember::new(
-                                    Address::new([3; 32]),
-                                    signing.public_key(),
-                                    encryption.public_key(),
-                                    1,
-                                )],
-                                epoch,
-                                0,
-                                5_000,
-                            ),
-                        )
-                    })
-                    .collect(),
-            );
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::db::Database::open(dir.path()).unwrap();
-        db.store_encryption_key(3, &encryption).unwrap();
-        db.store_signing_key(3, &signing).unwrap();
-        let candidate = super::pending_backup_context(&config, &set, 20, &[4; 33])
-            .unwrap()
-            .unwrap();
-        // Protocol completion alone has no persistent effect. Aborted or
-        // failed submissions never pass this candidate into housekeeping.
-        assert!(
-            db.backup_recovery_context(&db.snapshot())
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            finalized_backup_context(&config, &set, 20, &[4; 33])
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            super::pending_backup_context(&config, &set, 21, &[4; 33])
-                .unwrap()
-                .is_none()
-        );
-        let before_commit = db.snapshot();
-        // This is the direct successful-effects path used by housekeeping:
-        // capture and pruning both still see epoch 3 with epoch 20 pending.
-        db.prune_messages_with_recovery_context(
+        let candidate = crate::mpc::recovery::test_recovery_bundle(
             20,
-            &super::build_pruning_references(&set, 20),
-            Some(&candidate),
-        )
-        .unwrap();
+            crate::db::BackupDeployment::from_config(&config).unwrap(),
+        );
+        let key = hex::decode(&candidate.context.mpc_public_key).unwrap();
+        let mut set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        set.set_epoch(0).set_pending_epoch_change(Some(20));
+        set.insert_onchain_committee(20, candidate.committees[0].clone());
+        assert_eq!(
+            super::pending_backup_context(&config, &set, 20, &key)
+                .unwrap()
+                .as_ref(),
+            Some(&candidate.context),
+        );
         assert!(
-            db.backup_recovery_context(&before_commit)
+            finalized_backup_context(&config, &set, 20, &key)
                 .unwrap()
                 .is_none()
         );
-        let stored = db.backup_recovery_context(&db.snapshot()).unwrap().unwrap();
-        assert_eq!(stored.recovery_epoch, 20);
-        assert_eq!(stored.previous_committee_epoch, Some(3));
-        assert_eq!(stored.mpc_public_key, hex::encode([4; 33]));
-        assert_eq!(
-            stored.deployment,
-            crate::db::BackupDeployment::from_config(&config).unwrap()
+        assert!(
+            super::pending_backup_context(&config, &set, 21, &key)
+                .unwrap()
+                .is_none()
         );
-        assert!(db.get_encryption_key(3).unwrap().is_some());
-        assert!(db.get_signing_key(3).unwrap().is_some());
+        // A competing completion may promote the same candidate only once
+        // its exact key and epoch are visible, even with a later target pending.
+        set.set_epoch(20)
+            .set_mpc_public_key(key.clone())
+            .set_pending_epoch_change(Some(21));
+        assert_eq!(
+            finalized_backup_context(&config, &set, 20, &key)
+                .unwrap()
+                .as_ref(),
+            Some(&candidate.context),
+        );
+        assert!(
+            finalized_backup_context(&config, &set, 20, &[])
+                .unwrap()
+                .is_none()
+        );
     }
 }

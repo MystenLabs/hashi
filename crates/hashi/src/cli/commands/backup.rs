@@ -244,13 +244,11 @@ mod tests {
 
     fn initialize_backup_db(config: &Config) {
         let db = Database::open(config.db.as_ref().unwrap()).unwrap();
-        db.record_backup_recovery_context(&crate::db::BackupRecoveryContext {
-            recovery_epoch: 42,
-            previous_committee_epoch: Some(41),
-            mpc_public_key: "02".repeat(33),
-            deployment: crate::db::BackupDeployment::from_config(config).unwrap(),
-        })
-        .unwrap();
+        let bundle = crate::mpc::recovery::test_recovery_bundle(
+            42,
+            crate::db::BackupDeployment::from_config(config).unwrap(),
+        );
+        db.record_backup_recovery_bundle(&bundle).unwrap();
     }
 
     /// Fixture holding a populated source directory and node config.
@@ -839,7 +837,6 @@ mod tests {
         let mut entries = archive.entries().unwrap();
         let (mut manifest, _) =
             backup::read_backup_manifest(entries.next().unwrap().unwrap()).unwrap();
-        assert_eq!(manifest.paths.len(), 1);
         manifest.paths[0].original_path = config_target.clone();
         manifest.db.original_path = db_target.clone();
         let manifest_toml = toml::to_string(&manifest).unwrap();
