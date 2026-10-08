@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 ATTESTATION_SUFFIXES=(attestation-device.pem attestation-sig.pem attestation-dec.pem)
 HOST_UNITS="hashi-guardian-enclave.service hashi-guardian-bridge.service hashi-vsock-proxy-8101.service hashi-vsock-proxy-8102.service hashi-vsock-proxy-8103.service"
 STEPS="measure [run-id] | deploy | host | proxy | render | publish | tunnel | info | ceremony | new-session | provision [--do-genesis] | activate"
+WORK_DIR=""
 
 say() {
   printf '\n== %s ==\n' "$1"
@@ -31,6 +32,12 @@ run_or_die() {
 
   if ! "$@"; then
     die "$failure_message"
+  fi
+}
+
+cleanup() {
+  if [[ -n "$WORK_DIR" ]]; then
+    rm -rf -- "$WORK_DIR"
   fi
 }
 
@@ -115,6 +122,71 @@ write_config() {
   printf '\nlimiter_config:\n  refill_rate: %s\n  max_bucket_capacity: %s\n' "$REFILL_RATE" "$MAX_BUCKET_CAPACITY"
 }
 
+# Writes the deployed guardian's configuration into a directory: guardian-init.yaml for the key
+# provisioners, operator.yaml for the operator, and the certificates both list.
+render_into() {
+  local dir="$1" cert
+  read_deployed
+  EIF_PCR0="$(stack_config eif-pcr0)" || die "Stack $GUARDIAN_STACK has no eif-pcr0."
+  REFILL_RATE="$(stack_config refill-rate-sats-per-sec)" || die "Stack $GUARDIAN_STACK has no refill-rate-sats-per-sec."
+  MAX_BUCKET_CAPACITY="$(stack_config max-bucket-capacity-sats)" \
+    || die "Stack $GUARDIAN_STACK has no max-bucket-capacity-sats."
+  [[ "$EIF_PCR0" =~ ^[0-9a-f]{96}$ ]] || die "eif-pcr0 is not a PCR0 measurement: $EIF_PCR0"
+
+  [[ -f "$KP_ROSTER_DIR/roster.txt" ]] \
+    || die "No verified roster in $KP_ROSTER_DIR. Run download-kp-pubkeys.sh first."
+  rm -rf -- "$dir/certs"
+  mkdir -p "$dir/certs"
+  CERTS=()
+  for cert in "$KP_ROSTER_DIR"/*/*-kp-pubkey.asc; do
+    [[ -f "$cert" ]] || die "No certificates in $KP_ROSTER_DIR."
+    cp -- "$cert" "${ATTESTATION_SUFFIXES[@]/#/${cert%.asc}.}" "$dir/certs/"
+    CERTS+=("${cert##*/}")
+  done
+
+  write_config "$GUARDIAN_PROXY_URL" > "$dir/guardian-init.yaml"
+  S3_ACCESS_KEY_ID="$(stack_output s3_access_key_id)" || die "Could not read the guardian's S3 access key."
+  S3_SECRET_ACCESS_KEY="$(stack_output s3_secret_access_key --show-secrets)" \
+    || die "Could not read the guardian's S3 secret key."
+  # The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
+  (
+    umask 077
+    rm -f -- "$dir/operator.yaml"
+    {
+      write_config "$TUNNEL_ENDPOINT"
+      printf '\ns3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n' "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY"
+    } > "$dir/operator.yaml"
+  ) || die "Could not write $dir/operator.yaml."
+}
+
+# Stops unless the rendered configuration is what the render step would write now: the stack, the
+# environment file and the roster can each have changed since it ran.
+require_fresh_render() {
+  local rendered stale=""
+  [[ -f "$OPERATOR_CONFIG" ]] || die "No $OPERATOR_CONFIG. Run the render step first."
+  WORK_DIR="$(mktemp -d)"
+  render_into "$WORK_DIR"
+  for rendered in guardian-init.yaml operator.yaml certs; do
+    diff -r "$WORK_DIR/$rendered" "$OUT_DIR/$rendered" > /dev/null 2>&1 || stale+="${stale:+, }$rendered"
+  done
+  cleanup
+  WORK_DIR=""
+  [[ -z "$stale" ]] \
+    || die "Out of date in $OUT_DIR: $stale. The stack, $ENV_FILE or the roster changed after the render step. Run it again, then publish again and have every key provisioner download again, unless only operator.yaml is out of date."
+}
+
+# Stops unless the proxy fronts the guardian with this signing key, and sets PROXY_INFO. Key
+# provisioners and nodes reach whichever guardian the proxy fronts.
+require_fronted() {
+  local signing_key="$1" proxy_key
+  if ! PROXY_INFO="$(curl -fsS --max-time 15 "$GUARDIAN_PROXY_URL/info")" \
+    || ! proxy_key="$(jq -r '.signingPubKey // empty' <<< "$PROXY_INFO")"; then
+    die "The proxy does not answer at $GUARDIAN_PROXY_URL/info."
+  fi
+  [[ "$proxy_key" == "$signing_key" ]] \
+    || die "The proxy fronts guardian ${proxy_key:-none}, but $TUNNEL_ENDPOINT reaches $signing_key. The proxy caches its view for 30 seconds: run this step again. If they still differ, check that the tunnel is this stack's, then roll the proxy."
+}
+
 USAGE="Usage: $0 <env-file> <step>, where <step> is: $STEPS"
 case "${1:-}" in
   -h | --help)
@@ -156,6 +228,7 @@ if ((${#missing_commands[@]} > 0)); then
   exit 1
 fi
 
+trap cleanup EXIT
 OUT_DIR="$REPO_ROOT/.hashi/guardian/${GUARDIAN_STACK##*/}"
 OPERATOR_CONFIG="$OUT_DIR/operator.yaml"
 HASHI_COMMIT="$(stack_config hashi-commit)" || die "Stack $GUARDIAN_STACK in $GUARDIAN_PULUMI_DIR has no hashi-commit."
@@ -177,10 +250,15 @@ case "$STEP" in
     printf 'Measurement run: https://github.com/MystenLabs/hashi/actions/runs/%s\n' "$run_id"
     run_or_die "The measurement run did not succeed." \
       gh run watch "$run_id" --repo MystenLabs/hashi --exit-status > /dev/null
-    # The run builds whatever commit it was given, so check it was this one, on both runners.
-    if ! checkouts="$(gh run view "$run_id" --repo MystenLabs/hashi --log \
-      | grep -c -- "checkout --progress --force $HASHI_COMMIT")" || [[ "$checkouts" != 2 ]]; then
-      die "Run $run_id did not build $HASHI_COMMIT on both runners."
+    # The run builds whatever commit and features it was given, so check it built this commit on
+    # both runners, with no feature that changes the image, such as non-enclave-dev.
+    if ! run_log="$(gh run view "$run_id" --repo MystenLabs/hashi --log)"; then
+      die "Could not read the log of run $run_id."
+    fi
+    [[ "$(grep -c -- "checkout --progress --force $HASHI_COMMIT" <<< "$run_log")" == 2 ]] \
+      || die "Run $run_id did not build $HASHI_COMMIT on both runners."
+    if grep -qE 'FEATURES: [^[:space:]]' <<< "$run_log"; then
+      die "Run $run_id built with extra features, so it does not measure the guardian's image."
     fi
     pcrs_dir="$(mktemp -d)"
     run_or_die "Could not download the measurements of run $run_id." \
@@ -236,12 +314,15 @@ case "$STEP" in
         *) die "Not confirmed; nothing was changed." ;;
       esac
     fi
-    run_or_die "The deploy did not finish. Preview the stack before running this step again." \
-      pulumi -C "$GUARDIAN_PULUMI_DIR" up --stack "$GUARDIAN_STACK" --yes
-    # Rotation state describes earlier instances, so it is stale once none of them is left.
+    up_status=0
+    pulumi -C "$GUARDIAN_PULUMI_DIR" up --stack "$GUARDIAN_STACK" --yes || up_status=$?
+    outcome="Deployed, but"
+    ((up_status == 0)) || outcome="The deploy did not finish, and"
+    # Rotation state describes earlier instances, so it is stale once none of them is left. A deploy
+    # that fails partway can already have destroyed them, so this runs either way.
     if ! remaining="$(pulumi -C "$GUARDIAN_PULUMI_DIR" stack export --stack "$GUARDIAN_STACK" \
       | jq -r '.deployment.resources[]? | select(.type == "aws:ec2/instance:Instance") | .id')"; then
-      die "Deployed, but could not read the instances of stack $GUARDIAN_STACK."
+      die "$outcome could not read the instances of stack $GUARDIAN_STACK."
     fi
     survivors=0
     for instance_id in $existing; do
@@ -252,13 +333,14 @@ case "$STEP" in
     if ((survivors == 0)); then
       if ! rotation_tags="$(pulumi -C "$GUARDIAN_PULUMI_DIR" stack tag ls --stack "$GUARDIAN_STACK" --json \
         | jq -r 'keys[] | select(startswith("rotation:"))')"; then
-        die "Deployed, but could not list the stack's rotation tags. Clear them before the next rotation."
+        die "$outcome could not list the stack's rotation tags. Clear them before the next rotation."
       fi
       for rotation_tag in $rotation_tags; do
-        run_or_die "Deployed, but could not clear $rotation_tag. Clear it before the next rotation." \
+        run_or_die "$outcome could not clear $rotation_tag. Clear it before the next rotation." \
           pulumi -C "$GUARDIAN_PULUMI_DIR" stack tag rm "$rotation_tag" --stack "$GUARDIAN_STACK"
       done
     fi
+    ((up_status == 0)) || die "The deploy did not finish. Preview the stack before running this step again."
     printf '\nDeployed. The host builds the enclave image at boot; follow it with the host step.\n'
     ;;
   host)
@@ -274,6 +356,11 @@ case "$STEP" in
     # The workflow builds the image and applies the proxy stack from the sui-operations ref it runs on.
     sui_operations_ref="${SUI_OPERATIONS_REF:-main}"
     printf 'Proxy stack configuration: sui-operations %s\n' "$sui_operations_ref"
+    warn "Rolling a proxy that is serving takes the guardian's address down while it restarts, and drops the shares key provisioners have sent in a provisioning round that has not finished."
+    if ! IFS= read -r -p "Type ${GUARDIAN_STACK##*/} to roll its proxy: " typed_stack; then
+      die "No input received; nothing was rolled."
+    fi
+    [[ "$typed_stack" == "${GUARDIAN_STACK##*/}" ]] || die "Not confirmed; nothing was rolled."
     if ! run_url="$(gh workflow run hashi-guardian-proxy-deploy.yaml --repo MystenLabs/sui-operations \
       --ref "$sui_operations_ref" -f env="${GUARDIAN_STACK##*/}" -f hashi_commit="$HASHI_COMMIT")"; then
       die "Could not dispatch the proxy deploy."
@@ -289,46 +376,17 @@ case "$STEP" in
     ;;
   render)
     say "Render the guardian configuration"
-    read_deployed
-    EIF_PCR0="$(stack_config eif-pcr0)" || die "Stack $GUARDIAN_STACK has no eif-pcr0."
-    REFILL_RATE="$(stack_config refill-rate-sats-per-sec)" || die "Stack $GUARDIAN_STACK has no refill-rate-sats-per-sec."
-    MAX_BUCKET_CAPACITY="$(stack_config max-bucket-capacity-sats)" \
-      || die "Stack $GUARDIAN_STACK has no max-bucket-capacity-sats."
-    [[ "$EIF_PCR0" =~ ^[0-9a-f]{96}$ ]] || die "eif-pcr0 is not a PCR0 measurement: $EIF_PCR0"
     require_guardian_build
-
-    [[ -f "$KP_ROSTER_DIR/roster.txt" ]] \
-      || die "No verified roster in $KP_ROSTER_DIR. Run download-kp-pubkeys.sh first."
-    mkdir -p "$OUT_DIR"
-    rm -rf -- "$OUT_DIR/certs"
-    mkdir "$OUT_DIR/certs"
-    CERTS=()
-    for cert in "$KP_ROSTER_DIR"/*/*-kp-pubkey.asc; do
-      [[ -f "$cert" ]] || die "No certificates in $KP_ROSTER_DIR."
-      cp -- "$cert" "${ATTESTATION_SUFFIXES[@]/#/${cert%.asc}.}" "$OUT_DIR/certs/"
-      CERTS+=("${cert##*/}")
-    done
-
-    write_config "$GUARDIAN_PROXY_URL" > "$OUT_DIR/guardian-init.yaml"
-    S3_ACCESS_KEY_ID="$(stack_output s3_access_key_id)" || die "Could not read the guardian's S3 access key."
-    S3_SECRET_ACCESS_KEY="$(stack_output s3_secret_access_key --show-secrets)" \
-      || die "Could not read the guardian's S3 secret key."
-    # The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
-    (
-      umask 077
-      rm -f -- "$OPERATOR_CONFIG"
-      {
-        write_config "$TUNNEL_ENDPOINT"
-        printf '\ns3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n' "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY"
-      } > "$OPERATOR_CONFIG"
-    ) || die "Could not write $OPERATOR_CONFIG."
-    printf 'Guardian commit:  %s\nPCR0:             %s\nLog bucket:       s3://%s\nKey provisioners: %d, any %d provision\n' \
-      "$HASHI_COMMIT" "$EIF_PCR0" "$GUARDIAN_BUCKET" "${#CERTS[@]}" "$KP_THRESHOLD"
+    render_into "$OUT_DIR"
+    printf 'Guardian commit:  %s\nPCR0:             %s\nLog bucket:       s3://%s\n' \
+      "$HASHI_COMMIT" "$EIF_PCR0" "$GUARDIAN_BUCKET"
+    printf 'Bitcoin network:  %s\nRetention class:  %s\nKey provisioners: %d, any %d provision\n' \
+      "$BITCOIN_NETWORK" "$RETENTION_ENVIRONMENT" "${#CERTS[@]}" "$KP_THRESHOLD"
     printf 'For key provisioners: %s\nFor the operator:     %s\n' "$OUT_DIR/guardian-init.yaml" "$OPERATOR_CONFIG"
     ;;
   publish)
-    read_deployed
     require_guardian_build
+    require_fresh_render
     exec "$(dirname "$0")/publish-kp-config.sh" "$KP_NAME" "$OUT_DIR" "$GUARDIAN_BUCKET"
     ;;
   tunnel)
@@ -349,21 +407,25 @@ case "$STEP" in
       btc_key="none; the guardian is not provisioned"
     fi
     printf 'Signing key: %s\nBTC key:     %s\n' "$signing_key" "$btc_key"
-    # Key provisioners and nodes reach whichever guardian the proxy fronts.
-    if ! proxy_info="$(curl -fsS --max-time 15 "$GUARDIAN_PROXY_URL/info")" \
-      || ! proxy_key="$(jq -r '.signingPubKey // empty' <<< "$proxy_info")"; then
-      die "The proxy does not answer at $GUARDIAN_PROXY_URL/info."
-    fi
-    [[ "$proxy_key" == "$signing_key" ]] \
-      || die "The proxy fronts guardian ${proxy_key:-none}, not this one. It caches its view for 30 seconds: run this step again, and roll the proxy if it still differs."
+    require_fronted "$signing_key"
     printf 'Proxy:       fronts this guardian at %s\n' "$GUARDIAN_PROXY_URL"
     jq -r '"Serving:     " + (if .committeeEpoch then "committee epoch \(.committeeEpoch)" else "no; the guardian is not activated" end)' \
-      <<< "$proxy_info"
+      <<< "$PROXY_INFO"
     ;;
   ceremony | provision | activate)
-    [[ -f "$OPERATOR_CONFIG" ]] || die "No $OPERATOR_CONFIG. Run the render step first."
     require_guardian_build
-    guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT" > /dev/null || die "$TUNNEL_DOWN"
+    require_fresh_render
+    # Another guardian's tunnel can be holding the local port.
+    signing_key="$(guardian_init tools fetch-info --endpoint "$TUNNEL_ENDPOINT")" || die "$TUNNEL_DOWN"
+    require_fronted "$signing_key"
+    if [[ "$STEP" == ceremony ]]; then
+      warn "The ceremony fixes three things for the life of the guardian's key: Bitcoin network $BITCOIN_NETWORK, retention class $RETENTION_ENVIRONMENT, and log bucket s3://$GUARDIAN_BUCKET."
+      if ! IFS= read -r -p "Type $BITCOIN_NETWORK $RETENTION_ENVIRONMENT to run the ceremony: " typed_choice; then
+        die "No input received; the ceremony was not run."
+      fi
+      [[ "$typed_choice" == "$BITCOIN_NETWORK $RETENTION_ENVIRONMENT" ]] \
+        || die "Not confirmed; the ceremony was not run."
+    fi
     # The configuration lists certificates relative to its own directory.
     cd "$OUT_DIR"
     exec cargo run --release --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p hashi-guardian-init -- \
