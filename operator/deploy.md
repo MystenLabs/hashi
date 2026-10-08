@@ -189,6 +189,10 @@ for you, and `certs/`. `operator.yaml` holds the guardian's S3 key; never share
 it. `publish` uploads the KPs' copy and prints a guardian commit and a
 configuration digest.
 
+Where the guardian's build has `tools check-config`, `render` also loads both
+files with the guardian's own tools, so a value they refuse stops the render
+and not the ceremony. An earlier build renders with a warning instead.
+
 `publish` and the ceremony, provision and activate steps stop when those files
 are no longer what `render` would write, which happens once the stack, your
 environment file or the roster changes. Run `render` again when they do.
