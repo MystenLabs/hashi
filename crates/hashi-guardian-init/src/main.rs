@@ -6,6 +6,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 
 mod ceremony;
+mod check_config;
 mod config;
 mod fetch_info;
 mod guardian_info;
@@ -155,6 +156,12 @@ enum ToolsCommand {
         #[arg(long)]
         kp_pgp_cert_path: PathBuf,
     },
+    /// Load a guardian init config exactly as the production commands do, then summarize it.
+    CheckConfig {
+        /// Path to the guardian init YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Write a dev KP's attestation files from a software device, in place of a YubiKey.
     #[cfg(feature = "non-enclave-dev")]
     DevAttest {
@@ -236,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
             ToolsCommand::VerifyKpCert { kp_pgp_cert_path } => {
                 let cert = hashi_guardian_init::load_attested_kp_cert(&kp_pgp_cert_path)?;
                 println!("{}", cert.fingerprint().to_hex());
+            }
+            ToolsCommand::CheckConfig { config } => {
+                let cfg = config::Config::load_yaml(&config)?;
+                check_config::report(&cfg)?;
             }
             #[cfg(feature = "non-enclave-dev")]
             ToolsCommand::DevAttest { kp_pgp_cert_path } => {
@@ -425,6 +436,29 @@ mod tests {
         assert_eq!(kp_pgp_cert_path, PathBuf::from("kp1.asc"));
 
         let result = Cli::try_parse_from(["hashi-guardian-init", "tools", "verify-kp-cert"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tools_check_config_requires_config_path() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "tools",
+            "check-config",
+            "--config",
+            "guardian-init.yaml",
+        ])
+        .unwrap();
+
+        let Command::Tools {
+            command: ToolsCommand::CheckConfig { config },
+        } = cli.command
+        else {
+            panic!("expected tools check-config command");
+        };
+        assert_eq!(config, PathBuf::from("guardian-init.yaml"));
+
+        let result = Cli::try_parse_from(["hashi-guardian-init", "tools", "check-config"]);
         assert!(result.is_err());
     }
 }
