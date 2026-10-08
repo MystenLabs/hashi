@@ -380,6 +380,20 @@ case "$STEP" in
     say "Render the guardian configuration"
     require_guardian_build
     render_into "$OUT_DIR"
+    # The guardian's own tools load both files as the ceremony will, when its build can. The
+    # configuration lists certificates relative to its own directory.
+    cd "$OUT_DIR"
+    tools_help="$(guardian_init tools --help)" || die "Could not build the guardian's tools."
+    if [[ "$tools_help" == *check-config* ]]; then
+      for rendered in guardian-init.yaml operator.yaml; do
+        if ! guardian_init tools check-config --config "$rendered" > /dev/null; then
+          rm -f -- "$OPERATOR_CONFIG"
+          die "The guardian's tools refuse $OUT_DIR/$rendered, so no step will run with it. Fix what they name, then render again."
+        fi
+      done
+    else
+      warn "This guardian's build has no tools check-config, so its tools have not checked the rendered files."
+    fi
     printf 'Guardian commit:  %s\nPCR0:             %s\nLog bucket:       s3://%s\n' \
       "$HASHI_COMMIT" "$EIF_PCR0" "$GUARDIAN_BUCKET"
     printf 'Bitcoin network:  %s\nRetention class:  %s\nKey provisioners: %d, any %d provision\n' \
