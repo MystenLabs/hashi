@@ -23,6 +23,8 @@ use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 
+use crate::findings::MonitorFinding;
+
 /// Unix seconds rendered in the monitor's canonical UTC timestamp format.
 pub struct UtcTimestamp(UnixSeconds);
 
@@ -290,7 +292,11 @@ impl Cursors {
 
 /// Outcome of a Guardian or Sui poll
 pub enum PollOutcome {
-    CursorAdvanced(Vec<MonitorEvent>),
+    /// The events of the newly scanned range, and the findings of events that failed a check.
+    CursorAdvanced {
+        events: Vec<MonitorEvent>,
+        findings: Vec<MonitorFinding>,
+    },
     CursorUnmoved,
 }
 

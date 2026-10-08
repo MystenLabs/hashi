@@ -450,6 +450,31 @@ pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
     }
 }
 
+/// The unsigned transaction that a withdrawal's on-chain `inputs` and
+/// `outputs` build. `outputs` are the withdrawal outputs followed by the
+/// change outputs, in transaction order. Fails on an output address that is
+/// not a 20- or 32-byte witness program.
+pub fn unsigned_withdrawal_tx(
+    inputs: &[crate::move_types::Utxo],
+    outputs: &[crate::move_types::OutputUtxo],
+) -> anyhow::Result<Transaction> {
+    let tx_inputs = inputs
+        .iter()
+        .map(|utxo| InputUTXO::from(utxo).txin())
+        .collect();
+    let tx_outputs = outputs
+        .iter()
+        .map(|output| {
+            let script_pubkey = super::script_pubkey_from_witness_program(&output.bitcoin_address)?;
+            Ok(TxOut {
+                value: Amount::from_sat(output.amount),
+                script_pubkey,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(construct_tx(tx_inputs, tx_outputs))
+}
+
 // ---------------------------------
 //    Serialize / Deserialize
 // ---------------------------------
