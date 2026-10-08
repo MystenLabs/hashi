@@ -136,3 +136,10 @@ Once the guardian is provisioned and activated, revoke the access key:
 ```sh
 ./operator/scripts/revoke-kp-upload-key.sh mainnet
 ```
+
+## Deploy a guardian
+
+[Deploying a Guardian](deploy.md) takes an operator through a first deployment
+step by step: measuring the build, deploying the enclave and the proxy, the key
+ceremony, and provisioning. Each step is one run of
+`operator/scripts/guardian.sh`.
