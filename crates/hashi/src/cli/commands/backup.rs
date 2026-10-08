@@ -5,6 +5,10 @@
 //!
 //! Orchestrates config loading, recipient/identity resolution, and user-facing
 //! output. The core archive logic lives in [`crate::backup`].
+//!
+//! Saving is offline: the database must already contain recovery context recorded
+//! by the node. Its recovery epoch labels the archive, even if the network has
+//! advanced. Saving never queries RPC or guesses an epoch from the current time.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -28,7 +32,9 @@ pub enum RestoreDecryptor {
     GpgAgent { homedir: Option<PathBuf> },
 }
 
-/// Save an encrypted backup of the node config, referenced files, and database
+/// Save an encrypted backup using recovery context already recorded in the local DB.
+///
+/// Stop the node first. Missing context is an error; no RPC lookup is attempted.
 pub fn save(
     node_config_path: &Path,
     backup_pgp_cert_override: Option<String>,
@@ -227,6 +233,26 @@ mod tests {
     const KEYPAIR_CONTENTS: &[u8] = b"test-ed25519-keypair-bytes";
     const BTC_KEY_CONTENTS: &[u8] = b"test-bitcoin-wif-bytes";
 
+    fn backup_test_config() -> Config {
+        let mut config = Config::new_for_testing();
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: sui_sdk_types::Address::from_static("0x1"),
+            hashi_object_id: sui_sdk_types::Address::from_static("0x2"),
+        });
+        config
+    }
+
+    fn initialize_backup_db(config: &Config) {
+        let db = Database::open(config.db.as_ref().unwrap()).unwrap();
+        db.record_backup_recovery_context(&crate::db::BackupRecoveryContext {
+            recovery_epoch: 42,
+            previous_committee_epoch: Some(41),
+            mpc_public_key: "02".repeat(33),
+            deployment: crate::db::BackupDeployment::from_config(config).unwrap(),
+        })
+        .unwrap();
+    }
+
     /// Fixture holding a populated source directory and node config.
     struct TestFixture {
         _src: TempDir,
@@ -240,7 +266,7 @@ mod tests {
         }
 
         /// Create a new fixture with CLI-only files, a node config pointing to
-        /// a database, and an empty database on disk.
+        /// a database, and locally recorded recovery context on disk.
         fn new() -> Self {
             let src = tempfile::Builder::new().tempdir().unwrap();
             let config_path = src.path().join("hashi-cli.toml");
@@ -255,10 +281,10 @@ mod tests {
             // Create a node config file with a db path and initialise the database.
             // Drop the handle immediately so subsequent opens can acquire the lock.
             let node_config_path = src.path().join("config.toml");
-            let mut node_config = crate::config::Config::new_for_testing();
+            let mut node_config = backup_test_config();
             node_config.db = Some(db_path.clone());
             node_config.save(&node_config_path).unwrap();
-            drop(crate::db::Database::open(&db_path).unwrap());
+            initialize_backup_db(&node_config);
 
             Self {
                 _src: src,
@@ -295,6 +321,14 @@ mod tests {
                     .unwrap_or(false)
             })
             .expect("save() did not produce a tarball");
+        assert!(
+            tarball
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-42-")
+        );
 
         let secret_key_file = dir.path().join("secret-key.asc");
         fs::write(&secret_key_file, secret_key).unwrap();
@@ -443,12 +477,12 @@ mod tests {
         fs::write(&op_key_path, b"operator-key-bytes").unwrap();
 
         let node_config_path = src.path().join("config.toml");
-        let mut node_config = crate::config::Config::new_for_testing();
+        let mut node_config = backup_test_config();
         node_config.db = Some(db_path.clone());
         node_config.tls_private_key = Some(tls_key_path.to_string_lossy().into_owned());
         node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
         node_config.save(&node_config_path).unwrap();
-        drop(crate::db::Database::open(&db_path).unwrap());
+        initialize_backup_db(&node_config);
 
         let fixture = TestFixture {
             _src: src,
@@ -534,6 +568,21 @@ mod tests {
             bcs::to_bytes(&restored_rotation_msgs).unwrap(),
             bcs::to_bytes(&rotation_msgs).unwrap()
         );
+
+        // A restored DB can be backed up offline without observing another epoch.
+        drop(restored_db);
+        let restored_config_path = extract_dir.join("config.toml");
+        let mut restored_config = Config::load(&restored_config_path).unwrap();
+        restored_config.db = Some(snapshot_dir);
+        restored_config.sui_rpc = Some("http://127.0.0.1:1".to_owned());
+        restored_config.bitcoin_rpc = Some("http://127.0.0.1:1".to_owned());
+        restored_config.save(&restored_config_path).unwrap();
+        let restored_fixture = TestFixture {
+            _src: out,
+            node_config_path: restored_config_path,
+        };
+        let resaved = save_with_fresh_pgp_key(&restored_fixture);
+        assert!(resaved.tarball.is_file());
     }
 
     #[test]

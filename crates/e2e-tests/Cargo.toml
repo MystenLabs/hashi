@@ -48,3 +48,4 @@ path = "src/main.rs"
 fastcrypto-tbls.workspace = true
 hashi-guardian-proxy = { path = "../hashi-guardian-proxy" }
 tracing-subscriber.workspace = true
+toml.workspace = true

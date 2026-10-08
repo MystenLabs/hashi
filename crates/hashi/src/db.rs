@@ -88,6 +88,7 @@ pub struct Database {
     // key: `MAINTENANCE_COMPACTION_KEY`
     // value: big endian u64 unix seconds of the last major compaction
     maintenance: Keyspace,
+    backup_recovery_context: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
@@ -100,6 +101,8 @@ const AVID_HELD_ECHOES_CF_NAME: &str = "avid_held_echoes";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 const MAINTENANCE_CF_NAME: &str = "maintenance";
+const BACKUP_RECOVERY_CONTEXT_CF_NAME: &str = "backup_recovery_context";
+const BACKUP_RECOVERY_CONTEXT_KEY: &[u8] = b"context";
 
 const MAINTENANCE_COMPACTION_KEY: &[u8] = b"last_compaction";
 
@@ -128,6 +131,44 @@ pub struct MajorCompaction {
     pub unlink_error: Option<fjall::Error>,
 }
 
+/// Deployment identity resolved from the node configuration, never placeholder IDs.
+#[derive(Debug, Clone, Eq, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct BackupDeployment {
+    pub sui_chain_id: String,
+    pub bitcoin_chain_id: String,
+    pub package_id: Address,
+    pub hashi_object_id: Address,
+}
+
+impl BackupDeployment {
+    pub(crate) fn from_config(config: &crate::config::Config) -> anyhow::Result<Self> {
+        let ids = config
+            .hashi_ids
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("backup deployment requires configured hashi-ids"))?;
+        anyhow::ensure!(
+            ids.package_id != Address::ZERO && ids.hashi_object_id != Address::ZERO,
+            "backup deployment requires nonzero package and Hashi object IDs"
+        );
+        Ok(Self {
+            sui_chain_id: config.sui_chain_id().to_owned(),
+            bitcoin_chain_id: config.bitcoin_chain_id().to_owned(),
+            package_id: ids.package_id,
+            hashi_object_id: ids.hashi_object_id,
+        })
+    }
+}
+
+/// A locally reconstructed output matched to a finalized committee and MPC key.
+#[derive(Debug, Clone, Eq, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct BackupRecoveryContext {
+    pub recovery_epoch: u64,
+    pub previous_committee_epoch: Option<u64>,
+    /// Hex encoding of the exact on-chain (BCS-serialized group element) bytes.
+    pub mpc_public_key: String,
+    pub deployment: BackupDeployment,
+}
+
 /// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
 #[derive(Clone, Copy)]
 enum BackupKeyspace {
@@ -137,15 +178,17 @@ enum BackupKeyspace {
     SigningEpochIndex,
     DealerMessages,
     RotationMessages,
+    RecoveryContext,
 }
 
-const BACKUP_KEYSPACES: [BackupKeyspace; 6] = [
+const BACKUP_KEYSPACES: [BackupKeyspace; 7] = [
     BackupKeyspace::EncryptionKeys,
     BackupKeyspace::SigningKeys,
     BackupKeyspace::EncryptionEpochIndex,
     BackupKeyspace::SigningEpochIndex,
     BackupKeyspace::DealerMessages,
     BackupKeyspace::RotationMessages,
+    BackupKeyspace::RecoveryContext,
 ];
 
 impl BackupKeyspace {
@@ -157,6 +200,7 @@ impl BackupKeyspace {
             Self::SigningEpochIndex => SIGNING_EPOCH_INDEX_CF_NAME,
             Self::DealerMessages => DEALER_MESSAGES_CF_NAME,
             Self::RotationMessages => ROTATION_MESSAGES_CF_NAME,
+            Self::RecoveryContext => BACKUP_RECOVERY_CONTEXT_CF_NAME,
         }
     }
 
@@ -168,6 +212,7 @@ impl BackupKeyspace {
             Self::SigningEpochIndex => &db.signing_epoch_index,
             Self::DealerMessages => &db.dealer_messages,
             Self::RotationMessages => &db.rotation_messages,
+            Self::RecoveryContext => &db.backup_recovery_context,
         }
     }
 }
@@ -201,6 +246,10 @@ impl Database {
         let signing_epoch_index =
             db.keyspace(SIGNING_EPOCH_INDEX_CF_NAME, KeyspaceCreateOptions::default)?;
         let maintenance = db.keyspace(MAINTENANCE_CF_NAME, KeyspaceCreateOptions::default)?;
+        let backup_recovery_context = db.keyspace(
+            BACKUP_RECOVERY_CONTEXT_CF_NAME,
+            KeyspaceCreateOptions::default,
+        )?;
         reject_legacy_epoch_keyed_format(&encryption_keys, ENCRYPTION_KEYS_CF_NAME)?;
         reject_legacy_epoch_keyed_format(&signing_keys, SIGNING_KEYS_CF_NAME)?;
         Ok(Self {
@@ -215,14 +264,15 @@ impl Database {
             avid_dealer_builders,
             avid_held_echoes,
             maintenance,
+            backup_recovery_context,
         })
     }
 
-    pub(crate) fn backup_keyspaces(&self) -> [(&'static str, &Keyspace); 6] {
+    pub(crate) fn backup_keyspaces(&self) -> [(&'static str, &Keyspace); 7] {
         BACKUP_KEYSPACES.map(|keyspace| (keyspace.name(), keyspace.keyspace(self)))
     }
 
-    pub(crate) fn backup_keyspace_names() -> [&'static str; 6] {
+    pub(crate) fn backup_keyspace_names() -> [&'static str; 7] {
         BACKUP_KEYSPACES.map(BackupKeyspace::name)
     }
 
@@ -230,8 +280,30 @@ impl Database {
         self.db.snapshot()
     }
 
+    /// Record only a locally completed output checked against finalized chain state.
+    pub(crate) fn record_backup_recovery_context(
+        &self,
+        context: &BackupRecoveryContext,
+    ) -> anyhow::Result<()> {
+        self.backup_recovery_context
+            .insert(BACKUP_RECOVERY_CONTEXT_KEY, bcs::to_bytes(context)?)?;
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    pub(crate) fn backup_recovery_context(
+        &self,
+        snapshot: &fjall::Snapshot,
+    ) -> anyhow::Result<Option<BackupRecoveryContext>> {
+        use fjall::Readable;
+        snapshot
+            .get(&self.backup_recovery_context, BACKUP_RECOVERY_CONTEXT_KEY)?
+            .map(|bytes| bcs::from_bytes(&bytes).map_err(Into::into))
+            .transpose()
+    }
+
     /// Every keyspace, for whole-database maintenance. Add new keyspaces here.
-    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 10] {
+    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 11] {
         [
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
             (SIGNING_KEYS_CF_NAME, &self.signing_keys),
@@ -243,12 +315,16 @@ impl Database {
             (AVID_DEALER_BUILDERS_CF_NAME, &self.avid_dealer_builders),
             (AVID_HELD_ECHOES_CF_NAME, &self.avid_held_echoes),
             (MAINTENANCE_CF_NAME, &self.maintenance),
+            (
+                BACKUP_RECOVERY_CONTEXT_CF_NAME,
+                &self.backup_recovery_context,
+            ),
         ]
     }
 
     /// Bytes of live tables per keyspace; journals and tables awaiting unlink
     /// are not counted.
-    pub fn keyspace_disk_space(&self) -> [(&'static str, u64); 10] {
+    pub fn keyspace_disk_space(&self) -> [(&'static str, u64); 11] {
         self.all_keyspaces()
             .map(|(name, keyspace)| (name, keyspace.disk_space()))
     }
@@ -624,24 +700,29 @@ impl Database {
     }
 
     /// Prune all MPC keyspaces.
-    pub(crate) fn prune_messages_below(
+    pub(crate) fn prune_messages_with_recovery_context(
         &self,
         cutoff_epoch: u64,
         pruning_references: &PruningReferences,
+        context: Option<&BackupRecoveryContext>,
     ) -> Result<usize> {
+        // Recovery recording and pruning are owned by the serial MPC service.
+        // Publish all deletions and the corresponding context in one commit:
+        // snapshots see either the complete old recovery state or the new one.
+        let mut batch = self.db.batch();
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
         // A key is retained if and only if its public key is referenced by a live committee or pending registration,
         // or it was created within the retention buffer.
         // The primary and its side-index rows are evicted together atomically.
         let mut deleted = prune_pubkey_keyspace(
-            &self.db,
+            &mut batch,
             &self.encryption_keys,
             &self.encryption_epoch_index,
             &pruning_references.encryption_keys,
             retention_cutoff,
         )?;
         deleted += prune_pubkey_keyspace(
-            &self.db,
+            &mut batch,
             &self.signing_keys,
             &self.signing_epoch_index,
             &pruning_references.signing_keys,
@@ -649,16 +730,32 @@ impl Database {
         )?;
         let is_referenced_epoch =
             |epoch: u64, _value: &[u8]| pruning_references.committee_epochs.contains(&epoch);
-        deleted +=
-            prune_keyspace_with(&self.dealer_messages, retention_cutoff, is_referenced_epoch)?;
         deleted += prune_keyspace_with(
+            &mut batch,
+            &self.dealer_messages,
+            retention_cutoff,
+            is_referenced_epoch,
+        )?;
+        deleted += prune_keyspace_with(
+            &mut batch,
             &self.rotation_messages,
             retention_cutoff,
             is_referenced_epoch,
         )?;
-        deleted += prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
-        deleted += prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
-        deleted += prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
+        deleted += prune_keyspace(&mut batch, &self.avid_round_states, cutoff_epoch)?;
+        deleted += prune_keyspace(&mut batch, &self.avid_dealer_builders, cutoff_epoch)?;
+        deleted += prune_keyspace(&mut batch, &self.avid_held_echoes, cutoff_epoch)?;
+        if let Some(context) = context {
+            batch.insert(
+                &self.backup_recovery_context,
+                BACKUP_RECOVERY_CONTEXT_KEY,
+                bcs::to_bytes(context).expect("recovery context serialization cannot fail"),
+            );
+        } else {
+            batch.remove(&self.backup_recovery_context, BACKUP_RECOVERY_CONTEXT_KEY);
+        }
+        batch.commit()?;
+        self.db.persist(fjall::PersistMode::SyncAll)?;
         Ok(deleted)
     }
 }
@@ -735,26 +832,22 @@ fn list_messages_by_prefix<T: DeserializeOwned>(
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is `< cutoff_epoch`.
-fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<usize> {
-    let keys_to_delete: Vec<_> = keyspace
-        .iter()
-        .filter_map(|guard| {
-            let key = guard.key().ok()?;
-            let epoch_bytes: [u8; 8] = key.as_ref().get(..8)?.try_into().ok()?;
-            let epoch = u64::from_be_bytes(epoch_bytes);
-            (epoch < cutoff_epoch).then(|| key.to_vec())
-        })
-        .collect();
-    let deleted = keys_to_delete.len();
-    for key in keys_to_delete {
-        keyspace.remove(key)?;
-    }
-    Ok(deleted)
+fn prune_keyspace(
+    batch: &mut fjall::OwnedWriteBatch,
+    keyspace: &Keyspace,
+    cutoff_epoch: u64,
+) -> Result<usize> {
+    prune_keyspace_with(batch, keyspace, cutoff_epoch, |_, _| false)
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is
 /// `< cutoff_epoch`, unless `is_referenced(epoch, value)` returns `true`.
-fn prune_keyspace_with<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<usize>
+fn prune_keyspace_with<F>(
+    batch: &mut fjall::OwnedWriteBatch,
+    keyspace: &Keyspace,
+    cutoff_epoch: u64,
+    is_referenced: F,
+) -> Result<usize>
 where
     F: Fn(u64, &[u8]) -> bool,
 {
@@ -772,7 +865,7 @@ where
         .collect();
     let deleted = keys_to_delete.len();
     for key in keys_to_delete {
-        keyspace.remove(key)?;
+        batch.remove(keyspace, key);
     }
     Ok(deleted)
 }
@@ -830,7 +923,7 @@ fn reject_legacy_epoch_keyed_format(keyspace: &Keyspace, name: &str) -> anyhow::
 
 /// Committee-walk GC for a pubkey-keyed key keyspace and its epoch side-index.
 fn prune_pubkey_keyspace(
-    db: &fjall::Database,
+    batch: &mut fjall::OwnedWriteBatch,
     keyspace: &Keyspace,
     side_index: &Keyspace,
     referenced: &std::collections::HashSet<Vec<u8>>,
@@ -861,12 +954,10 @@ fn prune_pubkey_keyspace(
         })
         .collect();
     for pubkey in &to_delete {
-        let mut batch = db.batch();
         batch.remove(keyspace, pubkey.as_slice());
         for epoch in epochs_of.get(pubkey.as_slice()).into_iter().flatten() {
             batch.remove(side_index, epoch.to_be_bytes());
         }
-        batch.commit()?;
     }
     Ok(to_delete.len())
 }
@@ -1464,7 +1555,7 @@ pub(crate) mod tests {
         );
 
         // Pruned by the epoch cutoff
-        db.prune_messages_below(2, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(2, &PruningReferences::default(), None)
             .unwrap();
         assert!(db.get_avid_dealer_builder(1, 0).unwrap().is_none());
     }
@@ -1625,7 +1716,7 @@ pub(crate) mod tests {
             .unwrap();
         }
 
-        db.prune_messages_below(cutoff, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(cutoff, &PruningReferences::default(), None)
             .unwrap();
 
         let message_retain_floor = key_retain_floor;
@@ -1739,7 +1830,7 @@ pub(crate) mod tests {
         let occupied = bytes_on_disk(&db.avid_round_states);
         assert!(occupied > 0, "epoch 1 should be on disk before pruning");
 
-        db.prune_messages_below(2, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(2, &PruningReferences::default(), None)
             .unwrap();
         assert!(
             db.get_avid_round_state(1, 0, &Address::new([0u8; 32]))
@@ -1798,7 +1889,7 @@ pub(crate) mod tests {
         };
         assert!(avid_bytes(&db) > 0, "epoch 1 should be on disk");
 
-        db.prune_messages_below(2, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(2, &PruningReferences::default(), None)
             .unwrap();
         let compaction = db.major_compact();
         assert!(compaction.unlink_error.is_none());
@@ -1863,7 +1954,7 @@ pub(crate) mod tests {
 
         // Cutoff = 0 saturates the key-retention subtraction; nothing should
         // be pruned in any keyspace.
-        db.prune_messages_below(0, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(0, &PruningReferences::default(), None)
             .unwrap();
 
         for epoch in 5..=10 {
@@ -1878,7 +1969,7 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
         // Should be a no-op, not an error.
-        db.prune_messages_below(100, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(100, &PruningReferences::default(), None)
             .unwrap();
     }
 
@@ -1940,7 +2031,8 @@ pub(crate) mod tests {
         // committees 5 and 33 are below that — without committee-aware
         // protection they would be deleted, even though their pubkeys are
         // still referenced by committees still held on-chain.
-        db.prune_messages_below(51, &referenced).unwrap();
+        db.prune_messages_with_recovery_context(51, &referenced, None)
+            .unwrap();
 
         for committee_epoch in [5u64, 33, 51] {
             assert!(
@@ -1976,7 +2068,8 @@ pub(crate) mod tests {
 
         // Cutoff 20 → flat key cutoff 13; stored keys at epoch 10 are below
         // and not referenced, so should be deleted.
-        db.prune_messages_below(20, &referenced).unwrap();
+        db.prune_messages_with_recovery_context(20, &referenced, None)
+            .unwrap();
 
         assert!(
             db.get_encryption_key(10).unwrap().is_none(),
@@ -2007,7 +2100,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // No committee references the in-flight key.
-        db.prune_messages_below(target_epoch, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(target_epoch, &PruningReferences::default(), None)
             .unwrap();
 
         assert!(
@@ -2047,7 +2140,8 @@ pub(crate) mod tests {
 
         // Cutoff 20 → flat key cutoff 13; both keys are aged below it, so only
         // the pending-registration reference can save the registered one.
-        db.prune_messages_below(20, &referenced).unwrap();
+        db.prune_messages_with_recovery_context(20, &referenced, None)
+            .unwrap();
 
         assert!(
             db.get_encryption_key(5).unwrap().is_some(),
@@ -2105,7 +2199,7 @@ pub(crate) mod tests {
         // No references; both epochs (max = 12) are below the flat cutoff
         // (20 - 7 = 13) → the primary AND both side-index rows must be removed
         // together (not just the max-epoch side-index row).
-        db.prune_messages_below(20, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(20, &PruningReferences::default(), None)
             .unwrap();
 
         assert_eq!(db.encryption_keys.iter().count(), 0);
@@ -2172,7 +2266,8 @@ pub(crate) mod tests {
                 &pinned_signing.public_key(),
             );
             referenced.add_member_pubkeys(&encryption.public_key(), &signing.public_key());
-            db.prune_messages_below(epoch, &referenced).unwrap();
+            db.prune_messages_with_recovery_context(epoch, &referenced, None)
+                .unwrap();
         }
 
         // Retained = referenced (the one pinned key) ∪ the recent window
@@ -2236,7 +2331,8 @@ pub(crate) mod tests {
         let mut referenced = PruningReferences::default();
         referenced.add_committee_epoch(5);
 
-        db.prune_messages_below(20, &referenced).unwrap();
+        db.prune_messages_with_recovery_context(20, &referenced, None)
+            .unwrap();
 
         assert!(
             db.get_dealer_message(5, &dealer).unwrap().is_some(),
@@ -2278,7 +2374,7 @@ pub(crate) mod tests {
                 .unwrap();
         }
 
-        db.prune_messages_below(15, &PruningReferences::default())
+        db.prune_messages_with_recovery_context(15, &PruningReferences::default(), None)
             .unwrap();
 
         assert!(
@@ -2330,7 +2426,8 @@ pub(crate) mod tests {
         let sig = Bls12381PrivateKey::generate(&mut rand::thread_rng());
         let referenced = referenced_pubkeys_from(&[(&enc, &sig)]);
 
-        db.prune_messages_below(20, &referenced).unwrap();
+        db.prune_messages_with_recovery_context(20, &referenced, None)
+            .unwrap();
 
         assert!(
             db.get_dealer_message(5, &dealer).unwrap().is_none(),
@@ -2375,5 +2472,113 @@ pub(crate) mod tests {
             store.get_rotation_messages(87, &dealer).unwrap().is_none(),
             "rotation messages must not leak to the store's self.epoch=87"
         );
+    }
+}
+
+#[cfg(test)]
+mod backup_recovery_context_tests {
+    use super::*;
+    use fjall::Readable;
+
+    fn context(epoch: u64) -> BackupRecoveryContext {
+        BackupRecoveryContext {
+            recovery_epoch: epoch,
+            previous_committee_epoch: epoch.checked_sub(1),
+            mpc_public_key: "02".repeat(33),
+            deployment: BackupDeployment {
+                sui_chain_id: "sui-test".into(),
+                bitcoin_chain_id: "bitcoin-test".into(),
+                package_id: Address::new([1; 32]),
+                hashi_object_id: Address::new([2; 32]),
+            },
+        }
+    }
+
+    #[test]
+    fn pruning_commits_context_and_recovery_rows_at_one_snapshot_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let old = context(1);
+        let new = context(20);
+        let key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(1, &key).unwrap();
+        db.record_backup_recovery_context(&old).unwrap();
+        let before = db.snapshot();
+        db.prune_messages_with_recovery_context(20, &PruningReferences::default(), Some(&new))
+            .unwrap();
+        let after = db.snapshot();
+        assert_eq!(db.backup_recovery_context(&before).unwrap(), Some(old));
+        assert!(
+            before
+                .get(&db.encryption_epoch_index, 1u64.to_be_bytes())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.backup_recovery_context(&after).unwrap(),
+            Some(new.clone())
+        );
+        assert!(
+            after
+                .get(&db.encryption_epoch_index, 1u64.to_be_bytes())
+                .unwrap()
+                .is_none()
+        );
+        drop(before);
+        drop(after);
+        drop(db);
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(
+            db.backup_recovery_context(&db.snapshot()).unwrap(),
+            Some(new)
+        );
+        assert!(db.get_encryption_key(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn pruning_without_completed_output_invalidates_context_not_relabels_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.record_backup_recovery_context(&context(1)).unwrap();
+        // Preparing future keys is not completion of that epoch.
+        db.store_encryption_key(900, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
+            .unwrap();
+        assert_eq!(
+            db.backup_recovery_context(&db.snapshot()).unwrap(),
+            Some(context(1))
+        );
+        db.prune_messages_with_recovery_context(20, &PruningReferences::default(), None)
+            .unwrap();
+        assert_eq!(db.backup_recovery_context(&db.snapshot()).unwrap(), None);
+        assert!(db.get_encryption_key(900).unwrap().is_some());
+    }
+
+    #[test]
+    fn context_keyspace_is_exported_and_included_in_maintenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.backup_keyspaces().len(), 7);
+        assert_eq!(db.all_keyspaces().len(), 11);
+        assert!(Database::backup_keyspace_names().contains(&BACKUP_RECOVERY_CONTEXT_CF_NAME));
+        assert!(
+            db.keyspace_disk_space()
+                .iter()
+                .any(|(name, _)| *name == BACKUP_RECOVERY_CONTEXT_CF_NAME)
+        );
+    }
+
+    #[test]
+    fn deployment_rejects_unresolved_or_placeholder_object_identity() {
+        let mut config = crate::config::Config::new_for_testing();
+        assert!(BackupDeployment::from_config(&config).is_err());
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: Address::ZERO,
+            hashi_object_id: Address::new([2; 32]),
+        });
+        assert!(BackupDeployment::from_config(&config).is_err());
+        config.hashi_ids.as_mut().unwrap().package_id = Address::new([1; 32]);
+        let deployment = BackupDeployment::from_config(&config).unwrap();
+        assert_eq!(deployment.sui_chain_id, config.sui_chain_id());
+        assert_eq!(deployment.bitcoin_chain_id, config.bitcoin_chain_id());
     }
 }

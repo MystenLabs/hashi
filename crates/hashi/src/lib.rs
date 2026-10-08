@@ -1726,12 +1726,33 @@ mod test {
         );
     }
 
+    fn backup_test_config() -> Config {
+        let mut config = Config::new_for_testing();
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: Address::from_static("0x1"),
+            hashi_object_id: Address::from_static("0x2"),
+        });
+        config
+    }
+
+    fn record_backup_context(hashi: &Hashi, epoch: u64) {
+        hashi
+            .db
+            .record_backup_recovery_context(&crate::db::BackupRecoveryContext {
+                recovery_epoch: epoch,
+                previous_committee_epoch: epoch.checked_sub(1),
+                mpc_public_key: "02".repeat(33),
+                deployment: crate::db::BackupDeployment::from_config(&hashi.config).unwrap(),
+            })
+            .unwrap();
+    }
+
     fn archive_name_days_ago(days: i64) -> String {
         jiff::Timestamp::now()
             .checked_sub(jiff::SignedDuration::from_hours(days * 24))
             .unwrap()
             .to_zoned(jiff::tz::TimeZone::UTC)
-            .strftime("hashi-backup-%Y%m%dT%H%M%SZ.tar.asc")
+            .strftime("hashi-backup-epoch-5-%Y%m%dT%H%M%SZ.tar.asc")
             .to_string()
     }
 
@@ -1739,7 +1760,7 @@ mod test {
     fn automatic_backup_expires_the_last_archive_when_no_save_can_follow() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let backup_dir = tmpdir.path().join("backups");
-        let mut config = Config::new_for_testing();
+        let mut config = backup_test_config();
         config.db = Some(tmpdir.path().join("db"));
         config.backup_pgp_cert = mock_pgp_cert();
         config.backup_dir = backup_dir.clone();
@@ -1751,7 +1772,7 @@ mod test {
         )
         .unwrap();
         std::fs::create_dir_all(&backup_dir).unwrap();
-        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        let stale = backup_dir.join("hashi-backup-epoch-5-20000101T000000Z.tar.asc");
         std::fs::write(&stale, b"stale archive").unwrap();
 
         assert_eq!(
@@ -1767,7 +1788,7 @@ mod test {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let backup_dir = tmpdir.path().join("backups");
         let config_path = tmpdir.path().join("config.toml");
-        let mut config = Config::new_for_testing();
+        let mut config = backup_test_config();
         config.db = Some(tmpdir.path().join("db"));
         config.backup_pgp_cert = mock_pgp_cert();
         config.backup_dir = backup_dir.clone();
@@ -1779,8 +1800,9 @@ mod test {
             &prometheus::Registry::new(),
         )
         .unwrap();
+        record_backup_context(&hashi, 6);
         std::fs::create_dir_all(&backup_dir).unwrap();
-        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        let stale = backup_dir.join("hashi-backup-epoch-5-20000101T000000Z.tar.asc");
         std::fs::write(&stale, b"stale archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
@@ -1796,7 +1818,7 @@ mod test {
         let backup_dir = tmpdir.path().join("backups");
         let config_path = tmpdir.path().join("config.toml");
 
-        let mut config = Config::new_for_testing();
+        let mut config = backup_test_config();
         config.db = Some(db_path);
         config.backup_pgp_cert = mock_pgp_cert();
         config.backup_dir = backup_dir.clone();
@@ -1810,6 +1832,7 @@ mod test {
             &prometheus::Registry::new(),
         )
         .unwrap();
+        record_backup_context(&hashi, 6);
         std::fs::create_dir_all(&backup_dir).unwrap();
         let expired = backup_dir.join(archive_name_days_ago(20));
         std::fs::write(&expired, b"old archive").unwrap();
@@ -1821,6 +1844,7 @@ mod test {
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
         assert!(!older.exists());
         hashi.config.save(&config_path).unwrap();
+        record_backup_context(&hashi, 7);
 
         let output = hashi
             .maintain_backups_after_epoch_change(7, true)
@@ -1828,6 +1852,14 @@ mod test {
             .expect("backup should run");
 
         assert!(output.is_file());
+        assert!(
+            output
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-7-")
+        );
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
 
         std::fs::remove_file(config_path).unwrap();
@@ -1841,7 +1873,7 @@ mod test {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let config_path = tmpdir.path().join("config.toml");
         let backup_dir = tmpdir.path().join("backups");
-        let mut config = Config::new_for_testing();
+        let mut config = backup_test_config();
         config.db = Some(tmpdir.path().join("db"));
         config.backup_pgp_cert = mock_pgp_cert();
         config.backup_dir = backup_dir.clone();
@@ -1854,8 +1886,8 @@ mod test {
         )
         .unwrap();
         std::fs::create_dir_all(&backup_dir).unwrap();
-        let older = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
-        let newest = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        let older = backup_dir.join("hashi-backup-epoch-4-19990101T000000Z.tar.asc");
+        let newest = backup_dir.join("hashi-backup-epoch-5-20000101T000000Z.tar.asc");
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::write(&newest, b"last recovery archive").unwrap();
 
@@ -1880,7 +1912,7 @@ mod test {
         let backup_dir = tmpdir.path().join("not-a-directory");
         std::fs::write(&backup_dir, b"not a directory").unwrap();
 
-        let mut config = Config::new_for_testing();
+        let mut config = backup_test_config();
         config.db = Some(tmpdir.path().join("db"));
         config.backup_dir = backup_dir;
         let hashi = Hashi::new_with_registry(
@@ -1890,6 +1922,7 @@ mod test {
             &prometheus::Registry::new(),
         )
         .unwrap();
+        record_backup_context(&hashi, 7);
 
         let error = hashi
             .maintain_backups_after_epoch_change(7, true)

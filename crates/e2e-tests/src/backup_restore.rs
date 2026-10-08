@@ -20,7 +20,11 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::Result;
+    use fastcrypto::encoding::Encoding;
+    use fastcrypto::encoding::Hex;
     use hashi::backup::BACKUP_FILE_NAME_PREFIX;
+    use hashi::backup::BACKUP_MANIFEST_FILE_NAME;
+    use hashi::backup::BackupManifest;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
@@ -76,16 +80,17 @@ mod tests {
 
     /// Find the single backup tarball produced under
     /// `dir` by `backup::save`.
-    fn find_backup_tarball(dir: &Path) -> PathBuf {
+    fn find_backup_tarball(dir: &Path, recovery_epoch: u64) -> PathBuf {
         std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .find(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("asc")
-                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
-                        name.starts_with(&format!("{BACKUP_FILE_NAME_PREFIX}-"))
-                    })
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                    name.starts_with(&format!(
+                        "{BACKUP_FILE_NAME_PREFIX}-epoch-{recovery_epoch}-"
+                    )) && name.ends_with(".tar.asc")
+                })
             })
             .expect("backup::save did not produce a tarball")
     }
@@ -143,8 +148,32 @@ mod tests {
         // One pre-backup rotation so the DB has rotation_messages rows, not
         // just the initial DKG state.
         test_networks.sui_network.force_close_epoch().await?;
-        wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
+        let recovery_epoch =
+            wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
+        // The mirror and MPC public key can advance before local housekeeping.
+        // Exact-epoch signing readiness follows its durable recovery-context
+        // write; do not cancel the service by shutting down before that point.
+        let deadline = tokio::time::Instant::now() + ROTATION_TIMEOUT;
+        while test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .signing_manager_for(recovery_epoch)
+            .is_none()
+        {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Timed out waiting for node 0 signing readiness for backup epoch {recovery_epoch}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        let mpc_public_key = Hex::encode(bcs::to_bytes(
+            &test_networks.hashi_network().nodes()[0]
+                .hashi()
+                .mpc_handle()
+                .unwrap()
+                .public_key()
+                .unwrap(),
+        )?);
 
         // 2. Stop node 0.
         test_networks.hashi_network_mut().nodes_mut()[0]
@@ -179,7 +208,7 @@ mod tests {
         // the node's configured recipient rather than the key generated above.
         let save_out_dir = node0_config.backup_dir.join("manual");
         commands::backup::save(&node_config_path, Some(recipient), &save_out_dir)?;
-        let tarball = find_backup_tarball(&save_out_dir);
+        let tarball = find_backup_tarball(&save_out_dir, recovery_epoch);
 
         // 4. Destroy node 0's on-disk state so recovery actually has to put
         //    things back. The config has its own tempdir; both the DB and
@@ -217,6 +246,32 @@ mod tests {
         assert!(!original_db_path.exists());
         assert!(!node_config_path.exists());
         let extracted_dir = restore_out_dir.path().join(extract_dir_name(&tarball)?);
+        let manifest: BackupManifest = toml::from_slice(&std::fs::read(
+            extracted_dir.join(BACKUP_MANIFEST_FILE_NAME),
+        )?)?;
+        assert_eq!(manifest.recovery.recovery_epoch, recovery_epoch);
+        assert_eq!(
+            manifest.recovery.previous_committee_epoch,
+            Some(initial_epoch)
+        );
+        assert_eq!(manifest.recovery.mpc_public_key, mpc_public_key);
+        assert_eq!(
+            manifest.recovery.deployment.sui_chain_id,
+            node0_config.sui_chain_id()
+        );
+        assert_eq!(
+            manifest.recovery.deployment.bitcoin_chain_id,
+            node0_config.bitcoin_chain_id()
+        );
+        let hashi_ids = node0_config.hashi_ids();
+        assert_eq!(
+            manifest.recovery.deployment.package_id,
+            hashi_ids.package_id
+        );
+        assert_eq!(
+            manifest.recovery.deployment.hashi_object_id,
+            hashi_ids.hashi_object_id
+        );
         std::fs::copy(extracted_dir.join("node-config.toml"), &node_config_path)?;
         std::fs::rename(
             extracted_dir.join(DB_SNAPSHOT_TAR_PREFIX),

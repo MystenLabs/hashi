@@ -1948,8 +1948,9 @@ mod tests {
             .backup_dir
             .clone();
         std::fs::create_dir_all(&backup_dir)?;
-        let older_backup = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
-        let newest_backup = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        // Epoch order deliberately disagrees with age; retention uses timestamps.
+        let older_backup = backup_dir.join("hashi-backup-epoch-100-19990101T000000Z.tar.asc");
+        let newest_backup = backup_dir.join("hashi-backup-epoch-10-20000101T000000Z.tar.asc");
         std::fs::write(&older_backup, b"older archive")?;
         std::fs::write(&newest_backup, b"last recovery archive")?;
 

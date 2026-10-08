@@ -163,6 +163,7 @@ fn create_file_strict(path: &Path) -> Result<File> {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct BackupManifest {
+    pub recovery: crate::db::BackupRecoveryContext,
     pub paths: Vec<BackupManifestEntry>,
     pub db: DbManifestEntry,
 }
@@ -179,7 +180,11 @@ pub struct BackupManifestEntry {
     pub original_path: PathBuf,
 }
 
-pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Result<BackupManifest> {
+fn build_backup_manifest(
+    files: &[PathBuf],
+    db_original_path: &Path,
+    recovery: crate::db::BackupRecoveryContext,
+) -> Result<BackupManifest> {
     let db_archive_entries = backup_keyspace_archive_entries(Path::new(DB_SNAPSHOT_TAR_PREFIX));
     // Reserve the db snapshot directory prefix and every keyspace archive
     // basename so a user file with one of those names gets disambiguated
@@ -240,6 +245,7 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
     }
 
     Ok(BackupManifest {
+        recovery,
         paths: manifest_paths,
         db: DbManifestEntry {
             original_path: db_original_path.to_path_buf(),
@@ -248,9 +254,10 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
     })
 }
 
-pub fn encrypt_files_to_pgp_archive(
+fn encrypt_files_to_pgp_archive(
     manifest: &BackupManifest,
     db: &Database,
+    snapshot: &fjall::Snapshot,
     recipient: &PgpPublicCert,
     output_path: &Path,
 ) -> Result<()> {
@@ -282,7 +289,7 @@ pub fn encrypt_files_to_pgp_archive(
             );
         }
 
-        append_db_backup_to_tar(db, &mut archive, &manifest.db.archive_entries)?;
+        append_db_backup_to_tar(db, snapshot, &mut archive, &manifest.db.archive_entries)?;
         info!("Added database backup to backup archive");
 
         archive.finish()?;
@@ -332,7 +339,20 @@ pub fn save(
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = build_backup_manifest(&files, db_path)?;
+    // Metadata and exported keyspaces must come from the very same snapshot.
+    // In particular, neither a delayed queue event nor current RPC state describes
+    // the recovery point of an offline or lagging database.
+    let snapshot = db.snapshot();
+    let recovery = db.backup_recovery_context(&snapshot)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Database has no completed backup recovery context; wait for a finalized local MPC reconfiguration or successful MPC recovery before backing up"
+        )
+    })?;
+    anyhow::ensure!(
+        recovery.deployment == crate::db::BackupDeployment::from_config(node_config)?,
+        "Node configuration deployment does not match the database backup recovery context"
+    );
+    let manifest = build_backup_manifest(&files, db_path, recovery)?;
 
     info!(
         file_count = files.len(),
@@ -340,8 +360,8 @@ pub fn save(
         "Backing up files + database",
     );
 
-    let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path)?;
+    let output_path = output_dir.join(encrypted_backup_file_name(manifest.recovery.recovery_epoch));
+    encrypt_files_to_pgp_archive(&manifest, db, &snapshot, recipient, &output_path)?;
 
     Ok(output_path)
 }
@@ -394,12 +414,11 @@ fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<V
     Ok(paths)
 }
 
-pub fn encrypted_backup_file_name() -> PathBuf {
-    // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
-    // lexicographically, and contains no characters that need escaping on any
-    // common filesystem.
+pub fn encrypted_backup_file_name(epoch: u64) -> PathBuf {
+    // ISO 8601 basic format in UTC. Retention parses the timestamp rather than
+    // sorting these names: epochs need not increase across offline archives.
     format!(
-        "{BACKUP_FILE_NAME_PREFIX}{}",
+        "{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}{}",
         jiff::Timestamp::now()
             .to_zoned(jiff::tz::TimeZone::UTC)
             .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
@@ -487,13 +506,7 @@ pub(crate) fn cleanup_old_backups(
             }
             continue;
         }
-        let Some(suffix) = file_name.strip_prefix(BACKUP_FILE_NAME_PREFIX.as_bytes()) else {
-            continue;
-        };
-        let Ok(created_at) =
-            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, suffix)
-                .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
-        else {
+        let Some(created_at) = backup_created_at(file_name) else {
             continue;
         };
         if created_at.timestamp() > now {
@@ -536,6 +549,21 @@ pub(crate) fn cleanup_old_backups(
         warn!(path = %path.display(), "Expired the newest backup archive");
     }
     Ok(stats)
+}
+
+fn backup_created_at(file_name: &[u8]) -> Option<jiff::Zoned> {
+    let name = std::str::from_utf8(file_name).ok()?;
+    let suffix = name
+        .strip_prefix(BACKUP_FILE_NAME_PREFIX)?
+        .strip_prefix("-epoch-")?;
+    let (epoch, timestamp) = suffix.split_at(suffix.find('-')?);
+    if epoch.is_empty() || !epoch.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    epoch.parse::<u64>().ok()?;
+    jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, timestamp)
+        .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
+        .ok()
 }
 
 fn remove_expired_backup(stats: &mut CleanupStats, path: &Path) -> bool {
@@ -594,10 +622,10 @@ fn backup_keyspace_name_from_file_name(file_name: &str) -> Option<&'static str> 
 
 fn append_db_backup_to_tar<W: Write>(
     db: &Database,
+    snapshot: &fjall::Snapshot,
     archive: &mut tar::Builder<W>,
     archive_entries: &[PathBuf],
 ) -> Result<()> {
-    let snapshot = db.snapshot();
     let keyspaces = db.backup_keyspaces();
 
     for archive_path in archive_entries {
@@ -986,8 +1014,33 @@ mod tests {
         homedir
     }
 
+    fn test_recovery_context() -> crate::db::BackupRecoveryContext {
+        crate::db::BackupRecoveryContext {
+            recovery_epoch: 7,
+            previous_committee_epoch: Some(3),
+            mpc_public_key: "02".repeat(33),
+            deployment: crate::db::BackupDeployment {
+                sui_chain_id: "mainnet".to_owned(),
+                bitcoin_chain_id: "mainnet".to_owned(),
+                package_id: sui_sdk_types::Address::new([1; 32]),
+                hashi_object_id: sui_sdk_types::Address::new([2; 32]),
+            },
+        }
+    }
+
+    fn record_test_context(db: &Database, config: &mut crate::config::Config) {
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: sui_sdk_types::Address::new([1; 32]),
+            hashi_object_id: sui_sdk_types::Address::new([2; 32]),
+        });
+        let mut context = test_recovery_context();
+        context.deployment = crate::db::BackupDeployment::from_config(config).unwrap();
+        db.record_backup_recovery_context(&context).unwrap();
+    }
+
     fn db_only_manifest() -> BackupManifest {
         BackupManifest {
+            recovery: test_recovery_context(),
             paths: Vec::new(),
             db: DbManifestEntry {
                 original_path: PathBuf::from("/var/lib/hashi/db"),
@@ -1040,13 +1093,13 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let now = jiff::Timestamp::now();
         let older = tmpdir.path().join(format!(
-            "{BACKUP_FILE_NAME_PREFIX}{}",
+            "{BACKUP_FILE_NAME_PREFIX}-epoch-900{}",
             now.checked_sub(jiff::SignedDuration::from_hours(24))
                 .unwrap()
                 .to_zoned(jiff::tz::TimeZone::UTC)
                 .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
         ));
-        let generated = tmpdir.path().join(encrypted_backup_file_name());
+        let generated = tmpdir.path().join(encrypted_backup_file_name(7));
         fs::write(&older, b"older archive").unwrap();
         fs::write(&generated, b"generated recovery archive").unwrap();
         let sweep_time = now
@@ -1128,7 +1181,7 @@ mod tests {
         let wrong_type = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}regular-file"));
         fs::write(&wrong_type, b"not a staging directory").unwrap();
         File::open(&wrong_type).unwrap().set_times(times).unwrap();
-        let completed = dir.join(extract_dir_name(&encrypted_backup_file_name()).unwrap());
+        let completed = dir.join(extract_dir_name(&encrypted_backup_file_name(7)).unwrap());
         let db_restore = dir.join(".hashi-db-restore-abandoned");
         for path in [&completed, &db_restore] {
             fs::create_dir(path).unwrap();
@@ -1202,14 +1255,18 @@ mod tests {
     fn cleanup_old_backups_preserves_boundary_and_unrelated_entries() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let expired = dir.join("hashi-backup-20260825T115959Z.tar.asc");
+        let expired = dir.join("hashi-backup-epoch-7-20260825T115959Z.tar.asc");
         fs::write(&expired, b"expired despite fresh mtime").unwrap();
         let preserved = [
-            "hashi-backup-20260825T120000Z.tar.asc",
-            "hashi-backup-20260908T120000Z.tar.asc",
-            "hashi-backup-20260230T000000Z.tar.asc",
-            "hashi-backup-20260801T000000Z.tar.asc.partial",
+            "hashi-backup-epoch-7-20260825T120000Z.tar.asc",
+            "hashi-backup-epoch-7-20260908T120000Z.tar.asc",
+            "hashi-backup-epoch-7-20260230T000000Z.tar.asc",
+            "hashi-backup-epoch-7-20260801T000000Z.tar.asc.partial",
             "other-backup-20260801T000000Z.tar.asc",
+            "hashi-backup-20260801T000000Z.tar.asc",
+            "hashi-backup-epoch-x-20260801T000000Z.tar.asc",
+            "hashi-backup-epoch--20260801T000000Z.tar.asc",
+            "hashi-backup-epoch-18446744073709551616-20260801T000000Z.tar.asc",
         ];
         for name in preserved {
             fs::write(dir.join(name), b"keep").unwrap();
@@ -1227,7 +1284,7 @@ mod tests {
     fn cleanup_old_backups_preserves_newest_expired_archive_inside_the_floor_bound() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let newest = dir.join("hashi-backup-20260820T000000Z.tar.asc");
+        let newest = dir.join("hashi-backup-epoch-2-20260820T000000Z.tar.asc");
         fs::write(&newest, b"newest recovery archive").unwrap();
         let staging = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}abandoned"));
         fs::write(&staging, b"not a recovery archive").unwrap();
@@ -1237,25 +1294,25 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(staging_modified.into()))
             .unwrap();
         let older = [
-            dir.join("hashi-backup-20260801T000000Z.tar.asc"),
-            dir.join("hashi-backup-20260802T000000Z.tar.asc"),
+            dir.join("hashi-backup-epoch-900-20260801T000000Z.tar.asc"),
+            dir.join("hashi-backup-epoch-10-20260802T000000Z.tar.asc"),
         ];
         for archive in &older {
             fs::write(archive, b"older archive with newer mtime").unwrap();
         }
         let unrelated = [
-            "hashi-backup-20260831T000000Z.tar.asc.partial",
+            "hashi-backup-epoch-7-20260831T000000Z.tar.asc.partial",
             "other-backup-20260831T000000Z.tar.asc",
-            "hashi-backup-20260931T000000Z.tar.asc",
+            "hashi-backup-epoch-7-20260931T000000Z.tar.asc",
         ];
         for name in unrelated {
             fs::write(dir.join(name), b"unrelated").unwrap();
         }
-        let nested = dir.join("hashi-backup-20260804T000000Z.tar.asc");
+        let nested = dir.join("hashi-backup-epoch-7-20260804T000000Z.tar.asc");
         fs::create_dir(&nested).unwrap();
-        let nested_archive = nested.join("hashi-backup-20260801T000000Z.tar.asc");
+        let nested_archive = nested.join("hashi-backup-epoch-7-20260801T000000Z.tar.asc");
         fs::write(&nested_archive, b"nested").unwrap();
-        let link = dir.join("hashi-backup-20260805T000000Z.tar.asc");
+        let link = dir.join("hashi-backup-epoch-7-20260805T000000Z.tar.asc");
         std::os::unix::fs::symlink(&newest, &link).unwrap();
 
         let stats =
@@ -1279,7 +1336,7 @@ mod tests {
     fn cleanup_old_backups_keeps_the_last_archive_inside_the_floor_bound() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let last = dir.join("hashi-backup-20260820T000000Z.tar.asc");
+        let last = dir.join("hashi-backup-epoch-7-20260820T000000Z.tar.asc");
         fs::write(&last, b"last").unwrap();
 
         let stats =
@@ -1294,8 +1351,8 @@ mod tests {
     fn cleanup_old_backups_keeps_the_last_archive_exactly_on_the_floor_bound() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let on_bound = dir.join("hashi-backup-20260809T120000Z.tar.asc");
-        let past_bound = dir.join("hashi-backup-20260809T115959Z.tar.asc");
+        let on_bound = dir.join("hashi-backup-epoch-7-20260809T120000Z.tar.asc");
+        let past_bound = dir.join("hashi-backup-epoch-7-20260809T115959Z.tar.asc");
         fs::write(&on_bound, b"on").unwrap();
         fs::write(&past_bound, b"past").unwrap();
 
@@ -1312,7 +1369,7 @@ mod tests {
     fn cleanup_old_backups_spares_the_last_archive_when_a_save_may_follow() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let last = dir.join("hashi-backup-20260803T000000Z.tar.asc");
+        let last = dir.join("hashi-backup-epoch-7-20260803T000000Z.tar.asc");
         fs::write(&last, b"last").unwrap();
 
         let stats =
@@ -1327,9 +1384,9 @@ mod tests {
     fn cleanup_old_backups_ignores_future_dated_archives_when_choosing_the_newest() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let future = dir.join("hashi-backup-20270101T000000Z.tar.asc");
-        let real = dir.join("hashi-backup-20260820T000000Z.tar.asc");
-        let older = dir.join("hashi-backup-20260801T000000Z.tar.asc");
+        let future = dir.join("hashi-backup-epoch-7-20270101T000000Z.tar.asc");
+        let real = dir.join("hashi-backup-epoch-7-20260820T000000Z.tar.asc");
+        let older = dir.join("hashi-backup-epoch-7-20260801T000000Z.tar.asc");
         fs::write(&future, b"future").unwrap();
         fs::write(&real, b"real").unwrap();
         fs::write(&older, b"older").unwrap();
@@ -1346,7 +1403,7 @@ mod tests {
     fn cleanup_old_backups_expires_the_last_archive_past_the_floor_bound() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let last = dir.join("hashi-backup-20260809T115959Z.tar.asc");
+        let last = dir.join("hashi-backup-epoch-7-20260809T115959Z.tar.asc");
         fs::write(&last, b"last").unwrap();
 
         let stats =
@@ -1365,7 +1422,7 @@ mod tests {
         let files = vec![PathBuf::from("/etc/hashi/hashi-db-snapshot")];
         let db_path = PathBuf::from("/var/lib/hashi/db");
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest = build_backup_manifest(&files, &db_path, test_recovery_context()).unwrap();
 
         assert_eq!(manifest.paths.len(), 1);
         assert_eq!(manifest.db.original_path, db_path);
@@ -1390,7 +1447,7 @@ mod tests {
         let files = vec![PathBuf::from("/etc/hashi/encryption_keys.bin")];
         let db_path = PathBuf::from("/var/lib/hashi/db");
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest = build_backup_manifest(&files, &db_path, test_recovery_context()).unwrap();
 
         assert_eq!(manifest.paths.len(), 1);
         assert_eq!(
@@ -1417,7 +1474,7 @@ mod tests {
         ];
         let db_path = PathBuf::from("/var/lib/hashi/db");
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest = build_backup_manifest(&files, &db_path, test_recovery_context()).unwrap();
 
         assert_eq!(manifest.paths.len(), 2);
         assert_eq!(
@@ -1435,7 +1492,7 @@ mod tests {
         let files = Vec::new();
         let db_path = PathBuf::from("/var/lib/hashi/db");
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest = build_backup_manifest(&files, &db_path, test_recovery_context()).unwrap();
 
         assert_eq!(manifest.db.original_path, db_path);
         assert_eq!(
@@ -1448,8 +1505,12 @@ mod tests {
     #[test]
     fn manifest_round_trips_through_toml() {
         let db_path = PathBuf::from("/var/lib/hashi/db");
-        let manifest =
-            build_backup_manifest(&[PathBuf::from("/etc/hashi/hashi-cli.toml")], &db_path).unwrap();
+        let manifest = build_backup_manifest(
+            &[PathBuf::from("/etc/hashi/hashi-cli.toml")],
+            &db_path,
+            test_recovery_context(),
+        )
+        .unwrap();
 
         let toml = toml::to_string_pretty(&manifest).unwrap();
         let parsed: BackupManifest = toml::from_str(&toml).unwrap();
@@ -1544,6 +1605,7 @@ mod tests {
     #[test]
     fn restore_backup_entries_rejects_unknown_keyspace_file_name() {
         let manifest = BackupManifest {
+            recovery: test_recovery_context(),
             paths: Vec::new(),
             db: DbManifestEntry {
                 original_path: PathBuf::from("/var/lib/hashi/db"),
@@ -1617,16 +1679,21 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let db = Database::open(src.path()).unwrap();
         let out = tempfile::tempdir().unwrap();
-        let recovery = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
+        let recovery = out
+            .path()
+            .join("hashi-backup-epoch-7-20260801T000000Z.tar.asc");
         fs::write(&recovery, b"last recovery archive").unwrap();
-        let output = out.path().join("hashi-backup-20260802T000000Z.tar.asc");
+        let output = out
+            .path()
+            .join("hashi-backup-epoch-7-20260802T000000Z.tar.asc");
         let mut manifest = db_only_manifest();
         manifest.paths.push(BackupManifestEntry {
             original_path: src.path().join("missing-config.toml"),
             archive_name: PathBuf::from("config.toml"),
         });
 
-        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert(), &output);
+        let result =
+            encrypt_files_to_pgp_archive(&manifest, &db, &db.snapshot(), &mock_pgp_cert(), &output);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1645,10 +1712,18 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let db = Database::open(src.path()).unwrap();
         let out = tempfile::tempdir().unwrap();
-        let output = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
+        let output = out
+            .path()
+            .join("hashi-backup-epoch-7-20260801T000000Z.tar.asc");
         fs::write(&output, b"existing recovery archive").unwrap();
         let recipient = mock_pgp_cert();
-        let collision = encrypt_files_to_pgp_archive(&db_only_manifest(), &db, &recipient, &output);
+        let collision = encrypt_files_to_pgp_archive(
+            &db_only_manifest(),
+            &db,
+            &db.snapshot(),
+            &recipient,
+            &output,
+        );
         assert!(collision.is_err());
         assert_eq!(fs::read(&output).unwrap(), b"existing recovery archive");
         assert_eq!(
@@ -1670,6 +1745,8 @@ mod tests {
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
+        record_test_context(&db, &mut node_config);
+        node_config.save(&node_config_path).unwrap();
         let recipient = mock_pgp_cert();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
@@ -1692,6 +1769,19 @@ mod tests {
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
+        record_test_context(&db, &mut node_config);
+        node_config.save(&node_config_path).unwrap();
+        // A later epoch's prepared keys must not advance the completed recovery
+        // epoch of this offline DB, even when the node's RPC is unreachable.
+        db.store_encryption_key(
+            900,
+            &hashi_types::committee::EncryptionPrivateKey::new(&mut rand::thread_rng()),
+        )
+        .unwrap();
+        drop(db);
+        node_config.sui_rpc = Some("http://127.0.0.1:1".to_owned());
+        node_config.save(&node_config_path).unwrap();
+        let db = Database::open(&db_path).unwrap();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
         let output_path =
@@ -1711,14 +1801,17 @@ mod tests {
         // gpg --decrypt inflates the OpenPGP compression layer, so its stdout
         // is the raw tar.
         let mut archive = tar::Archive::new(Cursor::new(output.stdout));
-        let has_manifest = archive
-            .entries()
-            .unwrap()
-            .map(|entry| entry.unwrap().path().unwrap().into_owned())
-            .any(|path| path == Path::new(BACKUP_MANIFEST_FILE_NAME));
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        let (manifest, _) = read_backup_manifest(entry).unwrap();
+        assert_eq!(manifest.recovery.recovery_epoch, 7);
+        assert_eq!(manifest.recovery.previous_committee_epoch, Some(3));
         assert!(
-            has_manifest,
-            "manual gpg decrypt did not produce a valid backup tarball"
+            output_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-7-")
         );
     }
 
@@ -1749,12 +1842,23 @@ mod tests {
             .unwrap();
         db.store_avid_round_state(7, 0, &dealer, &avid_state)
             .unwrap();
+        let context = test_recovery_context();
+        db.record_backup_recovery_context(&context).unwrap();
+        let snapshot = db.snapshot();
+        let captured_context = db.backup_recovery_context(&snapshot).unwrap().unwrap();
+        // Advance the live DB after capturing the recovery point. Both the
+        // context and keyspaces exported below must remain on the old snapshot.
+        let mut newer_context = context.clone();
+        newer_context.recovery_epoch = 900;
+        db.store_encryption_key(900, &enc_key).unwrap();
+        db.record_backup_recovery_context(&newer_context).unwrap();
 
         let mut tar_bytes = Vec::new();
         {
             let mut archive = tar::Builder::new(&mut tar_bytes);
             append_db_backup_to_tar(
                 &db,
+                &snapshot,
                 &mut archive,
                 &backup_keyspace_archive_entries(Path::new(DB_SNAPSHOT_TAR_PREFIX)),
             )
@@ -1780,6 +1884,14 @@ mod tests {
         let restored = Database::open(&dest_path).unwrap();
 
         assert_eq!(restored.get_encryption_key(7).unwrap().unwrap(), enc_key);
+        assert!(restored.get_encryption_key(900).unwrap().is_none());
+        assert_eq!(
+            restored
+                .backup_recovery_context(&restored.snapshot())
+                .unwrap()
+                .unwrap(),
+            captured_context,
+        );
         let restored_dealer = restored.get_dealer_message(7, &dealer).unwrap().unwrap();
         assert_eq!(
             bcs::to_bytes(&restored_dealer).unwrap(),
@@ -1808,6 +1920,7 @@ mod tests {
             let mut archive = tar::Builder::new(&mut tar_bytes);
             append_db_backup_to_tar(
                 &db,
+                &db.snapshot(),
                 &mut archive,
                 &backup_keyspace_archive_entries(Path::new(DB_SNAPSHOT_TAR_PREFIX)),
             )
