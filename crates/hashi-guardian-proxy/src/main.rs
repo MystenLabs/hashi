@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
             .refresh_forever(ChainSource::new(channel.clone(), &config.sui_rpc_url)?),
     );
     let gate = Arc::new(MemberGate::new(allowlist, metrics.clone()));
-    // Its own Sui connection, so handoff lookups can't hold up the allowlist
-    // refresh.
+    // Its own Sui connection: lookups are request-driven, and on a shared one
+    // they could crowd out the allowlist refresh.
     let handoffs = Arc::new(HandoffGate::new(
         ChainSource::new(channel.clone(), &config.sui_rpc_url)?,
         metrics.clone(),
