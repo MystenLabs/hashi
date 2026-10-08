@@ -149,6 +149,13 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_per_peer_inflight_limit: Option<u32>,
 
+    /// Maximum request bytes in flight for one registered peer across all its
+    /// connections; requests above it are shed with `Unavailable`.
+    ///
+    /// Defaults to, and is never below, room for two maximum-size requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_per_peer_inflight_bytes: Option<u64>,
+
     /// Maximum number of tasks each leader job family (unapproved and approved
     /// deposit processing, withdrawal approval, signing, broadcast, block checks)
     /// runs concurrently. The cap is per family, not a global budget.
@@ -353,6 +360,12 @@ impl Config {
         anyhow::ensure!(
             config.grpc_per_peer_inflight_limit != Some(0),
             "grpc_per_peer_inflight_limit must be at least 1"
+        );
+        anyhow::ensure!(
+            config
+                .grpc_max_decoding_message_size
+                .is_none_or(|limit| u32::try_from(limit).is_ok()),
+            "grpc_max_decoding_message_size must fit the 4-byte gRPC length prefix"
         );
         anyhow::ensure!(
             config.withdrawal_signing_per_caller_limit != Some(0),
@@ -574,6 +587,10 @@ impl Config {
             .unwrap_or(DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT)
     }
 
+    pub fn grpc_per_peer_inflight_bytes(&self) -> Option<u64> {
+        self.grpc_per_peer_inflight_bytes
+    }
+
     pub fn max_concurrent_leader_job_tasks(&self) -> usize {
         self.max_concurrent_leader_job_tasks.unwrap_or(32)
     }
@@ -656,6 +673,7 @@ impl Config {
             guardian_endpoint: None,
             grpc_max_decoding_message_size: None,
             grpc_per_peer_inflight_limit: None,
+            grpc_per_peer_inflight_bytes: None,
             max_concurrent_leader_job_tasks: None,
             withdrawal_batching_delay_ms: None,
             withdrawal_max_batch_size: None,
