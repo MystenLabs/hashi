@@ -68,7 +68,8 @@ impl HandoffGate {
         }
     }
 
-    /// Admit `transitions` only if each is a handoff the chain stores.
+    /// Admit `transitions` only if each is a handoff the chain stores and each
+    /// leaves the epoch the one before it reached.
     pub async fn admit(
         &self,
         transitions: &[proto::SignedCommitteeTransition],
@@ -83,8 +84,14 @@ impl HandoffGate {
     }
 
     async fn check(&self, transitions: &[proto::SignedCommitteeTransition]) -> Result<(), Refusal> {
+        let mut reached = None;
         for transition in transitions {
             let (from_epoch, to_epoch) = epochs(transition).ok_or(Refusal::Malformed)?;
+            // A handoff reaches a later epoch, so consecutive ones are distinct
+            // stored ones, which bounds how many a request can send the enclave.
+            if reached.is_some_and(|reached| reached != from_epoch) {
+                return Err(Refusal::NotConsecutive);
+            }
             let stored = self.stored_next_epoch(from_epoch).await?;
             if stored != Some(to_epoch) {
                 warn!(
@@ -105,12 +112,12 @@ impl HandoffGate {
                     },
                 });
             }
+            reached = Some(to_epoch);
         }
         Ok(())
     }
 
-    /// The epoch activated by the handoff the chain stores out of `from_epoch`.
-    /// A stored handoff is read once: replaying the chain's history costs no
+    /// Stored handoffs are remembered, so replaying the chain's history costs no
     /// reads, and each request at most one lookup that finds nothing.
     async fn stored_next_epoch(&self, from_epoch: u64) -> Result<Option<u64>, Refusal> {
         let known = self.stored().get(&from_epoch).copied();
@@ -146,6 +153,7 @@ fn epochs(transition: &proto::SignedCommitteeTransition) -> Option<(u64, u64)> {
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
     Malformed,
+    NotConsecutive,
     /// Nothing is stored out of this epoch yet: its reconfig is pending, or
     /// the read is stale.
     NotOnChain {
@@ -166,6 +174,7 @@ impl Refusal {
     fn reason(self) -> &'static str {
         match self {
             Self::Malformed => "malformed",
+            Self::NotConsecutive => "not_consecutive",
             Self::NotOnChain { .. } => "not_on_chain",
             Self::Superseded { .. } => "superseded",
             Self::ChainUnavailable => "chain_unavailable",
@@ -177,6 +186,10 @@ impl Refusal {
             Self::Malformed => {
                 Status::invalid_argument("malformed committee transition: missing an epoch")
             }
+            Self::NotConsecutive => Status::invalid_argument(
+                "committee transitions are not consecutive: each must leave the epoch the one \
+                 before it reached",
+            ),
             Self::NotOnChain {
                 from_epoch,
                 to_epoch,
@@ -375,12 +388,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refuses_a_chain_that_is_not_consecutive() {
+        let (gate, metrics) = gate(StoredHandoffs::new(&[(5, 7), (7, 9)]));
+
+        // Every handoff here is stored, but none follows the one before it.
+        let repeated = vec![transition(5, 7); 100];
+        let reordered = vec![transition(7, 9), transition(5, 7)];
+        for chain in [repeated, reordered] {
+            let err = gate.admit(&chain).await.unwrap_err();
+            assert_eq!(err.code(), Code::InvalidArgument);
+        }
+        assert_eq!(refused(&metrics, "not_consecutive"), 2);
+    }
+
+    #[tokio::test]
     async fn reads_a_stored_handoff_once() {
         let chain = StoredHandoffs::new(&[(5, 7)]);
         let lookups = chain.lookups.clone();
         let (gate, _) = gate(chain);
 
-        gate.admit(&vec![transition(5, 7); 100]).await.unwrap();
+        gate.admit(&[transition(5, 7)]).await.unwrap();
         gate.admit(&[transition(5, 7)]).await.unwrap();
         gate.admit(&[transition(5, 8)]).await.unwrap_err();
         assert_eq!(lookups.load(Ordering::SeqCst), 1);
