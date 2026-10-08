@@ -10,8 +10,9 @@ use hashi_guardian_proxy::kp::roster::RosterCache;
 use hashi_guardian_proxy::log_store::S3LogStore;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::node::cache::CachingGuardianGrpc;
+use hashi_guardian_proxy::node::handoffs::HandoffGate;
 use hashi_guardian_proxy::node::member_auth::MemberGate;
-use hashi_guardian_proxy::node::members::ChainMemberSource;
+use hashi_guardian_proxy::node::members::ChainSource;
 use hashi_guardian_proxy::node::members::MemberAllowlist;
 use hashi_guardian_proxy::node::widlog::WidLogIndex;
 use hashi_guardian_proxy::public::info;
@@ -85,11 +86,18 @@ async fn main() -> Result<()> {
     // The member gate's allowlist follows the committee of the Hashi object the
     // active guardian serves.
     let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-    tokio::spawn(allowlist.clone().refresh_forever(ChainMemberSource::new(
-        channel.clone(),
-        &config.sui_rpc_url,
-    )?));
+    tokio::spawn(
+        allowlist
+            .clone()
+            .refresh_forever(ChainSource::new(channel.clone(), &config.sui_rpc_url)?),
+    );
     let gate = Arc::new(MemberGate::new(allowlist, metrics.clone()));
+    // Its own Sui connection, so handoff lookups can't hold up the allowlist
+    // refresh.
+    let handoffs = Arc::new(HandoffGate::new(
+        ChainSource::new(channel.clone(), &config.sui_rpc_url)?,
+        metrics.clone(),
+    ));
 
     // One roster cache, shared: the relay authorizes submissions against it and
     // a cert rotation through the forwarder invalidates it.
@@ -115,7 +123,7 @@ async fn main() -> Result<()> {
     // KPs confirm a ceremony to the guardian they are provisioning, so that
     // RPC follows the relay's backend.
     let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel, relay_channel, roster),
+        Forwarding::new(channel, relay_channel, roster, handoffs),
         widlog,
         metrics.clone(),
     );

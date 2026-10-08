@@ -2236,6 +2236,38 @@ mod tests {
             proxy_allowlist().await?.members,
             tls_keys(&test_networks.hashi_network().nodes()[..INITIAL_NODES])?
         );
+        // The proxy forwards a committee handoff only once the chain stores
+        // it: none out of the current epoch until the rotation completes.
+        use hashi_guardian_proxy::node::handoffs::HandoffGate;
+        use hashi_guardian_proxy::node::members::ChainSource;
+        use hashi_types::proto;
+        let guardian = test_networks
+            .guardian_harness
+            .as_ref()
+            .context("no guardian harness")?
+            .endpoint()
+            .to_string();
+        let handoff_gate = HandoffGate::new(
+            ChainSource::new(
+                tonic::transport::Endpoint::from_shared(guardian)?.connect_lazy(),
+                &test_networks.sui_network.rpc_url,
+            )?,
+            std::sync::Arc::new(hashi_guardian_proxy::metrics::ProxyMetrics::new()),
+        );
+        let early = proto::SignedCommitteeTransition {
+            data: Some(proto::CommitteeTransition {
+                new_committee: Some(proto::Committee {
+                    epoch: Some(initial_epoch + 1),
+                    ..Default::default()
+                }),
+            }),
+            committee_signature: Some(proto::CommitteeSignature {
+                epoch: Some(initial_epoch),
+                ..Default::default()
+            }),
+        };
+        let refused = handoff_gate.admit(&[early]).await.unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
 
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
@@ -2267,6 +2299,18 @@ mod tests {
             proxy_allowlist().await?.members,
             tls_keys(test_networks.hashi_network().nodes())?
         );
+        // The handoff a node pushes for the completed rotation is admitted.
+        let pushed = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .committee_handoff(initial_epoch)
+            .context("node 0 holds no handoff out of the initial epoch")?;
+        let pushed =
+            hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb(&pushed);
+        handoff_gate
+            .admit(&[pushed])
+            .await
+            .map_err(|status| anyhow::anyhow!("the proxy refused a node's handoff: {status}"))?;
         crate::test_helpers::assert_no_member_refusals(&test_networks);
 
         Ok(())

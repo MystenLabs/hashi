@@ -3,8 +3,8 @@
 
 //! The registered TLS keys of the current and pending committee's members,
 //! re-read from chain in the background. The member gate
-//! ([`crate::node::member_auth`]) only reads the latest snapshot, so no request, and
-//! no unknown key, ever waits on or triggers a Sui read.
+//! ([`crate::node::member_auth`]) only reads the latest snapshot, so admitting a
+//! request never waits on or triggers a Sui read, even for an unknown key.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -135,17 +135,17 @@ impl MemberAllowlist {
     }
 }
 
-/// Reads the Hashi object id from the active guardian and its committees from
-/// Sui.
-pub struct ChainMemberSource {
+/// Reads the Hashi object id from the active guardian and its committees and
+/// their handoffs from Sui.
+pub struct ChainSource {
     guardian: GuardianServiceClient<Channel>,
-    sui: sui_rpc::Client,
-    /// Read once: it can't change under a running proxy, and later refreshes
+    pub(super) sui: sui_rpc::Client,
+    /// Read once: it can't change under a running proxy, and later reads
     /// then never queue on the enclave's control lock.
     hashi_object_id: OnceLock<Address>,
 }
 
-impl ChainMemberSource {
+impl ChainSource {
     pub fn new(guardian: Channel, sui_rpc_url: &str) -> anyhow::Result<Self> {
         Ok(Self {
             guardian: GuardianServiceClient::new(guardian),
@@ -154,7 +154,7 @@ impl ChainMemberSource {
         })
     }
 
-    async fn hashi_object_id(&self) -> anyhow::Result<Address> {
+    pub(super) async fn hashi_object_id(&self) -> anyhow::Result<Address> {
         if let Some(id) = self.hashi_object_id.get() {
             return Ok(*id);
         }
@@ -179,7 +179,7 @@ impl ChainMemberSource {
 }
 
 #[tonic::async_trait]
-impl MemberSource for ChainMemberSource {
+impl MemberSource for ChainSource {
     async fn fetch(&self) -> anyhow::Result<MemberSnapshot> {
         read_snapshot(self.sui.clone(), self.hashi_object_id().await?).await
     }
@@ -295,7 +295,7 @@ async fn get_committee(
     Ok(field.map(|field| field.value))
 }
 
-async fn get_object<T: serde::de::DeserializeOwned>(
+pub(super) async fn get_object<T: serde::de::DeserializeOwned>(
     sui: &mut sui_rpc::Client,
     id: Address,
 ) -> anyhow::Result<Option<T>> {
@@ -528,7 +528,7 @@ mod tests {
             info, 1,
         )));
         // Nothing listens on port 1, so every Sui read fails.
-        let source = ChainMemberSource::new(channel, "http://127.0.0.1:1").unwrap();
+        let source = ChainSource::new(channel, "http://127.0.0.1:1").unwrap();
 
         source.fetch().await.unwrap_err();
         source.fetch().await.unwrap_err();

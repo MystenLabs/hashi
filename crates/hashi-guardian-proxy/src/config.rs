@@ -53,8 +53,9 @@ pub struct Config {
     /// bitcoin|testnet|signet|regtest). Must match the guardian's config; used
     /// to recompute sighashes when verifying a log replay.
     pub btc_network: Network,
-    /// Sui fullnode gRPC endpoint the committee member allowlist is read from
-    /// (`SUI_RPC_URL`, required), on the chain of the guardian's Hashi object.
+    /// Sui fullnode gRPC endpoint the committee member allowlist and stored
+    /// committee handoffs are read from (`SUI_RPC_URL`, required), on the chain
+    /// of the guardian's Hashi object.
     pub sui_rpc_url: String,
     /// Push metrics to a Prometheus remote-write endpoint; `None` leaves them
     /// on `/metrics`, which nothing can scrape (`MIMIR_URL`, `MIMIR_USERNAME`
