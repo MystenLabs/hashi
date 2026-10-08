@@ -144,8 +144,13 @@ from the sui-operations branch named by `SUI_OPERATIONS_REF`. That workflow
 only runs from `main` or a `workflows-testing*` branch, so until your pull
 request merges, push your branch under such a name and set
 `SUI_OPERATIONS_REF` to it in your environment file. The step prints the
-branch it uses, waits for the workflow and ends with
-`The proxy answers at <url>.`
+branch it uses and asks you to type the stack's name. It then waits for the
+workflow and ends with `The proxy answers at <url>.`
+
+Rolling a proxy that is already serving takes the guardian's address down
+while it restarts, and drops the shares KPs have sent in a provisioning round
+that has not finished. Never run this step between asking KPs to provision and
+seeing the guardian's BTC key in `info`.
 
 ## 6. Reach the guardian
 
@@ -167,7 +172,9 @@ Then check the guardian answers:
 
 A new guardian shows a signing key, no BTC key, and `Serving: no`. The step
 also checks that the proxy fronts this guardian, and stops if it fronts
-another: KPs and nodes reach whichever one the proxy does.
+another: KPs and nodes reach whichever one the proxy does. The ceremony,
+provision and activate steps make the same check before they run, so they
+never reach a guardian through a tunnel left open to another stack.
 
 ## 7. Publish the configuration to the KPs
 
@@ -181,6 +188,10 @@ another: KPs and nodes reach whichever one the proxy does.
 for you, and `certs/`. `operator.yaml` holds the guardian's S3 key; never share
 it. `publish` uploads the KPs' copy and prints a guardian commit and a
 configuration digest.
+
+`publish` and the ceremony, provision and activate steps stop when those files
+are no longer what `render` would write, which happens once the stack, your
+environment file or the roster changes. Run `render` again when they do.
 
 Read `guardian-init.yaml` before you publish it. The Bitcoin network and the
 retention class in it come from your environment file, and they are fixed for
@@ -196,6 +207,9 @@ the configuration.
 ```sh
 ./operator/scripts/guardian.sh guardian.env ceremony
 ```
+
+The step first asks you to type the Bitcoin network and the retention class
+from your environment file: the ceremony fixes both for the life of the key.
 
 The guardian generates its Bitcoin key and deals one encrypted share to each
 KP. The step then waits, printing a line each minute. Ask every KP to run the
