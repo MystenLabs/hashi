@@ -97,6 +97,9 @@ fi
 bucket_pattern='^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
 [[ "$GUARDIAN_BUCKET" =~ $bucket_pattern ]] || die "$USAGE"
 [[ -d "$CONFIG_DIR" ]] || die "No configuration directory at $CONFIG_DIR. $USAGE"
+if [[ "$CONFIG_DIR" != /* ]]; then
+  CONFIG_DIR="$PWD/$CONFIG_DIR"
+fi
 BUCKET="mysten-hashi-kp-pubkeys-$NAME"
 IAM_USER="hashi-kp-pubkeys-$NAME-upload"
 CONFIG_FILE="$CONFIG_DIR/guardian-init.yaml"
@@ -172,6 +175,10 @@ for cert in "$CONFIG_DIR"/certs/*.asc; do
   printf '%s  %s\n' "$(format_fingerprint "$fingerprint")" "${cert_name%-kp-pubkey.asc}"
   cert_count=$((cert_count + 1))
 done
+while IFS= read -r listed_cert; do
+  [[ -f "$PUBLISH_DIR/$listed_cert" ]] \
+    || die "$CONFIG_FILE lists $listed_cert, which is not in $CONFIG_DIR. Add the file, or stop listing it."
+done < <(grep -oE 'certs/[A-Za-z0-9._-]+\.asc' "$CONFIG_FILE")
 leak_status=0
 leaked="$(grep -rlE 'AKIA[A-Z0-9]{16}' "$PUBLISH_DIR")" || leak_status=$?
 ((leak_status == 1)) \

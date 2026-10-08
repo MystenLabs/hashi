@@ -40,7 +40,7 @@ for argument in "$@"; do
   case "$argument" in
     -h | --help)
       printf '%s\n' "$USAGE" \
-        "Deletes the upload-only IAM user for s3://mysten-hashi-kp-pubkeys-<name> and its access keys." \
+        "Deletes the key provisioners' IAM user for s3://mysten-hashi-kp-pubkeys-<name> and its access keys." \
         "The bucket and its files are kept."
       exit 0
       ;;
@@ -82,7 +82,8 @@ fi
 say "Key provisioner upload key revocation"
 printf '%s\n' \
   "This script deletes IAM user $IAM_PATH$IAM_USER and its access keys," \
-  "so key provisioners can no longer upload to s3://$BUCKET." \
+  "so key provisioners can no longer upload to s3://$BUCKET, download the guardian" \
+  "configuration from it, or read the guardian's log bucket." \
   "The bucket and its files are kept."
 
 say "Check the AWS account"
