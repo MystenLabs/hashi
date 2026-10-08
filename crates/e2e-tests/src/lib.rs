@@ -2237,7 +2237,7 @@ mod tests {
             tls_keys(&test_networks.hashi_network().nodes()[..INITIAL_NODES])?
         );
         // The proxy forwards a committee handoff only once the chain stores
-        // it: none out of the current epoch until the rotation completes.
+        // it, which is when the rotation completes.
         use hashi_guardian_proxy::node::handoffs::HandoffGate;
         use hashi_guardian_proxy::node::members::ChainSource;
         use hashi_types::proto;
@@ -2255,26 +2255,6 @@ mod tests {
                 &test_networks.sui_network.rpc_url,
             )?,
             handoff_metrics.clone(),
-        );
-        let early = proto::SignedCommitteeTransition {
-            data: Some(proto::CommitteeTransition {
-                new_committee: Some(proto::Committee {
-                    epoch: Some(initial_epoch + 1),
-                    ..Default::default()
-                }),
-            }),
-            committee_signature: Some(proto::CommitteeSignature {
-                epoch: Some(initial_epoch),
-                ..Default::default()
-            }),
-        };
-        handoff_gate.admit(&[early]).await.unwrap_err();
-        assert_eq!(
-            handoff_metrics
-                .handoff_refused
-                .with_label_values(&["not_on_chain"])
-                .get(),
-            1
         );
 
         // Force epoch change → key rotation 19→20.
@@ -2298,6 +2278,28 @@ mod tests {
         assert_eq!(
             proxy_allowlist().await?.members,
             tls_keys(test_networks.hashi_network().nodes())?
+        );
+        // A handoff out of the current epoch is not stored while the rotation
+        // is pending, so the proxy refuses it.
+        let early = proto::SignedCommitteeTransition {
+            data: Some(proto::CommitteeTransition {
+                new_committee: Some(proto::Committee {
+                    epoch: Some(initial_epoch + 1),
+                    ..Default::default()
+                }),
+            }),
+            committee_signature: Some(proto::CommitteeSignature {
+                epoch: Some(initial_epoch),
+                ..Default::default()
+            }),
+        };
+        handoff_gate.admit(&[early]).await.unwrap_err();
+        assert_eq!(
+            handoff_metrics
+                .handoff_refused
+                .with_label_values(&["not_on_chain"])
+                .get(),
+            1
         );
 
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
