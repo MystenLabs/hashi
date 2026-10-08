@@ -292,6 +292,10 @@ Add `--do-genesis` when the operator says this is the guardian's first
 deployment. If the command stops with `is not live in S3`, the guardian has not
 started its session yet: wait a minute and run it again.
 
+If a step fails with `Inappropriate ioctl for device`, GnuPG has no terminal to
+ask for your PIN on. Run `export GPG_TTY=$(tty)` in the same terminal, then run
+the step again.
+
 After each step, tell the operator that it finished and post the last line it
-printed. If a step fails, send the operator its last lines instead of working
-around it.
+printed. If a step fails for any other reason, send the operator its last lines
+instead of working around it.
