@@ -15,7 +15,10 @@
 //! `start_reconfig`, and an abort needs that epoch to have passed), and the
 //! enclave verifies the certificate over the committee it is sent.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -50,6 +53,9 @@ pub trait HandoffSource: Send + Sync + 'static {
 
 pub struct HandoffGate {
     source: Box<dyn HandoffSource>,
+    /// The stored handoffs read so far: the epoch each leaves, to the one it
+    /// activates.
+    stored: Mutex<HashMap<u64, u64>>,
     metrics: Arc<ProxyMetrics>,
 }
 
@@ -57,12 +63,12 @@ impl HandoffGate {
     pub fn new(source: impl HandoffSource, metrics: Arc<ProxyMetrics>) -> Self {
         Self {
             source: Box::new(source),
+            stored: Mutex::default(),
             metrics,
         }
     }
 
-    /// Admit `transitions` only if each is a handoff the chain stores and each
-    /// leaves the epoch the one before it reached.
+    /// Admit `transitions` only if each is a handoff the chain stores.
     pub async fn admit(
         &self,
         transitions: &[proto::SignedCommitteeTransition],
@@ -77,21 +83,9 @@ impl HandoffGate {
     }
 
     async fn check(&self, transitions: &[proto::SignedCommitteeTransition]) -> Result<(), Refusal> {
-        let mut reached = None;
         for transition in transitions {
             let (from_epoch, to_epoch) = epochs(transition).ok_or(Refusal::Malformed)?;
-            // Consecutive handoffs are distinct stored ones, which bounds the
-            // lookups one request can cost.
-            if reached.is_some_and(|reached| reached != from_epoch) {
-                return Err(Refusal::NotConsecutive);
-            }
-            let stored = tokio::time::timeout(LOOKUP_TIMEOUT, self.source.next_epoch(from_epoch))
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {LOOKUP_TIMEOUT:?}")))
-                .map_err(|e| {
-                    warn!(from_epoch, error = %format!("{e:#}"), "Committee handoff read failed.");
-                    Refusal::ChainUnavailable
-                })?;
+            let stored = self.stored_next_epoch(from_epoch).await?;
             if stored != Some(to_epoch) {
                 warn!(
                     from_epoch,
@@ -104,9 +98,33 @@ impl HandoffGate {
                     to_epoch,
                 });
             }
-            reached = Some(to_epoch);
         }
         Ok(())
+    }
+
+    /// The epoch activated by the handoff the chain stores out of `from_epoch`.
+    /// A stored handoff is read once, so replaying the chain's history costs
+    /// no reads, and a request at most one that finds nothing.
+    async fn stored_next_epoch(&self, from_epoch: u64) -> Result<Option<u64>, Refusal> {
+        let known = self.stored().get(&from_epoch).copied();
+        if known.is_some() {
+            return Ok(known);
+        }
+        let read = tokio::time::timeout(LOOKUP_TIMEOUT, self.source.next_epoch(from_epoch))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {LOOKUP_TIMEOUT:?}")))
+            .map_err(|e| {
+                warn!(from_epoch, error = %format!("{e:#}"), "Committee handoff read failed.");
+                Refusal::ChainUnavailable
+            })?;
+        if let Some(next_epoch) = read {
+            self.stored().insert(from_epoch, next_epoch);
+        }
+        Ok(read)
+    }
+
+    fn stored(&self) -> MutexGuard<'_, HashMap<u64, u64>> {
+        self.stored.lock().expect("stored handoffs mutex poisoned")
     }
 }
 
@@ -121,7 +139,6 @@ fn epochs(transition: &proto::SignedCommitteeTransition) -> Option<(u64, u64)> {
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
     Malformed,
-    NotConsecutive,
     NotOnChain { from_epoch: u64, to_epoch: u64 },
     ChainUnavailable,
 }
@@ -130,7 +147,6 @@ impl Refusal {
     fn reason(self) -> &'static str {
         match self {
             Self::Malformed => "malformed",
-            Self::NotConsecutive => "not_consecutive",
             Self::NotOnChain { .. } => "not_on_chain",
             Self::ChainUnavailable => "chain_unavailable",
         }
@@ -141,10 +157,6 @@ impl Refusal {
             Self::Malformed => {
                 Status::invalid_argument("malformed committee transition: missing an epoch")
             }
-            Self::NotConsecutive => Status::invalid_argument(
-                "committee transitions are not consecutive: each must leave the epoch the one \
-                 before it reached",
-            ),
             Self::NotOnChain {
                 from_epoch,
                 to_epoch,
@@ -216,7 +228,6 @@ async fn read_next_epoch(
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -320,7 +331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admits_consecutive_handoffs_only_if_each_is_stored() {
+    async fn admits_a_chain_only_if_each_handoff_is_stored() {
         let (gate, _) = gate(StoredHandoffs::new(&[(5, 7), (7, 9)]));
         gate.admit(&[]).await.unwrap();
         gate.admit(&[transition(5, 7), transition(7, 9)])
@@ -335,15 +346,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeating_a_stored_handoff_costs_no_more_lookups() {
+    async fn reads_a_stored_handoff_once() {
         let chain = StoredHandoffs::new(&[(5, 7)]);
         let lookups = chain.lookups.clone();
-        let (gate, metrics) = gate(chain);
+        let (gate, _) = gate(chain);
 
-        let repeated = gate.admit(&vec![transition(5, 7); 100]).await.unwrap_err();
-        assert_eq!(repeated.code(), Code::InvalidArgument);
+        gate.admit(&vec![transition(5, 7); 100]).await.unwrap();
+        gate.admit(&[transition(5, 7)]).await.unwrap();
+        gate.admit(&[transition(5, 8)]).await.unwrap_err();
         assert_eq!(lookups.load(Ordering::SeqCst), 1);
-        assert_eq!(refused(&metrics, "not_consecutive"), 1);
+
+        // One the chain may yet store is read again each time.
+        gate.admit(&[transition(7, 9)]).await.unwrap_err();
+        gate.admit(&[transition(7, 9)]).await.unwrap_err();
+        assert_eq!(lookups.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
