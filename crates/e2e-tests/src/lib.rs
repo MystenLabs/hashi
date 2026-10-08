@@ -2247,12 +2247,14 @@ mod tests {
             .context("no guardian harness")?
             .endpoint()
             .to_string();
+        let handoff_metrics =
+            std::sync::Arc::new(hashi_guardian_proxy::metrics::ProxyMetrics::new());
         let handoff_gate = HandoffGate::new(
             ChainSource::new(
                 tonic::transport::Endpoint::from_shared(guardian)?.connect_lazy(),
                 &test_networks.sui_network.rpc_url,
             )?,
-            std::sync::Arc::new(hashi_guardian_proxy::metrics::ProxyMetrics::new()),
+            handoff_metrics.clone(),
         );
         let early = proto::SignedCommitteeTransition {
             data: Some(proto::CommitteeTransition {
@@ -2266,8 +2268,14 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let refused = handoff_gate.admit(&[early]).await.unwrap_err();
-        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        handoff_gate.admit(&[early]).await.unwrap_err();
+        assert_eq!(
+            handoff_metrics
+                .handoff_refused
+                .with_label_values(&["not_on_chain"])
+                .get(),
+            1
+        );
 
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;

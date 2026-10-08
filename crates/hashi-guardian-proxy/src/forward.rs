@@ -485,12 +485,12 @@ mod tests {
             .update_committee(Request::new(transition(7, 9)))
             .await
             .unwrap_err();
-        assert_eq!(early.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(early.code(), tonic::Code::Unavailable);
         let early = proxy
             .update_committee_chain(chain(vec![transition(5, 7), transition(7, 9)]))
             .await
             .unwrap_err();
-        assert_eq!(early.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(early.code(), tonic::Code::Unavailable);
         assert_eq!(stub.update_committee_calls.load(Ordering::SeqCst), 2);
     }
 

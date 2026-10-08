@@ -93,9 +93,16 @@ impl HandoffGate {
                     ?stored,
                     "Refusing a committee handoff the chain does not store."
                 );
-                return Err(Refusal::NotOnChain {
-                    from_epoch,
-                    to_epoch,
+                return Err(match stored {
+                    Some(stored) => Refusal::Superseded {
+                        from_epoch,
+                        to_epoch,
+                        stored,
+                    },
+                    None => Refusal::NotOnChain {
+                        from_epoch,
+                        to_epoch,
+                    },
                 });
             }
         }
@@ -139,7 +146,19 @@ fn epochs(transition: &proto::SignedCommitteeTransition) -> Option<(u64, u64)> {
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
     Malformed,
-    NotOnChain { from_epoch: u64, to_epoch: u64 },
+    /// Nothing is stored out of this epoch yet: its reconfig is pending, or
+    /// the read is stale.
+    NotOnChain {
+        from_epoch: u64,
+        to_epoch: u64,
+    },
+    /// Another handoff is stored out of this epoch, so this one's reconfig
+    /// aborted. No stale read can show that.
+    Superseded {
+        from_epoch: u64,
+        to_epoch: u64,
+        stored: u64,
+    },
     ChainUnavailable,
 }
 
@@ -148,6 +167,7 @@ impl Refusal {
         match self {
             Self::Malformed => "malformed",
             Self::NotOnChain { .. } => "not_on_chain",
+            Self::Superseded { .. } => "superseded",
             Self::ChainUnavailable => "chain_unavailable",
         }
     }
@@ -160,9 +180,17 @@ impl Refusal {
             Self::NotOnChain {
                 from_epoch,
                 to_epoch,
+            } => Status::unavailable(format!(
+                "no handoff from epoch {from_epoch} to epoch {to_epoch} is stored on chain yet; \
+                 retry"
+            )),
+            Self::Superseded {
+                from_epoch,
+                to_epoch,
+                stored,
             } => Status::failed_precondition(format!(
-                "no completed handoff from epoch {from_epoch} to epoch {to_epoch} is stored on \
-                 chain"
+                "the chain stores a handoff from epoch {from_epoch} to epoch {stored}, not to \
+                 epoch {to_epoch}"
             )),
             Self::ChainUnavailable => Status::unavailable("committee handoffs unavailable; retry"),
         }
@@ -324,10 +352,11 @@ mod tests {
 
         let aborted = gate.admit(&[transition(5, 7)]).await.unwrap_err();
         assert_eq!(aborted.code(), Code::FailedPrecondition);
+        assert_eq!(refused(&metrics, "superseded"), 1);
         // A reconfig out of 8 is pending at most: nothing is stored for it.
         let pending = gate.admit(&[transition(8, 9)]).await.unwrap_err();
-        assert_eq!(pending.code(), Code::FailedPrecondition);
-        assert_eq!(refused(&metrics, "not_on_chain"), 2);
+        assert_eq!(pending.code(), Code::Unavailable);
+        assert_eq!(refused(&metrics, "not_on_chain"), 1);
     }
 
     #[tokio::test]
