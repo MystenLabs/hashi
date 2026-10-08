@@ -68,6 +68,12 @@ pub enum MonitorFinding {
         claimed: Txid,
         reason: String,
     },
+    /// A change output of the Hashi approval does not pay the bridge's change address.
+    ChangeOutputNotToBridge {
+        wid: WithdrawalID,
+        vout: u32,
+        bitcoin_address: Vec<u8>,
+    },
 }
 
 impl MonitorFinding {
@@ -85,6 +91,7 @@ impl MonitorFinding {
             Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
+            Self::ChangeOutputNotToBridge { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -139,6 +146,15 @@ impl fmt::Display for MonitorFinding {
             } => write!(
                 f,
                 "WithdrawalTxUnbuildable(wid={wid}, claimed={claimed}, reason={reason})"
+            ),
+            Self::ChangeOutputNotToBridge {
+                wid,
+                vout,
+                bitcoin_address,
+            } => write!(
+                f,
+                "ChangeOutputNotToBridge(wid={wid}, vout={vout}, bitcoin_address={})",
+                hex::encode(bitcoin_address),
             ),
         }
     }

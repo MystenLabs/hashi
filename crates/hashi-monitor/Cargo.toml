@@ -12,6 +12,7 @@ futures.workspace = true
 hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
+hex.workspace = true
 minreq = { workspace = true, features = ["json-using-serde"] }
 prometheus.workspace = true
 serde.workspace = true
