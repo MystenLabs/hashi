@@ -1672,6 +1672,10 @@ fn test_mpc_manager_new_party_id_follows_canonical_order() {
     }
 }
 
+fn encoded<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    bcs::to_bytes(value).unwrap()
+}
+
 struct InMemoryPublicMessagesStore {
     stored: std::sync::Mutex<HashMap<Address, avss::Message>>,
     rotation_stored: std::sync::Mutex<HashMap<Address, RotationMessages>>,
@@ -1709,21 +1713,17 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         Ok(())
     }
 
-    fn get_dealer_message(
-        &self,
-        _epoch: u64,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
-        Ok(self.stored.lock().unwrap().get(dealer).cloned())
+    fn get_dealer_message(&self, _epoch: u64, dealer: &Address) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.stored.lock().unwrap().get(dealer).map(encoded))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(self
             .stored
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
+            .map(|(k, v)| (*k, encoded(v)))
             .collect())
     }
 
@@ -1744,17 +1744,22 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         &self,
         _epoch: u64,
         dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
-        Ok(self.rotation_stored.lock().unwrap().get(dealer).cloned())
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self
+            .rotation_stored
+            .lock()
+            .unwrap()
+            .get(dealer)
+            .map(encoded))
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(self
             .rotation_stored
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
+            .map(|(k, v)| (*k, encoded(v)))
             .collect())
     }
 
@@ -1780,7 +1785,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         if self.fail_avid_round_state_reads {
             return Err(anyhow::anyhow!("avid round state read failure"));
         }
@@ -1789,20 +1794,17 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
             .lock()
             .unwrap()
             .get(&(batch_index, *dealer))
-            .cloned())
+            .map(encoded))
     }
 
-    fn list_avid_round_states(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(self
             .avid_round_stored
             .lock()
             .unwrap()
             .iter()
             .filter(|((bi, _), _)| *bi == batch_index)
-            .map(|((_, addr), state)| (*addr, state.clone()))
+            .map(|((_, addr), state)| (*addr, encoded(state)))
             .collect())
     }
 
@@ -1825,7 +1827,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         if self.fail_avid_held_echoes_reads {
             return Err(anyhow::anyhow!("avid held echoes read failure"));
         }
@@ -1834,7 +1836,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
             .lock()
             .unwrap()
             .get(&(batch_index, *dealer))
-            .cloned())
+            .map(encoded))
     }
 
     fn store_avid_dealer_builder(
@@ -1880,11 +1882,11 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Err(anyhow::anyhow!("Storage failure"))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(vec![])
     }
 
@@ -1901,11 +1903,11 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Err(anyhow::anyhow!("Storage failure"))
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(vec![])
     }
 
@@ -1924,14 +1926,11 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
-    fn list_avid_round_states(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, _batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(vec![])
     }
 
@@ -1950,7 +1949,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         anyhow::bail!("store failure")
     }
 
@@ -4085,26 +4084,26 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
     let rotation_setup = RotationTestSetup::new();
 
     let dealer_address = rotation_setup.setup.address(0);
-    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let (mut manager, _) = rotation_setup.create_receiver_with_memory_store(0);
 
-    // Store "previous epoch" rotation messages in DB under epoch - 1.
+    // Store a "previous epoch" DKG message in DB under epoch - 1.
     let prev_epoch = manager.mpc_config.epoch - 1;
-    let prev_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    let prev_msg = manager.create_dealer_message(&mut rng);
     manager
         .public_messages_store
-        .store_rotation_messages(prev_epoch, &dealer_address, &prev_msgs)
+        .store_dealer_message(prev_epoch, &dealer_address, &prev_msg)
         .unwrap();
 
-    // Put DIFFERENT "current epoch" messages in the in-memory map.
-    let current_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    // Put a DIFFERENT "current epoch" message in the in-memory map.
+    let current_msg = manager.create_dealer_message(&mut rng);
     manager
-        .current_rotation_messages
-        .insert(dealer_address, current_msgs.clone());
+        .current_dkg_messages
+        .insert(dealer_address, current_msg);
 
-    // Request previous epoch's messages — should get DB data, not in-memory.
+    // Request previous epoch's message — should get DB data, not in-memory.
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
-        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: prev_epoch,
         batch_index: None,
     };
@@ -4112,7 +4111,7 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
         .handle_retrieve_messages_request(Address::ZERO, &request)
         .unwrap();
 
-    let expected_hash = Messages::Rotation(prev_msgs).compute_hash();
+    let expected_hash = Messages::Dkg(prev_msg).compute_hash();
     let actual_hash = response.messages.compute_hash();
     assert_eq!(
         expected_hash, actual_hash,
@@ -4151,7 +4150,7 @@ fn test_persist_and_cache_rotation_messages_does_not_overwrite_in_memory_with_no
         .unwrap()
         .expect("Store should have the cross-epoch entry");
     assert_eq!(
-        Messages::Rotation(stored_prev).compute_hash(),
+        stored_rows::rotation_messages_hash(&stored_prev),
         Messages::Rotation(prev_msgs).compute_hash(),
     );
 
@@ -4198,7 +4197,7 @@ fn test_persist_and_cache_dkg_message_does_not_overwrite_in_memory_with_non_curr
         .unwrap()
         .expect("Store should have the cross-epoch entry");
     assert_eq!(
-        Messages::Dkg(stored_prev).compute_hash(),
+        stored_rows::dkg_message_hash(&stored_prev),
         Messages::Dkg(prev_msg).compute_hash(),
     );
 
@@ -6001,21 +6000,17 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         Ok(())
     }
 
-    fn get_dealer_message(
-        &self,
-        _epoch: u64,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
-        Ok(self.stored.lock().unwrap().get(dealer).cloned())
+    fn get_dealer_message(&self, _epoch: u64, dealer: &Address) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.stored.lock().unwrap().get(dealer).map(encoded))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(self
             .stored
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
+            .map(|(k, v)| (*k, encoded(v)))
             .collect())
     }
 
@@ -6036,17 +6031,22 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         &self,
         _epoch: u64,
         dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
-        Ok(self.rotation_stored.lock().unwrap().get(dealer).cloned())
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self
+            .rotation_stored
+            .lock()
+            .unwrap()
+            .get(dealer)
+            .map(encoded))
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(self
             .rotation_stored
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
+            .map(|(k, v)| (*k, encoded(v)))
             .collect())
     }
 
@@ -6065,14 +6065,11 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
-    fn list_avid_round_states(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, _batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(vec![])
     }
 
@@ -6091,7 +6088,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
@@ -8305,7 +8302,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
         .unwrap()
         .expect("the re-fetched message is persisted");
     assert_eq!(
-        Messages::Dkg(stored).compute_hash(),
+        stored_rows::dkg_message_hash(&stored),
         certified_hash,
         "the diverged copy must be replaced by the certified one",
     );
@@ -8650,7 +8647,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         .unwrap()
         .expect("the re-fetched message is persisted");
     assert_eq!(
-        Messages::Rotation(stored).compute_hash(),
+        stored_rows::rotation_messages_hash(&stored),
         certified_hash,
         "the diverged copy must be replaced by the certified one",
     );
@@ -9035,7 +9032,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
         .unwrap()
         .expect("the later dealer's message is still present");
     assert_ne!(
-        Messages::Rotation(stored_later).compute_hash(),
+        stored_rows::rotation_messages_hash(&stored_later),
         repairable_certified_hash,
         "reconstruction fails on the unrepairable dealer first, so the walk must stop there",
     );
@@ -9949,15 +9946,11 @@ impl PublicMessagesStore for SharedMemoryStore {
             .store_dealer_message(0, dealer, message)
     }
 
-    fn get_dealer_message(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
+    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner.lock().unwrap().get_dealer_message(epoch, dealer)
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.inner.lock().unwrap().list_all_dealer_messages()
     }
 
@@ -9977,14 +9970,14 @@ impl PublicMessagesStore for SharedMemoryStore {
         &self,
         epoch: u64,
         dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner
             .lock()
             .unwrap()
             .get_rotation_messages(epoch, dealer)
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.inner.lock().unwrap().list_all_rotation_messages()
     }
 
@@ -10006,17 +9999,14 @@ impl PublicMessagesStore for SharedMemoryStore {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner
             .lock()
             .unwrap()
             .get_avid_round_state(epoch, batch_index, dealer)
     }
 
-    fn list_avid_round_states(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.inner
             .lock()
             .unwrap()
@@ -10041,7 +10031,7 @@ impl PublicMessagesStore for SharedMemoryStore {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.inner
             .lock()
             .unwrap()
@@ -10141,10 +10131,13 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
     rotation_setup.switch_to_rotation(&mut new_dealer_manager);
 
     // Load rotation messages from store (simulating restart recovery)
-    let stored_messages = shared_store
-        .get_rotation_messages(0, &dealer_addr)
-        .unwrap()
-        .expect("Rotation messages should be in store");
+    let stored_messages: RotationMessages = bcs::from_bytes(
+        &shared_store
+            .get_rotation_messages(0, &dealer_addr)
+            .unwrap()
+            .expect("Rotation messages should be in store"),
+    )
+    .unwrap();
 
     // Verify the stored messages match the original
     assert_eq!(
@@ -18276,17 +18269,17 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.entered.send(()).unwrap();
         self.release.lock().unwrap().recv().unwrap();
-        Ok(Some(self.message.clone()))
+        Ok(Some(encoded(&self.message)))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(Vec::new())
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(Vec::new())
     }
 
@@ -18312,7 +18305,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
@@ -18331,16 +18324,13 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.entered.send(()).unwrap();
         self.release.lock().unwrap().recv().unwrap();
         Ok(None)
     }
 
-    fn list_avid_round_states(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, _batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         Ok(Vec::new())
     }
 
@@ -18359,7 +18349,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 
@@ -18747,6 +18737,54 @@ fn complain_admits_a_zero_weight_member_and_refuses_a_non_member() {
     );
 }
 
+#[test]
+fn a_stored_row_that_fails_the_count_check_is_skipped_and_never_decoded() {
+    let setup = TestSetup::new(4);
+    let epoch = setup.epoch();
+    let dealer = setup.address(1);
+    let honest = setup
+        .create_manager(1)
+        .create_dealer_message(&mut rand::thread_rng());
+    let encs_count = 1 + usize::from(setup.dkg_config().threshold) * 33 + 64;
+    let mut miscounted = bcs::to_bytes(&honest).unwrap();
+    miscounted[encs_count] += 1;
+    miscounted.insert(miscounted.len() - 96, 0);
+    let store = Arc::new(InMemoryPublicMessagesStore::new());
+    store
+        .store_dealer_message(epoch, &dealer, &bcs::from_bytes(&miscounted).unwrap())
+        .unwrap();
+    let mut manager = setup.create_manager_with_store(0, store);
+
+    assert!(!manager.current_dkg_messages.contains_key(&dealer));
+    assert!(matches!(
+        manager.read_dkg_message(epoch, &dealer),
+        Err(MpcError::StoredRowRefused { .. })
+    ));
+    let resend = manager.handle_send_messages_request(
+        dealer,
+        &SendMessagesRequest {
+            messages: Messages::Dkg(honest),
+        },
+    );
+    assert!(
+        matches!(&resend, Err(MpcError::InvalidMessage { reason, .. }) if reason == "Dealer sent different messages"),
+        "{resend:?}"
+    );
+    let retrieved = manager.handle_retrieve_messages_request(
+        setup.address(2),
+        &RetrieveMessagesRequest {
+            dealer,
+            protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch,
+            batch_index: None,
+        },
+    );
+    assert!(
+        matches!(retrieved, Err(MpcError::NotFound(_))),
+        "{retrieved:?}"
+    );
+}
+
 struct RacingAvidStore {
     round_state: AvidRoundState,
     held: HeldAvidEchoes,
@@ -18783,11 +18821,11 @@ impl PublicMessagesStore for RacingAvidStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         unimplemented!()
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         unimplemented!()
     }
 
@@ -18804,11 +18842,11 @@ impl PublicMessagesStore for RacingAvidStore {
         &self,
         _epoch: u64,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         unimplemented!()
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         unimplemented!()
     }
 
@@ -18827,17 +18865,14 @@ impl PublicMessagesStore for RacingAvidStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let published = *self.published.lock().unwrap();
-        let answer = published.then(|| self.round_state.clone());
+        let answer = published.then(|| encoded(&self.round_state));
         self.pause_after_first_read();
         Ok(answer)
     }
 
-    fn list_avid_round_states(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, _batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         unimplemented!()
     }
 
@@ -18856,9 +18891,9 @@ impl PublicMessagesStore for RacingAvidStore {
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let published = *self.published.lock().unwrap();
-        let answer = published.then(|| self.held.clone());
+        let answer = published.then(|| encoded(&self.held));
         self.pause_after_first_read();
         Ok(answer)
     }
@@ -18910,14 +18945,20 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
         )
         .unwrap();
     let epoch = voter.mpc_config.epoch;
-    let round_state = source
-        .get_avid_round_state(epoch, batch_index, &fx.dealer_addr)
-        .unwrap()
-        .unwrap();
-    let held = source
-        .get_avid_held_echoes(epoch, batch_index, &fx.dealer_addr)
-        .unwrap()
-        .unwrap();
+    let round_state: AvidRoundState = bcs::from_bytes(
+        &source
+            .get_avid_round_state(epoch, batch_index, &fx.dealer_addr)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let held: HeldAvidEchoes = bcs::from_bytes(
+        &source
+            .get_avid_held_echoes(epoch, batch_index, &fx.dealer_addr)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
 
     let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -18939,9 +18980,10 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
         held: Lookup::Pending,
     };
 
+    let shape = voter.shape_params();
     let reader = {
         let store = Arc::clone(&store);
-        std::thread::spawn(move || finish_avid_retrieval(&*store, pending))
+        std::thread::spawn(move || finish_avid_retrieval(&*store, pending, &shape))
     };
 
     entered_rx

@@ -84,6 +84,7 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
+        let shape = self.shape_params()?;
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let to_status = |e: MpcError| {
@@ -128,10 +129,10 @@ impl MpcService for HttpService {
             let messages = match outcome {
                 RetrieveOutcome::Ready(messages) => messages,
                 RetrieveOutcome::NeedsStore => {
-                    retrieve_from_store(&*store, &internal_request).map_err(to_status)?
+                    retrieve_from_store(&*store, &internal_request, &shape).map_err(to_status)?
                 }
                 RetrieveOutcome::NeedsAvidStore(pending) => {
-                    finish_avid_retrieval(&*store, pending).map_err(to_status)?
+                    finish_avid_retrieval(&*store, pending, &shape).map_err(to_status)?
                 }
             };
             Ok(RetrieveMessagesResponse::from(&messages))

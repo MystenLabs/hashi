@@ -8,7 +8,6 @@ use sui_sdk_types::Address;
 
 pub use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::HeldAvidEchoes;
-pub use crate::mpc::types::Messages;
 pub use crate::mpc::types::RotationMessages;
 
 pub trait PublicMessagesStore: Send + Sync {
@@ -21,12 +20,12 @@ pub trait PublicMessagesStore: Send + Sync {
         message: &avss::Message,
     ) -> Result<()>;
 
-    /// Retrieve a dealer's DKG message for the given epoch.
+    /// Retrieve the stored bytes of a dealer's DKG message for the given epoch.
     /// Returns None if no message exists for this dealer.
-    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<Option<avss::Message>>;
+    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<Option<Vec<u8>>>;
 
-    /// List all stored dealer messages for the current epoch.
-    fn list_all_dealer_messages(&self) -> Result<Vec<(Address, Messages)>>;
+    /// List the stored bytes of all dealer messages for the current epoch.
+    fn list_all_dealer_messages(&self) -> Result<Vec<(Address, Vec<u8>)>>;
 
     /// Store a dealer's rotation messages at the given epoch.
     /// If messages already exist for this dealer, they will be overwritten.
@@ -37,16 +36,12 @@ pub trait PublicMessagesStore: Send + Sync {
         messages: &RotationMessages,
     ) -> Result<()>;
 
-    /// Retrieve a dealer's rotation messages for the given epoch.
+    /// Retrieve the stored bytes of a dealer's rotation messages for the given epoch.
     /// Returns None if no messages exist for this dealer.
-    fn get_rotation_messages(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> Result<Option<RotationMessages>>;
+    fn get_rotation_messages(&self, epoch: u64, dealer: &Address) -> Result<Option<Vec<u8>>>;
 
-    /// List all stored rotation messages for the current epoch.
-    fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Messages)>>;
+    /// List the stored bytes of all rotation messages for the current epoch.
+    fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Vec<u8>)>>;
 
     /// Store a dealer's AVID round state at the given epoch and batch.
     /// If state already exists for this dealer and batch, it will be overwritten.
@@ -58,17 +53,17 @@ pub trait PublicMessagesStore: Send + Sync {
         state: &AvidRoundState,
     ) -> Result<()>;
 
-    /// Retrieve a dealer's AVID round state for the given epoch and batch.
+    /// Retrieve the stored bytes of a dealer's AVID round state for the given epoch and batch.
     /// Returns None if no state exists for this dealer.
     fn get_avid_round_state(
         &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> Result<Option<AvidRoundState>>;
+    ) -> Result<Option<Vec<u8>>>;
 
-    /// List all AVID round states for the current epoch and given batch.
-    fn list_avid_round_states(&self, batch_index: u32) -> Result<Vec<(Address, AvidRoundState)>>;
+    /// List the stored bytes of all AVID round states for the current epoch and given batch.
+    fn list_avid_round_states(&self, batch_index: u32) -> Result<Vec<(Address, Vec<u8>)>>;
 
     /// Store this node's held AVID vote and echoes for the given epoch, batch, and dealer,
     /// overwriting any existing entry.
@@ -80,13 +75,14 @@ pub trait PublicMessagesStore: Send + Sync {
         held: &HeldAvidEchoes,
     ) -> Result<()>;
 
-    /// Retrieve this node's held AVID vote and echoes for the given epoch, batch, and dealer.
+    /// Retrieve the stored bytes of this node's held AVID vote and echoes for the given epoch,
+    /// batch, and dealer.
     fn get_avid_held_echoes(
         &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> Result<Option<HeldAvidEchoes>>;
+    ) -> Result<Option<Vec<u8>>>;
 
     /// Store this node's own AVID dealer builder for the given epoch and batch, overwriting any
     /// existing one.

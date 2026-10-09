@@ -2034,10 +2034,7 @@ mod tests {
 
         assert_eq!(restored.get_encryption_key(7).unwrap().unwrap(), enc_key);
         let restored_dealer = restored.get_dealer_message(7, &dealer).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&restored_dealer).unwrap(),
-            bcs::to_bytes(&dealer_msg).unwrap()
-        );
+        assert_eq!(restored_dealer, bcs::to_bytes(&dealer_msg).unwrap());
         let restored_rotation = restored.list_all_rotation_messages(7).unwrap();
         assert_eq!(restored_rotation.len(), 1);
         assert_eq!(restored_rotation[0].0, dealer);
