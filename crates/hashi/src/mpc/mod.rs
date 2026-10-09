@@ -8,6 +8,7 @@ pub mod rpc;
 pub mod service;
 pub(crate) mod shape_params;
 pub mod signing;
+pub(crate) mod stored_rows;
 pub mod types;
 
 pub use mpc_except_signing::*;

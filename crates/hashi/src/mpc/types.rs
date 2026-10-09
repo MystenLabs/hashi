@@ -1143,6 +1143,9 @@ pub enum MpcError {
     #[error("Stored message for dealer {dealer} does not match its certificate")]
     StoredMessageDiverged { dealer: Address },
 
+    #[error("Stored row for dealer {dealer} refused: {reason}")]
+    StoredRowRefused { dealer: Address, reason: String },
+
     #[error("Storage error: {0}")]
     StorageError(String),
 

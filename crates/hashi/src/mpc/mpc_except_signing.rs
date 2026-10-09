@@ -17,6 +17,7 @@ use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
+use crate::mpc::stored_rows;
 use crate::mpc::types::AdmittedCertRef;
 use crate::mpc::types::AdmittedNonceDealer;
 use crate::mpc::types::AdmittedNonceDealers;
@@ -211,6 +212,7 @@ pub struct MpcManager {
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::AvssOutput>,
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
+    stored_row_hashes: HashMap<(ProtocolTypeIndicator, Address), MessagesHash>,
     pub rotation_ack_signatures: HashMap<Address, (MessagesHash, BLS12381Signature)>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
@@ -539,6 +541,7 @@ impl MpcManager {
             dealer_outputs: HashMap::new(),
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
+            stored_row_hashes: HashMap::new(),
             rotation_ack_signatures: HashMap::new(),
             current_avid_round_state: HashMap::new(),
             current_avid_verified_common: HashMap::new(),
@@ -588,9 +591,8 @@ impl MpcManager {
             Messages::NonceGenerationAvid(_) => None,
             Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         };
-        let existing = self.accepted_dealer_messages(request.messages.protocol_type(), &sender)?;
-        if let Some(existing_messages) = existing {
-            let existing_hash = existing_messages.compute_hash();
+        let existing = self.accepted_messages_hash(request.messages.protocol_type(), &sender)?;
+        if let Some(existing_hash) = existing {
             let incoming_hash = request.messages.compute_hash();
             if existing_hash != incoming_hash {
                 return Err(MpcError::InvalidMessage {
@@ -642,10 +644,10 @@ impl MpcManager {
         match self.begin_retrieve(requester, request)? {
             RetrieveOutcome::Ready(response) => Ok(response),
             RetrieveOutcome::NeedsStore => {
-                retrieve_from_store(&*self.public_messages_store, request)
+                retrieve_from_store(&*self.public_messages_store, request, &self.shape_params())
             }
             RetrieveOutcome::NeedsAvidStore(pending) => {
-                finish_avid_retrieval(&*self.public_messages_store, pending)
+                finish_avid_retrieval(&*self.public_messages_store, pending, &self.shape_params())
             }
         }
     }
@@ -835,14 +837,10 @@ impl MpcManager {
         } else {
             let from_db = match request.protocol_type {
                 ProtocolTypeIndicator::Dkg => self
-                    .public_messages_store
-                    .get_dealer_message(request.epoch, &request.dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .read_dkg_message(request.epoch, &request.dealer)?
                     .map(Messages::Dkg),
                 ProtocolTypeIndicator::KeyRotation => self
-                    .public_messages_store
-                    .get_rotation_messages(request.epoch, &request.dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .read_rotation_messages(request.epoch, &request.dealer)?
                     .map(Messages::Rotation),
                 ProtocolTypeIndicator::NonceGeneration => None,
             };
@@ -1034,15 +1032,7 @@ impl MpcManager {
             mgr.set_previous_output(previous.clone());
             // Load rotation messages from DB for restart recovery.
             // For live rotation this is a no-op (no messages stored yet).
-            for (dealer, message) in mgr
-                .public_messages_store
-                .list_all_rotation_messages()
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
-            {
-                if let Messages::Rotation(msgs) = message {
-                    mgr.current_rotation_messages.insert(dealer, msgs);
-                }
-            }
+            mgr.load_stored_rotation_messages()?;
         }
         // Optimization: a node that fell back to the new-member path has empty
         // key shares and cannot generate valid rotation messages.
@@ -2227,11 +2217,7 @@ impl MpcManager {
             .get(&(batch_index, *dealer))
             .cloned()
             .map(|echoes| Ok(Some(echoes)))
-            .unwrap_or_else(|| {
-                self.public_messages_store
-                    .get_avid_held_echoes(self.mpc_config.epoch, batch_index, dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))
-            })
+            .unwrap_or_else(|| self.read_held_avid_echoes(batch_index, dealer))
     }
 
     fn try_sign_dkg_message(
@@ -2711,11 +2697,7 @@ impl MpcManager {
             .get(&(batch_index, *dealer))
             .cloned()
             .map(|s| Ok(Some(s)))
-            .unwrap_or_else(|| {
-                self.public_messages_store
-                    .get_avid_round_state(self.mpc_config.epoch, batch_index, dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))
-            })
+            .unwrap_or_else(|| self.read_avid_round_state(batch_index, dealer))
     }
 
     fn avid_round_verified_common(
@@ -4342,20 +4324,16 @@ impl MpcManager {
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.current_dkg_messages.get(&self.address) {
             Some(msg) => Messages::Dkg(msg.clone()),
-            None => match self
-                .public_messages_store
-                .get_dealer_message(self.mpc_config.epoch, &self.address)
-            {
-                Ok(Some(msg)) => {
+            None => match self.read_dkg_message(self.mpc_config.epoch, &self.address)? {
+                Some(msg) => {
                     self.current_dkg_messages.insert(self.address, msg.clone());
                     Messages::Dkg(msg)
                 }
-                Ok(None) => {
+                None => {
                     let msg = self.create_dealer_message(rng);
                     self.persist_and_cache_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
                     Messages::Dkg(msg)
                 }
-                Err(e) => return Err(MpcError::StorageError(e.to_string())),
             },
         };
         let signature = self.try_sign_dkg_message(self.address, &messages)?;
@@ -4369,16 +4347,13 @@ impl MpcManager {
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.current_rotation_messages.get(&self.address) {
             Some(msgs) => Messages::Rotation(msgs.clone()),
-            None => match self
-                .public_messages_store
-                .get_rotation_messages(self.mpc_config.epoch, &self.address)
-            {
-                Ok(Some(msgs)) => {
+            None => match self.read_rotation_messages(self.mpc_config.epoch, &self.address)? {
+                Some(msgs) => {
                     self.current_rotation_messages
                         .insert(self.address, msgs.clone());
                     Messages::Rotation(msgs)
                 }
-                Ok(None) => {
+                None => {
                     let msgs = self.create_rotation_messages(previous, rng);
                     self.persist_and_cache_rotation_messages(
                         self.mpc_config.epoch,
@@ -4387,7 +4362,6 @@ impl MpcManager {
                     )?;
                     Messages::Rotation(msgs)
                 }
-                Err(e) => return Err(MpcError::StorageError(e.to_string())),
             },
         };
         let signature = self
@@ -4665,22 +4639,44 @@ impl MpcManager {
     }
 
     fn load_stored_messages(&mut self) -> MpcResult<()> {
-        for (dealer, message) in self
+        let epoch = self.mpc_config.epoch;
+        let shape = self.shape_params();
+        for (dealer, bytes) in self
             .public_messages_store
             .list_all_dealer_messages()
             .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
-            if let Messages::Dkg(msg) = message {
-                self.current_dkg_messages.insert(dealer, msg);
+            self.stored_row_hashes.insert(
+                (ProtocolTypeIndicator::Dkg, dealer),
+                stored_rows::dkg_message_hash(&bytes),
+            );
+            match stored_rows::dkg_message(&shape, epoch, &dealer, &bytes) {
+                Ok(message) => {
+                    self.current_dkg_messages.insert(dealer, message);
+                }
+                Err(e) => tracing::warn!("Skipping a stored DKG message: {e}"),
             }
         }
-        for (dealer, message) in self
+        self.load_stored_rotation_messages()
+    }
+
+    fn load_stored_rotation_messages(&mut self) -> MpcResult<()> {
+        let epoch = self.mpc_config.epoch;
+        let shape = self.shape_params();
+        for (dealer, bytes) in self
             .public_messages_store
             .list_all_rotation_messages()
             .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
-            if let Messages::Rotation(msgs) = message {
-                self.current_rotation_messages.insert(dealer, msgs);
+            self.stored_row_hashes.insert(
+                (ProtocolTypeIndicator::KeyRotation, dealer),
+                stored_rows::rotation_messages_hash(&bytes),
+            );
+            match stored_rows::rotation_messages(&shape, epoch, &dealer, &bytes) {
+                Ok(messages) => {
+                    self.current_rotation_messages.insert(dealer, messages);
+                }
+                Err(e) => tracing::warn!("Skipping stored rotation messages: {e}"),
             }
         }
         Ok(())
@@ -5180,9 +5176,8 @@ impl MpcManager {
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
             let message = self
-                .public_messages_store
-                .get_dealer_message(context.epoch, &dealer_address)
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .read_dkg_message(context.epoch, &dealer_address)
+                .map_err(diverged_if_refused)?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
                         "DKG message not found for dealer: {:?}",
@@ -5355,9 +5350,8 @@ impl MpcManager {
             let msg = rotation_cert.message();
             let dealer_address = msg.dealer_address;
             let rotation_msgs = self
-                .public_messages_store
-                .get_rotation_messages(context.epoch, &dealer_address)
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .read_rotation_messages(context.epoch, &dealer_address)
+                .map_err(diverged_if_refused)?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
                         "Rotation messages not found for dealer: {:?}",
@@ -5787,9 +5781,7 @@ impl MpcManager {
                         let mgr = mpc_manager.read().unwrap();
                         let previous_epoch = mgr.previous_epoch;
                         let msgs = mgr
-                            .public_messages_store
-                            .get_rotation_messages(previous_epoch, &dealer_address)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
+                            .read_rotation_messages(previous_epoch, &dealer_address)?
                             .ok_or_else(|| {
                                 MpcError::NotFound(format!(
                                     "Rotation messages not found for dealer {:?}",
@@ -5907,8 +5899,7 @@ impl MpcManager {
                     let msg = dkg_cert.message();
                     let stored = {
                         let mgr = mpc_manager.read().unwrap();
-                        mgr.public_messages_store
-                            .get_dealer_message(previous_epoch, &msg.dealer_address)
+                        mgr.read_dkg_message(previous_epoch, &msg.dealer_address)
                             .map(|m| m.map(Messages::Dkg))
                     };
                     (
@@ -5922,8 +5913,7 @@ impl MpcManager {
                     let msg = rotation_cert.message();
                     let stored = {
                         let mgr = mpc_manager.read().unwrap();
-                        mgr.public_messages_store
-                            .get_rotation_messages(previous_epoch, &msg.dealer_address)
+                        mgr.read_rotation_messages(previous_epoch, &msg.dealer_address)
                             .map(|m| m.map(Messages::Rotation))
                     };
                     (
@@ -6001,7 +5991,7 @@ impl MpcManager {
         previous_epoch: u64,
         protocol_type: ProtocolTypeIndicator,
         msg: &DealerMessagesHash,
-        read_error: Option<&anyhow::Error>,
+        read_error: Option<&MpcError>,
         stored_hash: Option<&MessagesHash>,
         metrics: &Metrics,
     ) {
@@ -6322,13 +6312,16 @@ impl MpcManager {
         }
     }
 
-    fn accepted_dealer_messages(
-        &self,
+    fn accepted_messages_hash(
+        &mut self,
         protocol_type: ProtocolTypeIndicator,
         dealer: &Address,
-    ) -> MpcResult<Option<Messages>> {
+    ) -> MpcResult<Option<MessagesHash>> {
         if let Some(cached) = self.get_dealer_messages(protocol_type, dealer) {
-            return Ok(Some(cached));
+            return Ok(Some(cached.compute_hash()));
+        }
+        if let Some(recorded) = self.stored_row_hashes.get(&(protocol_type, *dealer)) {
+            return Ok(Some(*recorded));
         }
         let epoch = self.mpc_config.epoch;
         let stored = match protocol_type {
@@ -6336,15 +6329,65 @@ impl MpcManager {
                 .public_messages_store
                 .get_dealer_message(epoch, dealer)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
-                .map(Messages::Dkg),
+                .map(|bytes| stored_rows::dkg_message_hash(&bytes)),
             ProtocolTypeIndicator::KeyRotation => self
                 .public_messages_store
                 .get_rotation_messages(epoch, dealer)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
-                .map(Messages::Rotation),
+                .map(|bytes| stored_rows::rotation_messages_hash(&bytes)),
             ProtocolTypeIndicator::NonceGeneration => None,
         };
+        if let Some(hash) = stored {
+            self.stored_row_hashes
+                .insert((protocol_type, *dealer), hash);
+        }
         Ok(stored)
+    }
+
+    fn read_dkg_message(&self, epoch: u64, dealer: &Address) -> MpcResult<Option<avss::Message>> {
+        self.public_messages_store
+            .get_dealer_message(epoch, dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| stored_rows::dkg_message(&self.shape_params(), epoch, dealer, &bytes))
+            .transpose()
+    }
+
+    fn read_rotation_messages(
+        &self,
+        epoch: u64,
+        dealer: &Address,
+    ) -> MpcResult<Option<RotationMessages>> {
+        self.public_messages_store
+            .get_rotation_messages(epoch, dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| {
+                stored_rows::rotation_messages(&self.shape_params(), epoch, dealer, &bytes)
+            })
+            .transpose()
+    }
+
+    fn read_avid_round_state(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<AvidRoundState>> {
+        self.public_messages_store
+            .get_avid_round_state(self.mpc_config.epoch, batch_index, dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| stored_rows::avid_round_state(&self.shape_params(), dealer, &bytes))
+            .transpose()
+    }
+
+    fn read_held_avid_echoes(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<HeldAvidEchoes>> {
+        self.public_messages_store
+            .get_avid_held_echoes(self.mpc_config.epoch, batch_index, dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| stored_rows::held_avid_echoes(&self.shape_params(), dealer, &bytes))
+            .transpose()
     }
 
     pub(crate) fn required_nonce_weight(&self) -> u32 {
@@ -6806,18 +6849,25 @@ pub(crate) struct AvidPending {
 pub(crate) fn finish_avid_retrieval(
     store: &dyn PublicMessagesStore,
     pending: AvidPending,
+    shape: &ShapeParams,
 ) -> MpcResult<RetrieveMessagesResponse> {
     let held = match pending.held {
         Lookup::Resolved(resolved) => Some(resolved),
         Lookup::Pending => store
             .get_avid_held_echoes(pending.epoch, pending.batch_index, &pending.dealer)
-            .map_err(|e| MpcError::StorageError(e.to_string()))?,
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| stored_rows::held_avid_echoes(shape, &pending.dealer, &bytes))
+            .transpose()
+            .map_err(not_found_if_refused)?,
     };
     let common = match pending.common {
         Lookup::Resolved(resolved) => Some(resolved),
         Lookup::Pending => store
             .get_avid_round_state(pending.epoch, pending.batch_index, &pending.dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|bytes| stored_rows::avid_round_state(shape, &pending.dealer, &bytes))
+            .transpose()
+            .map_err(not_found_if_refused)?
             .map(|state| state.common),
     };
     build_avid_response(
@@ -6877,21 +6927,50 @@ fn build_avid_response(
 pub(crate) fn retrieve_from_store(
     store: &dyn PublicMessagesStore,
     request: &RetrieveMessagesRequest,
+    shape: &ShapeParams,
 ) -> MpcResult<RetrieveMessagesResponse> {
+    let (epoch, dealer) = (request.epoch, &request.dealer);
     let messages = match request.protocol_type {
         ProtocolTypeIndicator::Dkg => store
-            .get_dealer_message(request.epoch, &request.dealer)
+            .get_dealer_message(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(Messages::Dkg),
+            .map(|bytes| stored_rows::dkg_message(shape, epoch, dealer, &bytes).map(Messages::Dkg))
+            .transpose(),
         ProtocolTypeIndicator::KeyRotation => store
-            .get_rotation_messages(request.epoch, &request.dealer)
+            .get_rotation_messages(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(Messages::Rotation),
-        ProtocolTypeIndicator::NonceGeneration => None,
-    };
+            .map(|bytes| {
+                stored_rows::rotation_messages(shape, epoch, dealer, &bytes).map(Messages::Rotation)
+            })
+            .transpose(),
+        ProtocolTypeIndicator::NonceGeneration => Ok(None),
+    }
+    .map_err(not_found_if_refused)?;
     messages
         .map(|m| RetrieveMessagesResponse { messages: m })
         .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
+}
+
+fn not_found_if_refused(e: MpcError) -> MpcError {
+    match e {
+        MpcError::StoredRowRefused { dealer, reason } => MpcError::NotFound(format!(
+            "stored row for dealer {dealer:?} refused: {reason}"
+        )),
+        e => e,
+    }
+}
+
+fn diverged_if_refused(e: MpcError) -> MpcError {
+    match e {
+        MpcError::StoredRowRefused { dealer, reason } => {
+            tracing::warn!(
+                "Stored message for dealer {dealer:?} refused ({reason}); not usable for \
+                 reconstruction"
+            );
+            MpcError::StoredMessageDiverged { dealer }
+        }
+        e => e,
+    }
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T

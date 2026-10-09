@@ -10,7 +10,6 @@ use sui_sdk_types::Address;
 use crate::db::Database;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::HeldAvidEchoes;
-use crate::mpc::types::Messages;
 use crate::mpc::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
 
@@ -37,24 +36,15 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
             .map_err(|e| anyhow::anyhow!("failed to store dealer message: {e}"))
     }
 
-    fn get_dealer_message(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
+    fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> anyhow::Result<Option<Vec<u8>>> {
         self.db
             .get_dealer_message(epoch, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get dealer message: {e}"))
     }
 
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.db
             .list_all_dealer_messages(self.epoch)
-            .map(|msgs| {
-                msgs.into_iter()
-                    .map(|(addr, msg)| (addr, Messages::Dkg(msg)))
-                    .collect()
-            })
             .map_err(|e| anyhow::anyhow!("failed to list dealer messages: {e}"))
     }
 
@@ -73,20 +63,15 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         &self,
         epoch: u64,
         dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.db
             .get_rotation_messages(epoch, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get rotation messages: {e}"))
     }
 
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.db
             .list_all_rotation_messages(self.epoch)
-            .map(|msgs| {
-                msgs.into_iter()
-                    .map(|(addr, msg)| (addr, Messages::Rotation(msg)))
-                    .collect()
-            })
             .map_err(|e| anyhow::anyhow!("failed to list rotation messages: {e}"))
     }
 
@@ -107,16 +92,13 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<AvidRoundState>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.db
             .get_avid_round_state(epoch, batch_index, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get avid round state: {e}"))
     }
 
-    fn list_avid_round_states(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+    fn list_avid_round_states(&self, batch_index: u32) -> anyhow::Result<Vec<(Address, Vec<u8>)>> {
         self.db
             .list_avid_round_states(self.epoch, batch_index)
             .map_err(|e| anyhow::anyhow!("failed to list avid round states: {e}"))
@@ -139,7 +121,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         self.db
             .get_avid_held_echoes(epoch, batch_index, dealer)
             .map_err(|e| anyhow::anyhow!("failed to get avid held echoes: {e}"))

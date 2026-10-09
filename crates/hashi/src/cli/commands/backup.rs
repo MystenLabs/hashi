@@ -941,17 +941,14 @@ mod tests {
             .get_dealer_message(42, &dealer)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            bcs::to_bytes(&restored_dealer_msg).unwrap(),
-            bcs::to_bytes(&dealer_msg).unwrap()
-        );
+        assert_eq!(restored_dealer_msg, bcs::to_bytes(&dealer_msg).unwrap());
 
         let restored_rotation_msgs = restored_db
             .get_rotation_messages(42, &dealer)
             .unwrap()
             .unwrap();
         assert_eq!(
-            bcs::to_bytes(&restored_rotation_msgs).unwrap(),
+            restored_rotation_msgs,
             bcs::to_bytes(&rotation_msgs).unwrap()
         );
     }

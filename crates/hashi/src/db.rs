@@ -18,8 +18,6 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 
-use serde::de::DeserializeOwned;
-
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::RotationMessages;
@@ -410,31 +408,13 @@ impl Database {
         self.dealer_messages.insert(key, value)
     }
 
-    pub fn get_dealer_message(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> Result<Option<avss::Message>> {
+    pub fn get_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<Option<Vec<u8>>> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
-
-        let bytes = match self.dealer_messages.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-
-        let message = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid message",
-            ))
-        })?;
-
-        Ok(Some(message))
+        Ok(self.dealer_messages.get(key)?.map(|bytes| bytes.to_vec()))
     }
 
-    pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, avss::Message)>> {
-        list_messages_by_prefix(&self.dealer_messages, &epoch.to_be_bytes())
+    pub fn list_all_dealer_messages(&self, epoch: u64) -> Result<Vec<(Address, Vec<u8>)>> {
+        list_rows_by_prefix(&self.dealer_messages, &epoch.to_be_bytes())
     }
 
     pub fn store_rotation_messages(
@@ -448,31 +428,13 @@ impl Database {
         self.rotation_messages.insert(key, value)
     }
 
-    pub fn get_rotation_messages(
-        &self,
-        epoch: u64,
-        dealer: &Address,
-    ) -> Result<Option<RotationMessages>> {
+    pub fn get_rotation_messages(&self, epoch: u64, dealer: &Address) -> Result<Option<Vec<u8>>> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
-        let bytes = match self.rotation_messages.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let messages = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid rotation messages",
-            ))
-        })?;
-        Ok(Some(messages))
+        Ok(self.rotation_messages.get(key)?.map(|bytes| bytes.to_vec()))
     }
 
-    pub fn list_all_rotation_messages(
-        &self,
-        epoch: u64,
-    ) -> Result<Vec<(Address, RotationMessages)>> {
-        list_messages_by_prefix(&self.rotation_messages, &epoch.to_be_bytes())
+    pub fn list_all_rotation_messages(&self, epoch: u64) -> Result<Vec<(Address, Vec<u8>)>> {
+        list_rows_by_prefix(&self.rotation_messages, &epoch.to_be_bytes())
     }
 
     pub fn delete_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<()> {
@@ -507,38 +469,27 @@ impl Database {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> Result<Option<AvidRoundState>> {
+    ) -> Result<Option<Vec<u8>>> {
         let key = [
             epoch.to_be_bytes().as_slice(),
             batch_index.to_be_bytes().as_slice(),
             dealer.as_bytes(),
         ]
         .concat();
-        let bytes = match self.avid_round_states.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let state = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid avid round state",
-            ))
-        })?;
-        Ok(Some(state))
+        Ok(self.avid_round_states.get(key)?.map(|bytes| bytes.to_vec()))
     }
 
     pub fn list_avid_round_states(
         &self,
         epoch: u64,
         batch_index: u32,
-    ) -> Result<Vec<(Address, AvidRoundState)>> {
+    ) -> Result<Vec<(Address, Vec<u8>)>> {
         let prefix = [
             epoch.to_be_bytes().as_slice(),
             batch_index.to_be_bytes().as_slice(),
         ]
         .concat();
-        list_messages_by_prefix(&self.avid_round_states, &prefix)
+        list_rows_by_prefix(&self.avid_round_states, &prefix)
     }
 
     pub fn store_avid_held_echoes(
@@ -563,25 +514,14 @@ impl Database {
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
-    ) -> Result<Option<HeldAvidEchoes>> {
+    ) -> Result<Option<Vec<u8>>> {
         let key = [
             epoch.to_be_bytes().as_slice(),
             batch_index.to_be_bytes().as_slice(),
             dealer.as_bytes(),
         ]
         .concat();
-        let bytes = match self.avid_held_echoes.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let held = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid avid held echoes",
-            ))
-        })?;
-        Ok(Some(held))
+        Ok(self.avid_held_echoes.get(key)?.map(|bytes| bytes.to_vec()))
     }
 
     pub fn store_avid_dealer_builder(
@@ -700,12 +640,9 @@ impl PruningReferences {
     }
 }
 
-/// List all `(Address, T)` pairs from a keyspace where keys match the given prefix.
+/// List all `(Address, value)` pairs from a keyspace where keys match the given prefix.
 /// Keys are expected to end with a 32-byte address suffix.
-fn list_messages_by_prefix<T: DeserializeOwned>(
-    keyspace: &Keyspace,
-    prefix: &[u8],
-) -> Result<Vec<(Address, T)>> {
+fn list_rows_by_prefix(keyspace: &Keyspace, prefix: &[u8]) -> Result<Vec<(Address, Vec<u8>)>> {
     let addr_len = 32;
     let mut results = Vec::new();
     for guard in keyspace.prefix(prefix) {
@@ -722,14 +659,7 @@ fn list_messages_by_prefix<T: DeserializeOwned>(
                 "invalid key length",
             ))
         })?;
-        let address = Address::new(address_bytes);
-        let message: T = bcs::from_bytes(&value).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid message data",
-            ))
-        })?;
-        results.push((address, message));
+        results.push((Address::new(address_bytes), value.to_vec()));
     }
     Ok(results)
 }
@@ -893,6 +823,7 @@ pub(crate) mod tests {
     use super::Keyspace;
     use super::PruningReferences;
     use super::RETENTION_EXTRA_EPOCHS;
+    use super::RotationMessages;
 
     pub(crate) fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
         let nodes: Vec<_> = (0..count)
@@ -1016,10 +947,7 @@ pub(crate) mod tests {
         assert!(db.get_avid_held_echoes(1, 0, &dealer).unwrap().is_none());
         db.store_avid_held_echoes(1, 0, &dealer, &held).unwrap();
         let loaded = db.get_avid_held_echoes(1, 0, &dealer).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&loaded).unwrap(),
-            bcs::to_bytes(&held).unwrap()
-        );
+        assert_eq!(loaded, bcs::to_bytes(&held).unwrap());
         assert!(db.get_avid_held_echoes(2, 0, &dealer).unwrap().is_none());
     }
 
@@ -1200,10 +1128,7 @@ pub(crate) mod tests {
         // Store and retrieve
         db.store_dealer_message(1, &dealer1, &message1).unwrap();
         let retrieved = db.get_dealer_message(1, &dealer1).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&message1).unwrap(),
-            bcs::to_bytes(&retrieved).unwrap()
-        );
+        assert_eq!(bcs::to_bytes(&message1).unwrap(), retrieved);
 
         // Different epoch, same dealer - should be empty
         assert!(db.get_dealer_message(2, &dealer1).unwrap().is_none());
@@ -1259,14 +1184,8 @@ pub(crate) mod tests {
         assert!(!result_map.contains_key(&dealer3));
 
         // Verify message content
-        assert_eq!(
-            bcs::to_bytes(&result_map[&dealer1]).unwrap(),
-            bcs::to_bytes(&message1).unwrap()
-        );
-        assert_eq!(
-            bcs::to_bytes(&result_map[&dealer2]).unwrap(),
-            bcs::to_bytes(&message2).unwrap()
-        );
+        assert_eq!(result_map[&dealer1], bcs::to_bytes(&message1).unwrap());
+        assert_eq!(result_map[&dealer2], bcs::to_bytes(&message2).unwrap());
 
         // List epoch 2 - should return 1 message
         let result = db.list_all_dealer_messages(2).unwrap();
@@ -1304,7 +1223,7 @@ pub(crate) mod tests {
         db.store_rotation_messages(1, &dealer1, &messages1).unwrap();
         let all = db.list_all_rotation_messages(1).unwrap();
         assert_eq!(all.len(), 1);
-        let retrieved = &all[0].1;
+        let retrieved: RotationMessages = bcs::from_bytes(&all[0].1).unwrap();
         assert_eq!(retrieved.len(), 2);
         assert!(retrieved.contains_key(&NonZeroU16::new(1).unwrap()));
         assert!(retrieved.contains_key(&NonZeroU16::new(2).unwrap()));
@@ -1358,8 +1277,11 @@ pub(crate) mod tests {
         assert!(result_map.contains_key(&dealer2));
 
         // Verify content
-        assert!(result_map[&dealer1].contains_key(&NonZeroU16::new(1).unwrap()));
-        assert!(result_map[&dealer2].contains_key(&NonZeroU16::new(2).unwrap()));
+        let decoded = |dealer: &Address| -> RotationMessages {
+            bcs::from_bytes(&result_map[dealer]).unwrap()
+        };
+        assert!(decoded(&dealer1).contains_key(&NonZeroU16::new(1).unwrap()));
+        assert!(decoded(&dealer2).contains_key(&NonZeroU16::new(2).unwrap()));
 
         // List non-existent epoch - should return empty
         let result = db.list_all_rotation_messages(99).unwrap();
@@ -1383,17 +1305,11 @@ pub(crate) mod tests {
         // Store and round-trip byte-for-byte
         db.store_avid_round_state(1, 0, &dealer1, &state1).unwrap();
         let got = db.get_avid_round_state(1, 0, &dealer1).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&got).unwrap(),
-            bcs::to_bytes(&state1).unwrap()
-        );
+        assert_eq!(got, bcs::to_bytes(&state1).unwrap());
         let result = db.list_avid_round_states(1, 0).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, dealer1);
-        assert_eq!(
-            bcs::to_bytes(&result[0].1).unwrap(),
-            bcs::to_bytes(&state1).unwrap()
-        );
+        assert_eq!(result[0].1, bcs::to_bytes(&state1).unwrap());
 
         // Same epoch+batch, different dealer
         db.store_avid_round_state(1, 0, &dealer2, &state2).unwrap();
@@ -1480,7 +1396,8 @@ pub(crate) mod tests {
 
         drop(db);
         let db = Database::open(tmpdir.path()).unwrap();
-        let loaded = db.get_avid_round_state(1, 0, &dealer).unwrap().unwrap();
+        let loaded: AvidRoundState =
+            bcs::from_bytes(&db.get_avid_round_state(1, 0, &dealer).unwrap().unwrap()).unwrap();
         let message = batch_avss_avid::AvssMessage {
             common: loaded.common,
             ciphertext: loaded.own_ciphertext,
