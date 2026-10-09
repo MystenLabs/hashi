@@ -5,6 +5,7 @@
 
 use crate::audit::AuditWindow;
 use crate::config::Config;
+use crate::domain::BridgeKeys;
 use crate::domain::Cursors;
 use crate::domain::DepositEventType;
 use crate::domain::DepositId;
@@ -17,6 +18,7 @@ use crate::domain::WithdrawalEventType;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
+use bitcoin::TxOut;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
@@ -342,9 +344,13 @@ impl DepositStateMachine {
         self.btc_event.is_none()
     }
 
+    /// Look up the deposit on Bitcoin. A confirmed deposit also gets the
+    /// `validate_deposit` checks. Its findings are reported once: the
+    /// Bitcoin event is kept, so the flow completes and is not looked up again.
     pub fn try_fetch_btc_tx(
         &mut self,
         btc_rpc_client: &BtcRpcClient,
+        bridge_keys: &BridgeKeys,
     ) -> anyhow::Result<BtcFetchOutcome> {
         if !self.is_expecting_events() {
             return Ok(BtcFetchOutcome::NotExpected);
@@ -374,6 +380,11 @@ impl DepositStateMachine {
                         occurred_at: block_time,
                     });
                 }
+                findings.extend(validate_deposit(
+                    &self.hashi_deposit_event,
+                    &confirmation.outputs,
+                    bridge_keys,
+                ));
                 self.btc_event = Some(e_btc);
                 Ok(BtcFetchOutcome::Confirmed(findings))
             }
@@ -413,6 +424,39 @@ impl DepositStateMachine {
     }
 }
 
+/// Check what Move does not on a confirmed deposit: the claimed output exists,
+/// holds the claimed amount, and pays the bridge address of the claimed
+/// derivation path. Move only sees the committee's signature over the claim.
+pub fn validate_deposit(
+    claim: &MonitorDepositEvent,
+    outputs: &[TxOut],
+    bridge_keys: &BridgeKeys,
+) -> Vec<MonitorFinding> {
+    let deposit_id = claim.deposit_id;
+    let Some(output) = outputs.get(deposit_id.vout() as usize) else {
+        return vec![MonitorFinding::DepositOutputMissing {
+            deposit_id,
+            output_count: outputs.len(),
+        }];
+    };
+    let mut findings = Vec::new();
+    if output.value.to_sat() != claim.amount {
+        findings.push(MonitorFinding::DepositAmountMismatch {
+            deposit_id,
+            claimed: claim.amount,
+            onchain: output.value.to_sat(),
+        });
+    }
+    if output.script_pubkey != bridge_keys.script_pubkey(claim.derivation_path.as_ref()) {
+        findings.push(MonitorFinding::DepositOutputNotToBridge {
+            deposit_id,
+            derivation_path: claim.derivation_path,
+            script_pubkey: output.script_pubkey.clone(),
+        });
+    }
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -423,7 +467,12 @@ mod tests {
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use crate::findings::FindingCategory;
+    use crate::rpc::sui::approval::tests::test_bridge_keys;
+    use bitcoin::Amount;
+    use bitcoin::ScriptBuf;
+    use bitcoin::WPubkeyHash;
     use bitcoin::hashes::Hash as _;
+    use hashi_types::bitcoin::DerivationPath;
     use hashi_types::guardian::DeploymentConfig;
     use hashi_types::guardian::S3Credentials;
 
@@ -861,6 +910,116 @@ mod tests {
         };
 
         assert!(sm.is_in_audit_window(&window));
+    }
+
+    /// A claim of `amount` sats at vout 1 for `derivation_path`, and the
+    /// outputs of a transaction that pays `paid` sats to `script` at vout 1.
+    fn deposit_claim_and_outputs(
+        amount: u64,
+        derivation_path: Option<DerivationPath>,
+        paid: u64,
+        script: ScriptBuf,
+    ) -> (MonitorDepositEvent, Vec<TxOut>) {
+        let claim = MonitorDepositEvent {
+            event_type: DepositEventType::E2HashiDeposited,
+            timestamp_secs: 100,
+            deposit_id: DepositId::new(txid(9), 1),
+            amount,
+            derivation_path,
+        };
+        let outputs = vec![
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20])),
+            },
+            TxOut {
+                value: Amount::from_sat(paid),
+                script_pubkey: script,
+            },
+        ];
+        (claim, outputs)
+    }
+
+    #[test]
+    fn a_deposit_to_the_bridge_with_the_claimed_amount_is_valid() {
+        let keys = test_bridge_keys();
+        let path = DerivationPath::new([0x42; 32]);
+        let (claim, outputs) =
+            deposit_claim_and_outputs(50_000, Some(path), 50_000, keys.script_pubkey(Some(&path)));
+
+        assert!(validate_deposit(&claim, &outputs, &keys).is_empty());
+
+        let (claim, outputs) =
+            deposit_claim_and_outputs(50_000, None, 50_000, keys.change_script());
+        assert!(validate_deposit(&claim, &outputs, &keys).is_empty());
+    }
+
+    #[test]
+    fn a_missing_output_is_a_finding() {
+        let keys = test_bridge_keys();
+        let (claim, outputs) =
+            deposit_claim_and_outputs(50_000, None, 50_000, keys.change_script());
+
+        assert_eq!(
+            validate_deposit(&claim, &outputs[..1], &keys),
+            vec![MonitorFinding::DepositOutputMissing {
+                deposit_id: claim.deposit_id,
+                output_count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_claimed_amount_above_the_paid_amount_is_a_finding() {
+        let keys = test_bridge_keys();
+        let (claim, outputs) =
+            deposit_claim_and_outputs(50_000, None, 40_000, keys.change_script());
+
+        assert_eq!(
+            validate_deposit(&claim, &outputs, &keys),
+            vec![MonitorFinding::DepositAmountMismatch {
+                deposit_id: claim.deposit_id,
+                claimed: 50_000,
+                onchain: 40_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_output_to_another_address_is_a_finding() {
+        let keys = test_bridge_keys();
+        let other = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x54; 20]));
+        let (claim, outputs) = deposit_claim_and_outputs(50_000, None, 50_000, other.clone());
+
+        assert_eq!(
+            validate_deposit(&claim, &outputs, &keys),
+            vec![MonitorFinding::DepositOutputNotToBridge {
+                deposit_id: claim.deposit_id,
+                derivation_path: None,
+                script_pubkey: other,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_claimed_recipient_other_than_the_paid_one_is_a_finding() {
+        let keys = test_bridge_keys();
+        let paid_path = DerivationPath::new([0x42; 32]);
+        let claimed_path = DerivationPath::new([0x43; 32]);
+        let (claim, outputs) = deposit_claim_and_outputs(
+            50_000,
+            Some(claimed_path),
+            50_000,
+            keys.script_pubkey(Some(&paid_path)),
+        );
+
+        let findings = validate_deposit(&claim, &outputs, &keys);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(matches!(
+            findings[0],
+            MonitorFinding::DepositOutputNotToBridge { .. }
+        ));
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]

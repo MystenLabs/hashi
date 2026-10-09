@@ -15,6 +15,7 @@
 //! Deposits are checked over the derived Sui polling range rather than gated by
 //! the withdrawal audit window.
 
+use crate::domain::BridgeKeys;
 use crate::domain::Cursors;
 use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
@@ -137,6 +138,7 @@ pub struct AuditorCore {
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
+    bridge_keys: BridgeKeys,
 }
 
 impl AuditorCore {
@@ -152,6 +154,7 @@ impl AuditorCore {
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, bridge_keys.change_script(), cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
+            bridge_keys,
         })
     }
 
@@ -260,7 +263,7 @@ impl AuditorCore {
         for sm in self.pending_deposits.values_mut() {
             if sm.is_expecting_events()
                 && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.btc_client)?
+                    sm.try_fetch_btc_tx(&self.btc_client, &self.bridge_keys)?
             {
                 findings.extend(new_findings);
             }
@@ -473,6 +476,7 @@ impl AuditorCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::sui::approval::tests::test_bridge_keys;
     use crate::rpc::sui::approval::tests::with_wrong_txid;
     use crate::rpc::sui::approval::tests::withdrawal_transaction;
     use crate::rpc::sui::tests::looked_up_approval;
@@ -524,6 +528,7 @@ btc:
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            bridge_keys: test_bridge_keys(),
             cfg,
         };
         let approval = looked_up_approval();

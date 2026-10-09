@@ -1,12 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::domain::DepositId;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::human_duration;
 use crate::domain::utc_timestamp;
+use bitcoin::ScriptBuf;
 use bitcoin::Txid;
+use hashi_types::bitcoin::DerivationPath;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use std::fmt;
@@ -74,6 +77,24 @@ pub enum MonitorFinding {
         vout: u32,
         bitcoin_address: Vec<u8>,
     },
+    /// The confirmed Bitcoin transaction has no output at the deposit's vout.
+    DepositOutputMissing {
+        deposit_id: DepositId,
+        output_count: usize,
+    },
+    /// The deposit's Bitcoin output does not hold the amount the Sui request claims.
+    DepositAmountMismatch {
+        deposit_id: DepositId,
+        claimed: u64,
+        onchain: u64,
+    },
+    /// The deposit's Bitcoin output does not pay the bridge address of the
+    /// derivation path the Sui request claims.
+    DepositOutputNotToBridge {
+        deposit_id: DepositId,
+        derivation_path: Option<DerivationPath>,
+        script_pubkey: ScriptBuf,
+    },
 }
 
 impl MonitorFinding {
@@ -92,6 +113,9 @@ impl MonitorFinding {
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
             Self::ChangeOutputNotToBridge { .. } => FindingCategory::Safety,
+            Self::DepositOutputMissing { .. } => FindingCategory::Safety,
+            Self::DepositAmountMismatch { .. } => FindingCategory::Safety,
+            Self::DepositOutputNotToBridge { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -155,6 +179,30 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "ChangeOutputNotToBridge(wid={wid}, vout={vout}, bitcoin_address={})",
                 hex::encode(bitcoin_address),
+            ),
+            Self::DepositOutputMissing {
+                deposit_id,
+                output_count,
+            } => write!(
+                f,
+                "DepositOutputMissing(deposit_id={deposit_id}, output_count={output_count})"
+            ),
+            Self::DepositAmountMismatch {
+                deposit_id,
+                claimed,
+                onchain,
+            } => write!(
+                f,
+                "DepositAmountMismatch(deposit_id={deposit_id}, claimed={claimed}, onchain={onchain})"
+            ),
+            Self::DepositOutputNotToBridge {
+                deposit_id,
+                derivation_path,
+                script_pubkey,
+            } => write!(
+                f,
+                "DepositOutputNotToBridge(deposit_id={deposit_id}, derivation_path={}, script_pubkey={script_pubkey:x})",
+                derivation_path.map_or("none".to_string(), |path| path.to_string()),
             ),
         }
     }

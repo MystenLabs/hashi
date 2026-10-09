@@ -23,14 +23,20 @@ Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
 - **safety** for a contradictory event, a late predecessor, a predecessor
   still missing after its source cursor passes the deadline, an event the
-  Sui scan covered but never returned, or a Hashi approval whose txid or
-  change outputs do not match its inputs and outputs.
+  Sui scan covered but never returned, a Hashi approval whose txid or
+  change outputs do not match its inputs and outputs, or a confirmed deposit
+  whose Bitcoin output does not match the Sui request.
 
 Move does not validate a Hashi approval's txid or change outputs, so the
 monitor rebuilds the Bitcoin transaction from the approval and checks that the
 txid matches and that every change output pays the bridge change address. An
 approval that fails is reported at once and not ingested. The address is
 derived once at startup from the guardian's genesis and ceremony records.
+
+Move does not see Bitcoin, so once a deposit is confirmed the monitor checks
+its output against the Sui request: the output exists, holds the claimed
+amount, and pays the bridge address of the claimed derivation path. Without
+this, a compromised committee can mint hBTC against any confirmed transaction.
 
 Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 `WithdrawalTransaction` object from Sui, so an E1 older than the predecessor

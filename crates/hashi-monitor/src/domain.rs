@@ -174,6 +174,10 @@ impl DepositId {
     pub fn txid(self) -> Txid {
         self.0.txid
     }
+
+    pub fn vout(self) -> u32 {
+        self.0.vout
+    }
 }
 
 impl fmt::Display for DepositId {
