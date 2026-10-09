@@ -1,7 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::mpc::RetrieveReply;
+use crate::mpc::not_found_if_refused;
+use crate::mpc::shape_params::ShapeParams;
+use crate::mpc::stored_rows;
 use crate::mpc::types;
+use bytes::Bytes;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
@@ -306,6 +311,43 @@ fn mpc_protocol_type_from_proto(
 //
 // RetrieveMessagesResponse
 //
+
+impl RetrieveReply {
+    pub(crate) fn to_proto(
+        &self,
+        shape: &ShapeParams,
+        request: &types::RetrieveMessagesRequest,
+    ) -> types::MpcResult<proto::RetrieveMessagesResponse> {
+        use proto::retrieve_messages_response::Messages;
+        let messages = match self {
+            Self::Dkg(bytes) => Messages::DkgMessage(named_bcs::<avss::Message>(bytes.clone())),
+            Self::Rotation(blob) => {
+                let entries =
+                    stored_rows::rotation_entries(shape, request.epoch, &request.dealer, blob)
+                        .map_err(not_found_if_refused)?;
+                Messages::RotationMessages(proto::RotationMessages {
+                    messages: entries
+                        .into_iter()
+                        .map(|(index, range)| {
+                            (
+                                u32::from(index.get()),
+                                named_bcs::<avss::Message>(blob.slice(range)),
+                            )
+                        })
+                        .collect(),
+                })
+            }
+            Self::Decoded(response) => return Ok(proto::RetrieveMessagesResponse::from(response)),
+        };
+        Ok(proto::RetrieveMessagesResponse {
+            messages: Some(messages),
+        })
+    }
+}
+
+fn named_bcs<T>(bytes: Bytes) -> Bcs {
+    Bcs::from(bytes).with_name(std::any::type_name::<T>())
+}
 
 impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse {
     fn from(value: &types::RetrieveMessagesResponse) -> Self {

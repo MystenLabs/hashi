@@ -15,7 +15,10 @@ use crate::mpc::types::RotationMessages;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::types::ShareIndex;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
+use std::ops::Range;
 use sui_sdk_types::Address;
 
 pub(crate) fn dkg_message(
@@ -34,6 +37,16 @@ pub(crate) fn rotation_messages(
     dealer: &Address,
     bytes: &[u8],
 ) -> MpcResult<RotationMessages> {
+    rotation_entries(shape, epoch, dealer, bytes)?;
+    bcs::from_bytes(bytes).map_err(|e| refused(dealer, e.to_string()))
+}
+
+pub(crate) fn rotation_entries(
+    shape: &ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+    bytes: &[u8],
+) -> MpcResult<BTreeMap<ShareIndex, Range<usize>>> {
     let avss = avss_shape(shape, epoch, dealer)?;
     let owned = shape
         .dealing_committee_for_epoch(epoch)
@@ -50,11 +63,8 @@ pub(crate) fn rotation_messages(
                 format!("no shares in epoch {epoch}'s dealing committee"),
             )
         })?;
-    decode(
-        dealer,
-        bytes,
-        count_check::check_rotation_messages(bytes, avss, &owned).map(drop),
-    )
+    count_check::check_rotation_messages(bytes, avss, &owned)
+        .map_err(|e| refused(dealer, format!("count check: {e}")))
 }
 
 pub(crate) fn avid_round_state(
