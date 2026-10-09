@@ -49,7 +49,7 @@ This runbook is for **Sui validators joining the Hashi committee**. It covers pr
 
 Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](committee.mdx) members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](deposit.mdx) and [withdrawal](withdraw.mdx) flows, plus [reconfiguration](reconfiguration.mdx) at every epoch boundary.
 
-This is a **living document**. Hashi launches on Testnet first. This document adds Mainnet parameters to the [Networks](#networks) table below as the team finalizes them. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
+This is a **living document** covering both Hashi deployments, Testnet and Mainnet. The [Networks](#networks) table below gives each network's status and parameters. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
 
 This document assumes familiarity with Sui validator operations, Linux system administration, and basic Bitcoin infrastructure.
 
@@ -74,7 +74,7 @@ These details trip up most operators:
 
 | Section | What it covers |
 |---------|----------------|
-| [Networks](#networks) | Per-network chain IDs, endpoints, ports, and package IDs |
+| [Networks](#networks) | Per-network status, chain IDs, endpoints, ports, package IDs, and release tags |
 | [1. Prerequisites](#1-prerequisites) | Hardware sizing, the Bitcoin and Sui dependencies, and building the binary |
 | [2. Key management and security](#2-key-management-and-security) | Which keys exist, which you generate, and which one signs what |
 | [3. Configuration](#3-configuration) | Validator config template, CLI config, and environment variables |
@@ -87,18 +87,19 @@ These details trip up most operators:
 | [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
 | [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available (cloud backup upload) |
-| [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+| [13. Releases](#13-releases) | Published binaries, container images, and the Mysten fleet rollout |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
 ## Networks
 
-Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints all differ per deployment. The runbook's examples use **Testnet** (Sui Testnet + Bitcoin Signet); for any other network, substitute the values from this table. Adding a network later is just a matter of filling in a column here.
+Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints all differ per deployment. The runbook's examples use **Testnet** (Sui Testnet + Bitcoin Signet); on Mainnet, substitute the values from the Mainnet column.
 
 The pairing is enforced, not just documented: Bitcoin mainnet goes with Sui mainnet and nothing else. `hashi launch` refuses to build the launch transaction when its `--bitcoin-chain-id` does not match the chain the fullnode reports under that rule, and a node refuses to start (as does `hashi register`) when the validator config's `bitcoin-chain-id` is mainnet on any other Sui network or is not mainnet on Sui mainnet.
 
-| Parameter | Testnet (current) | Mainnet |
-|-----------|-------------------|---------|
+| Parameter | Testnet | Mainnet |
+|-----------|---------|---------|
+| Status | Live | Registration open ([step 2](#53-step-2-register-your-validator) of genesis); not yet launched |
 | Sui network | Testnet | Mainnet |
 | `sui-chain-id` | `69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD` | `4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S` |
 | Sui public fullnode | `https://fullnode.testnet.sui.io:443` | `https://fullnode.mainnet.sui.io:443` |
@@ -107,8 +108,10 @@ The pairing is enforced, not just documented: Bitcoin mainnet goes with Sui main
 | `[bitcoin].network` | `signet` | `mainnet` |
 | Bitcoin RPC port (default) | 38332 | 8332 |
 | Bitcoin P2P port (default) | 38333 | 8333 |
-| `package-id` | `0x5e0b99c31f691742acea5de4ca1bf53c398d5639fed6503a51ffe8035dc68485` | _TBD_ |
-| `hashi-object-id` | `0x342e908043db6090558ed7766df95bfc3609881b2eac7edb5343dd5bb3ddd1bb` | _TBD_ |
+| `package-id` | `0x5e0b99c31f691742acea5de4ca1bf53c398d5639fed6503a51ffe8035dc68485` | `0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06` |
+| `hashi-object-id` | `0x342e908043db6090558ed7766df95bfc3609881b2eac7edb5343dd5bb3ddd1bb` | `0x8d110642d9b5133bd661cda4873edf135ab6b91ff6918601015880874b950e5d` |
+| `[metrics-push].push-url` | `https://metrics-proxy.testnet.sui.io:8443/publish/metrics` | `https://metrics-proxy.mainnet.sui.io:8443/publish/metrics` |
+| Release tags | `testnet-X.Y` | `mainnet-X.Y` |
 
 > A self-hosted Sui fullnode is reached at its RPC port (default `http://127.0.0.1:9000`) on any network. Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332` (the Mainnet port), so on Signet you must set the port explicitly.
 
@@ -160,7 +163,7 @@ See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 GIT_REVISION=$(git rev-parse HEAD) bash docker/hashi/build.sh --no-cache
 ```
 
-> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Testnet releases are tagged `testnet-<major>.<minor>` (for example `testnet-0.4`), and each release's notes give its source commit and binary sha256 (see [13](#13-testnet-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
+> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Releases are tagged `<network>-<major>.<minor>` (for example `testnet-1.0` and `mainnet-1.0`), and each release's notes give its source commit and binary sha256 (see [13](#13-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum. Compute the sha256 of your build and compare it against the published value:
 
@@ -535,7 +538,8 @@ hashi-object-id = "0x<hashi-object-id>"
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 
-# Push metrics to the Mysten collection endpoint (see section 8.2)
+# Push metrics to the Mysten collection endpoint (see section 8.2). Use your
+# network's URL from the Networks table; the example below is Testnet.
 [metrics-push]
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 ```
@@ -548,7 +552,7 @@ For governance commands, queries, and user-facing operations. Generate a templat
 hashi config template -o hashi-cli.toml
 ```
 
-> **Where the package and object IDs come from.** The [Networks](#networks) table at the top of this runbook is the canonical source for `package_id` and `hashi_object_id`; copy them from the column for your target network. `hashi config on-chain` shows the **onchain protocol configuration** and requires these IDs to already be set, so it cannot be used to discover them. Mainnet values are listed as _TBD_ until the package is published.
+> **Where the package and object IDs come from.** The [Networks](#networks) table at the top of this runbook is the canonical source for `package_id` and `hashi_object_id`; copy them from the column for your target network. `hashi config on-chain` shows the **onchain protocol configuration** and requires these IDs to already be set, so it cannot be used to discover them.
 
 ```toml
 # Sui gRPC endpoint
@@ -1038,11 +1042,14 @@ curl -s http://localhost:9180/metrics | grep hashi_
 
 ### 8.2 Metrics push
 
-Configure the node to push its metrics to the Mysten-operated collection endpoint. The Hashi team relies on this for fleet-wide visibility during Testnet, so every operator must include this section in the validator config:
+Configure the node to push its metrics to the Mysten-operated collection endpoint for your network. The Hashi team relies on this for fleet-wide visibility on both networks, so every operator must include this section in the validator config, with exactly one `push-url`:
 
 ```toml
 [metrics-push]
+# Testnet
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+# Mainnet
+# push-url = "https://metrics-proxy.mainnet.sui.io:8443/publish/metrics"
 # How often to push (default: 60)
 # push-interval-seconds = 60
 ```
@@ -1426,9 +1433,11 @@ The following capabilities are planned but not yet available.
 
 ---
 
-## 13. Testnet releases
+## 13. Releases
 
-Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet X.Y` and tagged `testnet-X.Y` (for example `testnet-0.4`); its notes give the source commit. Releases before the numbered scheme are tagged `testnet-<full-sha>`.
+Releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi <network> X.Y` and tagged `<network>-X.Y` (for example `testnet-1.0` and `mainnet-1.0`); its notes give the source commit, the binary SHA-256, and the image digest. Use the releases tagged for your network: `mainnet-X.Y` on Mainnet, `testnet-X.Y` on Testnet. Testnet releases before the numbered scheme are tagged `testnet-<full-sha>`.
+
+A Mainnet release is a promoted Testnet release. `mainnet-X.Y` is cut at the commit `testnet-X.Y` points to, and the release run fails if its rebuilt binary differs from the Testnet release's checksum, so the two carry the same version, commit, and binary. `mainnet-1.0` and `testnet-1.0` are the same binary.
 
 ### 13.1 Binary
 
@@ -1456,7 +1465,7 @@ chmod +x hashi-linux-amd64
 The matching public image uses the same release tag:
 
 ```bash
-docker pull mysten/hashi:testnet-X.Y
+docker pull mysten/hashi:<network>-X.Y   # for example mysten/hashi:mainnet-1.0
 ```
 
 The release notes include the image's immutable OCI digest. Pin that digest when a deployment must remain on the exact image regardless of tags:
