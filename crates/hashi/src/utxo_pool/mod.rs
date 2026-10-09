@@ -273,7 +273,7 @@ pub struct CoinSelectionParams {
     /// request's amount. The batch is rejected if `total_fee / N` would exceed
     /// this value for the selected set of N requests. Sourced from
     /// [`crate::onchain::types::Config::worst_case_network_fee`] (the on-chain
-    /// withdrawal minimum less dust), which is the only bound on the fee rate.
+    /// withdrawal minimum less dust), which bounds the fee at any fee rate.
     pub max_fee_per_request: u64,
 
     /// Absolute minimum fee rate (floor). The actual fee rate passed to
