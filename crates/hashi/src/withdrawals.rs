@@ -53,8 +53,8 @@ const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
 /// fees to fall.
 const MAINNET_MAX_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(100);
 
-/// Above this the mainnet committee commits no new withdrawal: one can't be replaced once
-/// signed, so requests wait in the queue instead of committing underpriced.
+/// Above this the mainnet committee commits no new withdrawal. A committed one can't be
+/// repriced or cancelled, so through a fee spike requests wait in the queue instead.
 const MAINNET_HOLD_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(30);
 
 /// Signet blocks rarely fill, but bitcoind's estimate there follows a few relayed outliers.
@@ -3162,6 +3162,62 @@ mod tests {
 
         config.withdrawal_min_fee_rate_sat_vb = Some(80);
         check_held_fee(&config, sat_per_vb(80), tx_weight, 250).unwrap();
+    }
+
+    #[test]
+    fn a_holding_validator_signs_a_batch_priced_at_its_rate() {
+        let mut config = crate::config::Config::new_for_testing();
+        config.bitcoin_chain_id = Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string());
+        let change = vec![4u8; 32];
+        let change_script = hashi_bitcoin::script_pubkey_from_witness_program(&change).unwrap();
+        let params = CoinSelectionParams::new(
+            bitcoin::Address::from_script(&change_script, Network::Bitcoin).unwrap(),
+        );
+        let candidate = UtxoCandidate {
+            id: UtxoId {
+                txid: Address::new([1; 32]).into(),
+                vout: 0,
+            },
+            amount: 10_000_000,
+            confirmation_age_blocks: None,
+            spend_path: SpendPath::TaprootScriptPath2of2,
+            status: UtxoStatus::Confirmed,
+        };
+
+        for recipient in [vec![2u8; 20], vec![2u8; 32]] {
+            let request = utxo_pool::WithdrawalRequest {
+                id: Address::new([3; 32]),
+                recipient,
+                amount: 1_000_000,
+                timestamp_ms: 0,
+            };
+            // The rate of a leader whose floor is the cap, and of a validator holding above it.
+            let selection = utxo_pool::select_coins(
+                std::slice::from_ref(&candidate),
+                &[request],
+                &params,
+                MAINNET_MAX_FEE_RATE,
+            )
+            .unwrap();
+            let mut outputs: Vec<OutputUtxo> = selection
+                .withdrawal_outputs
+                .iter()
+                .map(|o| OutputUtxo {
+                    amount: o.amount,
+                    bitcoin_address: o.recipient.clone(),
+                })
+                .collect();
+            outputs.push(OutputUtxo {
+                amount: selection.change.unwrap(),
+                bitcoin_address: change.clone(),
+            });
+            let tx_weight =
+                estimated_withdrawal_tx_weight(selection.inputs.len(), &outputs).unwrap();
+
+            let estimate = FeeRate::from_sat_per_vb_unchecked(2_000);
+            check_held_fee(&config, estimate, tx_weight, selection.fee).unwrap();
+            check_held_fee(&config, estimate, tx_weight, selection.fee - 1).unwrap_err();
+        }
     }
 
     #[test]

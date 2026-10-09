@@ -107,16 +107,17 @@ would sit unconfirmed.
 
 On mainnet the estimate is also capped at 100 sat/vB before the floor
 applies, and the committee holds withdrawals while it is above 30 sat/vB.
-A signed withdrawal can't be replaced by a higher-fee version, so through
-a fee spike the leader commits no batch: requests stay queued, where their
-owners can still cancel them, until fees fall back.
+A committed withdrawal can't be replaced by a higher-fee version, so
+through a fee spike the leader commits no batch: requests stay queued,
+where their owners can still cancel them, until fees fall back.
 
 Validators enforce the hold too. While a validator's own estimate is above
 30 sat/vB, it signs a batch only if the batch already pays that estimate,
 so a leader with a stale estimate can't commit an underpriced one. A node
 whose floor is at or above its estimate doesn't hold, and as leader it
-commits at that floor, which is how an operator pays through a spike that
-outlasts the hold.
+commits at that floor. An operator raises it to pay through a long spike,
+or to bump a withdrawal committed just before one: while the committee
+holds, no new batch spends that withdrawal's change.
 
 Signet's cap is lower. Its blocks rarely fill, but Bitcoin Core's
 estimate there follows the few relayed transactions that pay hundreds of
