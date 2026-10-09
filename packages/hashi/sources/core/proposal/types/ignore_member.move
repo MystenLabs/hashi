@@ -23,11 +23,14 @@
 ///   ignored member). Non-participating weight must therefore stay at or
 ///   below 3333 bps of the current committee — the standard BFT bound —
 ///   for the mechanism to help; beyond it the system is already stuck.
-/// - Ignoring does not touch the registry: the member stays registered,
-///   keeps proposal/vote authorization, and can be re-admitted by executing
-///   the same proposal type with `ignored: false`. If every registered
-///   member were ignored, committee formation would abort and the current
-///   committee would simply continue — recoverable by un-ignoring.
+/// - Ignoring does not touch the registry: the member stays registered and
+///   can be re-admitted by executing the same proposal type with
+///   `ignored: false`. It can create and vote on proposals only while it is
+///   still seated: both require a seat in the current committee, so once a
+///   committee forms without it, it can do neither until it is re-admitted.
+///   If every registered member were ignored, committee formation would
+///   abort and the current committee would simply continue — recoverable by
+///   un-ignoring.
 module hashi::ignore_member;
 
 use hashi::{hashi::Hashi, proposal};
