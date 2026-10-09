@@ -672,20 +672,44 @@ pub fn assert_no_member_refusals(networks: &TestNetworks) {
             refusals.is_empty(),
             "node {index} refused MPC RPC callers as non-members: {refusals:?}"
         );
-        let over_connection_limit: Vec<String> = node
-            .hashi()
-            .metrics
-            .peer_requests_over_connection_limit_total
-            .collect()
-            .iter()
-            .flat_map(|family| family.get_metric())
-            .filter(|metric| metric.get_counter().value() > 0.0)
-            .map(describe_counter)
-            .collect();
-        assert!(
-            over_connection_limit.is_empty(),
-            "node {index} refused members over the connection limit: {over_connection_limit:?}"
-        );
+        let metrics = &node.hashi().metrics;
+        for (counter, what) in [
+            (
+                &metrics.peer_requests_over_connection_limit_total,
+                "refused members over the connection limit",
+            ),
+            (
+                &metrics.peer_requests_shed_total,
+                "shed member requests over the in-flight limit",
+            ),
+            (
+                &metrics.peer_requests_over_byte_budget_total,
+                "shed member requests over the request byte budget",
+            ),
+            (
+                &metrics.peer_requests_too_large_total,
+                "refused member requests over a route's size limit",
+            ),
+            (
+                &metrics.peer_responses_shed_total,
+                "shed member responses over the byte budget",
+            ),
+        ] {
+            let nonzero: Vec<String> = counter
+                .collect()
+                .iter()
+                .flat_map(|family| family.get_metric())
+                .filter(|metric| {
+                    metric.get_counter().value() > 0.0
+                        && !metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == "budget" && label.value() == "work")
+                })
+                .map(describe_counter)
+                .collect();
+            assert!(nonzero.is_empty(), "node {index} {what}: {nonzero:?}");
+        }
     }
 }
 
