@@ -196,7 +196,14 @@ impl MpcService for HttpService {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.handle_get_public_mpc_output_request(&internal_request)
                     .map_err(|e| {
-                        tracing::warn!("get_public_mpc_output failed: {e}");
+                        match &e {
+                            MpcError::NotFound(_) => {
+                                tracing::debug!("get_public_mpc_output: {e}");
+                            }
+                            _ => {
+                                tracing::warn!("get_public_mpc_output failed: {e}");
+                            }
+                        }
                         mpc_error_to_status(e)
                     })?
             };

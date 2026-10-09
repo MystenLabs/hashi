@@ -129,6 +129,10 @@ const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a new member keeps re-asking peers that are still rebuilding the
+/// previous epoch's public output, and how often.
+const PUBLIC_OUTPUT_NOT_READY_WAIT: Duration = Duration::from_secs(10);
+const PUBLIC_OUTPUT_NOT_READY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the first phase of batch AVSS keeps waiting for unanimity once the
 /// pessimistic fallback is already assured.
 const BATCH_AVSS_VOTES_GRACE: Duration = Duration::from_secs(90);
@@ -5483,6 +5487,7 @@ impl MpcManager {
             (previous_committee, previous_nodes, mgr.previous_epoch)
         };
         let request = GetPublicMpcOutputRequest { epoch };
+        let deadline = tokio::time::Instant::now() + PUBLIC_OUTPUT_NOT_READY_WAIT;
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
             .iter()
@@ -5495,8 +5500,18 @@ impl MpcManager {
                     .unwrap_or(0);
                 let req = request.clone();
                 async move {
-                    let result = p2p_channel.get_public_mpc_output(&addr, &req).await;
-                    (addr, weight, result)
+                    // Peers rebuild this output as the same rotation starts, so
+                    // one that is not ready yet is asked again until the deadline.
+                    loop {
+                        let result = p2p_channel.get_public_mpc_output(&addr, &req).await;
+                        let retry_at =
+                            tokio::time::Instant::now() + PUBLIC_OUTPUT_NOT_READY_RETRY_INTERVAL;
+                        if !matches!(result, Err(ChannelError::NotReady(_))) || retry_at > deadline
+                        {
+                            break (addr, weight, result);
+                        }
+                        tokio::time::sleep_until(retry_at).await;
+                    }
                 }
             })
             .collect();

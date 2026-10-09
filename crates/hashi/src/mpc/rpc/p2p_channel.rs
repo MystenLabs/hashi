@@ -98,6 +98,16 @@ fn map_status(status: tonic::Status) -> ChannelError {
     }
 }
 
+/// A peer answers `NotFound` for an epoch's public output it is still
+/// rebuilding at the start of a rotation, so that is "retry shortly" too.
+fn map_public_output_status(status: tonic::Status) -> ChannelError {
+    if status.code() == tonic::Code::NotFound {
+        ChannelError::NotReady(status.to_string())
+    } else {
+        map_status(status)
+    }
+}
+
 #[async_trait]
 impl P2PChannel for RpcP2PChannel {
     async fn send_messages(
@@ -159,7 +169,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .get_public_mpc_output(proto_request)
             .await
-            .map_err(map_status)?;
+            .map_err(map_public_output_status)?;
         GetPublicMpcOutputResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -235,6 +245,30 @@ mod tests {
         assert!(matches!(
             map_status(not_found),
             ChannelError::RequestFailed(_)
+        ));
+    }
+
+    #[test]
+    fn a_public_output_a_peer_is_still_rebuilding_is_not_ready() {
+        let rebuilding =
+            tonic::Status::not_found("Not found: DKG output for epoch 12 not yet available");
+        assert!(matches!(
+            map_public_output_status(rebuilding),
+            ChannelError::NotReady(_)
+        ));
+
+        let refused = tonic::Status::permission_denied(
+            "0x01 not admitted for epoch 12 or the committee after it (not_a_member)",
+        );
+        assert!(matches!(
+            map_public_output_status(refused),
+            ChannelError::RequestFailed(_)
+        ));
+
+        let shed = tonic::Status::unavailable(crate::grpc::PEER_INFLIGHT_LIMIT_MSG);
+        assert!(matches!(
+            map_public_output_status(shed),
+            ChannelError::NotReady(_)
         ));
     }
 }

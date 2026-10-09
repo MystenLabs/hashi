@@ -8862,6 +8862,131 @@ async fn test_prepare_previous_output_adopts_only_the_on_chain_key() {
     assert!(previous.key_shares.shares.is_empty());
 }
 
+/// Previous-committee peers that answer not-ready `ready_after` times each
+/// before serving the output, as they do while rebuilding it.
+struct RebuildingChannel {
+    output: PublicMpcOutput,
+    ready_after: u32,
+    asked: std::sync::Mutex<HashMap<Address, u32>>,
+}
+
+#[async_trait::async_trait]
+impl P2PChannel for RebuildingChannel {
+    async fn send_messages(
+        &self,
+        _party: &Address,
+        _request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
+        unimplemented!()
+    }
+    async fn retrieve_messages(
+        &self,
+        _party: &Address,
+        _request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse> {
+        unimplemented!()
+    }
+    async fn complain(
+        &self,
+        _party: &Address,
+        _request: &ComplainRequest,
+    ) -> ChannelResult<ComplaintResponse> {
+        unimplemented!()
+    }
+    async fn get_public_mpc_output(
+        &self,
+        party: &Address,
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        let asked = {
+            let mut asked = self.asked.lock().unwrap();
+            let count = asked.entry(*party).or_default();
+            *count += 1;
+            *count
+        };
+        if asked > self.ready_after {
+            Ok(GetPublicMpcOutputResponse {
+                output: self.output.clone(),
+            })
+        } else {
+            Err(crate::communication::ChannelError::NotReady(
+                "Not found: DKG output for epoch 12 not yet available".into(),
+            ))
+        }
+    }
+    async fn get_partial_signatures(
+        &self,
+        _party: &Address,
+        _request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        unimplemented!()
+    }
+}
+
+fn new_member_fetching_from(
+    rotation_setup: &RotationTestSetup,
+    ready_after: u32,
+) -> (Arc<RwLock<MpcManager>>, RebuildingChannel, u64) {
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    manager.previous_epoch = rotation_setup.setup.epoch();
+    let threshold = manager
+        .previous_reconfig_output_threshold
+        .expect("rotation setup records the previous threshold") as u64;
+    let channel = RebuildingChannel {
+        output: PublicMpcOutput::from_mpc_output(&dkg_output),
+        ready_after,
+        asked: Default::default(),
+    };
+    (Arc::new(RwLock::new(manager)), channel, threshold)
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_fetch_public_mpc_output_waits_for_peers_still_rebuilding() {
+    let rotation_setup = RotationTestSetup::new();
+    let (manager, channel, threshold) = new_member_fetching_from(&rotation_setup, 3);
+    let onchain_key = bcs::to_bytes(&channel.output.public_key).unwrap();
+
+    let started = tokio::time::Instant::now();
+    let fetched = MpcManager::fetch_public_mpc_output_from_quorum(
+        &manager,
+        &channel,
+        threshold,
+        &onchain_key,
+    )
+    .await
+    .expect("peers that finish rebuilding must still form the quorum");
+
+    assert_eq!(fetched, channel.output);
+    assert_eq!(
+        started.elapsed(),
+        PUBLIC_OUTPUT_NOT_READY_RETRY_INTERVAL * 3,
+        "each peer is re-asked once per interval until it serves the output",
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_fetch_public_mpc_output_stops_waiting_at_the_deadline() {
+    let rotation_setup = RotationTestSetup::new();
+    let (manager, channel, threshold) = new_member_fetching_from(&rotation_setup, u32::MAX);
+    let onchain_key = bcs::to_bytes(&channel.output.public_key).unwrap();
+
+    let started = tokio::time::Instant::now();
+    let outcome = MpcManager::fetch_public_mpc_output_from_quorum(
+        &manager,
+        &channel,
+        threshold,
+        &onchain_key,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, Err(MpcError::NotEnoughApprovals { got: 0, .. })),
+        "peers that never become ready must not count: {outcome:?}",
+    );
+    assert_eq!(started.elapsed(), PUBLIC_OUTPUT_NOT_READY_WAIT);
+}
+
 #[test]
 fn test_complete_key_rotation_refuses_a_key_the_chain_does_not_hold() {
     let mut rng = rand::thread_rng();
