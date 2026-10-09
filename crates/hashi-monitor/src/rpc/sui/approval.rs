@@ -204,6 +204,8 @@ pub fn parse_event(
                 // timestamp alongside the nested events.
                 timestamp_secs: transaction_timestamp_secs,
                 deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
+                amount: event.utxo.amount,
+                derivation_path: event.utxo.derivation_path,
             }));
         }
         Some(_) | None => {}
@@ -217,13 +219,12 @@ pub mod tests {
 
     use std::collections::BTreeMap;
 
+    use crate::domain::BridgeKeys;
     use crate::findings::FindingCategory;
     use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::bitcoin::BitcoinKeypair;
-    use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::HashiMasterG;
-    use hashi_types::bitcoin::taproot_address;
     use hashi_types::bitcoin::witness_program_from_address;
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
@@ -238,8 +239,8 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
-    /// The bridge change address for the test guardian and MPC keys.
-    pub fn test_change_address() -> BitcoinAddress {
+    /// Bridge keys from fixed test guardian and MPC keys, on Signet.
+    pub fn test_bridge_keys() -> BridgeKeys {
         let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
             .unwrap()
             .x_only_public_key()
@@ -252,12 +253,16 @@ pub mod tests {
                 .serialize(),
         )
         .unwrap();
-        taproot_address(
-            &guardian,
-            &mpc,
-            &DerivationPath::ZERO,
+        BridgeKeys::new(guardian, mpc, bitcoin::Network::Signet)
+    }
+
+    /// The bridge change address of `test_bridge_keys`.
+    pub fn test_change_address() -> BitcoinAddress {
+        BitcoinAddress::from_script(
+            &test_bridge_keys().change_script(),
             bitcoin::Network::Signet,
         )
+        .unwrap()
     }
 
     /// `txn` with the txid that its inputs and outputs build.

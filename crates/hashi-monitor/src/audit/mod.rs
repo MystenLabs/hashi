@@ -142,15 +142,15 @@ pub struct AuditorCore {
 impl AuditorCore {
     pub async fn new(cfg: &Config, cursors: Cursors) -> anyhow::Result<Self> {
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?;
-        let change_script = guardian_poller
-            .read_change_script(cfg.deployment.bitcoin_network)
+        let bridge_keys = guardian_poller
+            .read_bridge_keys(cfg.deployment.bitcoin_network)
             .await?;
         Ok(Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             guardian_poller,
-            sui_poller: SuiEventsPoller::new(&cfg.sui, change_script, cursors.sui)?,
+            sui_poller: SuiEventsPoller::new(&cfg.sui, bridge_keys.change_script(), cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
         })
     }

@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bitcoin::BlockHash;
+use bitcoin::Transaction;
+use bitcoin::TxOut;
 use bitcoin::Txid;
+use bitcoin::consensus::encode::deserialize_hex;
 use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,9 +29,18 @@ const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
 
+/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
+#[derive(Clone, Debug)]
+pub struct TxConfirmation {
+    /// The time of the block that holds the transaction.
+    pub block_time: UnixSeconds,
+    /// The transaction's outputs, in order.
+    pub outputs: Vec<TxOut>,
+}
+
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
-    confirmation_cache: RefCell<HashMap<Txid, Option<UnixSeconds>>>,
+    confirmation_cache: RefCell<HashMap<Txid, Option<TxConfirmation>>>,
 }
 
 struct HttpJsonRpcTransport {
@@ -51,6 +63,8 @@ struct JsonRpcError {
 
 #[derive(Deserialize)]
 struct RawTransactionInfo {
+    /// The serialized transaction.
+    hex: String,
     blockhash: Option<String>,
     #[serde(default)]
     confirmations: u64,
@@ -82,7 +96,8 @@ impl BlockchainInfo {
 }
 
 impl RawTransactionInfo {
-    fn sufficiently_confirmed_block_hash(self, txid: Txid) -> anyhow::Result<Option<BlockHash>> {
+    /// The block hash and outputs of a sufficiently confirmed transaction.
+    fn confirmed(self, txid: Txid) -> anyhow::Result<Option<(BlockHash, Vec<TxOut>)>> {
         let Some(block_hash) = self.blockhash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
@@ -97,9 +112,16 @@ impl RawTransactionInfo {
             return Ok(None);
         }
 
-        BlockHash::from_str(&block_hash)
-            .with_context(|| format!("invalid bitcoin block hash for {txid}"))
-            .map(Some)
+        let block_hash = BlockHash::from_str(&block_hash)
+            .with_context(|| format!("invalid bitcoin block hash for {txid}"))?;
+        let tx: Transaction = deserialize_hex(&self.hex)
+            .with_context(|| format!("invalid bitcoin transaction hex for {txid}"))?;
+        anyhow::ensure!(
+            tx.compute_txid() == txid,
+            "bitcoin returned transaction {} for {txid}",
+            tx.compute_txid()
+        );
+        Ok(Some((block_hash, tx.output)))
     }
 }
 
@@ -151,15 +173,17 @@ impl BtcRpcClient {
 
     /// Query BTC RPC to check if a transaction is confirmed.
     /// Returns
-    /// - `Ok(Some(block_time))` if txid is confirmed,
+    /// - `Ok(Some(confirmation))` if txid is confirmed,
     /// - `Ok(None)` if txid is not seen or txid is seen but not confirmed,
     /// - `Err(...)` for all other errors
-    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<UnixSeconds>> {
+    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
         if let Some(result) = self.confirmation_cache.borrow().get(&txid) {
-            return Ok(*result);
+            return Ok(result.clone());
         }
         let result = self.transport.lookup_confirmation(txid)?;
-        self.confirmation_cache.borrow_mut().insert(txid, result);
+        self.confirmation_cache
+            .borrow_mut()
+            .insert(txid, result.clone());
         Ok(result)
     }
 }
@@ -239,7 +263,7 @@ impl HttpJsonRpcTransport {
         Ok(())
     }
 
-    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<UnixSeconds>> {
+    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
         let response = self.call(
             "getrawtransaction",
             serde_json::json!([txid.to_string(), true]),
@@ -261,7 +285,7 @@ impl HttpJsonRpcTransport {
                 .context("bitcoin getrawtransaction response is missing its result")?,
         )
         .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-        let Some(block_hash) = tx_info.sufficiently_confirmed_block_hash(txid)? else {
+        let Some((block_hash, outputs)) = tx_info.confirmed(txid)? else {
             return Ok(None);
         };
 
@@ -282,13 +306,16 @@ impl HttpJsonRpcTransport {
                 .context("bitcoin getblockheader response is missing its result")?,
         )
         .with_context(|| format!("failed to parse block header for {block_hash}"))?;
-        Ok(Some(header.time))
+        Ok(Some(TxConfirmation {
+            block_time: header.time,
+            outputs,
+        }))
     }
 
     fn lookup_confirmations(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<UnixSeconds>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
         let mut confirmations = HashMap::with_capacity(txids.len());
         for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
             confirmations.extend(self.lookup_confirmation_batch(chunk)?);
@@ -307,7 +334,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmation_batch(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<UnixSeconds>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
         let requests = txids
             .iter()
             .enumerate()
@@ -322,7 +349,7 @@ impl HttpJsonRpcTransport {
             .collect::<Vec<_>>();
         let responses = self.call_batch(&requests)?;
         let mut seen = HashSet::with_capacity(txids.len());
-        let mut block_hashes = HashMap::with_capacity(txids.len());
+        let mut confirmed = HashMap::with_capacity(txids.len());
 
         for response in responses {
             let index = response_index(&response, txids.len())?;
@@ -333,7 +360,7 @@ impl HttpJsonRpcTransport {
             let txid = txids[index];
             if let Some(error) = response.error {
                 if error.code == -5 {
-                    block_hashes.insert(txid, None);
+                    confirmed.insert(txid, None);
                     continue;
                 }
                 anyhow::bail!(
@@ -348,8 +375,7 @@ impl HttpJsonRpcTransport {
                     .context("bitcoin getrawtransaction batch response is missing its result")?,
             )
             .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-            let block_hash = info.sufficiently_confirmed_block_hash(txid)?;
-            block_hashes.insert(txid, block_hash);
+            confirmed.insert(txid, info.confirmed(txid)?);
         }
         anyhow::ensure!(
             seen.len() == txids.len(),
@@ -358,10 +384,10 @@ impl HttpJsonRpcTransport {
             txids.len()
         );
 
-        let unique_block_hashes = block_hashes
+        let unique_block_hashes = confirmed
             .values()
             .flatten()
-            .copied()
+            .map(|(block_hash, _)| *block_hash)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -411,15 +437,19 @@ impl HttpJsonRpcTransport {
             );
         }
 
-        block_hashes
+        confirmed
             .into_iter()
-            .map(|(txid, block_hash)| {
-                let confirmation = block_hash
-                    .map(|hash| {
-                        block_times
+            .map(|(txid, confirmed)| {
+                let confirmation = confirmed
+                    .map(|(hash, outputs)| {
+                        let block_time = block_times
                             .get(&hash)
                             .copied()
-                            .with_context(|| format!("missing block time for {hash}"))
+                            .with_context(|| format!("missing block time for {hash}"))?;
+                        Ok::<_, anyhow::Error>(TxConfirmation {
+                            block_time,
+                            outputs,
+                        })
                     })
                     .transpose()?;
                 Ok((txid, confirmation))
@@ -590,8 +620,17 @@ mod tests {
         node.generate_blocks(MIN_CONFIRMATIONS - 1)?;
         btc_rpc_client.clear_confirmation_cache();
 
-        let confirmed = btc_rpc_client.lookup_confirmation(txid)?;
-        assert!(confirmed.is_some(), "expected confirmed transaction");
+        let confirmed = btc_rpc_client
+            .lookup_confirmation(txid)?
+            .expect("expected confirmed transaction");
+        assert!(
+            confirmed.outputs.iter().any(|output| {
+                output.value == Amount::from_sat(50_000)
+                    && output.script_pubkey == destination.script_pubkey()
+            }),
+            "expected the paid output among {:?}",
+            confirmed.outputs
+        );
 
         Ok(())
     }

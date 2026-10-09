@@ -223,13 +223,13 @@ impl WithdrawalStateMachine {
         let cur_time = now_timestamp_secs();
 
         match btc_rpc_client.lookup_confirmation(btc_txid) {
-            Ok(Some(block_time)) => {
+            Ok(Some(confirmation)) => {
                 self.btc_checked_at = Some(cur_time);
                 let e_btc = MonitorWithdrawalEvent {
                     event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
                     btc_txid,
-                    timestamp_secs: block_time,
+                    timestamp_secs: confirmation.block_time,
                 };
                 Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg)))
             }
@@ -356,12 +356,13 @@ impl DepositStateMachine {
         let cur_time = now_timestamp_secs();
 
         match btc_rpc_client.lookup_confirmation(btc_txid) {
-            Ok(Some(block_time)) => {
+            Ok(Some(confirmation)) => {
                 self.btc_checked_at = Some(cur_time);
+                let block_time = confirmation.block_time;
                 let e_btc = MonitorDepositEvent {
                     event_type: DepositEventType::E1BtcConfirmed,
-                    deposit_id,
                     timestamp_secs: block_time,
+                    ..self.hashi_deposit_event.clone()
                 };
 
                 let mut findings = Vec::new();
@@ -503,6 +504,8 @@ mod tests {
             event_type: DepositEventType::E2HashiDeposited,
             timestamp_secs: timestamp,
             deposit_id: DepositId::new(txid(fill), 0),
+            amount: 50_000,
+            derivation_path: None,
         }
     }
 
