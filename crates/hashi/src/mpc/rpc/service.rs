@@ -4,7 +4,9 @@
 use super::caller_membership;
 use super::gates;
 use crate::grpc::HttpService;
+use crate::mpc::PreparedMessages;
 use crate::mpc::RetrieveOutcome;
+use crate::mpc::RetrieveReply;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
 use crate::mpc::spawn_blocking;
@@ -53,11 +55,11 @@ impl MpcService for HttpService {
             let internal_request = types::SendMessagesRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             drop(external_request);
-            let label = match &internal_request.messages {
-                types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
-                types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
-                types::Messages::NonceGenerationAvid(_)
-                | types::Messages::AvidNonceRetrieval(_) => {
+            let prepared = PreparedMessages::new(internal_request.messages);
+            let label = match &prepared {
+                PreparedMessages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
+                PreparedMessages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+                PreparedMessages::NonceGenerationAvid(_) | PreparedMessages::AvidNonceRetrieval => {
                     crate::metrics::MPC_LABEL_NONCE_GENERATION
                 }
             };
@@ -65,7 +67,7 @@ impl MpcService for HttpService {
             let signed = {
                 let mut mgr = mpc_manager.write().unwrap();
                 validate_epoch(mgr.mpc_config.epoch, epoch)?;
-                mgr.handle_send_messages_request(sender, &internal_request)
+                mgr.handle_prepared_messages(sender, prepared)
                     .map_err(|e| send_messages_error(sender, e))?
             };
             Ok(SendMessagesResponse::from(&signed))
@@ -129,16 +131,16 @@ impl MpcService for HttpService {
                     mgr.shape_params(),
                 )
             };
-            let messages = match outcome {
-                RetrieveOutcome::Ready(messages) => messages,
+            let reply = match outcome {
+                RetrieveOutcome::Ready(reply) => reply,
                 RetrieveOutcome::NeedsStore => {
-                    retrieve_from_store(&*store, &internal_request, &shape).map_err(to_status)?
+                    retrieve_from_store(&*store, &internal_request).map_err(to_status)?
                 }
-                RetrieveOutcome::NeedsAvidStore(pending) => {
-                    finish_avid_retrieval(&*store, pending, &shape).map_err(to_status)?
-                }
+                RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Decoded(
+                    finish_avid_retrieval(&*store, pending, &shape).map_err(to_status)?,
+                ),
             };
-            Ok(RetrieveMessagesResponse::from(&messages))
+            reply.to_proto(&shape, &internal_request).map_err(to_status)
         })
         .await?;
         Ok(tonic::Response::new(response))

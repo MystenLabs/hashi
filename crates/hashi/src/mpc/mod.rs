@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod count_check;
+pub mod message_cache;
 mod mpc_except_signing;
 mod presig_seal;
 pub mod rpc;

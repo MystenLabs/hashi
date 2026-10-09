@@ -104,6 +104,16 @@ fn receive_dealer_messages(
     ))
 }
 
+impl MpcManager {
+    fn handle_send_messages_request(
+        &mut self,
+        sender: Address,
+        request: &SendMessagesRequest,
+    ) -> MpcResult<SendMessagesResponse> {
+        self.handle_prepared_messages(sender, PreparedMessages::new(request.messages.clone()))
+    }
+}
+
 struct TestSetup {
     pub committee_set: CommitteeSet,
     pub encryption_keys: Vec<EncryptionPrivateKey>,
@@ -11956,6 +11966,51 @@ fn test_handle_retrieve_messages_request_rotation_success() {
 
     send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
     retrieve_and_verify_hash(&receiver, dealer_addr, &rotation_messages);
+}
+
+#[test]
+fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
+    let rotation_setup = RotationTestSetup::new();
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let dealer_addr = rotation_setup.setup.address(0);
+    let (mut receiver, receiver_dkg_output) = rotation_setup.create_receiver_with_completed_dkg(2);
+    receiver.previous_output = Some(receiver_dkg_output);
+    send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
+
+    let request = RetrieveMessagesRequest {
+        dealer: dealer_addr,
+        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: receiver.mpc_config.epoch,
+        batch_index: None,
+    };
+    let RetrieveOutcome::Ready(reply) = receiver.begin_retrieve(Address::ZERO, &request).unwrap()
+    else {
+        panic!("expected a cache hit");
+    };
+    let response = reply.to_proto(&receiver.shape_params(), &request).unwrap();
+    let Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessages(served)) =
+        response.messages
+    else {
+        panic!("expected rotation messages");
+    };
+    let Messages::Rotation(expected) = &rotation_messages else {
+        unreachable!()
+    };
+    let cached = receiver
+        .current_rotation_messages
+        .entry(&dealer_addr)
+        .unwrap()
+        .bytes()
+        .as_ptr_range();
+    assert_eq!(served.messages.len(), expected.len());
+    for (index, message) in expected.iter() {
+        let value = served.messages[&u32::from(index.get())]
+            .value
+            .as_ref()
+            .unwrap();
+        assert_eq!(&value[..], bcs::to_bytes(message).unwrap());
+        assert!(cached.contains(&value.as_ptr()) && value.as_ptr_range().end <= cached.end);
+    }
 }
 
 #[test]

@@ -15,6 +15,8 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::message_cache::Cached;
+use crate::mpc::message_cache::MessageCache;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::stored_rows;
@@ -81,6 +83,7 @@ use crate::mpc::types::hash_avid_vote;
 use crate::onchain::OnchainState;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
+use bytes::Bytes;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Blake2b256;
@@ -210,9 +213,10 @@ pub struct MpcManager {
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::AvssOutput>,
-    pub current_dkg_messages: HashMap<Address, avss::Message>,
-    pub current_rotation_messages: HashMap<Address, RotationMessages>,
+    pub current_dkg_messages: MessageCache<avss::Message>,
+    pub current_rotation_messages: MessageCache<RotationMessages>,
     stored_row_hashes: HashMap<(ProtocolTypeIndicator, Address), MessagesHash>,
+    skipped_rows: HashSet<(ProtocolTypeIndicator, Address)>,
     pub rotation_ack_signatures: HashMap<Address, (MessagesHash, BLS12381Signature)>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
@@ -539,9 +543,10 @@ impl MpcManager {
             previous_reconfig_input_threshold,
             previous_reconfig_input,
             dealer_outputs: HashMap::new(),
-            current_dkg_messages: HashMap::new(),
-            current_rotation_messages: HashMap::new(),
+            current_dkg_messages: MessageCache::default(),
+            current_rotation_messages: MessageCache::default(),
             stored_row_hashes: HashMap::new(),
+            skipped_rows: HashSet::new(),
             rotation_ack_signatures: HashMap::new(),
             current_avid_round_state: HashMap::new(),
             current_avid_verified_common: HashMap::new(),
@@ -564,10 +569,10 @@ impl MpcManager {
         Ok(manager)
     }
 
-    pub fn handle_send_messages_request(
+    pub(crate) fn handle_prepared_messages(
         &mut self,
         sender: Address,
-        request: &SendMessagesRequest,
+        prepared: PreparedMessages,
     ) -> MpcResult<SendMessagesResponse> {
         if !self.is_committee_member() {
             return Err(MpcError::InvalidMessage {
@@ -578,26 +583,41 @@ impl MpcManager {
                 ),
             });
         }
-        if matches!(request.messages, Messages::AvidNonceRetrieval(_)) {
-            return Err(MpcError::InvalidMessage {
-                sender,
-                reason: "retrieval messages are response-only".into(),
-            });
-        }
-        self.reject_kind_mismatch(sender, &request.messages)?;
-        let cache_key = match &request.messages {
-            Messages::Dkg(_) => Some(MessageResponsesKey::Dkg { sender }),
-            Messages::Rotation(_) => Some(MessageResponsesKey::Rotation { sender }),
-            Messages::NonceGenerationAvid(_) => None,
-            Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
+        let protocol_type = match &prepared {
+            PreparedMessages::Dkg(_) => ProtocolTypeIndicator::Dkg,
+            PreparedMessages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
+            PreparedMessages::NonceGenerationAvid(_) => ProtocolTypeIndicator::NonceGeneration,
+            PreparedMessages::AvidNonceRetrieval => {
+                return Err(MpcError::InvalidMessage {
+                    sender,
+                    reason: "retrieval messages are response-only".into(),
+                });
+            }
         };
-        let existing = self.accepted_messages_hash(request.messages.protocol_type(), &sender)?;
+        self.reject_kind_mismatch(sender, protocol_type)?;
+        let (cache_key, incoming_hash) = match &prepared {
+            PreparedMessages::Dkg(entry) => (
+                Some(MessageResponsesKey::Dkg { sender }),
+                Some(entry.hash()),
+            ),
+            PreparedMessages::Rotation(entry) => (
+                Some(MessageResponsesKey::Rotation { sender }),
+                Some(entry.hash()),
+            ),
+            PreparedMessages::NonceGenerationAvid(_) | PreparedMessages::AvidNonceRetrieval => {
+                (None, None)
+            }
+        };
+        let existing = self.accepted_messages_hash(protocol_type, &sender)?;
         if let Some(existing_hash) = existing {
-            let incoming_hash = request.messages.compute_hash();
-            if existing_hash != incoming_hash {
-                let held = self
-                    .get_dealer_messages(request.messages.protocol_type(), &sender)
-                    .is_some();
+            if Some(existing_hash) != incoming_hash {
+                let held = match protocol_type {
+                    ProtocolTypeIndicator::Dkg => self.current_dkg_messages.contains_key(&sender),
+                    ProtocolTypeIndicator::KeyRotation => {
+                        self.current_rotation_messages.contains_key(&sender)
+                    }
+                    ProtocolTypeIndicator::NonceGeneration => false,
+                };
                 let reason = if held {
                     "Dealer sent different messages"
                 } else {
@@ -612,27 +632,29 @@ impl MpcManager {
                 return cached.clone();
             }
             tracing::info!(
-                "handle_send_messages_request: existing message from {sender:?} but no \
+                "handle_prepared_messages: existing message from {sender:?} but no \
                  cached response (e.g. post-restart), re-processing"
             );
         }
-        let result = match &request.messages {
-            Messages::Dkg(msg) => {
+        let result = match prepared {
+            PreparedMessages::Dkg(entry) => {
                 Self::member_party_id(&self.committee, &sender, "committee")?;
-                self.persist_and_cache_dkg_message(self.mpc_config.epoch, sender, msg)?;
-                self.try_sign_dkg_message(sender, &request.messages)
+                self.persist_and_cache_dkg_entry(sender, Arc::clone(&entry))?;
+                self.sign_dkg_message(sender, &entry, entry.hash())
             }
-            Messages::Rotation(msgs) => {
+            PreparedMessages::Rotation(entry) => {
                 let previous = self
                     .previous_output
                     .clone()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
-                self.reject_unowned_rotation_indices(sender, msgs)?;
-                self.persist_and_cache_rotation_messages(self.mpc_config.epoch, sender, msgs)?;
-                self.try_sign_rotation_messages(&previous, sender, &request.messages)
+                self.reject_unowned_rotation_indices(sender, &entry)?;
+                self.persist_and_cache_rotation_entry(sender, Arc::clone(&entry))?;
+                self.sign_rotation_messages(&previous, sender, &entry, entry.hash())
             }
-            Messages::NonceGenerationAvid(avid) => self.handle_avid_nonce_message(sender, avid),
-            Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
+            PreparedMessages::NonceGenerationAvid(avid) => {
+                self.handle_avid_nonce_message(sender, &avid)
+            }
+            PreparedMessages::AvidNonceRetrieval => unreachable!("rejected above"),
         }
         .map(|signature| SendMessagesResponse { signature });
         if let Some(key) = cache_key
@@ -649,15 +671,18 @@ impl MpcManager {
         requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
-        match self.begin_retrieve(requester, request)? {
-            RetrieveOutcome::Ready(response) => Ok(response),
+        let shape = self.shape_params();
+        let reply = match self.begin_retrieve(requester, request)? {
+            RetrieveOutcome::Ready(reply) => reply,
             RetrieveOutcome::NeedsStore => {
-                retrieve_from_store(&*self.public_messages_store, request, &self.shape_params())
+                retrieve_from_store(&*self.public_messages_store, request)?
             }
-            RetrieveOutcome::NeedsAvidStore(pending) => {
-                finish_avid_retrieval(&*self.public_messages_store, pending, &self.shape_params())
-            }
-        }
+            RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Decoded(
+                finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
+            ),
+        };
+        RetrieveMessagesResponse::try_from(&reply.to_proto(&shape, request)?)
+            .map_err(|e| MpcError::ProtocolFailed(e.to_string()))
     }
 
     pub(crate) fn begin_retrieve(
@@ -665,12 +690,30 @@ impl MpcManager {
         requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveOutcome> {
-        if request.epoch == self.mpc_config.epoch
-            && let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer)
-        {
-            return Ok(RetrieveOutcome::Ready(RetrieveMessagesResponse {
-                messages,
-            }));
+        if request.epoch == self.mpc_config.epoch {
+            let cached = match request.protocol_type {
+                ProtocolTypeIndicator::Dkg => self
+                    .current_dkg_messages
+                    .entry(&request.dealer)
+                    .map(|entry| RetrieveReply::Dkg(entry.bytes().clone())),
+                ProtocolTypeIndicator::KeyRotation => self
+                    .current_rotation_messages
+                    .entry(&request.dealer)
+                    .map(|entry| RetrieveReply::Rotation(entry.bytes().clone())),
+                ProtocolTypeIndicator::NonceGeneration => None,
+            };
+            if let Some(reply) = cached {
+                return Ok(RetrieveOutcome::Ready(reply));
+            }
+            if self
+                .skipped_rows
+                .contains(&(request.protocol_type, request.dealer))
+            {
+                return Err(MpcError::NotFound(format!(
+                    "stored row for dealer {:?} was refused at load",
+                    request.dealer
+                )));
+            }
         }
         if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
             let batch_index = request.batch_index.ok_or_else(|| {
@@ -1674,12 +1717,9 @@ impl MpcManager {
             }
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
-                match mgr.current_dkg_messages.get(&dealer) {
-                    None => true,
-                    Some(stored_msg) => {
-                        Messages::Dkg(stored_msg.clone()).compute_hash() != message.messages_hash
-                    }
-                }
+                mgr.current_dkg_messages
+                    .entry(&dealer)
+                    .is_none_or(|entry| entry.hash() != message.messages_hash)
             };
             if needs_retrieval {
                 tracing::info!(
@@ -1989,13 +2029,9 @@ impl MpcManager {
             };
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
-                match mgr.current_rotation_messages.get(&dealer) {
-                    None => true,
-                    Some(stored_msgs) => {
-                        Messages::Rotation(stored_msgs.clone()).compute_hash()
-                            != message.messages_hash
-                    }
-                }
+                mgr.current_rotation_messages
+                    .entry(&dealer)
+                    .is_none_or(|entry| entry.hash() != message.messages_hash)
             };
             if needs_retrieval {
                 tracing::info!(
@@ -2186,6 +2222,30 @@ impl MpcManager {
         Ok(())
     }
 
+    fn persist_and_cache_dkg_entry(
+        &mut self,
+        dealer: Address,
+        entry: Arc<Cached<avss::Message>>,
+    ) -> MpcResult<()> {
+        self.public_messages_store
+            .store_dealer_message(self.mpc_config.epoch, &dealer, &entry)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        self.current_dkg_messages.insert_entry(dealer, entry);
+        Ok(())
+    }
+
+    fn persist_and_cache_rotation_entry(
+        &mut self,
+        dealer: Address,
+        entry: Arc<Cached<RotationMessages>>,
+    ) -> MpcResult<()> {
+        self.public_messages_store
+            .store_rotation_messages(self.mpc_config.epoch, &dealer, &entry)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        self.current_rotation_messages.insert_entry(dealer, entry);
+        Ok(())
+    }
+
     fn persist_and_cache_avid_round_state(
         &mut self,
         epoch: u64,
@@ -2233,7 +2293,7 @@ impl MpcManager {
         dealer: Address,
         messages: &Messages,
     ) -> MpcResult<BLS12381Signature> {
-        self.reject_kind_mismatch(dealer, messages)?;
+        self.reject_kind_mismatch(dealer, messages.protocol_type())?;
         let message = match messages {
             Messages::Dkg(msg) => msg,
             Messages::Rotation(_)
@@ -2242,6 +2302,15 @@ impl MpcManager {
                 panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
+        self.sign_dkg_message(dealer, message, messages.compute_hash())
+    }
+
+    fn sign_dkg_message(
+        &mut self,
+        dealer: Address,
+        message: &avss::Message,
+        messages_hash: MessagesHash,
+    ) -> MpcResult<BLS12381Signature> {
         Self::member_party_id(&self.committee, &dealer, "committee")?;
         let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
         let result = process_avss_message(
@@ -2262,7 +2331,7 @@ impl MpcManager {
                     .insert(DealerOutputsKey::Dkg(dealer), output);
                 let dkg_message = DealerMessagesHash {
                     dealer_address: dealer,
-                    messages_hash: messages.compute_hash(),
+                    messages_hash,
                 };
                 let signature = self.signing_key()?.sign(
                     self.hashi_object_id,
@@ -3238,18 +3307,19 @@ impl MpcManager {
             })
     }
 
-    fn reject_kind_mismatch(&self, sender: Address, messages: &Messages) -> MpcResult<()> {
-        match (&self.protocol_type, messages) {
-            (ProtocolType::Dkg, Messages::Dkg(_))
-            | (ProtocolType::KeyRotation, Messages::Rotation(_)) => Ok(()),
-            (_, Messages::Dkg(_) | Messages::Rotation(_)) => Err(MpcError::InvalidMessage {
-                sender,
-                reason: format!(
-                    "{:?} message rejected: this epoch runs {:?}",
-                    messages.protocol_type(),
-                    self.protocol_type
-                ),
-            }),
+    fn reject_kind_mismatch(&self, sender: Address, kind: ProtocolTypeIndicator) -> MpcResult<()> {
+        match (&self.protocol_type, kind) {
+            (ProtocolType::Dkg, ProtocolTypeIndicator::Dkg)
+            | (ProtocolType::KeyRotation, ProtocolTypeIndicator::KeyRotation) => Ok(()),
+            (_, ProtocolTypeIndicator::Dkg | ProtocolTypeIndicator::KeyRotation) => {
+                Err(MpcError::InvalidMessage {
+                    sender,
+                    reason: format!(
+                        "{kind:?} message rejected: this epoch runs {:?}",
+                        self.protocol_type
+                    ),
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -4314,15 +4384,15 @@ impl MpcManager {
                     message.dealer_address
                 ))
             })?;
-        let Messages::Dkg(ref msg) = messages else {
-            unreachable!(
+        let entry = match messages {
+            Messages::Dkg(msg) => Cached::new(msg),
+            other => unreachable!(
                 "Hash matched DKG certificate but got {:?}",
-                std::mem::discriminant(&messages)
-            );
+                std::mem::discriminant(&other)
+            ),
         };
         let mut mgr = mpc_manager.write().unwrap();
-        let epoch = mgr.mpc_config.epoch;
-        mgr.persist_and_cache_dkg_message(epoch, message.dealer_address, msg)?;
+        mgr.persist_and_cache_dkg_entry(message.dealer_address, entry)?;
         Ok(())
     }
 
@@ -4453,15 +4523,15 @@ impl MpcManager {
                     "Failed to retrieve rotation messages from any signer".to_string(),
                 )
             })?;
-        let Messages::Rotation(ref msgs) = messages else {
-            unreachable!(
+        let entry = match messages {
+            Messages::Rotation(msgs) => Cached::new(msgs),
+            other => unreachable!(
                 "Hash matched rotation certificate but got {:?}",
-                std::mem::discriminant(&messages)
-            );
+                std::mem::discriminant(&other)
+            ),
         };
         let mut mgr = mpc_manager.write().unwrap();
-        let epoch = mgr.mpc_config.epoch;
-        mgr.persist_and_cache_rotation_messages(epoch, message.dealer_address, msgs)?;
+        mgr.persist_and_cache_rotation_entry(message.dealer_address, entry)?;
         Ok(())
     }
 
@@ -4662,7 +4732,11 @@ impl MpcManager {
                 Ok(message) => {
                     self.current_dkg_messages.insert(dealer, message);
                 }
-                Err(e) => tracing::warn!("Skipping a stored DKG message: {e}"),
+                Err(e) => {
+                    tracing::warn!("Skipping a stored DKG message: {e}");
+                    self.skipped_rows
+                        .insert((ProtocolTypeIndicator::Dkg, dealer));
+                }
             }
         }
         self.load_stored_rotation_messages()
@@ -4684,7 +4758,11 @@ impl MpcManager {
                 Ok(messages) => {
                     self.current_rotation_messages.insert(dealer, messages);
                 }
-                Err(e) => tracing::warn!("Skipping stored rotation messages: {e}"),
+                Err(e) => {
+                    tracing::warn!("Skipping stored rotation messages: {e}");
+                    self.skipped_rows
+                        .insert((ProtocolTypeIndicator::KeyRotation, dealer));
+                }
             }
         }
         Ok(())
@@ -4786,7 +4864,7 @@ impl MpcManager {
         dealer: Address,
         messages: &Messages,
     ) -> MpcResult<BLS12381Signature> {
-        self.reject_kind_mismatch(dealer, messages)?;
+        self.reject_kind_mismatch(dealer, messages.protocol_type())?;
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
             Messages::Dkg(_)
@@ -4795,11 +4873,25 @@ impl MpcManager {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
+        self.sign_rotation_messages(
+            previous_dkg_output,
+            dealer,
+            rotation_messages,
+            messages.compute_hash(),
+        )
+    }
+
+    fn sign_rotation_messages(
+        &mut self,
+        previous_dkg_output: &MpcOutput,
+        dealer: Address,
+        rotation_messages: &RotationMessages,
+        messages_hash: MessagesHash,
+    ) -> MpcResult<BLS12381Signature> {
         let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous committee".into())
         })?;
         Self::member_party_id(previous_committee, &dealer, "previous committee")?;
-        let messages_hash = messages.compute_hash();
         if let Some((acked_hash, ack)) = self.rotation_ack_signatures.get(&dealer) {
             if *acked_hash == messages_hash {
                 tracing::info!("re-acking identical rotation batch from dealer {dealer}");
@@ -6325,11 +6417,20 @@ impl MpcManager {
         protocol_type: ProtocolTypeIndicator,
         dealer: &Address,
     ) -> MpcResult<Option<MessagesHash>> {
-        if let Some(cached) = self.get_dealer_messages(protocol_type, dealer) {
-            return Ok(Some(cached.compute_hash()));
-        }
-        if let Some(recorded) = self.stored_row_hashes.get(&(protocol_type, *dealer)) {
-            return Ok(Some(*recorded));
+        let cached = match protocol_type {
+            ProtocolTypeIndicator::Dkg => self.current_dkg_messages.entry(dealer).map(|e| e.hash()),
+            ProtocolTypeIndicator::KeyRotation => self
+                .current_rotation_messages
+                .entry(dealer)
+                .map(|e| e.hash()),
+            ProtocolTypeIndicator::NonceGeneration => None,
+        };
+        if let Some(hash) = cached.or_else(|| {
+            self.stored_row_hashes
+                .get(&(protocol_type, *dealer))
+                .copied()
+        }) {
+            return Ok(Some(hash));
         }
         let epoch = self.mpc_config.epoch;
         let stored = match protocol_type {
@@ -6837,9 +6938,35 @@ fn consume_certified_nonce_outputs<T>(
 
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum RetrieveOutcome {
-    Ready(RetrieveMessagesResponse),
+    Ready(RetrieveReply),
     NeedsStore,
     NeedsAvidStore(AvidPending),
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum RetrieveReply {
+    Dkg(Bytes),
+    Rotation(Bytes),
+    Decoded(RetrieveMessagesResponse),
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PreparedMessages {
+    Dkg(Arc<Cached<avss::Message>>),
+    Rotation(Arc<Cached<RotationMessages>>),
+    NonceGenerationAvid(AvidNonceMessage),
+    AvidNonceRetrieval,
+}
+
+impl PreparedMessages {
+    pub(crate) fn new(decoded: Messages) -> Self {
+        match decoded {
+            Messages::Dkg(message) => Self::Dkg(Cached::new(message)),
+            Messages::Rotation(messages) => Self::Rotation(Cached::new(messages)),
+            Messages::NonceGenerationAvid(message) => Self::NonceGenerationAvid(message),
+            Messages::AvidNonceRetrieval(_) => Self::AvidNonceRetrieval,
+        }
+    }
 }
 
 pub(crate) enum Lookup<T> {
@@ -6941,31 +7068,23 @@ fn build_avid_response(
 pub(crate) fn retrieve_from_store(
     store: &dyn PublicMessagesStore,
     request: &RetrieveMessagesRequest,
-    shape: &ShapeParams,
-) -> MpcResult<RetrieveMessagesResponse> {
+) -> MpcResult<RetrieveReply> {
     let (epoch, dealer) = (request.epoch, &request.dealer);
-    let messages = match request.protocol_type {
+    let reply = match request.protocol_type {
         ProtocolTypeIndicator::Dkg => store
             .get_dealer_message(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| stored_rows::dkg_message(shape, epoch, dealer, &bytes).map(Messages::Dkg))
-            .transpose(),
+            .map(|bytes| RetrieveReply::Dkg(Bytes::from(bytes))),
         ProtocolTypeIndicator::KeyRotation => store
             .get_rotation_messages(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| {
-                stored_rows::rotation_messages(shape, epoch, dealer, &bytes).map(Messages::Rotation)
-            })
-            .transpose(),
-        ProtocolTypeIndicator::NonceGeneration => Ok(None),
-    }
-    .map_err(not_found_if_refused)?;
-    messages
-        .map(|m| RetrieveMessagesResponse { messages: m })
-        .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
+            .map(|bytes| RetrieveReply::Rotation(Bytes::from(bytes))),
+        ProtocolTypeIndicator::NonceGeneration => None,
+    };
+    reply.ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
 }
 
-fn not_found_if_refused(e: MpcError) -> MpcError {
+pub(crate) fn not_found_if_refused(e: MpcError) -> MpcError {
     match e {
         MpcError::StoredRowRefused { dealer, reason } => {
             tracing::warn!("Stored row for dealer {dealer:?} refused ({reason}); not served");
