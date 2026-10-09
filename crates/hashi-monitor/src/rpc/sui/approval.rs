@@ -35,7 +35,8 @@
 //!    completes both goals.
 //!
 //! Assumptions:
-//! - The bridge change address never changes. The caller derives it once.
+//! - The two keys every bridge address derives from never change. The caller
+//!   reads them once.
 //! - An approval comes from a `WithdrawalPickedForProcessing` event or from the
 //!   `WithdrawalTransaction` object created with it. Both carry the same txid,
 //!   inputs, outputs and timestamp.
@@ -60,6 +61,7 @@ use sui_sdk_types::StructTag;
 
 use crate::domain::DepositEventType;
 use crate::domain::DepositId;
+use crate::domain::HashiBTCKeys;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
@@ -132,7 +134,7 @@ fn validate_withdrawal(
 /// is not a Hashi `WithdrawalTransaction`.
 pub fn parse_withdrawal_object(
     package_versions: &PackageVersions,
-    change_script: &ScriptBuf,
+    hashi_btc_keys: &HashiBTCKeys,
     wid: WithdrawalID,
     object: &Object,
 ) -> anyhow::Result<Option<HashiApproval>> {
@@ -159,7 +161,7 @@ pub fn parse_withdrawal_object(
         &txn.inputs,
         &txn.withdrawal_outputs,
         &txn.change_outputs,
-        change_script,
+        &hashi_btc_keys.script_pubkey(None),
         unix_millis_to_seconds(txn.created_timestamp_ms),
     )))
 }
@@ -168,7 +170,7 @@ pub fn parse_withdrawal_object(
 /// findings into `findings` if it fails a check.
 pub fn parse_event(
     package_versions: &PackageVersions,
-    change_script: &ScriptBuf,
+    hashi_btc_keys: &HashiBTCKeys,
     event: Event,
     transaction_timestamp_secs: UnixSeconds,
     events: &mut Vec<MonitorEvent>,
@@ -188,7 +190,7 @@ pub fn parse_event(
                 &event.inputs,
                 &event.withdrawal_outputs,
                 &event.change_outputs,
-                change_script,
+                &hashi_btc_keys.script_pubkey(None),
                 unix_millis_to_seconds(event.timestamp_ms),
             );
             match approval {
@@ -204,6 +206,9 @@ pub fn parse_event(
                 // timestamp alongside the nested events.
                 timestamp_secs: transaction_timestamp_secs,
                 deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
+                amount: event.utxo.amount,
+                // The state machine compares the claim with the paid output.
+                script_pubkey: hashi_btc_keys.script_pubkey(event.utxo.derivation_path.as_ref()),
             }));
         }
         Some(_) | None => {}
@@ -217,13 +222,12 @@ pub mod tests {
 
     use std::collections::BTreeMap;
 
+    use crate::domain::HashiBTCKeys;
     use crate::findings::FindingCategory;
     use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::bitcoin::BitcoinKeypair;
-    use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::HashiMasterG;
-    use hashi_types::bitcoin::taproot_address;
     use hashi_types::bitcoin::witness_program_from_address;
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
@@ -238,8 +242,8 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
-    /// The bridge change address for the test guardian and MPC keys.
-    pub fn test_change_address() -> BitcoinAddress {
+    /// Bridge keys from fixed test guardian and MPC keys, on Signet.
+    pub fn test_hashi_btc_keys() -> HashiBTCKeys {
         let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
             .unwrap()
             .x_only_public_key()
@@ -252,12 +256,16 @@ pub mod tests {
                 .serialize(),
         )
         .unwrap();
-        taproot_address(
-            &guardian,
-            &mpc,
-            &DerivationPath::ZERO,
+        HashiBTCKeys::new(guardian, mpc, bitcoin::Network::Signet)
+    }
+
+    /// The bridge change address of `test_hashi_btc_keys`.
+    pub fn test_change_address() -> BitcoinAddress {
+        BitcoinAddress::from_script(
+            &test_hashi_btc_keys().script_pubkey(None),
             bitcoin::Network::Signet,
         )
+        .unwrap()
     }
 
     /// `txn` with the txid that its inputs and outputs build.
@@ -351,7 +359,7 @@ pub mod tests {
     fn approval(txn: &WithdrawalTransaction) -> HashiApproval {
         parse_withdrawal_object(
             &package_versions(),
-            &test_change_address().script_pubkey(),
+            &test_hashi_btc_keys(),
             WID,
             &object_at_wid(PACKAGE_ID, txn),
         )
@@ -465,12 +473,8 @@ pub mod tests {
         package.object_type = Some("package".to_string());
 
         for object in [foreign_type, package] {
-            let approval = parse_withdrawal_object(
-                &package_versions(),
-                &test_change_address().script_pubkey(),
-                WID,
-                &object,
-            );
+            let approval =
+                parse_withdrawal_object(&package_versions(), &test_hashi_btc_keys(), WID, &object);
             assert_eq!(approval.unwrap(), None);
         }
     }
@@ -485,26 +489,22 @@ pub mod tests {
         undecodable.contents = Some(Bcs::from(vec![1, 2, 3]));
 
         for object in [another_withdrawal, undecodable] {
-            let approval = parse_withdrawal_object(
-                &package_versions(),
-                &test_change_address().script_pubkey(),
-                WID,
-                &object,
-            );
+            let approval =
+                parse_withdrawal_object(&package_versions(), &test_hashi_btc_keys(), WID, &object);
             assert!(approval.is_err());
         }
     }
 
     #[test]
     fn lookup_and_event_scan_build_the_same_approval() {
-        let change_script = test_change_address().script_pubkey();
+        let hashi_btc_keys = test_hashi_btc_keys();
         for txn in [
             withdrawal_transaction(WID),
             with_wrong_txid(withdrawal_transaction(WID)),
         ] {
             let looked_up = parse_withdrawal_object(
                 &package_versions(),
-                &change_script,
+                &hashi_btc_keys,
                 WID,
                 &object_at_wid(PACKAGE_ID, &txn),
             )
@@ -518,7 +518,7 @@ pub mod tests {
             let (mut events, mut findings) = (Vec::new(), Vec::new());
             parse_event(
                 &package_versions(),
-                &change_script,
+                &hashi_btc_keys,
                 picked_for_processing_event(&txn),
                 0,
                 &mut events,

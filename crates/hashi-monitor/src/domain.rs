@@ -17,8 +17,14 @@
 
 use std::fmt;
 
+use bitcoin::Network;
 use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
 use bitcoin::Txid;
+use hashi_types::bitcoin::BitcoinPubkey;
+use hashi_types::bitcoin::DerivationPath;
+use hashi_types::bitcoin::HashiMasterG;
+use hashi_types::bitcoin::taproot_address;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
@@ -146,10 +152,12 @@ impl fmt::Display for MonitorEvent {
             ),
             Self::Deposit(event) => write!(
                 formatter,
-                "Deposit(type={:?}, deposit_id={}, timestamp={})",
+                "Deposit(type={:?}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
                 event.event_type,
                 event.deposit_id,
                 utc_timestamp(event.timestamp_secs),
+                event.amount,
+                event.script_pubkey,
             ),
         }
     }
@@ -166,6 +174,10 @@ impl DepositId {
 
     pub fn txid(self) -> Txid {
         self.0.txid
+    }
+
+    pub fn vout(self) -> u32 {
+        self.0.vout
     }
 }
 
@@ -230,6 +242,46 @@ pub struct MonitorDepositEvent {
     pub event_type: DepositEventType,
     pub timestamp_secs: UnixSeconds,
     pub deposit_id: DepositId,
+    /// Satoshis in the deposit output. Sui gives the claimed amount, Bitcoin
+    /// the paid amount.
+    pub amount: u64,
+    /// Script the deposit output pays. Sui gives the bridge address of the
+    /// claimed derivation path, Bitcoin the paid script.
+    pub script_pubkey: ScriptBuf,
+}
+
+/// The two fixed keys that every bridge address derives from.
+#[derive(Clone)]
+pub struct HashiBTCKeys {
+    guardian_btc_pubkey: BitcoinPubkey,
+    mpc_master_g: HashiMasterG,
+    network: Network,
+}
+
+impl HashiBTCKeys {
+    pub fn new(
+        guardian_btc_pubkey: BitcoinPubkey,
+        mpc_master_g: HashiMasterG,
+        network: Network,
+    ) -> Self {
+        Self {
+            guardian_btc_pubkey,
+            mpc_master_g,
+            network,
+        }
+    }
+
+    /// The script of the bridge address for `derivation_path`. A missing path
+    /// is the zero path, as in Move.
+    pub fn script_pubkey(&self, derivation_path: Option<&DerivationPath>) -> ScriptBuf {
+        taproot_address(
+            &self.guardian_btc_pubkey,
+            &self.mpc_master_g,
+            derivation_path.unwrap_or(&DerivationPath::ZERO),
+            self.network,
+        )
+        .script_pubkey()
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
