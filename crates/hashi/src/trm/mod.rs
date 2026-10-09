@@ -56,7 +56,8 @@ pub enum Verdict {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrmError {
-    /// Timeouts, transport failures, rate limiting and TRM server errors.
+    /// Timeouts, transport failures, rate limiting, TRM server errors and a
+    /// refused API key.
     #[error("{0}")]
     Transient(anyhow::Error),
     #[error("{0}")]
@@ -301,8 +302,16 @@ impl TrmClient {
                 "TRM returned {status}: {}",
                 body.chars().take(512).collect::<String>()
             );
+            // A refused key or client (401, 403) says nothing about the request,
+            // so it retries like an outage instead of parking the request.
             return Err(
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                if matches!(
+                    status,
+                    reqwest::StatusCode::TOO_MANY_REQUESTS
+                        | reqwest::StatusCode::UNAUTHORIZED
+                        | reqwest::StatusCode::FORBIDDEN
+                ) || status.is_server_error()
+                {
                     TrmError::Transient(error)
                 } else {
                     TrmError::Permanent(error)
@@ -923,12 +932,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_rate_limits_and_server_errors_are_transient() {
+    async fn only_rate_limits_server_errors_and_a_refused_key_are_transient() {
         for (status, body, transient) in [
             (StatusCode::TOO_MANY_REQUESTS, json!({}), true),
             (StatusCode::SERVICE_UNAVAILABLE, json!({}), true),
+            (StatusCode::UNAUTHORIZED, json!({}), true),
+            (StatusCode::FORBIDDEN, json!({}), true),
             (StatusCode::BAD_REQUEST, json!({}), false),
-            (StatusCode::UNAUTHORIZED, json!({}), false),
             (StatusCode::CREATED, json!({ "results": [] }), false),
             (StatusCode::CREATED, json!([]), false),
             (
