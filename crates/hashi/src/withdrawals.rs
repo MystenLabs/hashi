@@ -331,23 +331,28 @@ fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Fee
     estimate.max(config.withdrawal_min_fee_rate())
 }
 
-/// The rate a node that holds withdrawals would otherwise price at. It holds while its capped
-/// estimate is above both `MAINNET_HOLD_FEE_RATE` and its floor, so raising the floor lifts it.
-fn held_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Option<FeeRate> {
-    let rate = withdrawal_fee_rate(config, estimate);
-    let hold_above = MAINNET_HOLD_FEE_RATE.max(config.withdrawal_min_fee_rate());
-    (config.bitcoin_network() == Network::Bitcoin && rate > hold_above).then_some(rate)
+/// The capped mainnet estimate, while it is above `MAINNET_HOLD_FEE_RATE`.
+fn estimate_above_hold(config: &crate::config::Config, estimate: FeeRate) -> Option<FeeRate> {
+    let estimate = estimate.min(MAINNET_MAX_FEE_RATE);
+    (config.bitcoin_network() == Network::Bitcoin && estimate > MAINNET_HOLD_FEE_RATE)
+        .then_some(estimate)
 }
 
-/// A validator that holds withdrawals signs only a commitment that already pays its own rate,
-/// so a leader with a stale estimate can't commit an underpriced one.
+/// The estimate a leader holds withdrawals at. A floor at or above it lifts the hold, and the
+/// leader then commits at the floor.
+fn held_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Option<FeeRate> {
+    estimate_above_hold(config, estimate).filter(|rate| *rate > config.withdrawal_min_fee_rate())
+}
+
+/// While its estimate is above the hold rate, a validator signs only a commitment that already
+/// pays it, whatever its own floor, so a leader with a stale estimate can't commit underpriced.
 fn check_held_fee(
     config: &crate::config::Config,
     estimate: FeeRate,
     tx_weight: Weight,
     fee: u64,
 ) -> Result<(), WithdrawalsHeld> {
-    let Some(rate) = held_fee_rate(config, estimate) else {
+    let Some(rate) = estimate_above_hold(config, estimate) else {
         return Ok(());
     };
     let min_fee = rate.fee_wu(tx_weight).map_or(u64::MAX, |a| a.to_sat());
@@ -3140,6 +3145,13 @@ mod tests {
             let mut config = crate::config::Config::new_for_testing();
             config.bitcoin_chain_id = Some(chain_id.to_string());
             assert_eq!(held_fee_rate(&config, sat_per_vb(2_000)), None);
+            check_held_fee(
+                &config,
+                sat_per_vb(2_000),
+                Weight::from_vb_unchecked(250),
+                250,
+            )
+            .unwrap();
         }
     }
 
@@ -3160,8 +3172,11 @@ mod tests {
         check_held_fee(&config, sat_per_vb(2_000), tx_weight, 24_999).unwrap_err();
         check_held_fee(&config, sat_per_vb(2_000), tx_weight, 25_000).unwrap();
 
+        // Its own floor lifts its hold as leader, not what it requires of one.
         config.withdrawal_min_fee_rate_sat_vb = Some(80);
-        check_held_fee(&config, sat_per_vb(80), tx_weight, 250).unwrap();
+        assert_eq!(held_fee_rate(&config, sat_per_vb(80)), None);
+        check_held_fee(&config, sat_per_vb(80), tx_weight, 19_999).unwrap_err();
+        check_held_fee(&config, sat_per_vb(80), tx_weight, 20_000).unwrap();
     }
 
     #[test]

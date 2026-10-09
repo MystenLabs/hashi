@@ -165,7 +165,8 @@ The leader then constructs an unsigned Bitcoin transaction:
    floored at `3 sat/vB`. Each user's share of the miner fee
    is deducted from their output. Validators independently verify that the
    fee is within acceptable bounds (at least `1 sat/vB`, at most 3x their
-   own estimate).
+   own estimate). On mainnet the leader builds no transaction while the
+   estimate is above `30 sat/vB` (see [Fees](fees.mdx)).
 
 The resulting unsigned transaction and its txid are committed onchain by
 calling `hashi::withdraw::commit_withdrawal_tx`:

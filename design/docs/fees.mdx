@@ -111,13 +111,17 @@ A committed withdrawal can't be replaced by a higher-fee version, so
 through a fee spike the leader commits no batch: requests stay queued,
 where their owners can still cancel them, until fees fall back.
 
-Validators enforce the hold too. While a validator's own estimate is above
+Validators back the hold. While a validator's own estimate is above
 30 sat/vB, it signs a batch only if the batch already pays that estimate,
-so a leader with a stale estimate can't commit an underpriced one. A node
-whose floor is at or above its estimate doesn't hold, and as leader it
-commits at that floor. An operator raises it to pay through a long spike,
-or to bump a withdrawal committed just before one: while the committee
-holds, no new batch spends that withdrawal's change.
+whatever its own floor, so a leader with a stale estimate can't commit an
+underpriced one.
+
+A leader whose floor is at or above its estimate doesn't hold. It commits
+at the floor, and validators sign if that covers their estimates too. An
+operator raises the floor to pay through a long spike, or to bump a
+withdrawal committed just before one: while the committee holds, no new
+batch spends that withdrawal's change. Because the estimate is capped, a
+floor of 100 sat/vB or more never holds.
 
 Signet's cap is lower. Its blocks rarely fill, but Bitcoin Core's
 estimate there follows the few relayed transactions that pay hundreds of
@@ -160,7 +164,8 @@ the fee against three bounds:
 
 - **Floor**: the fee must be at least `1 sat/vB` (the minimum relay fee),
   or the Bitcoin network does not propagate the transaction. A mainnet
-  validator that is holding withdrawals requires its own estimate instead.
+  validator whose own estimate is above 30 sat/vB requires that estimate
+  instead.
 - **Ceiling**: the fee must not exceed 3x the validator's own fee
   estimate for the same transaction weight, including any CPFP deficit
   its unconfirmed ancestors owe. This prevents a malicious leader from
