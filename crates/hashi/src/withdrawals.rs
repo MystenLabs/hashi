@@ -53,6 +53,10 @@ const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
 /// fees to fall.
 const MAINNET_MAX_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(100);
 
+/// Above this the mainnet committee commits no new withdrawal: one can't be replaced once
+/// signed, so requests wait in the queue instead of committing underpriced.
+const MAINNET_HOLD_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(30);
+
 /// Signet blocks rarely fill, but bitcoind's estimate there follows a few relayed outliers.
 const SIGNET_MAX_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(9);
 
@@ -327,6 +331,35 @@ fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Fee
     estimate.max(config.withdrawal_min_fee_rate())
 }
 
+/// The rate a node that holds withdrawals would otherwise price at. It holds while its capped
+/// estimate is above both `MAINNET_HOLD_FEE_RATE` and its floor, so raising the floor lifts it.
+fn held_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Option<FeeRate> {
+    let rate = withdrawal_fee_rate(config, estimate);
+    let hold_above = MAINNET_HOLD_FEE_RATE.max(config.withdrawal_min_fee_rate());
+    (config.bitcoin_network() == Network::Bitcoin && rate > hold_above).then_some(rate)
+}
+
+/// A validator that holds withdrawals signs only a commitment that already pays its own rate,
+/// so a leader with a stale estimate can't commit an underpriced one.
+fn check_held_fee(
+    config: &crate::config::Config,
+    estimate: FeeRate,
+    tx_weight: Weight,
+    fee: u64,
+) -> Result<(), WithdrawalsHeld> {
+    let Some(rate) = held_fee_rate(config, estimate) else {
+        return Ok(());
+    };
+    let min_fee = rate.fee_wu(tx_weight).map_or(u64::MAX, |a| a.to_sat());
+    if fee < min_fee {
+        return Err(WithdrawalsHeld(format!(
+            "Fee {fee} sats is below the {min_fee} sats that {rate:#} needs, which this \
+             validator requires while fees are above the {MAINNET_HOLD_FEE_RATE:#} hold rate"
+        )));
+    }
+    Ok(())
+}
+
 /// Estimate the weight of the unsigned withdrawal transaction described by
 /// a commitment: fixed segwit overhead, the CompactSize input and output
 /// counts, script-path 2-of-2 inputs, and the declared outputs. Matches the
@@ -456,6 +489,10 @@ pub struct RefusedItems(pub Vec<RefusedItem>);
 #[derive(Debug, Error)]
 #[error(transparent)]
 pub struct FeeEstimateUnavailable(anyhow::Error);
+
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct WithdrawalsHeld(String);
 
 impl std::fmt::Display for RefusedItems {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -811,6 +848,7 @@ impl Hashi {
                 .await
                 .map_err(FeeEstimateUnavailable)?;
             let clamped_fee_rate = withdrawal_fee_rate(&self.config, kyoto_fee_rate);
+            check_held_fee(&self.config, kyoto_fee_rate, tx_weight, fee)?;
 
             let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
                 self,
@@ -1582,6 +1620,11 @@ impl Hashi {
             .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
+        if let Some(rate) = held_fee_rate(&self.config, kyoto_fee_rate) {
+            return Err(WithdrawalCommitmentError::Held(anyhow!(
+                "the fee rate is {rate:#}, above the {MAINNET_HOLD_FEE_RATE:#} hold rate"
+            )));
+        }
         let min_fee_rate = self.config.withdrawal_min_fee_rate();
         let fee_rate = withdrawal_fee_rate(&self.config, kyoto_fee_rate);
 
@@ -1954,6 +1997,7 @@ pub enum WithdrawalCommitmentErrorKind {
     CommitmentCheckFailed,
     FailedQuorum,
     FeeEstimateFailed,
+    Held,
     UtxoSelectionFailed,
     TimedOut,
     TaskFailed,
@@ -1981,6 +2025,9 @@ pub enum WithdrawalCommitmentError {
     #[error("Fee estimate failed: {0}")]
     FeeEstimateFailed(#[source] anyhow::Error),
 
+    #[error("Withdrawals held: {0}")]
+    Held(#[source] anyhow::Error),
+
     #[error("UTXO selection failed: {0}")]
     UtxoSelectionFailed(#[source] anyhow::Error),
 
@@ -1993,6 +2040,7 @@ impl WithdrawalCommitmentError {
         match self {
             Self::BtcTxBuildFailed(_) => WithdrawalCommitmentErrorKind::BtcTxBuildFailed,
             Self::FeeEstimateFailed(_) => WithdrawalCommitmentErrorKind::FeeEstimateFailed,
+            Self::Held(_) => WithdrawalCommitmentErrorKind::Held,
             Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
             Self::CommitmentCheckFailed(_) => WithdrawalCommitmentErrorKind::CommitmentCheckFailed,
         }
@@ -3059,6 +3107,61 @@ mod tests {
             withdrawal_fee_rate(&config, sat_per_vb(2_000)),
             sat_per_vb(150)
         );
+    }
+
+    #[test]
+    fn mainnet_holds_withdrawals_above_the_hold_rate_unless_the_floor_covers_it() {
+        let sat_per_vb = FeeRate::from_sat_per_vb_unchecked;
+        let mut config = crate::config::Config::new_for_testing();
+        config.bitcoin_chain_id = Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string());
+        assert_eq!(held_fee_rate(&config, sat_per_vb(30)), None);
+        assert_eq!(held_fee_rate(&config, sat_per_vb(31)), Some(sat_per_vb(31)));
+        assert_eq!(
+            held_fee_rate(&config, sat_per_vb(2_000)),
+            Some(sat_per_vb(100))
+        );
+
+        config.withdrawal_min_fee_rate_sat_vb = Some(80);
+        assert_eq!(held_fee_rate(&config, sat_per_vb(80)), None);
+        assert_eq!(held_fee_rate(&config, sat_per_vb(81)), Some(sat_per_vb(81)));
+
+        config.withdrawal_min_fee_rate_sat_vb = Some(100);
+        assert_eq!(held_fee_rate(&config, sat_per_vb(2_000)), None);
+    }
+
+    #[test]
+    fn only_mainnet_holds_withdrawals() {
+        let sat_per_vb = FeeRate::from_sat_per_vb_unchecked;
+        for chain_id in [
+            crate::constants::BITCOIN_SIGNET_CHAIN_ID,
+            crate::constants::BITCOIN_TESTNET4_CHAIN_ID,
+            crate::constants::BITCOIN_REGTEST_CHAIN_ID,
+        ] {
+            let mut config = crate::config::Config::new_for_testing();
+            config.bitcoin_chain_id = Some(chain_id.to_string());
+            assert_eq!(held_fee_rate(&config, sat_per_vb(2_000)), None);
+        }
+    }
+
+    #[test]
+    fn a_holding_validator_signs_only_a_commitment_that_pays_its_rate() {
+        let sat_per_vb = FeeRate::from_sat_per_vb_unchecked;
+        let mut config = crate::config::Config::new_for_testing();
+        config.bitcoin_chain_id = Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string());
+        let tx_weight = Weight::from_vb_unchecked(250);
+
+        check_held_fee(&config, sat_per_vb(30), tx_weight, 250).unwrap();
+
+        let error = check_held_fee(&config, sat_per_vb(80), tx_weight, 19_999).unwrap_err();
+        assert!(error.to_string().contains("20000 sats"), "{error}");
+        check_held_fee(&config, sat_per_vb(80), tx_weight, 20_000).unwrap();
+
+        // The estimate is capped before it is required.
+        check_held_fee(&config, sat_per_vb(2_000), tx_weight, 24_999).unwrap_err();
+        check_held_fee(&config, sat_per_vb(2_000), tx_weight, 25_000).unwrap();
+
+        config.withdrawal_min_fee_rate_sat_vb = Some(80);
+        check_held_fee(&config, sat_per_vb(80), tx_weight, 250).unwrap();
     }
 
     #[test]

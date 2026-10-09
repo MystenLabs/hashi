@@ -23,6 +23,7 @@ use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
+use crate::withdrawals::WithdrawalsHeld;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
@@ -847,6 +848,9 @@ async fn build_checked_commitment(
         };
         if refusal.downcast_ref::<FeeEstimateUnavailable>().is_some() {
             return Err(WithdrawalCommitmentError::FeeEstimateFailed(refusal));
+        }
+        if refusal.downcast_ref::<WithdrawalsHeld>().is_some() {
+            return Err(WithdrawalCommitmentError::Held(refusal));
         }
         let Some(refused) = refusal.downcast_ref::<RefusedItems>() else {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(refusal));
