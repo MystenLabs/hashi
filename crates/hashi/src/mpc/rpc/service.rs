@@ -148,12 +148,25 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let mpc_manager = self.mpc_manager()?;
         let shape = self.shape_params()?;
+        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let result = spawn_blocking(move || -> Result<_, Status> {
             let epoch = external_request
                 .epoch
                 .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
             validate_epoch_current_or_previous(shape.epoch(), shape.previous_epoch(), epoch)?;
-            if let Err(e) = gates::check_complain(&shape, caller, epoch, &external_request) {
+            let committee =
+                gates::complain_committee(&shape, epoch, &caller).map_err(|refusal| {
+                    caller_membership::refuse(
+                        &refused,
+                        "complain",
+                        &caller,
+                        &format!("epoch {epoch}"),
+                        refusal,
+                    )
+                })?;
+            if let Err(e) =
+                gates::check_complain(&shape, committee, caller, epoch, &external_request)
+            {
                 return Ok(Err(e));
             }
             let internal_request = types::ComplainRequest::try_from(&external_request)

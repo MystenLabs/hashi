@@ -6,7 +6,7 @@ mod mpc_except_signing;
 mod presig_seal;
 pub mod rpc;
 pub mod service;
-pub mod shape_params;
+pub(crate) mod shape_params;
 pub mod signing;
 pub mod types;
 

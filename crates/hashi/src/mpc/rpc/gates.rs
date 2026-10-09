@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::caller_membership::Refusal;
 use crate::mpc::count_check;
 use crate::mpc::count_check::CountCheckError;
 use crate::mpc::shape_params::CommitteeShape;
@@ -66,29 +67,38 @@ pub(super) fn check_send_messages(
                 )
             })
         }
-        Some(Messages::AvidNonceMessage(message)) => {
-            check_avid_nonce_message(shape, sender, holder, message)
+        Some(Messages::AvidNonceMessage(avid)) => {
+            check_avid_nonce_message(shape, sender, holder, avid)
         }
         None => Ok(()),
     }
 }
 
+pub(super) fn complain_committee<'a>(
+    shape: &'a ShapeParams,
+    epoch: u64,
+    caller: &Address,
+) -> Result<&'a CommitteeShape, Refusal> {
+    let committee = shape
+        .committee_for_epoch(epoch)
+        .ok_or(Refusal::CommitteeUnknown)?;
+    committee.party_of(caller).ok_or(Refusal::NotMember)?;
+    Ok(committee)
+}
+
 pub(super) fn check_complain(
     shape: &ShapeParams,
+    committee: &CommitteeShape,
     caller: Address,
     epoch: u64,
     request: &proto::ComplainRequest,
 ) -> MpcResult<()> {
-    let committee = shape
-        .committee_for_epoch(epoch)
-        .ok_or_else(|| MpcError::InvalidConfig(format!("no committee known for epoch {epoch}")))?;
     committee
         .own_party()
         .ok_or_else(|| MpcError::InvalidMessage {
             sender: caller,
             reason: format!("not in the epoch {epoch} committee: no receiver role this epoch"),
         })?;
-    weighted_party(committee, caller, "Complaint accuser")?;
     if request.protocol_type == Some(proto::MpcProtocolType::KeyRotation as i32) {
         check_complained_share(shape, caller, epoch, request)?;
     }
@@ -104,20 +114,20 @@ fn check_avid_nonce_message(
     shape: &ShapeParams,
     sender: Address,
     holder: PartyId,
-    message: &proto::AvidNonceMessage,
+    avid: &proto::AvidNonceMessage,
 ) -> MpcResult<()> {
     use proto::avid_nonce_message::Kind;
     let current = shape.current();
     let dealer = weighted_party(current, sender, "Dealer")?;
-    let avss_message = |message: Option<&Bcs>| {
-        message.map_or(Ok(()), |message| {
+    let avss_message = |encoded: Option<&Bcs>| {
+        encoded.map_or(Ok(()), |payload| {
             count_checked(
                 sender,
-                count_check::check_avid_avss_message(bytes(message), shape.avid_shape(), dealer),
+                count_check::check_avid_avss_message(bytes(payload), shape.avid_shape(), dealer),
             )
         })
     };
-    match &message.kind {
+    match &avid.kind {
         Some(Kind::Optimistic(optimistic)) => avss_message(optimistic.message.as_ref()),
         Some(Kind::Dispersal(dispersal)) => {
             dispersal.dispersal.as_ref().map_or(Ok(()), |rows| {
