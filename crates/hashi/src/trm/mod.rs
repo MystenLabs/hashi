@@ -1116,6 +1116,18 @@ mod tests {
         )
     }
 
+    /// A mainnet payment whose only sender is on OFAC's SDN list.
+    fn live_sanctioned_deposit(request_id: Address, recipient: Address) -> DepositScreening {
+        let mut request = deposit_request(Some(recipient));
+        request.id = request_id;
+        request.utxo.id.txid = "c7a1239e6abe9c4b7e29ad8ec5be9523000b27208d34ddaa89b0391c68ccf008"
+            .parse()
+            .unwrap();
+        request.utxo.amount = 197_113;
+        request.created_timestamp_ms = 1_516_954_773_000;
+        DepositScreening::new(&request, "3FHPJFzsT5FfBqbhENPkoSrWjxPucm1sTt".to_owned())
+    }
+
     async fn screen_live_deposit(deposit: &DepositScreening) -> Verdict {
         let client = live_client();
         tokio::time::timeout(Duration::from_secs(300), async {
@@ -1168,6 +1180,15 @@ mod tests {
         assert!(matches!(
             screen_live_deposit(&to_exploiter).await,
             Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)
+        ));
+
+        // TRM alerts on a transfer only when a Transaction Monitoring rule
+        // matches it, so this fails on an account that has no rules.
+        let from_sanctioned =
+            live_sanctioned_deposit(Address::new([0x22; 32]), Address::new([1; 32]));
+        assert!(matches!(
+            screen_live_deposit(&from_sanctioned).await,
+            Verdict::Rejected(reason) if reason.contains("raised an alert")
         ));
     }
 }
