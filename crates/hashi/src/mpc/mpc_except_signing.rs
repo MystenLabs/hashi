@@ -15,6 +15,8 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::shape_params::CommitteeShape;
+use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::types::AdmittedCertRef;
 use crate::mpc::types::AdmittedNonceDealer;
 use crate::mpc::types::AdmittedNonceDealers;
@@ -195,6 +197,7 @@ pub struct MpcManager {
     pub previous_reconfig_output_threshold: Option<u16>,
     pub previous_reconfig_output_max_faulty: Option<u16>,
     pub previous_reconfig_input_threshold: Option<u16>,
+    previous_reconfig_input: Option<CommitteeShape>,
     chain_id: String,
     /// The Hashi shared-object id, bound into every signing preimage this
     /// manager produces or verifies.
@@ -317,6 +320,31 @@ impl MpcManager {
         self.previous_committee
             .as_ref()
             .is_some_and(|c| c.index_of(&self.address).is_some())
+    }
+
+    pub(crate) fn shape_params(&self) -> ShapeParams {
+        let previous = self
+            .previous_committee
+            .as_ref()
+            .zip(self.previous_nodes.as_ref())
+            .zip(self.previous_reconfig_output_threshold)
+            .map(|((committee, nodes), threshold)| {
+                CommitteeShape::new(committee, nodes, threshold, &self.address)
+            });
+        ShapeParams::new(
+            self.mpc_config.epoch,
+            self.previous_epoch,
+            self.protocol_type.clone(),
+            self.batch_size_per_weight,
+            CommitteeShape::new(
+                &self.committee,
+                &self.mpc_config.nodes,
+                self.mpc_config.threshold,
+                &self.address,
+            ),
+            previous,
+            self.previous_reconfig_input.clone(),
+        )
     }
 
     pub fn party_id(&self) -> MpcResult<PartyId> {
@@ -460,7 +488,7 @@ impl MpcManager {
             }
             None => (None, None, None, None),
         };
-        let previous_reconfig_input_threshold = committee_set
+        let previous_reconfig_input = committee_set
             .committees()
             .range(..previous_epoch)
             .next_back()
@@ -474,8 +502,13 @@ impl MpcManager {
                         );
                     })
                     .ok()
-                    .map(|(_, threshold, _)| threshold)
+                    .map(|(nodes, threshold, _)| {
+                        CommitteeShape::new(input_committee, &nodes, threshold, &address)
+                    })
             });
+        let previous_reconfig_input_threshold = previous_reconfig_input
+            .as_ref()
+            .map(CommitteeShape::threshold);
         let identity = match (party_id_opt, encryption_key, signing_key) {
             (Some(party_id), Some(encryption_key), Some(signing_key)) => Some(TargetIdentity {
                 party_id,
@@ -502,6 +535,7 @@ impl MpcManager {
             previous_reconfig_output_threshold,
             previous_reconfig_output_max_faulty,
             previous_reconfig_input_threshold,
+            previous_reconfig_input,
             dealer_outputs: HashMap::new(),
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),

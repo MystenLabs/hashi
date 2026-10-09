@@ -235,6 +235,14 @@ impl HttpService {
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
+    pub(crate) fn shape_params(
+        &self,
+    ) -> Result<Arc<crate::mpc::shape_params::ShapeParams>, tonic::Status> {
+        self.inner
+            .shape_params()
+            .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
+    }
+
     pub fn signing_manager_for(
         &self,
         epoch: u64,
