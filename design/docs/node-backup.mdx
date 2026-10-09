@@ -286,5 +286,133 @@ Operators must remove these plaintext copies when no longer needed.
 
 ## Cloud backup
 
-In the future, we will likely add support for automatically uploading backups
-to cloud storage such as s3.
+Enable S3 uploads with this optional node-config table; both values are required.
+Use a bucket name, not an S3 URI. Omit the table for local-only backups.
+
+```toml
+[backup-s3]
+bucket = "my-hashi-backups"
+region = "us-east-1"
+```
+
+Uploads and restores use the AWS default credential chain (environment, profiles,
+or IAM roles), not credentials in the node config. The secure Mainnet baseline
+requires operators to configure:
+
+- A private bucket with S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+  with **bucket-default retention**; Hashi does not set retention per object.
+- A bucket policy explicitly denying object-creation `s3:PutObject` requests
+  without `If-None-Match: *` (`s3:if-none-match`), rather than relying on the
+  client's header alone.
+- A node role restricted to `s3:PutObject` within its prefix, without object
+  read/delete, bucket/retention administration, or governance-retention bypass.
+  Restrict reads to approved recovery roles and keep their credentials off-node.
+- CloudTrail **read and write object data events** scoped to the backup bucket,
+  retained in an independent audit store outside backup writers' permissions.
+  Use per-node credentials for attribution: events identify the credential
+  principal, not a trusted archive creator.
+- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
+  for current **and noncurrent** versions, coordinated with Object Lock.
+  Expiring only current objects can leave historical versions behind. This is
+  an operational default, not guaranteed deletion on day 14 or a guaranteed
+  recovery window: Object Lock sets a minimum protected period, expiration is
+  asynchronous, and recovery depends on epoch-limited certificate history.
+
+Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
+configuration defines the bucket and audit safeguards, but leaves read access
+unchanged. Recovery-only reads remain Mainnet rollout work; node credential
+provisioning is separate.
+
+The destination is derived from the node identity, with no custom prefix:
+
+```text
+s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-<timestamp>.tar.asc
+```
+
+Scheduled backups upload the completed encrypted local archive once, without
+retries or a queue. Failures preserve local backups and retention, and log the
+local path and S3 URI.
+
+### Manual backups
+
+Stop the node before opening its database for a manual backup:
+
+```bash
+hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
+```
+
+This saves locally, then uploads if configured. Add `--local-only` to skip S3.
+Upload failure returns a nonzero exit status while preserving the local archive.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+
+### Restore and infrastructure limits
+
+Restore from a full S3 URI without the original node configuration:
+
+```bash
+hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region us-east-1 --backup-pgp-secret-key /secure/secret-key.asc \
+  --output-dir /private/restore
+```
+
+Use `--version-id '<version-id>'` to select an exact object version. Keys are
+literal object keys, not URL-decoded paths. Recovery credentials need
+`s3:GetObject` for the current object or `s3:GetObjectVersion` for a pinned version;
+inspecting version history also requires `s3:ListBucketVersions`.
+
+S3 restore accepts only encrypted `.tar.asc` archives. Choose
+`--backup-pgp-secret-key` or `--use-gpg-agent` (with optional `--gpg-homedir`).
+Local restores also accept plaintext `.tar` archives, which need neither decryptor.
+`--region` is required for S3; it and `--version-id` are invalid for local restores.
+
+Downloads use private temporary storage under `--output-dir` and are removed
+afterward. Restore publishes a complete extraction, refuses an existing
+destination, and does not install files at their original paths.
+
+Keep backup URI/version receipts, the region, and decryption-key access outside
+the node. Use independently retained receipts and audit history to select an
+exact version, then pin it with `--version-id`. Neither the newest object nor
+successful decryption proves its origin: encryption does not authenticate the
+creator. Unexpected versions or delete markers warrant investigation, but
+lifecycle rules and authorized administrators can also create them.
+
+### Machine-loss recovery
+
+Use this path for accidental machine or disk loss without suspected compromise.
+For suspected compromise, use the separate procedure below, not a snapshot restore.
+
+1. Stop or fence the old node. Restore on a trusted replacement host into a
+   private directory (`umask 077`); no original config or database is needed.
+2. Verify the restored chain, Hashi object, and validator identity against trusted
+   records. Install the config and key files at trusted paths, not paths taken
+   blindly from the manifest. Put `hashi-db-snapshot` at the configured `db` path;
+   never merge it into an existing database.
+3. Update config paths and endpoints, restrict permissions to the node user, and
+   start the node. Check chain catch-up and committee participation.
+4. Remove plaintext recovery output and temporary key copies when finished.
+   Keep decryption-key access independent of the replacement host.
+
+### Suspected node compromise
+
+Assume host-held operator, TLS, and MPC private keys are exposed. Even a known
+pre-compromise snapshot can contain those same keys; its age does not make them
+safe to restore.
+
+For a **single compromised node with sufficient healthy peers**:
+
+1. Fence the old host. From trusted infrastructure, use the validator account
+   authority to revoke the old operator delegation and register fresh operator
+   and TLS identities in onchain metadata. Follow the runbook's
+   [key generation and registration](node-operator-runbook.mdx#22-tls-key-dedicated)
+   and [operator revocation](node-operator-runbook.mdx#24-operator-key-day-to-day-signing)
+   procedures with the replacement config; do not authorize recovery with the
+   compromised operator key.
+2. Provision a fresh machine with an **empty database**, not restored key material.
+   Startup generates fresh node encryption/signing keys and registers them;
+   see [server startup](node-operator-runbook.mdx#54-step-3-start-the-server).
+3. Rejoin through [reconfiguration](node-operator-runbook.mdx#9-epoch-changes-reconfiguration)
+   with the healthy peers, and confirm the replacement identities and participation.
+
+Suspected quorum-wide or global MPC key compromise requires coordinated incident
+response, not this single-node procedure. Resharing preserves the global Bitcoin
+key; it does not repair a stolen global private key.

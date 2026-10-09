@@ -2992,6 +2992,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
  "axum",
  "backon",
  "base64ct",

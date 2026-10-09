@@ -106,6 +106,10 @@ pub struct Config {
     /// Directory to write automatic encrypted backups into.
     pub backup_dir: PathBuf,
 
+    /// Optional remote destination for encrypted node backups.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_s3: Option<BackupS3Config>,
+
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_run_as_leader: Option<ForceRunAsLeader>,
@@ -334,6 +338,14 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// S3 destination settings. Credentials come from the AWS provider chain.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BackupS3Config {
+    pub bucket: String,
+    pub region: String,
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, anyhow::Error> {
         let file = std::fs::read(path)?;
@@ -352,12 +364,61 @@ impl Config {
                 .is_none_or(|target| (1..=MAX_WITHDRAWAL_FEE_CONF_TARGET).contains(&target)),
             "withdrawal_fee_conf_target must be between 1 and {MAX_WITHDRAWAL_FEE_CONF_TARGET} blocks"
         );
+        config.validate_backup_s3()?;
         Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), anyhow::Error> {
         let toml = toml::to_string(self)?;
         std::fs::write(path, toml).map_err(Into::into)
+    }
+
+    /// Validate remote backup settings without deriving or allocating a destination.
+    /// Local-only configurations do not require deployment or validator identity.
+    pub fn validate_backup_s3(&self) -> anyhow::Result<()> {
+        let Some(s3) = &self.backup_s3 else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            !s3.bucket.trim().is_empty(),
+            "backup-s3.bucket must be nonempty"
+        );
+        anyhow::ensure!(
+            !s3.bucket.contains('/') && !s3.bucket.chars().any(char::is_whitespace),
+            "backup-s3.bucket must be a bucket name, not a URI or path"
+        );
+        anyhow::ensure!(
+            !s3.region.trim().is_empty(),
+            "backup-s3.region must be nonempty"
+        );
+        let chain_id = self.sui_chain_id();
+        anyhow::ensure!(
+            !chain_id.is_empty()
+                && chain_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "backup-s3 requires a nonempty sui-chain-id usable as a namespace component"
+        );
+        let ids = self.hashi_ids.context("backup-s3 requires hashi-ids")?;
+        anyhow::ensure!(
+            ids.hashi_object_id != Address::ZERO,
+            "backup-s3 requires a nonzero hashi-object-id"
+        );
+        self.validator_address
+            .context("backup-s3 requires validator-address")?;
+        Ok(())
+    }
+
+    /// Canonical object-key prefix, including the trailing slash.
+    /// Call `validate_backup_s3` before deriving a configured destination.
+    pub fn backup_s3_namespace(&self) -> Option<String> {
+        self.backup_s3.as_ref()?;
+        Some(format!(
+            "{}/{}/{}/",
+            self.sui_chain_id(),
+            self.hashi_ids?.hashi_object_id,
+            self.validator_address?,
+        ))
     }
 
     pub fn tls_private_key(&self) -> Result<ed25519_dalek::SigningKey, anyhow::Error> {
@@ -587,6 +648,7 @@ impl Config {
                 "hashi-test-backups-{:032x}",
                 rand::random::<u128>()
             )),
+            backup_s3: None,
             force_run_as_leader: None,
             test_weight_divisor: None,
             test_batch_size_per_weight: None,
@@ -673,6 +735,114 @@ fn get_ephemeral_port() -> std::io::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_s3_config_is_optional_and_validated_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::new_for_testing();
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert!(loaded.backup_s3.is_none());
+        assert!(loaded.backup_s3_namespace().is_none());
+
+        config.backup_s3 = Some(BackupS3Config {
+            bucket: "hashi-backups".into(),
+            region: "us-west-2".into(),
+        });
+        let load = |config: &Config| {
+            config.save(&path).unwrap();
+            Config::load(&path)
+        };
+        config.sui_chain_id = Some("AbCdEF12".into());
+        assert!(load(&config).unwrap_err().to_string().contains("hashi-ids"));
+        config.hashi_ids = Some(HashiIds {
+            package_id: Address::ZERO,
+            hashi_object_id: Address::ZERO,
+        });
+        assert!(
+            load(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("hashi-object-id")
+        );
+        config.hashi_ids.as_mut().unwrap().hashi_object_id = "0x1".parse().unwrap();
+        assert!(
+            load(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("validator-address")
+        );
+        config.validator_address = Some("0x2".parse().unwrap());
+        let loaded = load(&config).unwrap();
+        let s3 = loaded.backup_s3.as_ref().unwrap();
+        assert_eq!(s3.bucket, "hashi-backups");
+        assert_eq!(s3.region, "us-west-2");
+        assert_eq!(
+            loaded.backup_s3_namespace().unwrap(),
+            "AbCdEF12/0x0000000000000000000000000000000000000000000000000000000000000001/0x0000000000000000000000000000000000000000000000000000000000000002/"
+        );
+        config.sui_chain_id = None;
+        let default_config = load(&config).unwrap();
+        assert!(
+            default_config
+                .backup_s3_namespace()
+                .unwrap()
+                .starts_with(&format!("{SUI_MAINNET_CHAIN_ID}/"))
+        );
+
+        for chain in ["", " ", "../chain", "a/b"] {
+            config.sui_chain_id = Some(chain.into());
+            assert!(
+                load(&config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("sui-chain-id")
+            );
+        }
+        config.sui_chain_id = Some("abcdef12".into());
+        for bucket in ["", " ", "s3://bucket", "bucket/prefix", " bucket"] {
+            config.backup_s3.as_mut().unwrap().bucket = bucket.into();
+            assert!(
+                load(&config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("backup-s3.bucket")
+            );
+        }
+        config.backup_s3.as_mut().unwrap().bucket = "hashi-backups".into();
+        for region in ["", "   "] {
+            config.backup_s3.as_mut().unwrap().region = region.into();
+            assert!(
+                load(&config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("backup-s3.region")
+            );
+        }
+        // Invalid remote identities remain irrelevant when remote backup is disabled.
+        config.backup_s3 = None;
+        config.sui_chain_id = Some("../invalid".into());
+        config.hashi_ids = None;
+        config.validator_address = None;
+        assert!(load(&config).is_ok());
+    }
+
+    #[test]
+    fn backup_s3_rejects_partial_and_unknown_settings() {
+        let config = Config::new_for_testing();
+        let base = toml::to_string(&config).unwrap();
+        for settings in [
+            "",
+            "bucket = 'hashi-backups'",
+            "region = 'us-west-2'",
+            "bucket = 'hashi-backups'\nregion = 'us-west-2'\nprefix = 'custom/'",
+            "bucket = 'hashi-backups'\nregion = 'us-west-2'\naccess-key = 'secret'",
+        ] {
+            let text = format!("{base}\n[backup-s3]\n{settings}\n");
+            assert!(toml::from_str::<Config>(&text).is_err(), "{settings}");
+        }
+    }
 
     #[test]
     fn test_new_for_testing() {

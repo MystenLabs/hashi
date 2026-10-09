@@ -487,6 +487,10 @@ pub enum BackupCommands {
         /// Directory to write the encrypted backup into
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
+
+        /// Keep the archive local without uploading to configured S3 storage
+        #[clap(long)]
+        local_only: bool,
     },
 
     /// Restore files from a backup archive.
@@ -494,8 +498,16 @@ pub enum BackupCommands {
     /// Files are extracted only into the selected output directory. Original
     /// paths recorded in the manifest are metadata, not restore destinations.
     Restore {
-        /// Path to the backup tarball (.tar.asc encrypted or .tar unencrypted)
+        /// Local .tar or .tar.asc path, or s3://bucket/key (.tar.asc only)
         backup_tarball: std::path::PathBuf,
+
+        /// AWS region (required for S3 restores; not accepted for local files)
+        #[clap(long)]
+        region: Option<String>,
+
+        /// Restore a specific S3 object version (S3 restores only)
+        #[clap(long)]
+        version_id: Option<String>,
 
         /// OpenPGP secret key file used to decrypt encrypted .tar.asc backups locally
         #[clap(long)]
@@ -1259,16 +1271,25 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 node_config_path,
                 backup_pgp_cert,
                 output_dir,
+                local_only,
             } => {
-                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir)?;
+                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir, local_only)
+                    .await?;
             }
             BackupCommands::Restore {
                 backup_tarball,
+                region,
+                version_id,
                 backup_pgp_secret_key,
                 use_gpg_agent,
                 gpg_homedir,
                 output_dir,
             } => {
+                let remote = commands::backup::s3_restore_source(
+                    &backup_tarball,
+                    region.as_deref(),
+                    version_id.as_deref(),
+                )?;
                 let decryptor = match crate::backup::archive_format(&backup_tarball)? {
                     crate::backup::BackupArchiveFormat::Unencrypted => {
                         commands::backup::RestoreDecryptor::Unencrypted
@@ -1291,7 +1312,18 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         }
                     }
                 };
-                commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
+                if remote {
+                    commands::backup::restore_from_s3(
+                        backup_tarball.to_str().expect("validated S3 URI"),
+                        region.as_deref().expect("validated S3 region"),
+                        version_id.as_deref(),
+                        decryptor,
+                        &output_dir,
+                    )
+                    .await?;
+                } else {
+                    commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
+                }
             }
         },
         CliCommand::Deposit { action } => {

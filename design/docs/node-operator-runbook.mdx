@@ -86,8 +86,7 @@ These details trip up most operators:
 | [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
 | [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
-| [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available (cloud backup upload) |
-| [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+| [12. Testnet releases](#12-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
@@ -160,7 +159,7 @@ See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 GIT_REVISION=$(git rev-parse HEAD) bash docker/hashi/build.sh --no-cache
 ```
 
-> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Testnet releases are tagged `testnet-<major>.<minor>` (for example `testnet-0.4`), and each release's notes give its source commit and binary sha256 (see [13](#13-testnet-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
+> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Testnet releases are tagged `testnet-<major>.<minor>` (for example `testnet-0.4`), and each release's notes give its source commit and binary sha256 (see [12](#12-testnet-releases)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum. Compute the sha256 of your build and compare it against the published value:
 
@@ -538,6 +537,11 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # Push metrics to the Mysten collection endpoint (see section 8.2)
 [metrics-push]
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+
+# Optional S3 backups (uncomment all three lines; both fields required)
+# [backup-s3]
+# bucket = "my-hashi-backups"
+# region = "us-east-1"
 ```
 
 ### 3.2 CLI config
@@ -878,20 +882,32 @@ Executing the proposal changes the onchain value, but a running node keeps the g
 
 ### 6.7 Backup
 
-Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself.
+Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`.
 
 ```bash
 # Create a backup (uses the required configured cert unless overridden inline/by path).
 # Stop the node first: backup save opens its database and refuses while the node holds it.
-hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .]
+hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .] [--local-only]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
 hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-dir <private-staging-dir>
 
-# Restore an unencrypted .tar — no key needed
+# Restore a local unencrypted .tar — no key needed
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
+
+# Restore an S3 object; optionally pin its version:
+hashi backup restore s3://<bucket>/<key>.tar.asc --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
 ```
+
+With `[backup-s3]`, `backup save` uploads after saving locally; `--local-only`
+skips S3. Upload failure retains the local archive but exits nonzero, reporting
+its path and the intended S3 URI.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+
+S3 restore requires `--region`; `--version-id` optionally selects an exact
+version. Neither flag applies to local paths. Use the secret-key flag above or
+`--use-gpg-agent`; no original node configuration is needed.
 
 `--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
 
@@ -1176,7 +1192,16 @@ hashi committee start-reconfig
 
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Restore also accepts a `.tar` you decrypted yourself. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+
+The optional `[backup-s3]` table in the [config template](#31-validator-config)
+enables uploads using the AWS default credential chain. Without it, backups
+remain local-only. Each scheduled backup saves locally before one upload
+attempt; failed uploads retain the local archive and are not queued or retried.
+See [Cloud backup](node-backup.mdx#cloud-backup) for the server-side
+missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
+read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
+read access is unchanged; per-node AWS credentials remain to be provisioned.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
@@ -1196,6 +1221,22 @@ hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
   --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
   --output-dir /var/lib/hashi/restore
 ```
+
+For **accidental machine or disk loss without suspected compromise**, follow
+[Machine-loss recovery](node-backup.mdx#machine-loss-recovery) for installation
+and plaintext handling.
+
+For **suspected compromise**, assume host-held operator, TLS, and MPC private
+keys are exposed; even a pre-compromise backup can contain those same keys.
+For a single affected node with sufficient healthy peers, fence it, use the
+trusted validator account authority to revoke/replace its operator and TLS
+identities ([2.2](#22-tls-key-dedicated)–[2.4](#24-operator-key-day-to-day-signing)),
+then start a fresh machine with an empty DB to generate/register fresh MPC node
+keys and rejoin through [reconfiguration](#9-epoch-changes-reconfiguration).
+Do not restore possibly exposed keys. See
+[Suspected node compromise](node-backup.mdx#suspected-node-compromise).
+Quorum-wide or global MPC key compromise needs coordinated incident response:
+resharing preserves the global key and cannot repair a stolen global private key.
 
 ---
 
@@ -1416,21 +1457,11 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 
 ---
 
-## 12. Coming soon
-
-The following capabilities are planned but not yet available.
-
-### Cloud backup integration
-
-> **Coming soon:** Support for automatically uploading encrypted backups to cloud storage (for example, S3).
-
----
-
-## 13. Testnet releases
+## 12. Testnet releases
 
 Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet X.Y` and tagged `testnet-X.Y` (for example `testnet-0.4`); its notes give the source commit. Releases before the numbered scheme are tagged `testnet-<full-sha>`.
 
-### 13.1 Binary
+### 12.1 Binary
 
 Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
@@ -1451,7 +1482,7 @@ gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
 chmod +x hashi-linux-amd64
 ```
 
-### 13.2 Container image
+### 12.2 Container image
 
 The matching public image uses the same release tag:
 
@@ -1465,7 +1496,7 @@ The release notes include the image's immutable OCI digest. Pin that digest when
 mysten/hashi@sha256:<digest>
 ```
 
-### 13.3 Rolling the Mysten Testnet nodes
+### 12.3 Rolling the Mysten Testnet nodes
 
 The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
 

@@ -15,6 +15,7 @@ use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
 
 pub mod backup;
+pub mod backup_s3;
 pub mod btc_monitor;
 pub mod cli;
 pub mod communication;
@@ -488,10 +489,11 @@ impl Hashi {
             &self.config.backup_pgp_cert,
             &self.config.backup_dir,
         )?;
+        self.metrics.backup_scheduled_local_successes.inc();
         tracing::info!(
             epoch,
             output = %output_path.display(),
-            "Automatic backup completed after epoch change",
+            "Scheduled local backup completed after epoch change",
         );
         Ok(Some(output_path))
     }
