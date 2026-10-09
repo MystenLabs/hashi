@@ -18608,13 +18608,12 @@ fn send_messages_count_checks_before_the_manager_lock() {
         (honest[0], honest[encs_count]),
         (threshold as u8, setup.num_validators() as u8)
     );
-    let mut miscounted = honest.clone();
-    miscounted[encs_count] += 1;
-    miscounted.insert(miscounted.len() - 96, 0);
-    assert!(bcs::from_bytes::<avss::Message>(&miscounted).is_ok());
     let mut undecodable = honest.clone();
     undecodable[1..1 + 33].fill(0xff);
     assert!(bcs::from_bytes::<avss::Message>(&undecodable).is_err());
+    let mut miscounted = undecodable.clone();
+    miscounted[encs_count] += 1;
+    miscounted.insert(miscounted.len() - 96, 0);
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -18673,6 +18672,79 @@ fn send_messages_count_checks_before_the_manager_lock() {
 
     let accepted = rt.block_on(send(honest)).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+#[test]
+fn complain_admits_a_zero_weight_member_and_refuses_a_non_member() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let (dealer, _, complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rand::thread_rng());
+    let mut manager = setup.create_manager(2);
+    let zero_weighted = manager
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 1 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    manager.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+    let request = ComplainRequest {
+        epoch: manager.mpc_config.epoch,
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        dealer,
+        batch_index: None,
+        share_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+    };
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let refused = hashi.metrics.mpc_rpc_caller_refused_total.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+    let complain = |caller: Address| {
+        let mut proto_request = tonic::Request::new(request.to_proto());
+        proto_request.extensions_mut().insert(caller);
+        let service = service.clone();
+        rt.block_on(async move {
+            use hashi_types::proto::mpc_service_server::MpcService;
+            service.complain(proto_request).await
+        })
+    };
+
+    let zero_weight = complain(setup.address(1)).unwrap_err();
+    assert_eq!(
+        zero_weight.code(),
+        tonic::Code::NotFound,
+        "{}",
+        zero_weight.message()
+    );
+    let outsider = Address::new([0xee; 32]);
+    let refusal = complain(outsider).unwrap_err();
+    assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+    assert_eq!(
+        refused
+            .with_label_values(&["complain", &outsider.to_string(), "not_member"])
+            .get(),
+        1
+    );
 }
 
 struct RacingAvidStore {
