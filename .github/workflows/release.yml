@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Source branch, tag, or commit (defaults to latest main, separate from the workflow ref)
+        description: Source branch, tag, or commit (defaults to latest main, separate from the workflow ref). Mainnet takes the testnet-X.Y tag to promote
         type: string
         required: false
         default: main
@@ -15,6 +15,7 @@ on:
         options:
           - devnet
           - testnet
+          - mainnet
       bump_contract_version:
         description: Bump X and reset Y after a Move contract upgrade (testnet only; does not deploy contracts)
         type: boolean
@@ -48,8 +49,8 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   reserve:
-    name: Reserve testnet release
-    if: inputs.network == 'testnet'
+    name: Reserve ${{ inputs.network }} release
+    if: inputs.network != 'devnet'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -65,11 +66,13 @@ jobs:
       - name: Reserve source and release tag
         id: reservation
         env:
+          NETWORK: ${{ inputs.network }}
           SOURCE_REF: ${{ inputs.ref || 'main' }}
           BUMP_CONTRACT_VERSION: ${{ inputs.bump_contract_version }}
         run: |
           set -euo pipefail
-          RESERVATION=$(bash "$GITHUB_WORKSPACE/scripts/release/reserve-testnet.sh" \
+          RESERVATION=$(bash "$GITHUB_WORKSPACE/scripts/release/reserve.sh" \
+            --network "$NETWORK" \
             --ref "$SOURCE_REF" \
             --run-id "$GITHUB_RUN_ID" \
             --bump-contract-version "$BUMP_CONTRACT_VERSION")
@@ -77,14 +80,14 @@ jobs:
             <<< "$RESERVATION" >> "$GITHUB_OUTPUT"
 
   deterministic-build:
-    if: inputs.network == 'testnet'
+    if: inputs.network != 'devnet'
     needs: reserve
     uses: ./.github/workflows/deterministic-build.yml
     with:
       source_sha: ${{ needs.reserve.outputs.sha }}
 
   publish:
-    name: Verify and publish testnet release
+    name: Verify and publish ${{ inputs.network }} release
     needs: [reserve, deterministic-build]
     permissions:
       actions: read
@@ -95,6 +98,7 @@ jobs:
     timeout-minutes: 150
     env:
       IMAGE: mysten/hashi
+      NETWORK: ${{ inputs.network }}
       SOURCE_SHA: ${{ needs.reserve.outputs.sha }}
       RELEASE_TAG: ${{ needs.reserve.outputs.release_tag }}
     steps:
@@ -111,6 +115,9 @@ jobs:
           path: release
 
       - name: Prepare release assets
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           EXPECTED_HASH=$(awk '{print $1}' release/hashi.sha256)
@@ -118,6 +125,15 @@ jobs:
           if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
             echo "Downloaded binary hash does not match the verified build hash"
             exit 1
+          fi
+          if [ "$NETWORK" = mainnet ]; then
+            # Promotion must ship the bytes its testnet release published.
+            TESTNET_HASH=$(gh release download "testnet-${RELEASE_TAG#mainnet-}" \
+              --pattern SHA256SUMS --output - | awk '$2 == "hashi-linux-amd64" {print $1}')
+            if [ "$ACTUAL_HASH" != "$TESTNET_HASH" ]; then
+              echo "Binary hash does not match the testnet release being promoted"
+              exit 1
+            fi
           fi
 
           mv release/hashi release/hashi-linux-amd64
@@ -261,7 +277,7 @@ jobs:
           ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
         run: |
           cat > release/notes.md <<EOF
-          Automated Hashi testnet release.
+          Automated Hashi ${NETWORK} release.
 
           | Artifact | Identity |
           | --- | --- |
@@ -283,15 +299,16 @@ jobs:
           This release publishes artifacts only. It does not deploy Hashi.
           EOF
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.network != 'mainnet' }}
         run: |
           set -euo pipefail
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
-          VERSION=${RELEASE_TAG#testnet-}
+          VERSION=${RELEASE_TAG#"$NETWORK"-}
 
           # Reservation is the sole tag creator. Require its annotated tag to
           # still point at the source whose binary was verified above.
@@ -322,8 +339,8 @@ jobs:
             gh api --method POST "repos/$GH_REPO/releases" \
               -f tag_name="$RELEASE_TAG" \
               -F draft=true \
-              -F prerelease=true \
-              -f name="Hashi testnet $VERSION" \
+              -F prerelease="$PRERELEASE" \
+              -f name="Hashi $NETWORK $VERSION" \
               -F body=@release/notes.md \
               > "$TEMP_DIR/release.json"
           fi
@@ -365,8 +382,8 @@ jobs:
           if [ "$(jq -r .draft "$TEMP_DIR/release.json")" = true ]; then
             gh api --method PATCH "repos/$GH_REPO/releases/$RELEASE_ID" \
               -F draft=false \
-              -F prerelease=true \
-              -f name="Hashi testnet $VERSION" \
+              -F prerelease="$PRERELEASE" \
+              -f name="Hashi $NETWORK $VERSION" \
               -F body=@release/notes.md --silent
           fi
 
