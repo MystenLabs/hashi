@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
-allocator="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/reserve-testnet.sh"
-root=$(mktemp -d "${TMPDIR:-/tmp}/testnet-reservation.XXXXXXXX")
+allocator="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/reserve.sh"
+root=$(mktemp -d "${TMPDIR:-/tmp}/release-reservation.XXXXXXXX")
 log="$root/commands.log"
 pids=()
 cleanup() {
@@ -70,7 +70,7 @@ setup() {
 
 reserve() (
   cd -- "$1"
-  exec timeout --kill-after=2s 30s bash "$allocator" \
+  exec timeout --kill-after=2s 30s bash "$allocator" --network "${5:-testnet}" \
     --ref "$3" --run-id "$2" --bump-contract-version "$4" 2>>"$log"
 )
 
@@ -201,3 +201,35 @@ loser=$((1 - winner))
 assert_reservation "$(reserve "${checkouts[loser]}" "race-$loser" main false)" testnet-0.2 "$initial_sha"
 assert_equal "$(git_at "$origin" rev-parse refs/tags/testnet-0.1)" "$first_tag"
 printf 'ok 4 - tagless remote, concurrent winner, and safe loser retry\n'
+
+setup mainnet
+assert_reservation "$(reserve "$work" testnet-run main false)" testnet-0.1 "$initial_sha"
+moved_sha=$(commit 'main moved')
+# Promotion takes the testnet release's commit and version, not the moved main.
+assert_reservation "$(reserve "$work" mainnet-run testnet-0.1 false mainnet)" mainnet-0.1 "$initial_sha"
+clone "$scenario/retry"
+assert_reservation "$(reserve "$scenario/retry" mainnet-run testnet-0.1 false mainnet)" mainnet-0.1 "$initial_sha"
+# Mainnet tags stay out of testnet numbering.
+assert_reservation "$(reserve "$work" second-testnet-run main false)" testnet-0.2 "$moved_sha"
+# A lightweight tag was never reserved by a workflow run.
+git_at "$work" tag testnet-0.9
+git_at "$work" push origin refs/tags/testnet-0.9 >>"$log"
+before=$(remote_refs)
+rejected=(
+  'another-run testnet-0.1 false'
+  'branch-run main false'
+  "commit-run $moved_sha false"
+  'lightweight-run testnet-0.9 false'
+  'missing-run testnet-7.7 false'
+  'bump-run testnet-0.2 true'
+)
+for arguments in "${rejected[@]}"; do
+  read -r run ref bump <<<"$arguments"
+  if reserve "$work" "$run" "$ref" "$bump" mainnet >"$scenario/rejected.json"; then
+    printf 'Mainnet reservation accepted for <%s>\n' "$arguments" >&2
+    exit 1
+  fi
+done
+assert_equal "$(remote_refs)" "$before"
+assert_reservation "$(reserve "$work" second-mainnet-run testnet-0.2 false mainnet)" mainnet-0.2 "$moved_sha"
+printf 'ok 5 - mainnet promotion, retry, and rejected sources\n'

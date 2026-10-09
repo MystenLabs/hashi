@@ -1,63 +1,60 @@
 #!/usr/bin/env bash
-# Reserve one immutable testnet release tag for a GitHub workflow run.
+# Reserve one immutable release tag for a GitHub workflow run.
 set -Eeuo pipefail
 
 fail() {
-  printf 'reserve-testnet: %s\n' "$*" >&2
+  printf 'reserve: %s\n' "$*" >&2
   exit 1
 }
-trap 'printf "reserve-testnet: command failed at line %s\n" "$LINENO" >&2' ERR
+trap 'printf "reserve: command failed at line %s\n" "$LINENO" >&2' ERR
 
+network=''
 ref=''
 run_id=''
 bump=''
 while (($#)); do
   case "$1" in
-    --ref | --run-id | --bump-contract-version)
+    --network | --ref | --run-id | --bump-contract-version)
       (($# >= 2)) || fail "missing value for $1"
       option=$1
       value=$2
       shift 2
       ;;
-    --ref=* | --run-id=* | --bump-contract-version=*)
+    --network=* | --ref=* | --run-id=* | --bump-contract-version=*)
       option=${1%%=*}
       value=${1#*=}
       shift
       ;;
     -h | --help)
-      printf 'Usage: %s [--ref REF] --run-id ID --bump-contract-version true|false\n' "$0"
+      printf 'Usage: %s --network testnet|mainnet [--ref REF] --run-id ID --bump-contract-version true|false\n' "$0"
       exit 0
       ;;
     *) fail "unknown argument: $1" ;;
   esac
   case "$option" in
+    --network) network=$value ;;
     --ref) ref=$value ;;
     --run-id) run_id=$value ;;
     --bump-contract-version) bump=$value ;;
   esac
 done
+[[ $network == testnet || $network == mainnet ]] || fail 'network must be testnet or mainnet'
 [[ -n $run_id ]] || fail 'workflow run ID must not be empty'
 [[ $bump == true || $bump == false ]] || fail 'bump_contract_version must be true or false'
+# A mainnet release promotes one testnet release: same version, same commit.
+if [[ $network == mainnet ]]; then
+  [[ $ref =~ ^testnet-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
+    fail 'a mainnet release needs --ref testnet-X.Y, the testnet release it promotes'
+  [[ $bump == false ]] || fail 'bump_contract_version applies only to testnet'
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
-# Only fetched remote refs establish durability. A failed push must not leave
-# a local tag that a retry could mistake for a successful reservation. A
-# wildcard fetch fails on an empty remote, so check absence explicitly first.
-git ls-remote --refs origin 'refs/tags/testnet-*' >"$tmp/remote"
-: >"$tmp/records"
-if [[ -s $tmp/remote ]]; then
-  git fetch --depth=1 --no-tags --prune origin \
-    '+refs/tags/testnet-*:refs/hashi-release-reservations/testnet-*' >&2
-  git for-each-ref \
-    '--format=%(refname:strip=2)%00%(objecttype)%00%(*objecttype)%00%(*objectname)%00%(contents)%00' \
-    refs/hashi-release-reservations/ >"$tmp/records"
-fi
-
 # NUL delimiters preserve annotated messages, including embedded newlines.
 # Lightweight numbered tags count for numbering but cannot own a workflow run.
-jq -n --rawfile records "$tmp/records" '
+# shellcheck disable=SC2016
+parse_records='
   ($records | if . == "" then [""] else split("\u0000") end) as $fields
   | if (($fields | length) - 1) % 5 != 0
        or ($fields[-1] | test("\\A\\s*\\z") | not)
@@ -65,9 +62,9 @@ jq -n --rawfile records "$tmp/records" '
   | reduce range(0; ($fields | length) - 1; 5) as $offset
       ({versions: [], by_run: {}};
        ($fields[$offset] | sub("\\A\\n*"; "")) as $name
-       | if ($name | test("\\Atestnet-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z") | not)
+       | if ($name | test("\\A" + $network + "-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z") | not)
          then .
-         else .versions += [$name | ltrimstr("testnet-")]
+         else .versions += [$name | ltrimstr($network + "-")]
          | if $fields[$offset + 1] != "tag" then .
            else $fields[$offset + 4] as $message
            | (try {metadata: ($message | fromjson)} catch {}) as $parsed
@@ -78,7 +75,7 @@ jq -n --rawfile records "$tmp/records" '
              elif ($parsed.metadata | type) != "object" then .
              elif ($parsed.metadata | has("hashi_release") | not) then .
              else $parsed.metadata as $metadata
-             | if $metadata.hashi_release != "testnet"
+             | if $metadata.hashi_release != $network
                   or ($metadata.workflow_run_id | type) != "string"
                   or $metadata.workflow_run_id == ""
                   or ($metadata.source_sha | type) != "string"
@@ -97,7 +94,25 @@ jq -n --rawfile records "$tmp/records" '
              end
            end
          end)
-' >"$tmp/reservations"
+'
+
+# Print one network's numbered release tags as {versions, by_run}.
+reservations() {
+  # Only fetched remote refs establish durability. A failed push must not leave
+  # a local tag that a retry could mistake for a successful reservation. A
+  # wildcard fetch fails on an empty remote, so check absence explicitly first.
+  git ls-remote --refs origin "refs/tags/$1-*" >"$tmp/remote"
+  : >"$tmp/records"
+  if [[ -s $tmp/remote ]]; then
+    git fetch --depth=1 --no-tags --prune origin \
+      "+refs/tags/$1-*:refs/hashi-release-reservations/$1-*" >&2
+    git for-each-ref \
+      '--format=%(refname:strip=2)%00%(objecttype)%00%(*objecttype)%00%(*objectname)%00%(contents)%00' \
+      "refs/hashi-release-reservations/$1-*" >"$tmp/records"
+  fi
+  jq -n --arg network "$1" --rawfile records "$tmp/records" "$parse_records"
+}
+reservations "$network" >"$tmp/reservations"
 
 # Consult durable ownership before resolving the source: main may have moved
 # since the original allocation, and a retry must retain its original commit.
@@ -111,14 +126,6 @@ if [[ $reservation != null ]]; then
   ' "$tmp/reservations"
   exit 0
 fi
-
-ref=${ref:-main}
-# Accept a ref, not an option, refspec, revision expression, or wildcard.
-[[ $ref != -* && $ref != +* && $ref != @ ]] || fail 'invalid source ref'
-git check-ref-format --allow-onelevel "$ref"
-git fetch --depth=1 --no-tags origin "$ref" >&2
-sha=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
-[[ $sha =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || fail 'source ref did not resolve to a commit SHA'
 
 # Version components are unbounded decimal strings, not Bash integers. Only
 # individual digits enter arithmetic, so incrementing cannot silently overflow.
@@ -136,22 +143,40 @@ increment_decimal() {
   fi
 }
 
-jq -r '.versions[]' "$tmp/reservations" | LC_ALL=C sort -V >"$tmp/versions"
-maximum=''
-while IFS= read -r version; do
-  maximum=$version
-done <"$tmp/versions"
-if [[ -z $maximum ]]; then
-  version=0.1
-elif [[ $bump == true ]]; then
-  version="$(increment_decimal "${maximum%%.*}").0"
+if [[ $network == mainnet ]]; then
+  reservations testnet >"$tmp/testnet"
+  sha=$(jq -r --arg tag "$ref" \
+    '[.by_run[] | select(.release_tag == $tag)][0].sha // empty' "$tmp/testnet")
+  [[ -n $sha ]] || fail "$ref is not a reserved testnet release"
+  version=${ref#testnet-}
+  reserved=$(jq --arg version "$version" 'any(.versions[]; . == $version)' "$tmp/reservations")
+  [[ $reserved == false ]] || fail "mainnet-$version is already reserved by another workflow run"
 else
-  version="${maximum%%.*}.$(increment_decimal "${maximum#*.}")"
+  ref=${ref:-main}
+  # Accept a ref, not an option, refspec, revision expression, or wildcard.
+  [[ $ref != -* && $ref != +* && $ref != @ ]] || fail 'invalid source ref'
+  git check-ref-format --allow-onelevel "$ref"
+  git fetch --depth=1 --no-tags origin "$ref" >&2
+  sha=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
+  [[ $sha =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || fail 'source ref did not resolve to a commit SHA'
+
+  jq -r '.versions[]' "$tmp/reservations" | LC_ALL=C sort -V >"$tmp/versions"
+  maximum=''
+  while IFS= read -r version; do
+    maximum=$version
+  done <"$tmp/versions"
+  if [[ -z $maximum ]]; then
+    version=0.1
+  elif [[ $bump == true ]]; then
+    version="$(increment_decimal "${maximum%%.*}").0"
+  else
+    version="${maximum%%.*}.$(increment_decimal "${maximum#*.}")"
+  fi
 fi
-tag="testnet-$version"
+tag="$network-$version"
 ((${#tag} <= 128)) || fail 'release version exceeds the Docker tag length limit'
-metadata=$(jq -cn --arg run_id "$run_id" --arg sha "$sha" --argjson bump "$bump" \
-  '{hashi_release: "testnet", workflow_run_id: $run_id, source_sha: $sha, bump_contract_version: $bump}')
+metadata=$(jq -cn --arg network "$network" --arg run_id "$run_id" --arg sha "$sha" --argjson bump "$bump" \
+  '{hashi_release: $network, workflow_run_id: $run_id, source_sha: $sha, bump_contract_version: $bump}')
 identity=$(GIT_COMMITTER_NAME='github-actions[bot]' \
   GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
   git var GIT_COMMITTER_IDENT)
