@@ -365,8 +365,9 @@ pub enum CreateProposalCommands {
     /// An ignored member is treated as no longer part of the committee. The
     /// flag takes effect at the next committee FORMATION: the current
     /// committee is unchanged, and if a reconfiguration is already in
-    /// flight the change lands one epoch later. The member stays registered
-    /// and keeps proposal/vote authorization throughout.
+    /// flight the change lands one epoch later. The member stays registered,
+    /// but once a committee forms without it, it cannot create or vote on
+    /// proposals until it is re-admitted.
     IgnoreMember {
         /// The target member's Sui validator address.
         #[clap(long)]
