@@ -353,14 +353,7 @@ pub(crate) async fn limit_per_peer(
 }
 
 fn shed<B>(request: &http::Request<B>) -> axum::response::Response {
-    if super::is_grpc_content_type(request.headers()) {
-        tonic::Status::unavailable(super::PEER_INFLIGHT_LIMIT_MSG).into_http()
-    } else {
-        axum::response::IntoResponse::into_response((
-            http::StatusCode::SERVICE_UNAVAILABLE,
-            super::PEER_INFLIGHT_LIMIT_MSG,
-        ))
-    }
+    super::unavailable(request, super::PEER_INFLIGHT_LIMIT_MSG)
 }
 
 struct Guarded<B> {

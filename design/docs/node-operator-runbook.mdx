@@ -497,6 +497,9 @@ backup-dir = "/var/lib/hashi/backups"
 # Max in-flight gRPC request bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
 # grpc-per-peer-inflight-bytes = 67108874
 
+# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3)
+# grpc-per-peer-connection-limit = 4
+
 # Withdrawal batching delay in ms (default: 300000 = 5 min)
 # withdrawal-batching-delay-ms = 300000
 
