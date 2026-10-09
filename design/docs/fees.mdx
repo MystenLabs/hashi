@@ -99,14 +99,19 @@ validators don't sign them. Only regtest, which has no fee market, falls
 back to `1 sat/vB`.
 
 The estimated fee rate is then floored at 3 sat/vB (configurable per node
-with `withdrawal_min_fee_rate_sat_vb`) but not capped, because a signed
-withdrawal can't be replaced by a higher-fee version. The onchain
-`worst_case_network_fee` bounds each user's share of the miner fee
-instead: while a batch's share would exceed it, the leader waits for fees
-to fall or for more requests to share them, rather than broadcasting a
-transaction that would sit unconfirmed.
+with `withdrawal_min_fee_rate_sat_vb`). The onchain
+`worst_case_network_fee` bounds each user's share of the miner fee: while
+a batch's share would exceed it, the leader waits for fees to fall or for
+more requests to share them, rather than broadcasting a transaction that
+would sit unconfirmed.
 
-Signet is the exception. Its blocks rarely fill, but Bitcoin Core's
+On mainnet the estimate is also capped at 100 sat/vB before the floor
+applies. That is far above what blocks usually charge, but fee spikes have
+passed it for days at a time, as in December 2023. A signed withdrawal
+can't be replaced by a higher-fee version, so one priced at the cap during
+a spike stays unconfirmed until fees fall back.
+
+Signet's cap is lower. Its blocks rarely fill, but Bitcoin Core's
 estimate there follows the few relayed transactions that pay hundreds of
 sat/vB, so on signet the estimate is capped at 9 sat/vB before the floor
 applies.
