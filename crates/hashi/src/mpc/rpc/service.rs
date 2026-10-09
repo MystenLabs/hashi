@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::caller_membership;
+use super::gates;
 use crate::grpc::HttpService;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
@@ -37,39 +38,38 @@ impl MpcService for HttpService {
     ) -> Result<tonic::Response<SendMessagesResponse>, Status> {
         let sender = authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let internal_request = types::SendMessagesRequest::try_from(&external_request)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let label = match &internal_request.messages {
-            types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
-            types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
-            types::Messages::NonceGenerationAvid(_) | types::Messages::AvidNonceRetrieval(_) => {
-                crate::metrics::MPC_LABEL_NONCE_GENERATION
-            }
-        };
         let mpc_manager = self.mpc_manager()?;
-        let _timer = self
+        let shape = self.shape_params()?;
+        let process_duration = self
             .metrics()
             .mpc_rpc_handler_process_duration_seconds
-            .with_label_values(&[label])
-            .start_timer();
+            .clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
+            let epoch = external_request.epoch;
+            validate_epoch(shape.epoch(), epoch)?;
+            gates::check_send_messages(&shape, sender, &external_request)
+                .map_err(|e| send_messages_error(sender, e))?;
+            let internal_request = types::SendMessagesRequest::try_from(&external_request)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            drop(external_request);
+            let label = match &internal_request.messages {
+                types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
+                types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+                types::Messages::NonceGenerationAvid(_)
+                | types::Messages::AvidNonceRetrieval(_) => {
+                    crate::metrics::MPC_LABEL_NONCE_GENERATION
+                }
+            };
+            let _timer = process_duration.with_label_values(&[label]).start_timer();
             let signed = {
                 let mut mgr = mpc_manager.write().unwrap();
-                validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
+                validate_epoch(mgr.mpc_config.epoch, epoch)?;
                 mgr.handle_send_messages_request(sender, &internal_request)
-                    .map_err(|e| {
-                        if matches!(&e, MpcError::NotReady(_)) {
-                            tracing::info!("send_messages from {sender:?}: {e}");
-                        } else {
-                            tracing::warn!("send_messages from {sender:?} failed: {e}");
-                        }
-                        mpc_error_to_status(e)
-                    })?
+                    .map_err(|e| send_messages_error(sender, e))?
             };
             Ok(SendMessagesResponse::from(&signed))
         })
         .await?;
-        drop(_timer);
         Ok(tonic::Response::new(response))
     }
 
@@ -146,10 +146,19 @@ impl MpcService for HttpService {
     ) -> Result<tonic::Response<ComplainResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
-        let internal_request = types::ComplainRequest::try_from(&external_request)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
+        let shape = self.shape_params()?;
         let result = spawn_blocking(move || -> Result<_, Status> {
+            let epoch = external_request
+                .epoch
+                .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+            validate_epoch_current_or_previous(shape.epoch(), shape.previous_epoch(), epoch)?;
+            if let Err(e) = gates::check_complain(&shape, caller, epoch, &external_request) {
+                return Ok(Err(e));
+            }
+            let internal_request = types::ComplainRequest::try_from(&external_request)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            drop(external_request);
             let mut mgr = mpc_manager.write().unwrap();
             validate_epoch_current_or_previous(
                 mgr.mpc_config.epoch,
@@ -335,6 +344,15 @@ fn check_caller_in_epoch(
             refusal,
         )
     })
+}
+
+fn send_messages_error(sender: Address, e: MpcError) -> Status {
+    if matches!(&e, MpcError::NotReady(_)) {
+        tracing::info!("send_messages from {sender:?}: {e}");
+    } else {
+        tracing::warn!("send_messages from {sender:?} failed: {e}");
+    }
+    mpc_error_to_status(e)
 }
 
 fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Status> {

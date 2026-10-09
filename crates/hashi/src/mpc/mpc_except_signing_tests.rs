@@ -18585,6 +18585,96 @@ fn avid_retrieval_store_read_does_not_hold_the_manager_lock() {
     );
 }
 
+#[test]
+fn send_messages_count_checks_before_the_manager_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+    let threshold = manager.mpc_config.threshold;
+    let honest = bcs::to_bytes(
+        &setup
+            .create_manager(1)
+            .create_dealer_message(&mut rand::thread_rng()),
+    )
+    .unwrap();
+    let encs_count = 1 + usize::from(threshold) * 33 + 64;
+    assert_eq!(
+        (honest[0], honest[encs_count]),
+        (threshold as u8, setup.num_validators() as u8)
+    );
+    let mut miscounted = honest.clone();
+    miscounted[encs_count] += 1;
+    miscounted.insert(miscounted.len() - 96, 0);
+    assert!(bcs::from_bytes::<avss::Message>(&miscounted).is_ok());
+    let mut undecodable = honest.clone();
+    undecodable[1..1 + 33].fill(0xff);
+    assert!(bcs::from_bytes::<avss::Message>(&undecodable).is_err());
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+    let send = |message: Vec<u8>| {
+        let mut request = tonic::Request::new(hashi_types::proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: Some(
+                hashi_types::proto::send_messages_request::Messages::DkgMessage(message.into()),
+            ),
+        });
+        request.extensions_mut().insert(setup.address(1));
+        let service = service.clone();
+        rt.spawn(async move {
+            use hashi_types::proto::mpc_service_server::MpcService;
+            service.send_messages(request).await
+        })
+    };
+
+    let held = mpc_lock.write().unwrap();
+    let refusals = [miscounted, undecodable].map(|message| {
+        let handler = send(message);
+        rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
+    });
+    drop(held);
+    let [miscounted, undecodable] = refusals.map(|refused| {
+        refused
+            .expect("the refusal waited for the manager lock")
+            .unwrap()
+            .unwrap_err()
+    });
+    assert_eq!(
+        (miscounted.code(), undecodable.code()),
+        (tonic::Code::InvalidArgument, tonic::Code::InvalidArgument)
+    );
+    assert!(
+        miscounted.message().contains("ciphertext.encs"),
+        "{}",
+        miscounted.message()
+    );
+    assert!(
+        undecodable.message().contains("dkg_message"),
+        "{}",
+        undecodable.message()
+    );
+
+    let accepted = rt.block_on(send(honest)).unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
 struct RacingAvidStore {
     round_state: AvidRoundState,
     held: HeldAvidEchoes,

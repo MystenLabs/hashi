@@ -65,6 +65,7 @@ pub struct Hashi {
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
     mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
+    shape_params: RwLock<Option<Arc<mpc::shape_params::ShapeParams>>>,
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
@@ -108,6 +109,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
+            shape_params: RwLock::new(None),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
@@ -149,6 +151,7 @@ impl Hashi {
             db: Arc::new(db),
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
+            shape_params: RwLock::new(None),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
@@ -214,6 +217,7 @@ impl Hashi {
         self.metrics
             .mpc_manager_epoch
             .set(manager.mpc_config.epoch as i64);
+        let shape_params = Arc::new(manager.shape_params());
         match self.mpc_manager.get() {
             Some(lock) => {
                 // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
@@ -225,6 +229,11 @@ impl Hashi {
                 let _ = self.mpc_manager.set(Arc::new(RwLock::new(manager)));
             }
         }
+        *self.shape_params.write().unwrap() = Some(shape_params);
+    }
+
+    pub(crate) fn shape_params(&self) -> Option<Arc<mpc::shape_params::ShapeParams>> {
+        self.shape_params.read().unwrap().clone()
     }
 
     pub fn signing_manager_for(&self, epoch: u64) -> Option<Arc<mpc::SigningManager>> {
