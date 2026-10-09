@@ -6,10 +6,11 @@
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
-//! ceremony guardian, which is the relay's backend. Committee handoffs are
-//! forwarded only once the chain stores them ([`crate::node::handoffs`]).
-//! Wrapped by [`crate::node::cache::CachingGuardianGrpc`] to cache
-//! `StandardWithdrawal` and `GetGuardianInfo`.
+//! ceremony guardian, which is the relay's backend. A committee handoff is
+//! forwarded only once the chain stores one between the same two epochs
+//! ([`crate::node::handoffs`]). Wrapped by
+//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`
+//! and `GetGuardianInfo`.
 
 use std::sync::Arc;
 

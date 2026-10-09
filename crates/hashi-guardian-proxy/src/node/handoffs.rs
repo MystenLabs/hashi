@@ -1,19 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The proxy forwards a committee handoff only once the chain stores it. The
-//! outgoing committee certifies a handoff while its reconfig is still pending,
-//! and a pending reconfig can abort: a guardian that took the certificate
-//! early would follow a committee the chain never activated, with no way
-//! back. The chain stores a handoff only when its reconfig completes
-//! (`end_reconfig`), and never changes or removes one, so a stored handoff
-//! stays stored however stale the read that found it.
+//! The proxy forwards a committee handoff only once the chain stores one
+//! between the same two epochs. The outgoing committee certifies a handoff
+//! while its reconfig is still pending, and a pending reconfig can abort: a
+//! guardian that took the certificate early would follow a committee the chain
+//! never activated, with no way back. The chain stores a handoff only when its
+//! reconfig completes (`end_reconfig`), and never changes or removes one, so a
+//! stored handoff stays stored however stale the read that found it.
 //!
-//! A handoff is matched by the epochs it leaves and reaches, which is how
-//! `submit_committee_handoff` tells a completed one. That pins its committee
-//! too: an epoch only ever forms one committee (it is the Sui epoch of its
-//! `start_reconfig`, and an abort needs that epoch to have passed), and the
-//! enclave verifies the certificate over the committee it is sent.
+//! A handoff is matched only by the epochs it leaves and reaches, which is how
+//! `submit_committee_handoff` tells a completed one. Its certificate and
+//! committee are not compared with the chain's: an epoch only ever forms one
+//! committee (it is the Sui epoch of its `start_reconfig`, and an abort needs
+//! that epoch to have passed), and the enclave verifies the certificate over
+//! the committee it is sent.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,8 +69,8 @@ impl HandoffGate {
         }
     }
 
-    /// Admit `transitions` only if each is a handoff the chain stores and each
-    /// leaves the epoch the one before it reached.
+    /// Admit `transitions` only if each matches a stored handoff by its two
+    /// epochs alone, and each leaves the epoch the one before it reached.
     pub async fn admit(
         &self,
         transitions: &[proto::SignedCommitteeTransition],

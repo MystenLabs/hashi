@@ -13,7 +13,8 @@
 //!   [`node::member_auth`] gates every route: node RPCs are served only to
 //!   current or pending committee members ([`node::members`]), who present
 //!   their registered TLS key as a client certificate. [`node::handoffs`]
-//!   forwards a committee handoff only once the chain stores it.
+//!   forwards a committee handoff only once the chain stores one between the
+//!   same two epochs.
 //! - [`kp`]: [`kp::relay`] serves `GuardianRelayService`: key provisioners
 //!   submit one share each — authenticated against the ceremony's committed
 //!   roster read from the S3 share log ([`kp::roster`]) — and the relay batches
