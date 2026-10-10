@@ -356,31 +356,10 @@ fn extract_path(request: &request::Parts, role: Role) -> Cow<'static, str> {
 fn known_grpc_paths() -> &'static HashSet<Box<str>> {
     static PATHS: OnceLock<HashSet<Box<str>>> = OnceLock::new();
     PATHS.get_or_init(|| {
-        use prost::Message as _;
-
-        let mut paths = HashSet::new();
-        for encoded in [
-            hashi_types::proto::FILE_DESCRIPTOR_SET,
-            tonic_health::pb::FILE_DESCRIPTOR_SET,
-            tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET,
-            tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET,
-        ] {
-            let Ok(set) = prost_types::FileDescriptorSet::decode(encoded) else {
-                continue;
-            };
-            for file in set.file {
-                let package = file.package();
-                for service in &file.service {
-                    for method in &service.method {
-                        paths.insert(
-                            format!("/{package}.{}/{}", service.name(), method.name())
-                                .into_boxed_str(),
-                        );
-                    }
-                }
-            }
-        }
-        paths
+        super::route_limits::grpc_methods()
+            .iter()
+            .map(|method| method.path.clone())
+            .collect()
     })
 }
 

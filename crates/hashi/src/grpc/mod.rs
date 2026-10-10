@@ -18,6 +18,8 @@ pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reach
 
 mod client;
 mod peer_limit;
+mod request_body;
+mod route_limits;
 pub use client::BoxedChannel;
 pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
@@ -64,14 +66,28 @@ impl HttpService {
     }
 
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
+        let mut routes = route_limits::RouteLimits::default();
         let router = {
+            use hashi_types::proto::bridge_service_server;
+            use hashi_types::proto::mpc_service_server;
+
             let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();
-            let bridge_service =
-                hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone())
-                    .max_decoding_message_size(max_decoding_message_size);
-            let mpc_service =
-                hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone())
-                    .max_decoding_message_size(max_decoding_message_size);
+            let bridge_service = bridge_service_server::BridgeServiceServer::new(self.clone())
+                .max_decoding_message_size(routes.service(
+                    bridge_service_server::SERVICE_NAME,
+                    max_decoding_message_size,
+                ));
+            let mpc_service = mpc_service_server::MpcServiceServer::new(self.clone())
+                .max_decoding_message_size(
+                    routes.service(mpc_service_server::SERVICE_NAME, max_decoding_message_size),
+                );
+            for method in route_limits::SMALL_MPC_METHODS {
+                routes.method(
+                    mpc_service_server::SERVICE_NAME,
+                    method,
+                    route_limits::SMALL_MPC_REQUEST_LIMIT,
+                );
+            }
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
@@ -97,6 +113,17 @@ impl HttpService {
                 S::NAME
             }
 
+            let limit = route_limits::HEALTH_AND_REFLECTION_DECODE_LIMIT;
+            let name = service_name(&health_service);
+            let health_service =
+                health_service.max_decoding_message_size(routes.service(name, limit));
+            let name = service_name(&reflection_v1);
+            let reflection_v1 =
+                reflection_v1.max_decoding_message_size(routes.service(name, limit));
+            let name = service_name(&reflection_v1alpha);
+            let reflection_v1alpha =
+                reflection_v1alpha.max_decoding_message_size(routes.service(name, limit));
+
             for service_name in [
                 service_name(&bridge_service),
                 service_name(&mpc_service),
@@ -109,11 +136,11 @@ impl HttpService {
             }
 
             axum::Router::new()
-                .add_grpc_service(bridge_service)
-                .add_grpc_service(mpc_service)
-                .add_grpc_service(reflection_v1)
-                .add_grpc_service(reflection_v1alpha)
-                .add_grpc_service(health_service)
+                .add_grpc_service(bridge_service, &routes)
+                .add_grpc_service(mpc_service, &routes)
+                .add_grpc_service(reflection_v1, &routes)
+                .add_grpc_service(reflection_v1alpha, &routes)
+                .add_grpc_service(health_service, &routes)
         };
 
         let hashi_for_ready = self.inner.clone();
@@ -124,8 +151,18 @@ impl HttpService {
                 axum::routing::get(move || ready(hashi_for_ready.clone())),
             );
 
+        let budget_bytes = per_peer_byte_budget(
+            self.inner.config.grpc_per_peer_inflight_bytes(),
+            routes.largest(),
+        );
+        self.inner
+            .metrics
+            .peer_inflight_limit_bytes
+            .set(i64::try_from(budget_bytes).unwrap_or(i64::MAX));
         let limiter = peer_limit::PeerInflightLimiter::new(
             self.inner.config.grpc_per_peer_inflight_limit(),
+            budget_bytes,
+            routes,
             self.inner.metrics.clone(),
         );
         let layers = ServiceBuilder::new()
@@ -206,6 +243,24 @@ impl HttpService {
     }
 }
 
+fn per_peer_byte_budget(configured: Option<u64>, largest_decode_limit: usize) -> u64 {
+    let floor = u64::try_from(largest_decode_limit)
+        .unwrap_or(u64::MAX)
+        .saturating_add(request_body::PREFIX_LEN)
+        .saturating_mul(2);
+    match configured {
+        Some(bytes) if bytes < floor => {
+            tracing::warn!(
+                "grpc_per_peer_inflight_bytes {bytes} is below room for two maximum-size \
+                 requests; using {floor}"
+            );
+            floor
+        }
+        Some(bytes) => bytes,
+        None => floor,
+    }
+}
+
 // A server that stops without a shutdown signal has crashed (one HTTP/1 handler
 // panic ends sui-http's accept loop), so fail rather than run on without it.
 fn supervise(server_handle: Arc<ServerHandle>) -> Service {
@@ -257,7 +312,7 @@ async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
 }
 
 trait RouterExt {
-    fn add_grpc_service<S>(self, svc: S) -> Self
+    fn add_grpc_service<S>(self, svc: S, routes: &route_limits::RouteLimits) -> Self
     where
         S: tower::Service<
                 axum::extract::Request,
@@ -272,7 +327,7 @@ trait RouterExt {
 }
 
 impl RouterExt for axum::Router {
-    fn add_grpc_service<S>(self, svc: S) -> Self
+    fn add_grpc_service<S>(self, svc: S, routes: &route_limits::RouteLimits) -> Self
     where
         S: tower::Service<
                 axum::extract::Request,
@@ -285,6 +340,11 @@ impl RouterExt for axum::Router {
             + 'static,
         S::Future: Send + 'static,
     {
+        assert!(
+            routes.has_service(S::NAME),
+            "{} is served without a decode limit",
+            S::NAME
+        );
         self.route_service(&format!("/{}/{{*rest}}", S::NAME), svc)
     }
 }
