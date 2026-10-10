@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OUTCOME_FORWARDED","OUTCOME_HIT","OUTCOME_UNAVAILABLE_LOG_STORE"],"struct":["ProxyMetrics"]};

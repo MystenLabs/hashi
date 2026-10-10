@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEST_HASHI_OBJECT_ID"],"fn":["dev_kp_attestations","mock_attested_kp_certs","mock_attested_kp_keypair","mock_kp_certs_roster"]};

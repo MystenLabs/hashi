@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["confirm_ceremony"]};

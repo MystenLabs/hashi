@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["router"],"mod":["config","forward","guardian_info","kp","log_store","metrics","node","public","remote_write","tls"]};
