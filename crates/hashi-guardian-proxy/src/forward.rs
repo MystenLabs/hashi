@@ -6,9 +6,11 @@
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
-//! ceremony guardian, which is the relay's backend. Wrapped by
-//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal` and
-//! `GetGuardianInfo`.
+//! ceremony guardian, which is the relay's backend. A committee handoff is
+//! forwarded only once the chain stores one between the same two epochs
+//! ([`crate::node::handoffs`]). Wrapped by
+//! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`
+//! and `GetGuardianInfo`.
 
 use std::sync::Arc;
 
@@ -25,6 +27,7 @@ use tonic::Status;
 use crate::kp;
 use crate::kp::roster::RosterCache;
 use crate::log_store::LogStore;
+use crate::node::handoffs::HandoffGate;
 
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
@@ -37,14 +40,21 @@ pub struct Forwarding<L> {
     /// Shared with the relay: one gate admits every KP-signed RPC, and a cert
     /// rotation drops the cached roster for both.
     roster: Arc<RosterCache<L>>,
+    handoffs: Arc<HandoffGate>,
 }
 
 impl<L: LogStore> Forwarding<L> {
-    pub fn new(channel: Channel, ceremony_channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
+    pub fn new(
+        channel: Channel,
+        ceremony_channel: Channel,
+        roster: Arc<RosterCache<L>>,
+        handoffs: Arc<HandoffGate>,
+    ) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             ceremony_client: GuardianServiceClient::new(ceremony_channel),
             roster,
+            handoffs,
         }
     }
 }
@@ -88,6 +98,9 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+        self.handoffs
+            .admit(std::slice::from_ref(request.get_ref()))
+            .await?;
         self.client.clone().update_committee(request).await
     }
 
@@ -95,6 +108,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+        self.handoffs.admit(&request.get_ref().transitions).await?;
         self.client.clone().update_committee_chain(request).await
     }
 
@@ -179,6 +193,7 @@ pub(crate) mod test_utils {
         pub(crate) get_guardian_info_calls: Arc<AtomicUsize>,
         pub(crate) get_attested_guardian_info_calls: Arc<AtomicUsize>,
         pub(crate) confirm_ceremony_calls: Arc<AtomicUsize>,
+        pub(crate) update_committee_calls: Arc<AtomicUsize>,
         /// Served by `GetGuardianInfo`; the default response when unset.
         pub(crate) info: Arc<std::sync::Mutex<Option<proto::GetGuardianInfoResponse>>>,
     }
@@ -271,13 +286,15 @@ pub(crate) mod test_utils {
             &self,
             _: Request<proto::SignedCommitteeTransition>,
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
+            self.update_committee_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(proto::UpdateCommitteeResponse::default()))
         }
         async fn update_committee_chain(
             &self,
             _: Request<proto::UpdateCommitteeChainRequest>,
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
+            self.update_committee_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(proto::UpdateCommitteeResponse::default()))
         }
         async fn rotate_kp_set(
             &self,
@@ -329,6 +346,8 @@ mod tests {
     use super::test_utils::*;
     use super::*;
     use crate::node::cache::CachingGuardianGrpc;
+    use crate::node::handoffs::test_utils::gate_over;
+    use crate::node::handoffs::test_utils::transition;
     use crate::node::widlog::test_utils::withdrawal_log_json;
     use crate::node::widlog::WidLogIndex;
     use hashi_types::guardian::now_timestamp_ms;
@@ -339,14 +358,21 @@ mod tests {
 
     type StubStore = crate::log_store::test_store::MemStore;
 
+    /// A proxy whose chain stores `handoffs`, each as `(from_epoch, next_epoch)`.
     async fn proxy_over(
         active: tonic::transport::Channel,
         ceremony: tonic::transport::Channel,
         store: StubStore,
+        handoffs: &[(u64, u64)],
     ) -> CachingGuardianGrpc<Forwarding<StubStore>, StubStore> {
         let metrics = Arc::new(crate::metrics::ProxyMetrics::new());
         CachingGuardianGrpc::new(
-            Forwarding::new(active, ceremony, Arc::new(RosterCache::new(store))),
+            Forwarding::new(
+                active,
+                ceremony,
+                Arc::new(RosterCache::new(store)),
+                gate_over(handoffs),
+            ),
             WidLogIndex::ready_for_tests(StubStore::default(), metrics.clone()).await,
             metrics,
         )
@@ -360,7 +386,7 @@ mod tests {
         CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
     ) {
         let (stub, channel) = spawn_stub().await;
-        (stub, proxy_over(channel.clone(), channel, store).await)
+        (stub, proxy_over(channel.clone(), channel, store, &[]).await)
     }
 
     #[tokio::test]
@@ -437,6 +463,36 @@ mod tests {
             .expect_err("a missing signer attestation must not be forwarded");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn forwards_only_committee_handoffs_the_chain_stores() {
+        let (stub, channel) = spawn_stub().await;
+        let proxy = proxy_over(channel.clone(), channel, StubStore::default(), &[(5, 7)]).await;
+        let chain = |transitions| Request::new(proto::UpdateCommitteeChainRequest { transitions });
+
+        proxy
+            .update_committee(Request::new(transition(5, 7)))
+            .await
+            .unwrap();
+        proxy
+            .update_committee_chain(chain(vec![transition(5, 7)]))
+            .await
+            .unwrap();
+        assert_eq!(stub.update_committee_calls.load(Ordering::SeqCst), 2);
+
+        // The reconfig out of epoch 7 has not completed.
+        let early = proxy
+            .update_committee(Request::new(transition(7, 9)))
+            .await
+            .unwrap_err();
+        assert_eq!(early.code(), tonic::Code::Unavailable);
+        let early = proxy
+            .update_committee_chain(chain(vec![transition(5, 7), transition(7, 9)]))
+            .await
+            .unwrap_err();
+        assert_eq!(early.code(), tonic::Code::Unavailable);
+        assert_eq!(stub.update_committee_calls.load(Ordering::SeqCst), 2);
     }
 
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic

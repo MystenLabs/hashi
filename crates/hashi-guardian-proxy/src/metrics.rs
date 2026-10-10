@@ -42,6 +42,8 @@ pub struct ProxyMetrics {
     pub member_snapshot_timestamp_seconds: IntGauge,
     /// Failed allowlist reads.
     pub member_refresh_failures: IntCounter,
+    /// Committee updates the handoff gate refused, by reason.
+    pub handoff_refused: IntCounterVec,
 }
 
 impl ProxyMetrics {
@@ -104,6 +106,14 @@ impl ProxyMetrics {
             "Failed committee member allowlist reads",
         )
         .expect("valid metric");
+        let handoff_refused = IntCounterVec::new(
+            Opts::new(
+                "guardian_proxy_handoff_refused_total",
+                "Committee updates refused by the handoff gate, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -135,6 +145,9 @@ impl ProxyMetrics {
         registry
             .register(Box::new(member_refresh_failures.clone()))
             .expect("register");
+        registry
+            .register(Box::new(handoff_refused.clone()))
+            .expect("register");
 
         Self {
             registry,
@@ -148,6 +161,7 @@ impl ProxyMetrics {
             member_allowlist_size,
             member_snapshot_timestamp_seconds,
             member_refresh_failures,
+            handoff_refused,
         }
     }
 

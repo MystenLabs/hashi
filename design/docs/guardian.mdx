@@ -80,7 +80,11 @@ The main components are:
   enclave directly. Nodes call a separate one (`guardian_node_url`), which serves only
   `GetGuardianInfo` and node RPCs: the proxy terminates TLS itself and forwards
   node RPCs only for current or pending committee members, who present their
-  registered TLS key as a client certificate.
+  registered TLS key as a client certificate. It forwards a committee handoff
+  only once the chain stores it, which happens when its reconfiguration
+  completes, so no node can move the guardian to a committee whose
+  reconfiguration is later aborted. Both checks trust the proxy's Sui fullnode
+  for chain state, and assume nodes cannot reach the enclave directly.
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
@@ -281,7 +285,9 @@ sequenceDiagram
     Note over Onchain,Guardian: Committee handoff catch-up
     MPC->>Onchain: Read stored committee handoffs
     MPC->>MPC: Chain the stored handoffs from the guardian's epoch to the current one
-    MPC->>Guardian: UpdateCommitteeChain(signed handoffs) via proxy
+    MPC->>Proxy: UpdateCommitteeChain(signed handoffs)
+    Proxy->>Onchain: Check that each handoff is stored
+    Proxy->>Guardian: Forward the stored handoffs
     Guardian->>S3: log(committee-update)
-    Guardian-->>MPC: current_committee_epoch
+    Guardian-->>MPC: current_committee_epoch via proxy
 ```

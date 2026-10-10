@@ -12,7 +12,9 @@
 //!   log ([`node::widlog`]), which the proxy only reads.
 //!   [`node::member_auth`] gates every route: node RPCs are served only to
 //!   current or pending committee members ([`node::members`]), who present
-//!   their registered TLS key as a client certificate.
+//!   their registered TLS key as a client certificate. [`node::handoffs`]
+//!   forwards a committee handoff only once the chain stores one between the
+//!   same two epochs.
 //! - [`kp`]: [`kp::relay`] serves `GuardianRelayService`: key provisioners
 //!   submit one share each — authenticated against the ceremony's committed
 //!   roster read from the S3 share log ([`kp::roster`]) — and the relay batches
@@ -121,6 +123,7 @@ mod tests {
     use crate::kp::roster::RosterCache;
     use crate::log_store::test_store::MemStore;
     use crate::metrics::ProxyMetrics;
+    use crate::node::handoffs::test_utils::gate_over;
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
     use crate::node::widlog::WidLogIndex;
@@ -201,7 +204,12 @@ mod tests {
         let metrics = Arc::new(ProxyMetrics::new());
         let roster = Arc::new(RosterCache::new(MemStore::default()));
         let guardian = CachingGuardianGrpc::new(
-            Forwarding::new(backend.clone(), backend.clone(), roster.clone()),
+            Forwarding::new(
+                backend.clone(),
+                backend.clone(),
+                roster.clone(),
+                gate_over(&[]),
+            ),
             WidLogIndex::ready_for_tests(MemStore::default(), metrics.clone()).await,
             metrics.clone(),
         );
