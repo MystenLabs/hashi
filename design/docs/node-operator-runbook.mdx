@@ -57,7 +57,7 @@ This document assumes familiarity with Sui validator operations, Linux system ad
 
 Onboarding takes 6 steps. The remaining sections cover the detail, the defaults, and the failure modes:
 
-1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run both yourself. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
+1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
 2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [2.2](#22-tls-key-dedicated), [2.4](#24-operator-key-day-to-day-signing), and [2.5](#25-backup-key-openpgp).
 3. **Write the validator config:** use your target network's column in [Networks](#networks). See [3.1](#31-validator-config).
 4. **Register your validator:** run `hashi register --serialize-unsigned-transaction` and sign the result offline with your Sui validator account key. See [2.3](#23-registration-must-be-signed-by-the-account-key) and [5.3](#53-step-2-register-your-validator).
@@ -122,7 +122,7 @@ The pairing is enforced, not just documented: Bitcoin mainnet goes with Sui main
 
 The requirements for running a Hashi node are **low** compared with those of a Sui node. To reduce blast radius, avoid **colocating** the Hashi process with a Sui validator. There should be no performance concerns with containerizing the process or running it in Kubernetes.
 
-> **Where the dependencies run.** On **Mainnet**, validators are asked to self-host both dependencies from [1.2](#12-external-service-dependencies), the Sui fullnode and the Bitcoin node, and we advise running them on hosts separate from the Hashi node, which itself stays apart from your Sui validator. On **Testnet**, colocating these on one host is generally acceptable, because the blast radius is a test deployment rather than custodied funds, and the public Sui fullnode or a Bitcoin RPC provider is fine. This is an operational policy rather than something the software enforces.
+> **Where the dependencies run.** On **Mainnet**, validators are asked to self-host the Sui fullnode and are strongly encouraged to self-host the Bitcoin node (both from [1.2](#12-external-service-dependencies)), and we advise running them on hosts separate from the Hashi node, which itself stays apart from your Sui validator. On **Testnet**, colocating these on one host is generally acceptable, because the blast radius is a test deployment rather than custodied funds, and the public Sui fullnode or a Bitcoin RPC provider is fine. This is an operational policy rather than something the software enforces.
 
 | Resource | Recommendation |
 |----------|---------------|
@@ -151,7 +151,7 @@ A Hashi node depends on two external services that you provide:
   - transaction relay left on (no `blocksonly=1`, which disables `estimatesmartfee`); without a fee estimate the node won't build or sign withdrawals
 - **Sui fullnode serving the gRPC v2 API** (`sui.rpc.v2` services, including the `SubscribeCheckpoints` stream). On Mainnet, self-host it; on Testnet the public fullnode also works out of the box. See [1.4](#14-sui-rpc).
 
-> On **Mainnet**, validators are asked to self-host both dependencies: your own Sui fullnode and your own Bitcoin node, not the public Sui fullnode or a third-party Bitcoin RPC provider. Run both on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others. In the configurations shown here the links from the Hashi node to both are unencrypted (plaintext gRPC and HTTP basic auth), so keep them on a private network.
+> On **Mainnet**, validators are asked to self-host the Sui fullnode rather than use the public one, and are strongly encouraged to self-host the Bitcoin node rather than rely on a third-party RPC provider. Run what you host on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others. In the configurations shown here the links from the Hashi node to both are unencrypted (plaintext gRPC and HTTP basic auth), so keep them on a private network.
 
 See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 
@@ -242,9 +242,11 @@ bitcoind --version
 <Tabs groupId="network" queryString>
 <TabItem value="mainnet" label="Mainnet" default>
 
-**Run your own node.** On Mainnet, validators are asked to self-host the Bitcoin node rather than use an RPC provider, and to run it on a host separate from the Hashi node. One archival node serves both channels.
+**Run your own node if you can.** On Mainnet, validators are strongly encouraged to self-host the Bitcoin node, on a host separate from the Hashi node. A node that depends on a provider trusts it for transaction lookups, UTXO checks, fee estimates and withdrawal broadcast, and validators that share a provider share its outages. One self-hosted archival node serves both channels.
 
-**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [1.1](#11-resources). The node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: Hashi cannot anchor its light client until your node has passed `bitcoin-start-height` (`800000` by default on Mainnet).
+If you use a provider instead, it has to cover both channels. The JSON-RPC endpoint must be archival, look up any confirmed transaction by txid (`getrawtransaction`), and permit `sendrawtransaction` and `testmempoolaccept`. The P2P side must be a peer you can list in `bitcoin-trusted-peers` that serves compact block filters and full blocks, so an RPC-only endpoint is not enough. The rest of this tab covers the self-hosted node.
+
+**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [1.1](#11-resources). A self-hosted node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: Hashi cannot anchor its light client until your node has passed `bitcoin-start-height` (`800000` by default on Mainnet).
 
 **`bitcoin.conf`, run as an archival, non-pruned node:**
 
