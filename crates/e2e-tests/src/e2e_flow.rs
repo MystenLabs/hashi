@@ -2204,6 +2204,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
+        // The running node writes its next-epoch keys without waiting for an
+        // epoch change, so the next committee seats it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let has_keys = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .committee_member(&target)
+                .is_some_and(|m| m.next_epoch_encryption_public_key().is_some());
+            if has_keys {
+                break;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "re-registered node never wrote its next-epoch keys"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        networks.sui_network.force_close_epoch().await?;
+        let third_epoch = second_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(third_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {third_epoch}: {e}"));
+        }
+        let committee = networks.hashi_network.nodes()[0]
+            .hashi()
+            .onchain_state()
+            .current_committee()
+            .ok_or_else(|| anyhow!("no committee after third epoch change"))?;
+        assert!(
+            committee.index_of(&target).is_some(),
+            "a re-registered node must be seated at the next committee formation"
+        );
+
         Ok(())
     }
 
