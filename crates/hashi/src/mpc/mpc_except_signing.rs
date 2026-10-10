@@ -694,11 +694,11 @@ impl MpcManager {
             let cached = match request.protocol_type {
                 ProtocolTypeIndicator::Dkg => self
                     .current_dkg_messages
-                    .entry(&request.dealer)
+                    .get_entry(&request.dealer)
                     .map(|entry| RetrieveReply::Dkg(entry.bytes().clone())),
                 ProtocolTypeIndicator::KeyRotation => self
                     .current_rotation_messages
-                    .entry(&request.dealer)
+                    .get_entry(&request.dealer)
                     .map(|entry| RetrieveReply::Rotation(entry.bytes().clone())),
                 ProtocolTypeIndicator::NonceGeneration => None,
             };
@@ -1718,7 +1718,7 @@ impl MpcManager {
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.current_dkg_messages
-                    .entry(&dealer)
+                    .get_entry(&dealer)
                     .is_none_or(|entry| entry.hash() != message.messages_hash)
             };
             if needs_retrieval {
@@ -1793,14 +1793,14 @@ impl MpcManager {
                         })?;
                     let message = mgr
                         .current_dkg_messages
-                        .get(&dealer)
+                        .get_entry(&dealer)
+                        .cloned()
                         .ok_or_else(|| {
                             MpcError::ProtocolFailed(format!(
                                 "No DKG message for dealer {:?} during complaint recovery",
                                 dealer
                             ))
-                        })?
-                        .clone();
+                        })?;
                     (signers, mgr.mpc_config.epoch, message)
                 };
                 let recovered = Self::recover_dkg_shares_via_complaint(
@@ -2030,7 +2030,7 @@ impl MpcManager {
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.current_rotation_messages
-                    .entry(&dealer)
+                    .get_entry(&dealer)
                     .is_none_or(|entry| entry.hash() != message.messages_hash)
             };
             if needs_retrieval {
@@ -2101,14 +2101,14 @@ impl MpcManager {
                     })?;
                 let msgs = mgr
                     .current_rotation_messages
-                    .get(&dealer)
+                    .get_entry(&dealer)
+                    .cloned()
                     .ok_or_else(|| {
                         MpcError::ProtocolFailed(format!(
                             "No rotation messages for dealer {:?}",
                             dealer
                         ))
-                    })?
-                    .clone();
+                    })?;
                 (signers, mgr.mpc_config.epoch, msgs)
             };
             let _timer = metrics
@@ -4161,9 +4161,9 @@ impl MpcManager {
         let complaint_key = ComplaintsToProcessKey::Dkg(dealer);
         let message = self
             .current_dkg_messages
-            .get(&dealer)
-            .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?
-            .clone();
+            .get_entry(&dealer)
+            .cloned()
+            .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?;
         let session_id = self.current_session_id().dealer_session_id(&dealer);
         self.process_and_store_message(
             self.mpc_config.nodes.clone(),
@@ -4185,12 +4185,12 @@ impl MpcManager {
     ) -> MpcResult<()> {
         let rotation_messages = self
             .current_rotation_messages
-            .get(dealer)
-            .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?
-            .clone();
+            .get_entry(dealer)
+            .cloned()
+            .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?;
         let base_sid = self.current_session_id();
         let mut unowned = Vec::new();
-        for (share_index, message) in rotation_messages {
+        for (&share_index, message) in rotation_messages.iter() {
             if !dealer_previous_share_indices.contains(&share_index) {
                 unowned.push(share_index);
                 continue;
@@ -4217,7 +4217,7 @@ impl MpcManager {
                 self.party_id()?,
                 self.mpc_config.threshold,
                 &session_id,
-                &message,
+                message,
                 commitment,
                 output_key,
                 complaint_key,
@@ -6418,10 +6418,13 @@ impl MpcManager {
         dealer: &Address,
     ) -> MpcResult<Option<MessagesHash>> {
         let cached = match protocol_type {
-            ProtocolTypeIndicator::Dkg => self.current_dkg_messages.entry(dealer).map(|e| e.hash()),
+            ProtocolTypeIndicator::Dkg => self
+                .current_dkg_messages
+                .get_entry(dealer)
+                .map(|e| e.hash()),
             ProtocolTypeIndicator::KeyRotation => self
                 .current_rotation_messages
-                .entry(dealer)
+                .get_entry(dealer)
                 .map(|e| e.hash()),
             ProtocolTypeIndicator::NonceGeneration => None,
         };

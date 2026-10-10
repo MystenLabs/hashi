@@ -11998,7 +11998,7 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
     };
     let cached = receiver
         .current_rotation_messages
-        .entry(&dealer_addr)
+        .get_entry(&dealer_addr)
         .unwrap()
         .bytes()
         .as_ptr_range();

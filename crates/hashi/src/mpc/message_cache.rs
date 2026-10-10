@@ -37,7 +37,9 @@ pub struct Cached<T> {
 
 impl<T: CachedPayload> Cached<T> {
     pub fn new(value: T) -> Arc<Self> {
-        let bytes = Bytes::from(bcs::to_bytes(&value).expect(EXPECT_SERIALIZATION_SUCCESS));
+        let mut encoded = bcs::to_bytes(&value).expect(EXPECT_SERIALIZATION_SUCCESS);
+        encoded.shrink_to_fit();
+        let bytes = Bytes::from(encoded);
         let hash = T::payload_hash(&bytes);
         Arc::new(Self { value, bytes, hash })
     }
@@ -88,7 +90,7 @@ impl<T> MessageCache<T> {
         self.entries.get(dealer).map(|entry| &entry.value)
     }
 
-    pub fn entry(&self, dealer: &Address) -> Option<&Arc<Cached<T>>> {
+    pub fn get_entry(&self, dealer: &Address) -> Option<&Arc<Cached<T>>> {
         self.entries.get(dealer)
     }
 
