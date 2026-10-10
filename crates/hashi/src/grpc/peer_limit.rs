@@ -11,7 +11,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::ready;
 
+use bytes::Bytes;
 use prometheus::Histogram;
 use prometheus::IntCounter;
 use prometheus::IntGauge;
@@ -22,6 +24,7 @@ use super::route_limits::RouteLimits;
 use crate::metrics::Metrics;
 
 const REQUEST_BUDGET: &str = "request";
+const RESPONSE_PIECE: usize = 64 * 1024;
 const MPC_WORK_BUDGET: &str = "work";
 
 tokio::task_local! {
@@ -70,6 +73,7 @@ struct Peer {
     work_shed: IntCounter,
     work_bytes: ByteBudget,
     too_large: IntCounter,
+    responses_shed: IntCounter,
 }
 
 struct ByteBudget {
@@ -102,7 +106,6 @@ impl ByteBudget {
                     reserved.checked_add(bytes).filter(|&now| now <= limit)
                 })
         else {
-            self.over.inc();
             return false;
         };
         let now = before + bytes;
@@ -129,6 +132,7 @@ pub(super) struct RequestCharge {
 impl RequestCharge {
     pub(super) fn reserve(&self, bytes: u64) -> bool {
         if !self.peer.request_bytes.try_reserve(bytes, self.budget) {
+            self.peer.request_bytes.over.inc();
             return false;
         }
         self.reserved.fetch_add(bytes, Ordering::AcqRel);
@@ -155,6 +159,7 @@ pub(crate) struct MpcWorkGuard {
 impl MpcWorkGuard {
     fn reserve(&self, bytes: u64) -> bool {
         if !self.peer.work_bytes.try_reserve(bytes, self.budget) {
+            self.peer.work_bytes.over.inc();
             return false;
         }
         self.reserved.fetch_add(bytes, Ordering::AcqRel);
@@ -226,6 +231,9 @@ impl PeerInflightLimiter {
                     work_bytes: ByteBudget::new(metrics, &label, MPC_WORK_BUDGET),
                     too_large: metrics
                         .peer_requests_too_large_total
+                        .with_label_values(&[&label]),
+                    responses_shed: metrics
+                        .peer_responses_shed_total
                         .with_label_values(&[&label]),
                 })
             })
@@ -349,35 +357,111 @@ pub(crate) async fn limit_per_peer(
     // Held across the handler, since tonic drops a unary body before calling it.
     let response = MPC_WORK.scope(work, next.run(request)).await;
     drop(charge);
-    response.map(|body| axum::body::Body::new(Guarded { body, _slot: slot }))
+    let budget = super::is_grpc_content_type(response.headers()).then_some(limiter.0.budget_bytes);
+    response.map(|body| axum::body::Body::new(Guarded::new(body, slot, budget)))
 }
 
 fn shed<B>(request: &http::Request<B>) -> axum::response::Response {
     super::unavailable(request, super::PEER_INFLIGHT_LIMIT_MSG)
 }
 
-struct Guarded<B> {
-    body: B,
-    _slot: Slot,
+struct Guarded {
+    body: axum::body::Body,
+    slot: Slot,
+    budget: Option<u64>,
+    pending: Option<(Bytes, usize)>,
+    done: bool,
 }
 
-impl<B: http_body::Body + Unpin> http_body::Body for Guarded<B> {
-    type Data = B::Data;
-    type Error = B::Error;
+impl Guarded {
+    fn new(body: axum::body::Body, slot: Slot, budget: Option<u64>) -> Self {
+        Self {
+            body,
+            slot,
+            budget,
+            pending: None,
+            done: false,
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some((frame, _)) = self.pending.take() {
+            self.slot
+                .0
+                .request_bytes
+                .release(u64::try_from(frame.len()).unwrap_or(u64::MAX));
+        }
+    }
+}
+
+impl http_body::Body for Guarded {
+    type Data = Bytes;
+    type Error = axum::Error;
 
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.body).poll_frame(cx)
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, axum::Error>>> {
+        let this = self.get_mut();
+        loop {
+            if let Some((frame, sent)) = &mut this.pending
+                && *sent < frame.len()
+            {
+                let end = frame.len().min(*sent + RESPONSE_PIECE);
+                let piece = Bytes::copy_from_slice(&frame[*sent..end]);
+                *sent = end;
+                return Poll::Ready(Some(Ok(http_body::Frame::data(piece))));
+            }
+            this.release();
+            if this.done {
+                return Poll::Ready(None);
+            }
+            let frame = match ready!(Pin::new(&mut this.body).poll_frame(cx)) {
+                Some(Ok(frame)) => frame,
+                other => {
+                    this.done = true;
+                    return Poll::Ready(other);
+                }
+            };
+            let Some(budget) = this.budget else {
+                return Poll::Ready(Some(Ok(frame)));
+            };
+            let data = match frame.into_data() {
+                Ok(data) => data,
+                Err(frame) => return Poll::Ready(Some(Ok(frame))),
+            };
+            let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            if !this.slot.0.request_bytes.try_reserve(bytes, budget) {
+                this.slot.0.responses_shed.inc();
+                this.done = true;
+                let mut trailers = http::HeaderMap::new();
+                let _ = tonic::Status::unavailable(super::PEER_INFLIGHT_LIMIT_MSG)
+                    .add_header(&mut trailers);
+                return Poll::Ready(Some(Ok(http_body::Frame::trailers(trailers))));
+            }
+            this.pending = Some((data, 0));
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
+        let pieces_left = self
+            .pending
+            .as_ref()
+            .is_some_and(|(frame, sent)| *sent < frame.len());
+        !pieces_left && (self.done || self.body.is_end_stream())
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        self.body.size_hint()
+        match self.budget {
+            Some(_) => http_body::SizeHint::default(),
+            None => self.body.size_hint(),
+        }
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -442,6 +526,7 @@ mod tests {
     use axum::Router;
     use axum::routing::get;
     use axum::routing::post;
+    use http_body::Body as _;
     use tower::Service;
 
     use super::*;
@@ -803,6 +888,139 @@ mod tests {
         stream.send_data(message.into(), true).unwrap();
         assert_eq!(response.await.unwrap().status(), http::StatusCode::OK);
         assert_eq!(metrics.mpc_unguarded_spawn_blocking_total.get(), 1);
+    }
+
+    struct Frames(std::collections::VecDeque<http_body::Frame<Bytes>>);
+
+    impl http_body::Body for Frames {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+            Poll::Ready(self.0.pop_front().map(Ok))
+        }
+    }
+
+    fn guarded_response(limiter: &PeerInflightLimiter, frame: Bytes) -> Guarded {
+        let body = Frames(
+            [
+                http_body::Frame::data(frame),
+                http_body::Frame::trailers(http::HeaderMap::new()),
+            ]
+            .into(),
+        );
+        Guarded::new(
+            axum::body::Body::new(body),
+            limiter.try_admit(peer(b'a')).unwrap(),
+            Some(limiter.0.budget_bytes),
+        )
+    }
+
+    async fn next_frame(body: &mut Guarded) -> Option<http_body::Frame<Bytes>> {
+        std::future::poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx))
+            .await
+            .map(Result::unwrap)
+    }
+
+    #[tokio::test]
+    async fn a_response_is_charged_until_its_last_copied_piece_and_shed_when_it_does_not_fit() {
+        let registry = prometheus::Registry::new();
+        let limiter = PeerInflightLimiter::new(
+            200,
+            4 * RESPONSE_PIECE as u64,
+            RouteLimits::default(),
+            Arc::new(Metrics::new(&registry)),
+        );
+        let frame = Bytes::from(vec![7; 3 * RESPONSE_PIECE + 10]);
+        let allocation = frame.as_ptr_range();
+
+        let mut body = guarded_response(&limiter, frame.clone());
+        let piece = next_frame(&mut body).await.unwrap().into_data().unwrap();
+        assert_eq!(piece.len(), RESPONSE_PIECE);
+        assert!(!allocation.contains(&piece.as_ptr()));
+        assert_eq!(limiter.reserved(peer(b'a')), frame.len() as u64);
+        assert_eq!(limiter.inflight(peer(b'a')), 1);
+        let mut sent = piece.len();
+        while let Some(frame) = next_frame(&mut body).await {
+            if let Ok(piece) = frame.into_data() {
+                sent += piece.len();
+            }
+        }
+        assert_eq!(sent, frame.len());
+        assert_eq!(limiter.reserved(peer(b'a')), 0);
+        drop(body);
+        assert_eq!(limiter.inflight(peer(b'a')), 0);
+
+        let mut body = guarded_response(&limiter, frame.clone());
+        next_frame(&mut body).await.unwrap();
+        drop(body);
+        assert_eq!(limiter.reserved(peer(b'a')), 0);
+
+        let mut body = guarded_response(&limiter, Bytes::from(vec![7; 4 * RESPONSE_PIECE + 1]));
+        let trailers = next_frame(&mut body)
+            .await
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        let status = tonic::Status::from_header_map(&trailers).unwrap();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(
+            status
+                .message()
+                .contains(crate::grpc::PEER_INFLIGHT_LIMIT_MSG)
+        );
+        assert!(next_frame(&mut body).await.is_none());
+        assert_eq!(limiter.peer(peer(b'a')).responses_shed.get(), 1);
+        assert_eq!(limiter.reserved(peer(b'a')), 0);
+    }
+
+    const LARGE: usize = 4 << 20;
+
+    async fn large_grpc(_: axum::extract::Request) -> axum::response::Response {
+        let mut response = axum::response::Response::new(axum::body::Body::from(vec![7u8; LARGE]));
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/grpc"),
+        );
+        response
+    }
+
+    #[tokio::test]
+    async fn a_response_the_client_does_not_read_keeps_its_slot_and_charge() {
+        let registry = prometheus::Registry::new();
+        let limiter = PeerInflightLimiter::new(
+            200,
+            64 << 20,
+            RouteLimits::default(),
+            Arc::new(Metrics::new(&registry)),
+        );
+        let server = serve(
+            limiter.clone(),
+            Router::new().route("/large", post(large_grpc)),
+        );
+        let client = connect(*server.local_addr()).await;
+        let (response, mut stream) = open(&client, "/large", b'a', true).await;
+        stream.send_data(Bytes::new(), true).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), response)
+            .await
+            .unwrap()
+            .unwrap();
+        until(|| limiter.reserved(peer(b'a')) == LARGE as u64).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(limiter.reserved(peer(b'a')), LARGE as u64);
+        assert_eq!(limiter.inflight(peer(b'a')), 1);
+        let mut body = response.into_body();
+        let mut read = 0;
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.unwrap();
+            read += chunk.len();
+            body.flow_control().release_capacity(chunk.len()).unwrap();
+        }
+        assert_eq!(read, LARGE);
+        until(|| limiter.reserved(peer(b'a')) == 0 && limiter.inflight(peer(b'a')) == 0).await;
     }
 
     #[test]

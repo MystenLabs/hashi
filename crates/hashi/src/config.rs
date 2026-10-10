@@ -147,9 +147,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_per_peer_inflight_limit: Option<u32>,
 
-    /// Maximum request bytes in flight for one registered peer across all its
-    /// connections; requests above it are shed with `Unavailable`. MPC requests
-    /// that take the MPC lock also get a separate budget of this size.
+    /// Maximum request and response bytes in flight for one registered peer across
+    /// all its connections; requests and responses above it are shed with
+    /// `Unavailable`. Responses count until handed to HTTP/2. MPC requests that
+    /// take the MPC lock also get a separate budget of this size.
     ///
     /// Defaults to, and is never below, room for two maximum-size requests.
     #[serde(skip_serializing_if = "Option::is_none")]

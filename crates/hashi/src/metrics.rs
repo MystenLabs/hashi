@@ -33,15 +33,16 @@ pub struct Metrics {
     pub(crate) bytes_received_total: IntCounterVec,
     pub(crate) peer_inflight_at_admission: HistogramVec,
     pub(crate) peer_inflight_max: IntGaugeVec,
-    pub(crate) peer_requests_shed_total: IntCounterVec,
+    pub peer_requests_shed_total: IntCounterVec,
     pub(crate) peer_inflight_max_bytes: IntGaugeVec,
-    pub(crate) peer_requests_over_byte_budget_total: IntCounterVec,
-    pub(crate) peer_requests_too_large_total: IntCounterVec,
+    pub peer_requests_over_byte_budget_total: IntCounterVec,
+    pub peer_requests_too_large_total: IntCounterVec,
     pub(crate) peer_inflight_limit_bytes: IntGauge,
     pub(crate) peer_mpc_work_at_admission: HistogramVec,
     pub(crate) peer_mpc_work_shed_total: IntCounterVec,
     pub(crate) mpc_unguarded_spawn_blocking_total: IntCounter,
     pub(crate) peer_connections_max: IntGaugeVec,
+    pub peer_responses_shed_total: IntCounterVec,
     pub peer_requests_over_connection_limit_total: IntCounterVec,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
@@ -487,6 +488,13 @@ impl Metrics {
             peer_connections_max: register_int_gauge_vec_with_registry!(
                 "hashi_peer_connections_max",
                 "Peak connections counted against a peer's connection limit since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_responses_shed_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_responses_shed_total",
+                "Responses shed because they did not fit the peer's byte budget",
                 &["peer"],
                 registry,
             )
