@@ -23,6 +23,7 @@ mod route_limits;
 pub use client::BoxedChannel;
 pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
+pub(crate) use peer_limit::guard_blocking_mpc_work;
 
 pub mod bridge_service;
 pub mod guardian_client;
@@ -87,6 +88,9 @@ impl HttpService {
                     method,
                     route_limits::SMALL_MPC_REQUEST_LIMIT,
                 );
+            }
+            for method in route_limits::MPC_WORK_METHODS {
+                routes.mpc_work(mpc_service_server::SERVICE_NAME, method);
             }
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();

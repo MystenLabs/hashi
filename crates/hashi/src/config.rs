@@ -139,14 +139,16 @@ pub struct Config {
     pub grpc_max_decoding_message_size: Option<usize>,
 
     /// Maximum requests served concurrently for one registered peer across all
-    /// its connections; requests above it are shed with `Unavailable`.
+    /// its connections; requests above it are shed with `Unavailable`. MPC
+    /// requests that take the MPC lock also get a separate limit of this size.
     ///
     /// Defaults to 200. Zero is rejected at load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_per_peer_inflight_limit: Option<u32>,
 
     /// Maximum request bytes in flight for one registered peer across all its
-    /// connections; requests above it are shed with `Unavailable`.
+    /// connections; requests above it are shed with `Unavailable`. MPC requests
+    /// that take the MPC lock also get a separate budget of this size.
     ///
     /// Defaults to, and is never below, room for two maximum-size requests.
     #[serde(skip_serializing_if = "Option::is_none")]

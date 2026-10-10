@@ -17,10 +17,18 @@ pub(crate) const SMALL_MPC_METHODS: [&str; 5] = [
     "GetPresigDealerSetSignature",
 ];
 
+pub(crate) const MPC_WORK_METHODS: [&str; 4] = [
+    "SendMessages",
+    "Complain",
+    "RetrieveMessages",
+    "GetPublicMpcOutput",
+];
+
 #[derive(Debug, Default)]
 pub(crate) struct RouteLimits {
     services: HashMap<&'static str, usize>,
     methods: HashMap<String, usize>,
+    mpc_work: HashSet<String>,
 }
 
 impl RouteLimits {
@@ -31,6 +39,14 @@ impl RouteLimits {
 
     pub(crate) fn method(&mut self, service: &'static str, method: &str, limit: usize) {
         self.methods.insert(format!("/{service}/{method}"), limit);
+    }
+
+    pub(crate) fn mpc_work(&mut self, service: &'static str, method: &str) {
+        self.mpc_work.insert(format!("/{service}/{method}"));
+    }
+
+    pub(crate) fn mpc_work_paths(&self) -> impl Iterator<Item = &str> {
+        self.mpc_work.iter().map(String::as_str)
     }
 
     pub(crate) fn has_service(&self, name: &str) -> bool {
@@ -111,7 +127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_reflection_streams_requests_and_every_capped_method_exists() {
+    fn only_reflection_streams_requests_and_every_listed_mpc_method_exists() {
         let streaming: Vec<_> = grpc_methods()
             .iter()
             .filter(|method| method.client_streaming)
@@ -126,7 +142,7 @@ mod tests {
         );
 
         let mpc = hashi_types::proto::mpc_service_server::SERVICE_NAME;
-        for method in SMALL_MPC_METHODS {
+        for method in SMALL_MPC_METHODS.into_iter().chain(MPC_WORK_METHODS) {
             let path = format!("/{mpc}/{method}");
             assert!(
                 grpc_methods().iter().any(|known| *known.path == path),

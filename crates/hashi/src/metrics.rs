@@ -38,6 +38,9 @@ pub struct Metrics {
     pub(crate) peer_requests_over_byte_budget_total: IntCounterVec,
     pub(crate) peer_requests_too_large_total: IntCounterVec,
     pub(crate) peer_inflight_limit_bytes: IntGauge,
+    pub(crate) peer_mpc_work_at_admission: HistogramVec,
+    pub(crate) peer_mpc_work_shed_total: IntCounterVec,
+    pub(crate) mpc_unguarded_spawn_blocking_total: IntCounter,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
 
@@ -461,6 +464,27 @@ impl Metrics {
             peer_inflight_limit_bytes: register_int_gauge_with_registry!(
                 "hashi_peer_inflight_limit_bytes",
                 "Effective per-peer byte budget",
+                registry,
+            )
+            .unwrap(),
+            peer_mpc_work_at_admission: register_histogram_vec_with_registry!(
+                "hashi_peer_mpc_work_at_admission",
+                "MPC work requests a peer held when one more was admitted, by route",
+                &["path"],
+                PEER_INFLIGHT_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            peer_mpc_work_shed_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_mpc_work_shed_total",
+                "Requests shed because the peer was at its MPC work limit",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            mpc_unguarded_spawn_blocking_total: register_int_counter_with_registry!(
+                "hashi_mpc_unguarded_spawn_blocking_total",
+                "MPC blocking work started inline by a request handler that has no MPC work budget",
                 registry,
             )
             .unwrap(),

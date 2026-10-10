@@ -588,10 +588,10 @@ backup-dir = "/var/lib/hashi/backups"
 # Max gRPC message size in bytes (default: 33554432 = 32 MiB)
 # grpc-max-decoding-message-size = 33554432
 
-# Max in-flight gRPC requests per peer (default: 200)
+# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
 # grpc-per-peer-inflight-limit = 200
 
-# Max in-flight gRPC request bytes per peer (default and minimum: room for two maximum-size requests)
+# Max in-flight gRPC request bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
 # grpc-per-peer-inflight-bytes = 67108874
 
 # Withdrawal batching delay in ms (default: 300000 = 5 min)
