@@ -80,7 +80,7 @@ These details trip up most operators:
 | [2. Key management and security](#2-key-management-and-security) | Which keys exist, which you generate, and which one signs what |
 | [3. Configuration](#3-configuration) | Validator config template, CLI config, and environment variables |
 | [4. Network and firewall](#4-network-and-firewall) | Inbound and outbound ports, metrics binding, and TLS |
-| [5. Genesis procedure](#5-genesis-procedure) | Registering, starting the node, and the launch and DKG steps that follow |
+| [5. Genesis procedure](#5-genesis-procedure) | Registering, starting the node, the launch and DKG steps that follow, and joining after launch |
 | [6. CLI reference](#6-cli-reference) | Every subcommand, plus the flag placement that causes most CLI errors |
 | [7. Governance participation](#7-governance-participation) | Proposal types, thresholds, and voting |
 | [8. Monitoring and metrics](#8-monitoring-and-metrics) | Prometheus endpoint, metrics push, key metrics, and suggested alerts |
@@ -229,7 +229,7 @@ Hashi talks to Bitcoin over **two independent channels**, both of which must be 
 
 Whichever endpoint serves the **JSON-RPC** channel must be **archival** (Hashi calls `getrawtransaction` on arbitrary deposit txids) and must permit `sendrawtransaction` and `testmempoolaccept`. The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) needs a full, unpruned peer that serves filters (`peerblockfilters=1`): the light client drops any peer that does not advertise both `NODE_NETWORK` and `NODE_COMPACT_FILTERS`, and a pruned node never advertises the first. The simplest setup that satisfies both channels is a single self-hosted archival node.
 
-**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `testmempoolaccept`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockhash`, `getbestblockhash`. Off Mainnet the light client resolves its startup anchor with `getblockhash`, so the node can't start without it. `testmempoolaccept` sees each signed withdrawal before finalize, so prefer a bitcoind you run. Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
+**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `testmempoolaccept`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockhash`, `getbestblockhash`. Off Mainnet the light client resolves its startup anchor with `getblockhash`, so the node can't start without it. `testmempoolaccept` sees each signed withdrawal before finalize, so prefer a bitcoind you run. That check is not in the 1.0 releases, which never call `testmempoolaccept`; allow it now so the next release needs no RPC change. Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
 
 **Installing Bitcoin Core.** Download the release binaries for **v29 or newer** from [bitcoincore.org](https://bitcoincore.org/en/download/), verify them against the published checksums and signatures, then extract and install:
 
@@ -768,6 +768,8 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 
 > **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators are strongly encouraged to set one. Each operator screens with their own TRM account; [Sanctions](sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
 
+> **Already running a Testnet node?** Give the Mainnet node its own `db` directory, starting empty, and its own `backup-dir`. Both hold one deployment's node keys and MPC key shares, so never point a Mainnet node at a Testnet node's database or backups. We also recommend new TLS and operator keys for Mainnet (see [2](#2-key-management-and-security)) rather than the ones a Testnet host has been using.
+
 ### 3.2 CLI config
 
 For governance commands, queries, and user-facing operations. Generate a template:
@@ -981,6 +983,22 @@ curl -s http://localhost:9180/metrics | grep -E 'hashi_epoch|hashi_reconfig_in_p
 ```
 
 Expected after success: `hashi_epoch` > 0, `hashi_reconfig_in_progress` = 0, `hashi_presig_pool_remaining` > 0.
+
+### 5.9 Joining after launch
+
+A validator that registers after the launch is not in the genesis committee. It joins at a later committee formation, which happens at each Sui epoch change (see [9](#9-epoch-changes-reconfiguration)). The steps are steps 2 and 3 above, and their order matters:
+
+1. **Register** with the offline flow in [5.3](#53-step-2-register-your-validator).
+2. **Then start the node**, or restart it if it was already running. `hashi register` records your registration but not your node's next-epoch BLS and encryption keys; the node writes those when it starts.
+3. **Confirm** after the next epoch change that you are seated: `hashi committee -c hashi-cli.toml view 0x<your-validator-address>`.
+
+After launch, a node that starts before its validator is registered does not register itself. It logs:
+
+```
+validator 0x... has no readable on-chain registration, and a node only registers itself before genesis. Run `hashi register` if it is meant to join.
+```
+
+If you then register and leave that node running, its keys are not onchain yet, so it can miss the next committee formation and be seated an epoch (about a day) late. Restart it right after registering.
 
 ---
 
@@ -1357,6 +1375,8 @@ Notes:
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`, or `-1` until the pool holds a UTXO to probe. |
+
+> **Not in the 1.0 releases.** `hashi_withdrawal_bitcoin_check_script_failures_total` and `hashi_withdrawal_bitcoin_check_blind` come with the `testmempoolaccept` withdrawal check, which `testnet-1.0` and `mainnet-1.0` do not have. On 1.0 both metrics are absent and their alerts in [8.4](#84-suggested-alerts) never fire.
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count.
 
