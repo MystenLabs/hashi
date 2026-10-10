@@ -6,6 +6,8 @@ use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::human_duration;
 use crate::domain::utc_timestamp;
+use bitcoin::Txid;
+use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use std::fmt;
 
@@ -53,6 +55,19 @@ pub enum MonitorFinding {
         event: MonitorEvent,
         cursor: UnixSeconds,
     },
+    /// The Hashi approval's txid is not the txid of the transaction that its
+    /// inputs and outputs build.
+    WithdrawalTxidMismatch {
+        wid: WithdrawalID,
+        claimed: Txid,
+        computed: Txid,
+    },
+    /// The Hashi approval's inputs and outputs do not build a Bitcoin transaction.
+    WithdrawalTxUnbuildable {
+        wid: WithdrawalID,
+        claimed: Txid,
+        reason: String,
+    },
 }
 
 impl MonitorFinding {
@@ -68,6 +83,8 @@ impl MonitorFinding {
                 EventRelation::Successor => FindingCategory::Liveness,
             },
             Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
+            Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
+            Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -106,6 +123,22 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "SuiScanMissedEvent(event={event}, cursor={})",
                 utc_timestamp(*cursor),
+            ),
+            Self::WithdrawalTxidMismatch {
+                wid,
+                claimed,
+                computed,
+            } => write!(
+                f,
+                "WithdrawalTxidMismatch(wid={wid}, claimed={claimed}, computed={computed})"
+            ),
+            Self::WithdrawalTxUnbuildable {
+                wid,
+                claimed,
+                reason,
+            } => write!(
+                f,
+                "WithdrawalTxUnbuildable(wid={wid}, claimed={claimed}, reason={reason})"
             ),
         }
     }
