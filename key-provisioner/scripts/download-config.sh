@@ -55,13 +55,13 @@ format_fingerprint() {
     "${fingerprint:20:4}" "${fingerprint:24:4}" "${fingerprint:28:4}" "${fingerprint:32:4}" "${fingerprint:36:4}"
 }
 
-group_by_four() {
-  local value="$1" grouped=""
-  while ((${#value} > 4)); do
-    grouped+="${value:0:4} "
-    value="${value:4}"
-  done
-  printf '%s' "$grouped$value"
+# Prints one SHA-256 digest over every file under a directory. publish-kp-config.sh refuses to
+# publish unless its copy of this function is the same.
+config_digest() {
+  local manifest digest
+  manifest="$(cd "$1" && find . -type f -exec shasum -a 256 {} + | sort -k 2)" || return 1
+  digest="$(printf '%s\n' "$manifest" | shasum -a 256)" || return 1
+  printf '%s' "${digest:0:64}"
 }
 
 guardian_init() {
@@ -125,8 +125,9 @@ WORK_DIR="$(mktemp -d)"
 
 say "Guardian configuration download"
 printf '%s\n' \
-  "This script downloads the configuration the guardian operator published," \
-  "verifies every key provisioner certificate in it, and prepares it for the connected YubiKey." \
+  "This script downloads the configuration the guardian operator published, checks it against the" \
+  "digest the operator posted, verifies every key provisioner certificate in it, and prepares it" \
+  "for the connected YubiKey." \
   "It uses only the bucket and access key the operator shares, never other AWS configuration on this Mac."
 
 # A long-running scdaemon can miss a replugged YubiKey and holds the card exclusively,
@@ -212,6 +213,29 @@ done
 PUBLISHED_CONFIG="$DOWNLOAD_DIR/guardian-init.yaml"
 [[ -s "$PUBLISHED_CONFIG" ]] \
   || die "s3://$BUCKET/$CONFIG_PREFIX/ holds no configuration. Ask the operator to publish it."
+
+# The download names the commit to build, the guardian build to trust and the certificates the key
+# is shared between, so nothing in it is used before it has the digest the operator posted.
+say "Enter the configuration digest"
+printf 'The operator posts it with the guardian commit. Spaces in it are optional.\n'
+DIGEST="$(config_digest "$DOWNLOAD_DIR")" || die "Could not read the downloaded configuration."
+while true; do
+  read_value "Configuration digest" ""
+  VALUE="$(printf '%s' "$VALUE" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$VALUE" == "$DIGEST" ]]; then
+    break
+  fi
+  if [[ "$VALUE" =~ ^[0-9a-f]{64}$ ]]; then
+    printf '%s\n' \
+      "The published configuration does not have that digest. Check it against the operator's post." \
+      "If you entered it as posted, stop and tell the operator: the bucket holds another configuration." >&2
+  else
+    printf 'A configuration digest has 64 characters, each a digit or a letter from a to f, and you entered %d.\n' \
+      "${#VALUE}" >&2
+  fi
+done
+printf 'The configuration is the one the operator posted.\n'
+
 # This script writes both keys below; a published copy would make them ambiguous.
 if grep -qE '^(kp_pgp_cert_path|s3_credentials):' "$PUBLISHED_CONFIG"; then
   die "The published configuration sets kp_pgp_cert_path or s3_credentials. Ask the operator to publish it again."
@@ -227,9 +251,7 @@ while IFS= read -r line; do
 done < "$PUBLISHED_CONFIG"
 [[ -n "$HASHI_COMMIT" ]] \
   || die "The published configuration names no guardian commit. Ask the operator to publish it again."
-DIGEST="$(shasum -a 256 "$PUBLISHED_CONFIG")"
-DIGEST="${DIGEST:0:16}"
-printf 'Guardian commit:      %s\nConfiguration digest: %s\n' "$HASHI_COMMIT" "$(group_by_four "$DIGEST")"
+printf 'Guardian commit: %s\n' "$HASHI_COMMIT"
 
 if ! checkout_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"; then
   die "Could not read the commit of $REPO_ROOT."
@@ -286,13 +308,11 @@ CONFIG_FILE="$CONFIG_DIR/guardian-init.yaml"
 ) || die "Could not write $CONFIG_FILE."
 
 say "Download complete"
-printf 'Configuration:        %s\n' "$CONFIG_FILE"
-printf 'Your certificate:     certs/%s\n' "$MY_CERT"
-printf 'Key provisioners:     %d\n' "$cert_count"
-printf 'Configuration digest: %s\n' "$(group_by_four "$DIGEST")"
+printf 'Configuration:    %s\n' "$CONFIG_FILE"
+printf 'Your certificate: certs/%s\n' "$MY_CERT"
+printf 'Key provisioners: %d\n' "$cert_count"
 printf '%s\n' \
   "" \
-  "Compare the configuration digest with the one the guardian operator posted. Stop if they differ." \
   "The configuration holds the access key, so do not share it." \
   "When the operator asks for a step, run it from the configuration directory, as described in" \
   "key-provisioner/provision.md:"
