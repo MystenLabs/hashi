@@ -41,6 +41,8 @@ pub struct Metrics {
     pub(crate) peer_mpc_work_at_admission: HistogramVec,
     pub(crate) peer_mpc_work_shed_total: IntCounterVec,
     pub(crate) mpc_unguarded_spawn_blocking_total: IntCounter,
+    pub(crate) peer_connections_max: IntGaugeVec,
+    pub peer_requests_over_connection_limit_total: IntCounterVec,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
 
@@ -478,6 +480,20 @@ impl Metrics {
             peer_mpc_work_shed_total: register_int_counter_vec_with_registry!(
                 "hashi_peer_mpc_work_shed_total",
                 "Requests shed because the peer was at its MPC work limit",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_connections_max: register_int_gauge_vec_with_registry!(
+                "hashi_peer_connections_max",
+                "Peak connections counted against a peer's connection limit since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_requests_over_connection_limit_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_requests_over_connection_limit_total",
+                "Requests refused because they arrived on a connection beyond the peer's limit",
                 &["peer"],
                 registry,
             )

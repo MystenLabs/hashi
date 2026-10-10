@@ -356,25 +356,6 @@ impl CommitteeSet {
         self.clients.get(validator).cloned()
     }
 
-    // Set the tls private key to use when constructing tls configs for clients to other validators
-    pub fn set_tls_private_key(&mut self, tls_private_key: ed25519_dalek::SigningKey) -> &mut Self {
-        self.tls_private_key = Some(tls_private_key);
-        self.update_all_clients();
-        self
-    }
-
-    pub fn set_grpc_max_decoding_message_size(&mut self, limit: usize) -> &mut Self {
-        self.grpc_max_decoding_message_size = Some(limit);
-        self.update_all_clients();
-        self
-    }
-
-    pub fn set_metrics(&mut self, metrics: std::sync::Arc<crate::metrics::Metrics>) -> &mut Self {
-        self.metrics = Some(metrics);
-        self.update_all_clients();
-        self
-    }
-
     pub fn set_members(&mut self, members: BTreeMap<Address, MemberInfo>) -> &mut Self {
         self.tls_public_key_to_address = members
             .values()
@@ -385,40 +366,80 @@ impl CommitteeSet {
             })
             .collect();
         self.members = members;
-        self.update_all_clients();
+        self.update_all_clients(None);
         self
     }
 
-    fn update_all_clients(&mut self) {
+    pub fn configure_clients(
+        &mut self,
+        tls_private_key: Option<ed25519_dalek::SigningKey>,
+        grpc_max_decoding_message_size: Option<usize>,
+        metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
+        previous: Option<&CommitteeSet>,
+    ) {
+        self.tls_private_key = tls_private_key.or(self.tls_private_key.take());
+        self.grpc_max_decoding_message_size =
+            grpc_max_decoding_message_size.or(self.grpc_max_decoding_message_size);
+        self.metrics = metrics.or(self.metrics.take());
+        self.update_all_clients(previous);
+    }
+
+    fn update_all_clients(&mut self, previous: Option<&CommitteeSet>) {
+        let previous = previous.filter(|previous| self.same_client_settings(previous));
         self.clients = self
             .members
             .values()
             .filter_map(|info| {
-                if let (Some(addr), Some(public_key)) = (info.endpoint_url(), info.tls_public_key())
-                {
-                    Some((info.validator_address, addr, public_key))
-                } else {
-                    None
-                }
-            })
-            .filter_map(|(validator, endpoint_url, tls_public_key)| {
-                let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
-                    crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
-                } else {
-                    crate::tls::make_client_config(tls_public_key)
-                };
-                let mut client = Client::new(endpoint_url, tls_config)
-                    .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
-                    .ok()?;
-                if let Some(limit) = self.grpc_max_decoding_message_size {
-                    client = client.max_decoding_message_size(limit);
-                }
-                if let Some(metrics) = &self.metrics {
-                    client = client.with_metrics(metrics.clone());
-                }
-                Some((validator, client))
+                let validator = info.validator_address;
+                previous
+                    .filter(|previous| {
+                        previous
+                            .members
+                            .get(&validator)
+                            .is_some_and(|old| same_endpoint(old, info))
+                    })
+                    .and_then(|previous| previous.clients.get(&validator).cloned())
+                    .or_else(|| self.build_client(info))
+                    .map(|client| (validator, client))
             })
             .collect();
+    }
+
+    fn same_client_settings(&self, other: &CommitteeSet) -> bool {
+        self.tls_private_key
+            .as_ref()
+            .map(ed25519_dalek::SigningKey::verifying_key)
+            == other
+                .tls_private_key
+                .as_ref()
+                .map(ed25519_dalek::SigningKey::verifying_key)
+            && self.grpc_max_decoding_message_size == other.grpc_max_decoding_message_size
+            && match (&self.metrics, &other.metrics) {
+                (Some(ours), Some(theirs)) => std::sync::Arc::ptr_eq(ours, theirs),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn build_client(&self, info: &MemberInfo) -> Option<Client> {
+        let validator = info.validator_address;
+        let endpoint_url = info.endpoint_url.as_ref()?;
+        let tls_public_key = info.tls_public_key.as_ref()?;
+        let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
+            crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
+        } else {
+            crate::tls::make_client_config(tls_public_key)
+        };
+        let mut client = Client::new(endpoint_url, tls_config)
+            .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
+            .ok()?;
+        if let Some(limit) = self.grpc_max_decoding_message_size {
+            client = client.max_decoding_message_size(limit);
+        }
+        if let Some(metrics) = &self.metrics {
+            client = client.with_metrics(metrics.clone());
+        }
+        Some(client)
     }
 
     pub fn update_validator(&mut self, info: MemberInfo) {
@@ -439,28 +460,12 @@ impl CommitteeSet {
                 .insert(*tls_public_key.as_bytes(), validator);
         }
 
-        // update client
-        self.clients.remove(&validator);
-        if let Some(endpoint_url) = &info.endpoint_url
-            && let Some(tls_public_key) = &info.tls_public_key
-        {
-            let tls_config = if let Some(tls_private_key) = &self.tls_private_key {
-                crate::tls::make_client_config_with_client_auth(tls_private_key, tls_public_key)
-            } else {
-                crate::tls::make_client_config(tls_public_key)
-            };
-            if let Ok(mut client) = Client::new(endpoint_url, tls_config)
-                .inspect_err(|e| tracing::debug!("unable to build client for {validator}: {e}"))
-            {
-                if let Some(limit) = self.grpc_max_decoding_message_size {
-                    client = client.max_decoding_message_size(limit);
-                }
-                if let Some(metrics) = &self.metrics {
-                    client = client.with_metrics(metrics.clone());
-                }
-                self.clients.insert(validator, client);
+        let unchanged = match &info_entry {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                same_endpoint(entry.get(), &info) && self.clients.contains_key(&validator)
             }
-        }
+            std::collections::btree_map::Entry::Vacant(_) => false,
+        };
 
         // replace info
         match info_entry {
@@ -469,6 +474,13 @@ impl CommitteeSet {
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(info);
+            }
+        }
+        if !unchanged {
+            self.clients.remove(&validator);
+            let client = self.build_client(&self.members[&validator]);
+            if let Some(client) = client {
+                self.clients.insert(validator, client);
             }
         }
     }
@@ -626,6 +638,10 @@ impl fmt::Debug for MemberInfo {
             .field("resigned", &self.resigned)
             .finish()
     }
+}
+
+fn same_endpoint(a: &MemberInfo, b: &MemberInfo) -> bool {
+    a.endpoint_url == b.endpoint_url && a.tls_public_key == b.tls_public_key
 }
 
 impl MemberInfo {
@@ -1132,5 +1148,54 @@ mod tests {
     fn previous_committee_for_target_returns_none_when_no_earlier_committee() {
         let set = set_with(3, None, &[3]);
         assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_member_keeps_its_client_connection() {
+        use fastcrypto::traits::KeyPair;
+
+        crate::init_crypto_provider();
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let server = sui_http::Builder::new()
+            .tls_config(crate::tls::make_server_config(server_key.clone()))
+            .serve("127.0.0.1:0", axum::Router::new())
+            .unwrap();
+        let validator = Address::new([1; 32]);
+        let info = MemberInfo {
+            validator_address: validator,
+            operator_address: validator,
+            next_epoch_public_key: fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(
+                &mut rand::thread_rng(),
+            )
+            .public()
+            .clone(),
+            endpoint_url: Some(format!("https://{}", server.local_addr()).parse().unwrap()),
+            tls_public_key: Some(server_key.verifying_key()),
+            next_epoch_encryption_public_key: None,
+            ignored: false,
+            resigned: false,
+        };
+        let committees = |previous: Option<&CommitteeSet>| {
+            let mut set = CommitteeSet::new(Address::new([0; 32]), Address::new([0; 32]));
+            set.set_members(BTreeMap::from([(validator, info.clone())]));
+            set.configure_clients(
+                Some(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+                None,
+                None,
+                previous,
+            );
+            set
+        };
+
+        let mut set = committees(None);
+        let held = set.client(&validator).unwrap();
+        let _ = held.get_service_info().await;
+        assert_eq!(server.number_of_connections(), 1);
+
+        set.update_validator(info.clone());
+        let _ = set.client(&validator).unwrap().get_service_info().await;
+        let rebuilt = committees(Some(&set));
+        let _ = rebuilt.client(&validator).unwrap().get_service_info().await;
+        assert_eq!(server.number_of_connections(), 1);
     }
 }

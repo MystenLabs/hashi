@@ -15,8 +15,11 @@ use crate::Hashi;
 /// REFUSED_STREAM, 503/504), which must keep counting as peer failures.
 pub(crate) const SIGNING_MANAGER_NOT_READY_MSG: &str = "SigningManager not available";
 pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reached";
+pub(crate) const PEER_CONNECTION_LIMIT_MSG: &str =
+    "per-peer in-flight limit reached: too many connections";
 
 mod client;
+mod connection_limit;
 mod peer_limit;
 mod request_body;
 mod route_limits;
@@ -169,10 +172,18 @@ impl HttpService {
             routes,
             self.inner.metrics.clone(),
         );
+        let connections = connection_limit::ConnectionLimiter::new(
+            per_peer_connection_limit(self.inner.config.grpc_per_peer_connection_limit()),
+            self.inner.metrics.clone(),
+        );
         let layers = ServiceBuilder::new()
             .layer(axum::middleware::from_fn_with_state(
                 self.inner.clone(),
                 require_known_validator,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                connections.clone(),
+                connection_limit::limit_connections_per_peer,
             ))
             .layer(axum::middleware::from_fn_with_state(
                 limiter,
@@ -209,6 +220,7 @@ impl HttpService {
                 .serve(self.inner.config.listen_address(), router)
                 .unwrap(),
         );
+        connections.set_server(server_handle.clone());
         let local_addr = *server_handle.local_addr();
 
         (local_addr, supervise(server_handle))
@@ -262,6 +274,26 @@ fn per_peer_byte_budget(configured: Option<u64>, largest_decode_limit: usize) ->
         }
         Some(bytes) => bytes,
         None => floor,
+    }
+}
+
+fn per_peer_connection_limit(configured: Option<usize>) -> usize {
+    const FLOOR: usize = 3;
+    let limit = configured.unwrap_or(crate::config::DEFAULT_GRPC_PER_PEER_CONNECTION_LIMIT);
+    if limit < FLOOR {
+        tracing::warn!("grpc_per_peer_connection_limit {limit} is below {FLOOR}; using {FLOOR}");
+    }
+    limit.max(FLOOR)
+}
+
+fn unavailable<B>(request: &http::Request<B>, message: &'static str) -> axum::response::Response {
+    if is_grpc_content_type(request.headers()) {
+        tonic::Status::unavailable(message).into_http()
+    } else {
+        axum::response::IntoResponse::into_response((
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            message,
+        ))
     }
 }
 

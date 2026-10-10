@@ -19,6 +19,7 @@ const DEFAULT_WITHDRAWAL_SIGNING_PER_CALLER_LIMIT: usize = 4;
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 pub(crate) const DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT: u32 = 200;
+pub(crate) const DEFAULT_GRPC_PER_PEER_CONNECTION_LIMIT: usize = 4;
 /// Core's short fee-estimation horizon. Longer targets are answered from
 /// horizons that lag the fee market by hours to days.
 const MAX_WITHDRAWAL_FEE_CONF_TARGET: u16 = 12;
@@ -153,6 +154,13 @@ pub struct Config {
     /// Defaults to, and is never below, room for two maximum-size requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_per_peer_inflight_bytes: Option<u64>,
+
+    /// Maximum live connections one registered peer's requests are served on;
+    /// requests on any other connection are shed with `Unavailable`.
+    ///
+    /// Defaults to 4, and is never below 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_per_peer_connection_limit: Option<usize>,
 
     /// Maximum number of tasks each leader job family (unapproved and approved
     /// deposit processing, withdrawal approval, signing, broadcast, block checks)
@@ -532,6 +540,10 @@ impl Config {
         self.grpc_per_peer_inflight_bytes
     }
 
+    pub fn grpc_per_peer_connection_limit(&self) -> Option<usize> {
+        self.grpc_per_peer_connection_limit
+    }
+
     pub fn max_concurrent_leader_job_tasks(&self) -> usize {
         self.max_concurrent_leader_job_tasks.unwrap_or(32)
     }
@@ -614,6 +626,7 @@ impl Config {
             grpc_max_decoding_message_size: None,
             grpc_per_peer_inflight_limit: None,
             grpc_per_peer_inflight_bytes: None,
+            grpc_per_peer_connection_limit: None,
             max_concurrent_leader_job_tasks: None,
             withdrawal_batching_delay_ms: None,
             withdrawal_max_batch_size: None,
