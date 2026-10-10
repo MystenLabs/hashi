@@ -3170,6 +3170,7 @@ dependencies = [
  "futures",
  "hashi-guardian",
  "hashi-types",
+ "hex",
  "minreq",
  "prometheus",
  "serde",

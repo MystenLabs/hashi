@@ -7,8 +7,13 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
+use anyhow::Context;
+use bitcoin::Network;
+use bitcoin::ScriptBuf;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogEntry;
+use hashi_types::bitcoin::DerivationPath;
+use hashi_types::bitcoin::taproot_address;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -62,6 +67,32 @@ impl GuardianWithdrawalsPoller {
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
         self.cursor.to_unix_seconds()
+    }
+
+    /// The script every withdrawal change output must pay: the bridge address at
+    /// the zero derivation path. Its two keys never change. The MPC master key
+    /// comes from the KP-authorized genesis record and the guardian's Bitcoin
+    /// key from the latest ceremony record, both verified against the allowlist.
+    pub async fn read_change_script(&mut self, network: Network) -> anyhow::Result<ScriptBuf> {
+        let genesis = self
+            .reader
+            .read_genesis()
+            .await
+            .context("failed to read the guardian genesis record")?
+            .context("the guardian genesis record does not exist")?;
+        let ceremony = self
+            .reader
+            .read_latest_ceremony_state()
+            .await
+            .context("failed to read the guardian ceremony record")?;
+        let address = taproot_address(
+            &ceremony.btc_master_pubkey,
+            &genesis.mpc_master_g,
+            &DerivationPath::ZERO,
+            network,
+        );
+        tracing::info!(%address, "derived the bridge change address from the guardian records");
+        Ok(address.script_pubkey())
     }
 
     /// Time after which the next unread hourly partition is considered complete.
