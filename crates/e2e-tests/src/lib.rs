@@ -2239,6 +2239,7 @@ mod tests {
         // The proxy forwards a committee handoff only once the chain stores
         // it, which is when the rotation completes.
         use hashi_guardian_proxy::node::handoffs::HandoffGate;
+        use hashi_guardian_proxy::node::member_auth::MemberKey;
         use hashi_guardian_proxy::node::members::ChainSource;
         use hashi_types::proto;
         let guardian = test_networks
@@ -2293,7 +2294,10 @@ mod tests {
                 ..Default::default()
             }),
         };
-        handoff_gate.admit(&[early]).await.unwrap_err();
+        handoff_gate
+            .admit(MemberKey([1; 32]), &[early])
+            .await
+            .unwrap_err();
         assert_eq!(
             handoff_metrics
                 .handoff_refused
@@ -2309,7 +2313,8 @@ mod tests {
             proxy_allowlist().await?.members,
             tls_keys(test_networks.hashi_network().nodes())?
         );
-        // The handoff a node pushes for the completed rotation is admitted.
+        // The handoff a node pushes for the completed rotation is admitted. It
+        // comes from another member: the gate limits how often one may push.
         let pushed = test_networks.hashi_network().nodes()[0]
             .hashi()
             .onchain_state()
@@ -2318,7 +2323,7 @@ mod tests {
         let pushed =
             hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb(&pushed);
         handoff_gate
-            .admit(&[pushed])
+            .admit(MemberKey([2; 32]), &[pushed])
             .await
             .map_err(|status| anyhow::anyhow!("the proxy refused a node's handoff: {status}"))?;
         crate::test_helpers::assert_no_member_refusals(&test_networks);
