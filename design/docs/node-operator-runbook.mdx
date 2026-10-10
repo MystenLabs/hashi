@@ -246,7 +246,7 @@ bitcoind --version
 
 If you use a provider instead, it has to cover both channels. The JSON-RPC endpoint must be archival, look up any confirmed transaction by txid (`getrawtransaction`), and permit `sendrawtransaction` and `testmempoolaccept`. The P2P side must be a peer you can list in `bitcoin-trusted-peers` that meets the requirement above, so an RPC-only endpoint is not enough. Confirm with the provider that it offers such a peer before you rely on it. The rest of this tab covers the self-hosted node.
 
-**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [1.1](#11-resources). A self-hosted node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: Hashi cannot anchor its light client until your node has passed `bitcoin-start-height` (`800000` by default on Mainnet).
+**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [1.1](#11-resources). A self-hosted node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: the Hashi node cannot follow Bitcoin until this node is fully synced and both indexes are built.
 
 **`bitcoin.conf`, run as an archival, non-pruned node:**
 
@@ -277,19 +277,19 @@ The corresponding Hashi config pointers (full template in [3.1](#31-validator-co
 bitcoin-chain-id = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"  # mainnet genesis
 bitcoin-rpc = "http://<bitcoin-node-host>:8332"            # Hashi's default is http://localhost:8332, so set the host
 bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]       # host:port (port is mandatory)
-# bitcoin-start-height defaults to 800000 on Mainnet; override only to change the anchor
+# leave bitcoin-start-height unset on Mainnet (see the notes below)
 
 [bitcoin-rpc-auth]
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `800000` on Mainnet, a post-Taproot height; override it only if you need a different anchor. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
+> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. Leave `bitcoin-start-height` unset on Mainnet: for the default (`800000`) and any other height above Taproot activation, the light client anchors at a built-in checkpoint just below Taproot activation (block `709631`) and syncs headers and filters from there each time it starts. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
 
 **Verify your node:**
 
 ```bash
 bitcoin-cli getblockchaininfo | grep '"chain"'                           # must be "main"
-bitcoin-cli getblockchaininfo | grep -E '"blocks"|"initialblockdownload"'  # past 800000; false once synced
+bitcoin-cli getblockchaininfo | grep -E '"blocks"|"initialblockdownload"'  # at the network tip; false once synced
 bitcoin-cli getindexinfo                                                 # txindex and block filter index synced
 bitcoin-cli getnetworkinfo                                               # NODE_COMPACT_FILTERS advertised
 ```
@@ -557,7 +557,8 @@ bitcoin-rpc = "http://<bitcoin-node-host>:8332"
 # Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
 bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]
 
-# Light-client sync start height; defaults to 800000 on Mainnet (override to change the anchor)
+# Light-client sync start height; leave unset on Mainnet, where the client anchors
+# at a built-in checkpoint just below Taproot activation (block 709631)
 # bitcoin-start-height = 800000
 
 # ── Storage ───────────────────────────────────────────────────────────
@@ -1698,7 +1699,7 @@ Lost connectivity to Bitcoin peers after 15 consecutive failures. Restarting Kyo
 Waiting for bitcoind to reach start height 300000; it is at 214173
 ```
 
-**Likely cause:** the light client anchors at `bitcoin-start-height` and cannot start until your Bitcoin node has that block. The default is `800000` on Mainnet and `300000` on Signet, as in the example above. Either the node is still syncing, or the height is past its tip.
+**Likely cause:** the light client anchors at `bitcoin-start-height` and cannot start until your Bitcoin node has that block. This wait happens off Mainnet (the default is `300000` on Signet, as in the example above); on Mainnet with the default start height the light client anchors at a built-in checkpoint and does not wait here. Either the node is still syncing, or the height is past its tip.
 
 **Fix:** none needed while the node is syncing — the height in the log climbs, and Hashi anchors and carries on by itself once it arrives, with no restart. If the height is not climbing, set `bitcoin-start-height` at or below your node's tip, as noted in [1.5](#15-bitcoin-node).
 
