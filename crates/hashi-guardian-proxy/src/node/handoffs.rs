@@ -15,6 +15,12 @@
 //! committee (it is the Sui epoch of its `start_reconfig`, and an abort needs
 //! that epoch to have passed), and the enclave verifies the certificate over
 //! the committee it is sent.
+//!
+//! A member may send one committee update every `UPDATE_INTERVAL`. A lookup
+//! that finds nothing is not remembered and the enclave parses every chain it
+//! is sent, so without the limit one member could spend the proxy's Sui reads
+//! and the enclave's time. The limit is per member, so no member's updates
+//! hold back another's.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,16 +40,21 @@ use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
+use tokio::time::Instant;
 use tonic::Status;
 use tracing::warn;
 
 use crate::metrics::ProxyMetrics;
+use crate::node::member_auth::MemberKey;
 use crate::node::members::get_object;
 use crate::node::members::ChainSource;
 
 /// Nodes set no deadline on a committee update, so a stalled fullnode would
 /// otherwise hold the request open.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// A leader retries a refused update every checkpoint, so this is also the
+/// longest the limit delays a handoff.
+const UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tonic::async_trait]
 pub trait HandoffSource: Send + Sync + 'static {
@@ -57,6 +68,9 @@ pub struct HandoffGate {
     /// The stored handoffs read so far: the epoch each leaves, to the one it
     /// activates.
     stored: Mutex<HashMap<u64, u64>>,
+    /// When each member sent its last committee update, if within
+    /// `UPDATE_INTERVAL`.
+    last_update: Mutex<HashMap<MemberKey, Instant>>,
     metrics: Arc<ProxyMetrics>,
 }
 
@@ -65,17 +79,20 @@ impl HandoffGate {
         Self {
             source: Box::new(source),
             stored: Mutex::default(),
+            last_update: Mutex::default(),
             metrics,
         }
     }
 
-    /// Admit `transitions` only if each matches a stored handoff by its two
-    /// epochs alone, and each leaves the epoch the one before it reached.
+    /// Admit `member`'s `transitions` only if each matches a stored handoff by
+    /// its two epochs alone, and each leaves the epoch the one before it
+    /// reached.
     pub async fn admit(
         &self,
+        member: MemberKey,
         transitions: &[proto::SignedCommitteeTransition],
     ) -> Result<(), Status> {
-        self.check(transitions).await.map_err(|refusal| {
+        self.check(member, transitions).await.map_err(|refusal| {
             self.metrics
                 .handoff_refused
                 .with_label_values(&[refusal.reason()])
@@ -84,7 +101,12 @@ impl HandoffGate {
         })
     }
 
-    async fn check(&self, transitions: &[proto::SignedCommitteeTransition]) -> Result<(), Refusal> {
+    async fn check(
+        &self,
+        member: MemberKey,
+        transitions: &[proto::SignedCommitteeTransition],
+    ) -> Result<(), Refusal> {
+        self.take_turn(member)?;
         let mut reached = None;
         for transition in transitions {
             let (from_epoch, to_epoch) = epochs(transition).ok_or(Refusal::Malformed)?;
@@ -115,6 +137,21 @@ impl HandoffGate {
             }
             reached = Some(to_epoch);
         }
+        Ok(())
+    }
+
+    /// An update refused here does not restart the wait, so a member retrying
+    /// sooner still gets its next turn on time.
+    fn take_turn(&self, member: MemberKey) -> Result<(), Refusal> {
+        let mut last_update = self
+            .last_update
+            .lock()
+            .expect("member updates mutex poisoned");
+        last_update.retain(|_, at| at.elapsed() < UPDATE_INTERVAL);
+        if last_update.contains_key(&member) {
+            return Err(Refusal::RateLimited);
+        }
+        last_update.insert(member, Instant::now());
         Ok(())
     }
 
@@ -153,6 +190,7 @@ fn epochs(transition: &proto::SignedCommitteeTransition) -> Option<(u64, u64)> {
 
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
+    RateLimited,
     Malformed,
     NotConsecutive,
     /// Nothing is stored out of this epoch yet: its reconfig is pending, or
@@ -174,6 +212,7 @@ enum Refusal {
 impl Refusal {
     fn reason(self) -> &'static str {
         match self {
+            Self::RateLimited => "rate_limited",
             Self::Malformed => "malformed",
             Self::NotConsecutive => "not_consecutive",
             Self::NotOnChain { .. } => "not_on_chain",
@@ -184,6 +223,9 @@ impl Refusal {
 
     fn status(self) -> Status {
         match self {
+            Self::RateLimited => Status::resource_exhausted(format!(
+                "a member may send one committee update every {UPDATE_INTERVAL:?}; retry"
+            )),
             Self::Malformed => {
                 Status::invalid_argument("malformed committee transition: missing an epoch")
             }
@@ -270,8 +312,17 @@ async fn read_next_epoch(
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
+    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+
+    /// A member no other call has used, so the per-member limit never applies.
+    pub(crate) fn new_member() -> MemberKey {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&NEXT.fetch_add(1, Ordering::SeqCst).to_le_bytes());
+        MemberKey(key)
+    }
 
     /// A chain storing these handoffs, by the epoch each leaves.
     pub(super) struct StoredHandoffs {
@@ -323,6 +374,7 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use super::test_utils::new_member;
     use super::test_utils::transition;
     use super::test_utils::StoredHandoffs;
     use super::*;
@@ -362,13 +414,19 @@ mod tests {
     async fn admits_only_the_handoff_the_chain_stores() {
         // Epoch 7 formed out of 5 and aborted; 8 replaced it and activated.
         let (gate, metrics) = gate(StoredHandoffs::new(&[(5, 8)]));
-        gate.admit(&[transition(5, 8)]).await.unwrap();
+        gate.admit(new_member(), &[transition(5, 8)]).await.unwrap();
 
-        let aborted = gate.admit(&[transition(5, 7)]).await.unwrap_err();
+        let aborted = gate
+            .admit(new_member(), &[transition(5, 7)])
+            .await
+            .unwrap_err();
         assert_eq!(aborted.code(), Code::FailedPrecondition);
         assert_eq!(refused(&metrics, "superseded"), 1);
         // A reconfig out of 8 is pending at most: nothing is stored for it.
-        let pending = gate.admit(&[transition(8, 9)]).await.unwrap_err();
+        let pending = gate
+            .admit(new_member(), &[transition(8, 9)])
+            .await
+            .unwrap_err();
         assert_eq!(pending.code(), Code::Unavailable);
         assert_eq!(refused(&metrics, "not_on_chain"), 1);
     }
@@ -376,13 +434,13 @@ mod tests {
     #[tokio::test]
     async fn admits_a_chain_only_if_each_handoff_is_stored() {
         let (gate, _) = gate(StoredHandoffs::new(&[(5, 7), (7, 9)]));
-        gate.admit(&[]).await.unwrap();
-        gate.admit(&[transition(5, 7), transition(7, 9)])
+        gate.admit(new_member(), &[]).await.unwrap();
+        gate.admit(new_member(), &[transition(5, 7), transition(7, 9)])
             .await
             .unwrap();
 
         let unstored = gate
-            .admit(&[transition(5, 7), transition(7, 10)])
+            .admit(new_member(), &[transition(5, 7), transition(7, 10)])
             .await
             .unwrap_err();
         assert_eq!(unstored.code(), Code::FailedPrecondition);
@@ -396,7 +454,7 @@ mod tests {
         let repeated = vec![transition(5, 7); 100];
         let reordered = vec![transition(7, 9), transition(5, 7)];
         for chain in [repeated, reordered] {
-            let err = gate.admit(&chain).await.unwrap_err();
+            let err = gate.admit(new_member(), &chain).await.unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument);
         }
         assert_eq!(refused(&metrics, "not_consecutive"), 2);
@@ -408,15 +466,52 @@ mod tests {
         let lookups = chain.lookups.clone();
         let (gate, _) = gate(chain);
 
-        gate.admit(&[transition(5, 7)]).await.unwrap();
-        gate.admit(&[transition(5, 7)]).await.unwrap();
-        gate.admit(&[transition(5, 8)]).await.unwrap_err();
+        gate.admit(new_member(), &[transition(5, 7)]).await.unwrap();
+        gate.admit(new_member(), &[transition(5, 7)]).await.unwrap();
+        gate.admit(new_member(), &[transition(5, 8)])
+            .await
+            .unwrap_err();
         assert_eq!(lookups.load(Ordering::SeqCst), 1);
 
         // One the chain may yet store is read again each time.
-        gate.admit(&[transition(7, 9)]).await.unwrap_err();
-        gate.admit(&[transition(7, 9)]).await.unwrap_err();
+        gate.admit(new_member(), &[transition(7, 9)])
+            .await
+            .unwrap_err();
+        gate.admit(new_member(), &[transition(7, 9)])
+            .await
+            .unwrap_err();
         assert_eq!(lookups.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takes_one_update_per_member_each_interval() {
+        let chain = StoredHandoffs::new(&[(5, 7)]);
+        let lookups = chain.lookups.clone();
+        let (gate, metrics) = gate(chain);
+        let (member, other) = (new_member(), new_member());
+
+        // Nothing is stored out of epoch 7, so each of these would cost a lookup.
+        let unstored = [transition(7, 9)];
+        let first = gate.admit(member, &unstored).await.unwrap_err();
+        assert_eq!(first.code(), Code::Unavailable);
+        // Retrying sooner costs no lookup and does not restart the wait.
+        for _ in 0..4 {
+            tokio::time::advance(UPDATE_INTERVAL / 5).await;
+            let early = gate.admit(member, &unstored).await.unwrap_err();
+            assert_eq!(early.code(), Code::ResourceExhausted);
+        }
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+        assert_eq!(refused(&metrics, "rate_limited"), 4);
+
+        // Another member is not held back, and resending a stored handoff is
+        // limited too.
+        gate.admit(other, &[transition(5, 7)]).await.unwrap();
+        let resent = gate.admit(other, &[transition(5, 7)]).await.unwrap_err();
+        assert_eq!(resent.code(), Code::ResourceExhausted);
+
+        tokio::time::advance(UPDATE_INTERVAL / 5).await;
+        let next = gate.admit(member, &unstored).await.unwrap_err();
+        assert_eq!(next.code(), Code::Unavailable);
     }
 
     #[tokio::test]
@@ -444,7 +539,7 @@ mod tests {
             no_committee,
             no_committee_epoch,
         ] {
-            let err = gate.admit(&[malformed]).await.unwrap_err();
+            let err = gate.admit(new_member(), &[malformed]).await.unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument);
         }
         assert_eq!(lookups.load(Ordering::SeqCst), 0);
@@ -454,12 +549,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn fails_closed_when_the_chain_cannot_be_read() {
         let (unreadable, metrics) = gate(Unreadable);
-        let err = unreadable.admit(&[transition(5, 7)]).await.unwrap_err();
+        let err = unreadable
+            .admit(new_member(), &[transition(5, 7)])
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), Code::Unavailable);
         assert_eq!(refused(&metrics, "chain_unavailable"), 1);
 
         let (stuck, metrics) = gate(Stuck);
-        let err = stuck.admit(&[transition(5, 7)]).await.unwrap_err();
+        let err = stuck
+            .admit(new_member(), &[transition(5, 7)])
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), Code::Unavailable);
         assert_eq!(refused(&metrics, "chain_unavailable"), 1);
     }

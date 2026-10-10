@@ -28,6 +28,7 @@ use crate::kp;
 use crate::kp::roster::RosterCache;
 use crate::log_store::LogStore;
 use crate::node::handoffs::HandoffGate;
+use crate::node::member_auth::MemberKey;
 
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
@@ -99,7 +100,10 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
         self.handoffs
-            .admit(std::slice::from_ref(request.get_ref()))
+            .admit(
+                MemberKey::of(&request)?,
+                std::slice::from_ref(request.get_ref()),
+            )
             .await?;
         self.client.clone().update_committee(request).await
     }
@@ -108,7 +112,9 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.handoffs.admit(&request.get_ref().transitions).await?;
+        self.handoffs
+            .admit(MemberKey::of(&request)?, &request.get_ref().transitions)
+            .await?;
         self.client.clone().update_committee_chain(request).await
     }
 
@@ -347,6 +353,7 @@ mod tests {
     use super::*;
     use crate::node::cache::CachingGuardianGrpc;
     use crate::node::handoffs::test_utils::gate_over;
+    use crate::node::handoffs::test_utils::new_member;
     use crate::node::handoffs::test_utils::transition;
     use crate::node::widlog::test_utils::withdrawal_log_json;
     use crate::node::widlog::WidLogIndex;
@@ -465,14 +472,21 @@ mod tests {
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
     }
 
+    /// `message` as the member gate passes it on, from a member of its own.
+    fn from_a_member<T>(message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(new_member());
+        request
+    }
+
     #[tokio::test]
     async fn forwards_only_committee_handoffs_the_chain_stores() {
         let (stub, channel) = spawn_stub().await;
         let proxy = proxy_over(channel.clone(), channel, StubStore::default(), &[(5, 7)]).await;
-        let chain = |transitions| Request::new(proto::UpdateCommitteeChainRequest { transitions });
+        let chain = |transitions| from_a_member(proto::UpdateCommitteeChainRequest { transitions });
 
         proxy
-            .update_committee(Request::new(transition(5, 7)))
+            .update_committee(from_a_member(transition(5, 7)))
             .await
             .unwrap();
         proxy
@@ -483,7 +497,7 @@ mod tests {
 
         // The reconfig out of epoch 7 has not completed.
         let early = proxy
-            .update_committee(Request::new(transition(7, 9)))
+            .update_committee(from_a_member(transition(7, 9)))
             .await
             .unwrap_err();
         assert_eq!(early.code(), tonic::Code::Unavailable);
@@ -493,6 +507,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(early.code(), tonic::Code::Unavailable);
         assert_eq!(stub.update_committee_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_committee_update_the_member_gate_did_not_admit() {
+        let (stub, channel) = spawn_stub().await;
+        let proxy = proxy_over(channel.clone(), channel, StubStore::default(), &[(5, 7)]).await;
+
+        let single = proxy
+            .update_committee(Request::new(transition(5, 7)))
+            .await
+            .unwrap_err();
+        assert_eq!(single.code(), tonic::Code::Internal);
+        let chain = proxy
+            .update_committee_chain(Request::new(proto::UpdateCommitteeChainRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(chain.code(), tonic::Code::Internal);
+        assert_eq!(stub.update_committee_calls.load(Ordering::SeqCst), 0);
     }
 
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic
