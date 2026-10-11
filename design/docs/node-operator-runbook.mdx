@@ -432,8 +432,8 @@ All three simple Sui key schemes (Ed25519, secp256k1, and secp256r1) are accepte
 
 | Format | Produced by |
 | --- | --- |
-| Bech32 `suiprivkey...` string | `sui keytool generate` / `export` / `convert` |
-| Base64 keystore entry | `sui.keystore` entries, `sui keytool convert` |
+| Bech32 `suiprivkey...` string | `sui keytool export` / `convert` |
+| Base64 keystore entry | `sui keytool generate`, `sui.keystore` entries, `sui keytool convert` |
 | PKCS#8 PEM | `openssl genpkey -algorithm ed25519` |
 | PKCS#8 DER (file path only) | `openssl genpkey ... -outform DER` |
 
@@ -446,7 +446,9 @@ openssl genpkey -algorithm ed25519 -out hashi-operator-key.pem
 ```
 
 ```toml
-operator-private-key = "/path/to/hashi-operator-key.pem"
+operator-private-key = "/path/to/0x<operator-address>.key"
+# or a PKCS#8 key generated with openssl:
+# operator-private-key = "/path/to/hashi-operator-key.pem"
 # or inline, e.g.:
 # operator-private-key = "suiprivkey1..."
 ```
@@ -1169,7 +1171,7 @@ hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-di
 hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
 ```
 
-`--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations.
+`--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory; inspect them and manually install the config, keys, and database at trusted destinations. Follow the [crash-recovery procedure](#crash-recovery-procedure) rather than starting the node against an empty database.
 
 ### 6.8 Deposit, withdraw, and balance
 
@@ -1490,6 +1492,43 @@ hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
   --use-gpg-agent [--gpg-homedir /path/to/gnupghome] \
   --output-dir /var/lib/hashi/restore
 ```
+
+### Crash-recovery procedure
+
+1. Stop the Hashi service on the replacement host. Do not start it against an
+   empty database while preparing the restore.
+2. Select the newest known-good archive. Automatic backups are written after an
+   epoch change, so the useful freshness boundary is the latest completed Hashi
+   reconfiguration, not an arbitrary age such as 24 hours. To resume duties in
+   the current epoch, the restored database must contain signing and encryption
+   keys that match the current onchain committee record.
+3. Run `hashi backup restore` into a private staging directory. The command
+   decrypts and validates the archive, but deliberately does not write to the
+   original paths recorded in it.
+4. Review `hashi-backup-manifest.toml` in the completed restore directory. It
+   maps each extracted config or key file to its original path and records the
+   original database path. Treat those paths as metadata: install the restored
+   validator config, referenced TLS and operator key files, and the entire
+   `hashi-db-snapshot` directory at destinations you trust. If a key was inline
+   in the validator config, it is already captured in that restored config.
+5. Update the restored config for the replacement host. In particular, make
+   `db` point to the installed database and make `tls-private-key` and
+   `operator-private-key` point to the installed key files. Keep key files and
+   the restore directory owner-only, and set ownership to the Hashi service
+   user.
+6. Start Hashi and verify that it joins the current committee without a
+   key-mismatch error. An empty or stale database cannot recreate lost MPC
+   shares. Hashi can register replacement signing and encryption keys, but the
+   node then rejoins at the next reconfiguration rather than resuming the
+   current epoch.
+7. Remove the plaintext restore directory after the service is healthy and a
+   new encrypted backup has completed.
+
+The encrypted backup is a complete Hashi recovery bundle: it contains the node
+database (including MPC shares and generated signing/encryption keys), the
+validator config, and key files referenced by that config. Restoring only the
+database or generating replacement TLS/operator keys is not equivalent to a
+full current-epoch recovery; those public identities are registered onchain.
 
 ---
 
