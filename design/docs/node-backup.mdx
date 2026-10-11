@@ -284,6 +284,52 @@ Completed restores, `.hashi-db-restore-*` staging directories beside the destina
 database, and restore output elsewhere are not swept by automatic backup cleanup.
 Operators must remove these plaintext copies when no longer needed.
 
+## Restore after server loss
+
+Use the newest known-good archive. Hashi creates its automatic backup after an
+epoch change, so the relevant freshness boundary is the latest completed Hashi
+reconfiguration, not an arbitrary maximum age such as 24 hours. A node can
+resume current-epoch duties only when the restored database contains signing
+and encryption keys that match its current onchain committee record.
+
+Restore an encrypted archive into a private staging directory with exactly one
+decryptor:
+
+```sh
+hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+  --backup-pgp-secret-key /path/to/secret-key.asc \
+  --output-dir /var/lib/hashi/restore
+```
+
+```sh
+hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+  --use-gpg-agent \
+  --output-dir /var/lib/hashi/restore
+```
+
+The command decrypts and validates the archive but does not install anything at
+the original paths. In the completed restore directory:
+
+- `hashi-backup-manifest.toml` maps extracted config and key files to their
+  original paths and records the original database path. Review these paths as
+  metadata rather than blindly trusting them on a replacement host.
+- `hashi-db-snapshot` is the restored node database. Install the entire
+  directory, then make the restored validator config's `db` value point to it.
+- Install the restored validator config and any referenced TLS and operator key
+  files at trusted destinations. Inline keys are already present in the
+  restored config. Update the config paths if the new host layout differs.
+
+Keep the service stopped during installation, restrict the plaintext restore
+directory and private keys to the Hashi service user, and start the node only
+after the config points to the restored database and keys. If the database is
+empty or too old to contain keys matching the current committee, Hashi cannot
+reconstruct the lost MPC shares. It registers replacement signing and
+encryption keys and rejoins at the next reconfiguration instead of resuming the
+current epoch.
+
+After the node is healthy and a new encrypted backup has completed, remove the
+plaintext restore directory.
+
 ## Cloud backup
 
 In the future, we will likely add support for automatically uploading backups
