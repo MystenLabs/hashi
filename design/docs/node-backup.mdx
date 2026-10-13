@@ -284,6 +284,13 @@ Completed restores, `.hashi-db-restore-*` staging directories beside the destina
 database, and restore output elsewhere are not swept by automatic backup cleanup.
 Operators must remove these plaintext copies when no longer needed.
 
+## Restoring from a backup
+
+`hashi backup restore` decrypts an archive and extracts it into a directory you
+choose. It installs nothing. The full procedure, from choosing a backup to
+restarting the node, is in the
+[operator runbook](node-operator-runbook.mdx#102-restoring-a-node).
+
 ## Cloud backup
 
 In the future, we will likely add support for automatically uploading backups
