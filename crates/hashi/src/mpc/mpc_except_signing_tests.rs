@@ -19009,3 +19009,50 @@ fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
     assert!(voter.dealer_avid_nonce_outputs.is_empty());
     assert!(voter.current_avid_verified_common.is_empty());
 }
+
+#[test]
+fn the_snapshot_is_published_before_the_swap_waits_for_the_manager_lock() {
+    let setup = TestSetup::new(4);
+    let current = setup.create_manager(0);
+    let epoch = current.mpc_config.epoch;
+    let mut next = setup.create_manager(0);
+    next.mpc_config.epoch = epoch + 1;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(current);
+
+    let lock = hashi.mpc_manager().unwrap();
+    let held = lock.write().unwrap();
+    let installer = {
+        let hashi = Arc::clone(&hashi);
+        std::thread::spawn(move || hashi.set_mpc_manager(next))
+    };
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+    {
+        let hashi = Arc::clone(&hashi);
+        std::thread::spawn(move || {
+            while hashi
+                .shape_params()
+                .is_none_or(|shape| shape.epoch() != epoch + 1)
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = seen_tx.send(());
+        });
+    }
+    assert!(seen_rx.recv_timeout(Duration::from_secs(10)).is_ok());
+    assert_eq!(held.mpc_config.epoch, epoch);
+
+    drop(held);
+    installer.join().unwrap();
+    assert_eq!(lock.read().unwrap().mpc_config.epoch, epoch + 1);
+}

@@ -39,12 +39,13 @@ impl MpcService for HttpService {
         let sender = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let mpc_manager = self.mpc_manager()?;
-        let shape = self.shape_params()?;
+        let service = self.clone();
         let process_duration = self
             .metrics()
             .mpc_rpc_handler_process_duration_seconds
             .clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
+            let shape = service.shape_params()?;
             let epoch = external_request.epoch;
             validate_epoch(shape.epoch(), epoch)?;
             gates::check_send_messages(&shape, sender, &external_request)
@@ -147,12 +148,13 @@ impl MpcService for HttpService {
         let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let mpc_manager = self.mpc_manager()?;
-        let shape = self.shape_params()?;
+        let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let result = spawn_blocking(move || -> Result<_, Status> {
             let epoch = external_request
                 .epoch
                 .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
+            let shape = service.shape_params()?;
             validate_epoch_current_or_previous(shape.epoch(), shape.previous_epoch(), epoch)?;
             let committee =
                 gates::complain_committee(&shape, epoch, &caller).map_err(|refusal| {
