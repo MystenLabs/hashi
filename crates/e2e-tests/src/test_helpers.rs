@@ -639,6 +639,15 @@ pub fn assert_no_unrouted_objects(networks: &TestNetworks) {
     }
 }
 
+fn describe_counter(metric: &prometheus::proto::Metric) -> String {
+    let labels: Vec<_> = metric
+        .get_label()
+        .iter()
+        .map(|label| format!("{}={}", label.name(), label.value()))
+        .collect();
+    format!("{} x{}", labels.join(","), metric.get_counter().value())
+}
+
 pub fn assert_no_member_refusals(networks: &TestNetworks) {
     for (index, node) in networks.hashi_network.nodes().iter().enumerate() {
         if !node.is_running() {
@@ -657,18 +666,25 @@ pub fn assert_no_member_refusals(networks: &TestNetworks) {
                     .iter()
                     .any(|label| label.name() == "reason" && label.value() == "not_member")
             })
-            .map(|metric| {
-                let labels: Vec<_> = metric
-                    .get_label()
-                    .iter()
-                    .map(|label| format!("{}={}", label.name(), label.value()))
-                    .collect();
-                format!("{} x{}", labels.join(","), metric.get_counter().value())
-            })
+            .map(describe_counter)
             .collect();
         assert!(
             refusals.is_empty(),
             "node {index} refused MPC RPC callers as non-members: {refusals:?}"
+        );
+        let over_connection_limit: Vec<String> = node
+            .hashi()
+            .metrics
+            .peer_requests_over_connection_limit_total
+            .collect()
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| metric.get_counter().value() > 0.0)
+            .map(describe_counter)
+            .collect();
+        assert!(
+            over_connection_limit.is_empty(),
+            "node {index} refused members over the connection limit: {over_connection_limit:?}"
         );
     }
 }

@@ -257,21 +257,12 @@ impl OnchainState {
 
         let (mut state, checkpoint, seed) =
             State::scrape(client.clone(), ids, scope, metrics.as_deref()).await?;
-        if let Some(tls_private_key) = &tls_private_key {
-            state
-                .hashi
-                .committees
-                .set_tls_private_key(tls_private_key.clone());
-        }
-        if let Some(limit) = grpc_max_decoding_message_size {
-            state
-                .hashi
-                .committees
-                .set_grpc_max_decoding_message_size(limit);
-        }
-        if let Some(metrics) = metrics.clone() {
-            state.hashi.committees.set_metrics(metrics);
-        }
+        state.hashi.committees.configure_clients(
+            tls_private_key.clone(),
+            grpc_max_decoding_message_size,
+            metrics.clone(),
+            None,
+        );
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
@@ -520,18 +511,14 @@ impl OnchainState {
     /// Apply committee config from `Inner` to the given hashi state and replace the current
     /// state in a single write lock acquisition.
     fn replace_hashi_state(&self, mut hashi: types::Hashi) {
-        if let Some(tls_private_key) = &self.0.tls_private_key {
-            hashi
-                .committees
-                .set_tls_private_key(tls_private_key.clone());
-        }
-        if let Some(limit) = self.0.grpc_max_decoding_message_size {
-            hashi.committees.set_grpc_max_decoding_message_size(limit);
-        }
-        if let Some(metrics) = &self.0.metrics {
-            hashi.committees.set_metrics(metrics.clone());
-        }
-        self.state_mut().hashi = hashi;
+        let mut state = self.state_mut();
+        hashi.committees.configure_clients(
+            self.0.tls_private_key.clone(),
+            self.0.grpc_max_decoding_message_size,
+            self.0.metrics.clone(),
+            Some(&state.hashi.committees),
+        );
+        state.hashi = hashi;
     }
 
     /// Record an on-chain package upgrade. The root's `UpgradeCap`
