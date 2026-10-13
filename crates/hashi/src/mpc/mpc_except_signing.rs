@@ -6865,7 +6865,13 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
+    let work = crate::grpc::guard_blocking_mpc_work();
+    match tokio::task::spawn_blocking(move || {
+        let _work = work;
+        f()
+    })
+    .await
+    {
         Ok(v) => v,
         Err(e) if e.is_cancelled() => std::future::pending().await,
         Err(e) => std::panic::resume_unwind(e.into_panic()),
