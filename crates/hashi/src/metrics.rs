@@ -43,6 +43,13 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
+    // Remote-backup adoption only; this does not report S3 reachability or health.
+    backup_s3_configured: IntGauge,
+    // Scheduled backup outcomes only; manual saves do not increment these.
+    pub(crate) backup_scheduled_local_successes: IntCounter,
+    pub(crate) backup_scheduled_remote_successes: IntCounter,
+    pub(crate) backup_scheduled_remote_failures: IntCounter,
+
     // TRM AML screening metrics
     pub trm_enabled: IntGauge,
     pub trm_screenings_total: IntCounterVec,
@@ -474,6 +481,30 @@ impl Metrics {
                 "hashi_mpc_bytes_received_total",
                 "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
                 &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            backup_s3_configured: register_int_gauge_with_registry!(
+                "hashi_backup_s3_configured",
+                "Whether an S3 backup target is configured (not a health check)",
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_local_successes: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_local_successes_total",
+                "Scheduled local backup archives successfully published",
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_remote_successes: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_remote_successes_total",
+                "Scheduled backup archives successfully uploaded to S3",
+                registry,
+            )
+            .unwrap(),
+            backup_scheduled_remote_failures: register_int_counter_with_registry!(
+                "hashi_backup_scheduled_remote_failures_total",
+                "Scheduled S3 backup stages that failed after local publication",
                 registry,
             )
             .unwrap(),
@@ -1589,6 +1620,13 @@ impl Metrics {
         metrics
     }
 
+    /// Publish configuration adoption without contacting S3.
+    /// The caller must validate the configuration before recording it.
+    pub fn record_backup_s3_config(&self, config: &crate::config::Config) {
+        self.backup_s3_configured
+            .set(i64::from(config.backup_s3.is_some()));
+    }
+
     pub fn record_limiter_state(
         &self,
         state: &hashi_types::guardian::LimiterState,
@@ -2246,6 +2284,107 @@ mod tests {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
         }
+    }
+
+    #[test]
+    fn scheduled_backup_counters_expose_zero_initially() {
+        let registry = Registry::new();
+        let _metrics = Metrics::new(&registry);
+        let families = registry.gather();
+        for name in [
+            "hashi_backup_scheduled_local_successes_total",
+            "hashi_backup_scheduled_remote_successes_total",
+            "hashi_backup_scheduled_remote_failures_total",
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap();
+            assert_eq!(family.get_metric().len(), 1);
+            assert!(family.get_metric()[0].label.is_empty());
+            assert_eq!(
+                family.get_metric()[0]
+                    .get_counter()
+                    .as_ref()
+                    .expect("counter")
+                    .value(),
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn backup_s3_metrics_unconfigured() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+        let config = crate::config::Config::new_for_testing();
+        config.validate_backup_s3().unwrap();
+        metrics.record_backup_s3_config(&config);
+
+        let families = registry.gather();
+        let configured = families
+            .iter()
+            .find(|family| family.name() == "hashi_backup_s3_configured")
+            .unwrap();
+        assert_eq!(configured.get_metric().len(), 1);
+        assert!(configured.get_metric()[0].label.is_empty());
+        assert_eq!(
+            configured.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .expect("gauge")
+                .value(),
+            0.0
+        );
+        assert!(
+            families
+                .iter()
+                .filter(|family| family.name().starts_with("hashi_backup_"))
+                .flat_map(|family| family.get_metric())
+                .all(|metric| metric.label.is_empty())
+        );
+    }
+
+    #[test]
+    fn backup_s3_metrics_configured() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+        let mut config = crate::config::Config::new_for_testing();
+        config.backup_s3 = Some(crate::config::BackupS3Config {
+            bucket: "hashi-test-backups".to_owned(),
+            region: "us-west-2".to_owned(),
+        });
+        config.sui_chain_id = Some("aB12Cd34".to_owned());
+        config.hashi_ids = Some(crate::config::HashiIds {
+            package_id: "0x1".parse().unwrap(),
+            hashi_object_id: "0x2".parse().unwrap(),
+        });
+        config.validator_address = Some("0x3".parse().unwrap());
+        config.validate_backup_s3().unwrap();
+        metrics.record_backup_s3_config(&config);
+
+        let families = registry.gather();
+        let configured = families
+            .iter()
+            .find(|family| family.name() == "hashi_backup_s3_configured")
+            .unwrap();
+        assert_eq!(configured.get_metric().len(), 1);
+        assert!(configured.get_metric()[0].label.is_empty());
+        assert_eq!(
+            configured.get_metric()[0]
+                .get_gauge()
+                .as_ref()
+                .expect("gauge")
+                .value(),
+            1.0
+        );
+        assert!(
+            families
+                .iter()
+                .filter(|family| family.name().starts_with("hashi_backup_"))
+                .flat_map(|family| family.get_metric())
+                .all(|metric| metric.label.is_empty())
+        );
     }
 
     #[test]

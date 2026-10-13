@@ -88,6 +88,10 @@ tar.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
 
+# Remote backup uploads
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+
 [dev-dependencies]
 insta.workspace = true
 ed25519-dalek.workspace = true

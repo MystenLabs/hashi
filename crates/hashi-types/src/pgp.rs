@@ -24,6 +24,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::io::BufRead;
@@ -77,6 +78,18 @@ impl PgpPublicCert {
     pub fn fingerprint(&self) -> Fingerprint {
         self.cert.fingerprint()
     }
+
+    /// Compare the currently usable transport-encryption key fingerprints,
+    /// independent of armor, key ordering, and non-encryption keys.
+    pub fn has_same_encryption_recipients(&self, other: &Self) -> bool {
+        let recipients = |cert: &openpgp::Cert| {
+            usable_keys(cert)
+                .for_transport_encryption()
+                .map(|key| key.key().fingerprint())
+                .collect::<BTreeSet<_>>()
+        };
+        recipients(&self.cert) == recipients(&other.cert)
+    }
 }
 
 impl fmt::Display for PgpPublicCert {
@@ -85,7 +98,7 @@ impl fmt::Display for PgpPublicCert {
     }
 }
 
-// `armored` fully determines `cert`, so all comparisons key off it alone.
+// Trait equality and ordering compare the armored representation.
 // (`Cert` is only `PartialEq`, so `Eq`/`Ord` can't be derived anyway.)
 impl PartialEq for PgpPublicCert {
     fn eq(&self, other: &Self) -> bool {
@@ -946,6 +959,106 @@ mod tests {
     use std::fs;
     use std::io;
     use std::process::Command;
+
+    fn public_cert(cert: &openpgp::Cert) -> PgpPublicCert {
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+        PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn public_cert_rejects_no_encryption_recipients() {
+        let (cert, _) = CertBuilder::new().add_signing_subkey().generate().unwrap();
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+
+        let error = PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap_err();
+        assert!(
+            error.to_string().contains("has no usable encryption key"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn encryption_recipients_ignore_armor() {
+        let original = test_utils::mock_pgp_cert();
+        let mut writer = openpgp::armor::Writer::with_headers(
+            Vec::new(),
+            openpgp::armor::Kind::PublicKey,
+            [("Comment", "Re-exported backup certificate")],
+        )
+        .unwrap();
+        original.cert.export(&mut writer).unwrap();
+        let rearmored =
+            PgpPublicCert::new(String::from_utf8(writer.finalize().unwrap()).unwrap()).unwrap();
+
+        assert_ne!(original.armored(), rearmored.armored());
+        assert!(original.has_same_encryption_recipients(&rearmored));
+        assert!(rearmored.has_same_encryption_recipients(&original));
+    }
+
+    #[test]
+    fn encryption_recipients_differ_between_certificates() {
+        let first = test_utils::mock_pgp_cert();
+        let second = test_utils::mock_pgp_cert();
+
+        assert!(!first.has_same_encryption_recipients(&second));
+        assert!(!second.has_same_encryption_recipients(&first));
+    }
+
+    #[test]
+    fn encryption_recipients_compare_every_encryption_subkey() {
+        let (cert, _) = CertBuilder::new()
+            .add_signing_subkey()
+            .add_transport_encryption_subkey()
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap();
+        let encryption_keys: Vec<_> = usable_keys(&cert)
+            .for_transport_encryption()
+            .map(|key| key.key().fingerprint())
+            .collect();
+        assert_eq!(encryption_keys.len(), 2);
+        let all_recipients = public_cert(&cert);
+        let first_recipient = public_cert(
+            &cert
+                .clone()
+                .retain_subkeys(|key| key.key().fingerprint() != encryption_keys[1]),
+        );
+        let second_recipient =
+            public_cert(&cert.retain_subkeys(|key| key.key().fingerprint() != encryption_keys[0]));
+
+        assert_eq!(all_recipients.fingerprint(), first_recipient.fingerprint());
+        assert_eq!(all_recipients.fingerprint(), second_recipient.fingerprint());
+        assert!(!all_recipients.has_same_encryption_recipients(&first_recipient));
+        assert!(!first_recipient.has_same_encryption_recipients(&all_recipients));
+        assert!(!all_recipients.has_same_encryption_recipients(&second_recipient));
+        assert!(!second_recipient.has_same_encryption_recipients(&all_recipients));
+        assert!(!first_recipient.has_same_encryption_recipients(&second_recipient));
+    }
+
+    #[test]
+    fn encryption_recipients_ignore_non_encryption_subkeys() {
+        let (cert, _) = CertBuilder::new()
+            .add_signing_subkey()
+            .add_transport_encryption_subkey()
+            .add_authentication_subkey()
+            .generate()
+            .unwrap();
+        let authentication_key = usable_keys(&cert)
+            .for_authentication()
+            .next()
+            .unwrap()
+            .key()
+            .fingerprint();
+        let original = public_cert(&cert);
+        let without_authentication =
+            public_cert(&cert.retain_subkeys(|key| key.key().fingerprint() != authentication_key));
+
+        assert_ne!(original.armored(), without_authentication.armored());
+        assert!(original.has_same_encryption_recipients(&without_authentication));
+        assert!(without_authentication.has_same_encryption_recipients(&original));
+    }
 
     #[test]
     fn pinned_encryption_addresses_only_the_selected_subkey() {
