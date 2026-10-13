@@ -448,28 +448,26 @@ mod tests {
         routes
     }
 
-    fn serve<S>(limiter: PeerInflightLimiter, health: S) -> sui_http::ServerHandle
-    where
-        S: tower::Service<
-                axum::extract::Request,
-                Response: axum::response::IntoResponse,
-                Error = std::convert::Infallible,
-            > + Clone
-            + Send
-            + Sync
-            + 'static,
-        S::Future: Send + 'static,
-    {
-        let router = Router::new()
-            .route_service(&format!("/{HEALTH}/{{*rest}}"), health)
-            .layer(
-                tower::ServiceBuilder::new()
-                    .layer(axum::middleware::from_fn(gate))
-                    .layer(axum::middleware::from_fn_with_state(
-                        limiter,
-                        limit_per_peer,
-                    )),
-            );
+    async fn health_router() -> Router {
+        let (reporter, health) = tonic_health::server::health_reporter();
+        reporter
+            .set_service_status("", tonic_health::ServingStatus::Serving)
+            .await;
+        Router::new().route_service(
+            &format!("/{HEALTH}/{{*rest}}"),
+            health.max_decoding_message_size(HEALTH_LIMIT),
+        )
+    }
+
+    fn serve(limiter: PeerInflightLimiter, router: Router) -> sui_http::ServerHandle {
+        let router = router.layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::middleware::from_fn(gate))
+                .layer(axum::middleware::from_fn_with_state(
+                    limiter,
+                    limit_per_peer,
+                )),
+        );
         sui_http::Builder::new()
             .serve(("127.0.0.1", 0), router)
             .unwrap()
@@ -543,14 +541,7 @@ mod tests {
             health_routes(),
             Arc::new(Metrics::new(&registry)),
         );
-        let (reporter, health) = tonic_health::server::health_reporter();
-        reporter
-            .set_service_status("", tonic_health::ServingStatus::Serving)
-            .await;
-        let server = serve(
-            limiter.clone(),
-            health.max_decoding_message_size(HEALTH_LIMIT),
-        );
+        let server = serve(limiter.clone(), health_router().await);
         let client = connect(*server.local_addr()).await;
 
         let stalled_len = 60 * 1024;
@@ -629,7 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_streaming_request_is_charged_only_for_its_latest_message() {
+    async fn packed_streaming_messages_stay_charged_until_the_next_read() {
         let message = crate::grpc::request_body::PREFIX_LEN + 1000;
         let budget = 2 * message;
         let registry = prometheus::Registry::new();
@@ -639,37 +630,100 @@ mod tests {
             RouteLimits::default(),
             Arc::new(Metrics::new(&registry)),
         );
-        let charge = || {
-            Arc::new(RequestCharge {
-                peer: limiter.peer(peer(b'a')),
-                budget,
-                reserved: AtomicU64::new(0),
-            })
-        };
-        let frames = (0..10).map(move |_| {
+        let frames = (0..5).map(move |_| {
             let mut frame = prefix(1000);
             frame.resize(message as usize, 7);
+            frame.extend_from_within(..);
             Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frame))
         });
         let mut stream = LimitedBody::new(
             axum::body::Body::from_stream(futures::stream::iter(frames)),
-            charge(),
+            Arc::new(RequestCharge {
+                peer: limiter.peer(peer(b'a')),
+                budget,
+                reserved: AtomicU64::new(0),
+            }),
             4096,
             false,
         );
-        for _ in 0..10 {
+        for _ in 0..5 {
             std::future::poll_fn(|cx| http_body::Body::poll_frame(Pin::new(&mut stream), cx))
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(limiter.reserved(peer(b'a')), message);
+            assert_eq!(limiter.reserved(peer(b'a')), 2 * message);
         }
 
-        let other = charge();
-        assert!(other.reserve(message));
-        drop(stream);
-        assert_eq!(limiter.reserved(peer(b'a')), message);
-        drop(other);
+        assert!(
+            std::future::poll_fn(|cx| http_body::Body::poll_frame(Pin::new(&mut stream), cx))
+                .await
+                .is_none()
+        );
         assert_eq!(limiter.reserved(peer(b'a')), 0);
+    }
+
+    #[tokio::test]
+    async fn an_idle_reflection_stream_holds_no_charge_while_its_peer_is_served() {
+        use prost::Message as _;
+        use tonic_reflection::pb::v1::ServerReflectionRequest;
+        use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
+        use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
+
+        const REFLECTION: &str = "grpc.reflection.v1.ServerReflection";
+        let request = ServerReflectionRequest {
+            host: "h".repeat(1000),
+            message_request: Some(MessageRequest::ListServices(String::new())),
+        };
+        let message = crate::grpc::request_body::PREFIX_LEN + request.encoded_len() as u64;
+        let mut routes = health_routes();
+        routes.service(
+            REFLECTION,
+            crate::grpc::route_limits::REFLECTION_REQUEST_LIMIT,
+        );
+        let registry = prometheus::Registry::new();
+        let limiter =
+            PeerInflightLimiter::new(200, message + 4, routes, Arc::new(Metrics::new(&registry)));
+        let reflection = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .build_v1()
+            .unwrap()
+            .max_decoding_message_size(crate::grpc::route_limits::REFLECTION_REQUEST_LIMIT);
+        let server = serve(
+            limiter.clone(),
+            health_router()
+                .await
+                .route_service(&format!("/{REFLECTION}/{{*rest}}"), reflection),
+        );
+        let channel =
+            tonic::transport::Endpoint::from_shared(format!("http://{}", server.local_addr()))
+                .unwrap()
+                .connect()
+                .await
+                .unwrap();
+        let (requests, receiver) = tokio::sync::mpsc::channel(1);
+        let mut call = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(receiver));
+        call.metadata_mut()
+            .insert("x-peer", tonic::metadata::MetadataValue::from_static("a"));
+        let mut replies = ServerReflectionClient::new(channel)
+            .server_reflection_info(call)
+            .await
+            .unwrap()
+            .into_inner();
+        let client = connect(*server.local_addr()).await;
+
+        for _ in 0..3 {
+            requests.send(request.clone()).await.unwrap();
+            let reply = replies.message().await.unwrap().unwrap();
+            assert!(reply.message_response.is_some());
+            until(|| limiter.reserved(peer(b'a')) == 0).await;
+
+            let (response, mut stream) = open(&client, "Check", b'a', true).await;
+            stream.send_data(prefix(0).into(), true).unwrap();
+            assert_eq!(grpc_status(response).await.code(), tonic::Code::Ok);
+        }
+
+        drop(requests);
+        assert!(replies.message().await.unwrap().is_none());
+        assert_eq!(limiter.peer(peer(b'a')).reserved_max.get(), message as i64);
     }
 }

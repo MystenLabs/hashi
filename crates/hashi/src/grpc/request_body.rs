@@ -23,7 +23,8 @@ pub(super) struct LimitedBody {
     charge: Arc<RequestCharge>,
     limit: usize,
     single_message: bool,
-    held: u64,
+    current: u64,
+    completed: u64,
     state: State,
 }
 
@@ -60,7 +61,8 @@ impl LimitedBody {
             charge,
             limit,
             single_message,
-            held: 0,
+            current: 0,
+            completed: 0,
             state: State::prefix(),
         }
     }
@@ -104,12 +106,11 @@ impl LimitedBody {
                 "declared message length {len} exceeds this route's limit of {limit} bytes"
             )));
         }
-        self.charge.release(std::mem::take(&mut self.held));
         let bytes = PREFIX_LEN + u64::from(len);
         if !self.charge.reserve(bytes) {
             return Err(tonic::Status::unavailable(super::PEER_INFLIGHT_LIMIT_MSG));
         }
-        self.held = bytes;
+        self.current = bytes;
         self.state = State::Message {
             remaining: u64::from(len),
         };
@@ -123,6 +124,7 @@ impl LimitedBody {
         self.state = if self.single_message {
             State::AwaitingEnd(Box::pin(tokio::time::sleep(END_STREAM_WAIT)))
         } else {
+            self.completed += std::mem::take(&mut self.current);
             State::prefix()
         };
     }
@@ -137,6 +139,7 @@ impl http_body::Body for LimitedBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
         let this = self.get_mut();
+        this.charge.release(std::mem::take(&mut this.completed));
         loop {
             if let State::AwaitingEnd(deadline) = &mut this.state {
                 let polled = Pin::new(&mut this.inner).poll_frame(cx);
