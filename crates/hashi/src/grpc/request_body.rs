@@ -23,6 +23,7 @@ pub(super) struct LimitedBody {
     charge: Arc<RequestCharge>,
     limit: usize,
     single_message: bool,
+    held: u64,
     state: State,
 }
 
@@ -59,6 +60,7 @@ impl LimitedBody {
             charge,
             limit,
             single_message,
+            held: 0,
             state: State::prefix(),
         }
     }
@@ -102,9 +104,12 @@ impl LimitedBody {
                 "declared message length {len} exceeds this route's limit of {limit} bytes"
             )));
         }
-        if !self.charge.reserve(PREFIX_LEN + u64::from(len)) {
+        self.charge.release(std::mem::take(&mut self.held));
+        let bytes = PREFIX_LEN + u64::from(len);
+        if !self.charge.reserve(bytes) {
             return Err(tonic::Status::unavailable(super::PEER_INFLIGHT_LIMIT_MSG));
         }
+        self.held = bytes;
         self.state = State::Message {
             remaining: u64::from(len),
         };

@@ -86,6 +86,11 @@ impl RequestCharge {
         true
     }
 
+    pub(super) fn release(&self, bytes: u64) {
+        self.reserved.fetch_sub(bytes, Ordering::AcqRel);
+        self.peer.reserved.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
     pub(super) fn refuse_too_large(&self) {
         self.peer.too_large.inc();
     }
@@ -621,5 +626,50 @@ mod tests {
                 .get(),
             limit as i64
         );
+    }
+
+    #[tokio::test]
+    async fn a_streaming_request_is_charged_only_for_its_latest_message() {
+        let message = crate::grpc::request_body::PREFIX_LEN + 1000;
+        let budget = 2 * message;
+        let registry = prometheus::Registry::new();
+        let limiter = PeerInflightLimiter::new(
+            200,
+            budget,
+            RouteLimits::default(),
+            Arc::new(Metrics::new(&registry)),
+        );
+        let charge = || {
+            Arc::new(RequestCharge {
+                peer: limiter.peer(peer(b'a')),
+                budget,
+                reserved: AtomicU64::new(0),
+            })
+        };
+        let frames = (0..10).map(move |_| {
+            let mut frame = prefix(1000);
+            frame.resize(message as usize, 7);
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frame))
+        });
+        let mut stream = LimitedBody::new(
+            axum::body::Body::from_stream(futures::stream::iter(frames)),
+            charge(),
+            4096,
+            false,
+        );
+        for _ in 0..10 {
+            std::future::poll_fn(|cx| http_body::Body::poll_frame(Pin::new(&mut stream), cx))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(limiter.reserved(peer(b'a')), message);
+        }
+
+        let other = charge();
+        assert!(other.reserve(message));
+        drop(stream);
+        assert_eq!(limiter.reserved(peer(b'a')), message);
+        drop(other);
+        assert_eq!(limiter.reserved(peer(b'a')), 0);
     }
 }

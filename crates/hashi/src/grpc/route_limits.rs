@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-pub(crate) const HEALTH_AND_REFLECTION_DECODE_LIMIT: usize = 4 * 1024 * 1024;
+pub(crate) const HEALTH_DECODE_LIMIT: usize = 4 * 1024 * 1024;
+
+pub(crate) const REFLECTION_REQUEST_LIMIT: usize = 64 * 1024;
 
 pub(crate) const SMALL_MPC_REQUEST_LIMIT: usize = 64 * 1024;
 
