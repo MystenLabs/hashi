@@ -113,10 +113,11 @@ impl HttpService {
                 S::NAME
             }
 
-            let limit = route_limits::HEALTH_AND_REFLECTION_DECODE_LIMIT;
+            let limit = route_limits::HEALTH_DECODE_LIMIT;
             let name = service_name(&health_service);
             let health_service =
                 health_service.max_decoding_message_size(routes.service(name, limit));
+            let limit = route_limits::REFLECTION_REQUEST_LIMIT;
             let name = service_name(&reflection_v1);
             let reflection_v1 =
                 reflection_v1.max_decoding_message_size(routes.service(name, limit));
