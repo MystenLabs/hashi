@@ -19092,6 +19092,71 @@ fn stored_avid_state_is_refused_when_the_snapshot_is_for_another_epoch() {
     );
 }
 
+#[tokio::test]
+async fn retrieve_messages_serves_stored_avid_state_while_a_newer_snapshot_is_published() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let store = Arc::new(InMemoryPublicMessagesStore::new());
+    let mut voter = setup.create_manager_with_store(1, store.clone());
+    for messages in [fx.optimistic[1].1.clone(), dispersals[1].1.clone()] {
+        voter
+            .handle_send_messages_request(fx.dealer_addr, &SendMessagesRequest { messages })
+            .unwrap();
+    }
+    let restarted = setup.create_manager_with_store(1, store);
+    let epoch = restarted.mpc_config.epoch;
+    let shape = restarted.shape_params();
+    let ahead = ShapeParams::new(
+        epoch + 1,
+        epoch,
+        shape.protocol_type().clone(),
+        restarted.batch_size_per_weight,
+        shape.current().clone(),
+        None,
+        None,
+    );
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(restarted);
+    *hashi.shape_params.write().unwrap() = Some(Arc::new(ahead));
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+        epoch: Some(epoch),
+        dealer: Some(fx.dealer_addr.to_string()),
+        protocol_type: Some(hashi_types::proto::MpcProtocolType::NonceGeneration as i32),
+        batch_index: Some(batch_index),
+    });
+    request.extensions_mut().insert(setup.address(4));
+
+    use hashi_types::proto::mpc_service_server::MpcService;
+    let response = service
+        .retrieve_messages(request)
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        response.messages,
+        Some(hashi_types::proto::retrieve_messages_response::Messages::AvidNonceRetrievalMessage(
+            ref retrieval
+        )) if retrieval.common.is_some()
+    ));
+}
+
 #[test]
 fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
     let setup = TestSetup::new(6);
