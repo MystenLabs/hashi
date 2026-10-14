@@ -62,6 +62,10 @@ pub enum AvidNonceMessageKind {
     },
 }
 
+impl AvidNonceMessageKind {
+    pub(crate) const ECHO_VARIANT: u8 = 2;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvidNonceRetrievalMessage {
     pub common: Option<batch_avss_avid::AvssCommonMessage>,
@@ -346,6 +350,8 @@ pub enum Messages {
 }
 
 impl Messages {
+    pub(crate) const NONCE_GENERATION_AVID_VARIANT: u8 = 2;
+
     pub(crate) fn compute_hash(&self) -> MessagesHash {
         let bytes = bcs::to_bytes(self).expect(EXPECT_SERIALIZATION_SUCCESS);
         MessagesHash::from(Blake2b256::digest(&bytes).digest)
@@ -581,6 +587,12 @@ pub enum ProtocolComplaint {
         complaint: batch_avss_avid::AvidComplaint,
         vote_cert: SignedMessage<AvidVoteMessagesHash>,
     },
+}
+
+impl ProtocolComplaint {
+    pub(crate) const AVSS_VARIANT: u8 = 0;
+    pub(crate) const AVID_REVEAL_VARIANT: u8 = 1;
+    pub(crate) const AVID_BLAME_VARIANT: u8 = 2;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
