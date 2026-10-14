@@ -13,6 +13,7 @@ mod bootstrap;
 mod env;
 mod guardian;
 mod nonce;
+mod nonce_watch;
 mod workload;
 
 #[derive(Parser)]
@@ -34,6 +35,9 @@ enum Command {
     Guardian(guardian::Args),
     /// Mine blocks and drive deposits and withdrawals, asserting invariants.
     Workload(workload::Args),
+    /// Watch the partial signatures nodes serve, and the signatures on Sui and
+    /// Bitcoin, for presignature (nonce) reuse.
+    NonceWatch(nonce_watch::Args),
 }
 
 #[tokio::main]
@@ -52,5 +56,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Bootstrap(args) => bootstrap::run(&cli.common, args).await,
         Command::Guardian(args) => guardian::run(&cli.common, args).await,
         Command::Workload(args) => workload::run(&cli.common, args).await,
+        Command::NonceWatch(args) => nonce_watch::run(&cli.common, args).await,
     }
 }

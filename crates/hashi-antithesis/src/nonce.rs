@@ -247,11 +247,6 @@ impl NonceLedger {
         })
     }
 
-    /// Whether some node has served a nonce for this session.
-    pub fn has_session(&self, session: &Session) -> bool {
-        self.session_nonces.contains_key(session)
-    }
-
     /// The nonce x coordinate first observed for this session, if any.
     pub fn session_nonce(&self, session: &Session) -> Option<[u8; 32]> {
         self.session_nonces.get(session).map(|(x, _)| *x)
