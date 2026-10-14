@@ -461,11 +461,29 @@ impl Hashi {
         true
     }
 
+    pub(crate) fn capture_mpc_recovery(
+        &self,
+        epoch: u64,
+        output: &mpc::types::MpcOutput,
+    ) -> anyhow::Result<Option<backup::MpcRecoveryRecord>> {
+        Ok(backup::MpcRecoveryRecord::from_output(
+            self.config.sui_chain_id(),
+            self.config.hashi_ids().hashi_object_id,
+            epoch,
+            self.config.validator_address()?,
+            output,
+        ))
+    }
+
     pub(crate) fn maintain_backups_after_epoch_change(
         &self,
         epoch: u64,
-        write_backup: bool,
+        action: &backup::BackupAction,
     ) -> anyhow::Result<Option<PathBuf>> {
+        let write_backup = match action {
+            backup::BackupAction::CleanupOnly => false,
+            backup::BackupAction::SaveNodeState | backup::BackupAction::SaveWithRecovery(_) => true,
+        };
         match crate::backup::cleanup_old_backups(
             &self.config.backup_dir,
             jiff::Timestamp::now(),
@@ -485,9 +503,11 @@ impl Hashi {
                 "Cleanup of expired backups failed; continuing epoch maintenance: {error:#}",
             ),
         }
-        if !write_backup {
-            return Ok(None);
-        }
+        let recovery = match action {
+            backup::BackupAction::CleanupOnly => return Ok(None),
+            backup::BackupAction::SaveNodeState => None,
+            backup::BackupAction::SaveWithRecovery(recovery) => Some(recovery.as_ref()),
+        };
         let Some(config_path) = self.config_path.as_deref() else {
             tracing::warn!(
                 epoch,
@@ -501,6 +521,8 @@ impl Hashi {
             self.db.as_ref(),
             &self.config.backup_pgp_cert,
             &self.config.backup_dir,
+            Some(epoch),
+            recovery,
         )?;
         self.metrics.backup_scheduled_local_successes.inc();
         tracing::info!(
@@ -1647,6 +1669,7 @@ mod test {
 
     use crate::Hashi;
     use crate::ServerVersion;
+    use crate::backup;
     use crate::bitcoind_rpc_error_with_version_hint;
 
     use crate::config::Config;
@@ -1770,7 +1793,9 @@ mod test {
         std::fs::write(&stale, b"stale archive").unwrap();
 
         assert_eq!(
-            hashi.maintain_backups_after_epoch_change(6, true).unwrap(),
+            hashi
+                .maintain_backups_after_epoch_change(6, &backup::BackupAction::SaveNodeState)
+                .unwrap(),
             None
         );
 
@@ -1799,7 +1824,11 @@ mod test {
         std::fs::write(&stale, b"stale archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
-        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
+        assert!(
+            hashi
+                .maintain_backups_after_epoch_change(6, &backup::BackupAction::SaveNodeState)
+                .is_err()
+        );
 
         assert_eq!(std::fs::read(&stale).unwrap(), b"stale archive");
     }
@@ -1832,13 +1861,17 @@ mod test {
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
-        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
+        assert!(
+            hashi
+                .maintain_backups_after_epoch_change(6, &backup::BackupAction::SaveNodeState)
+                .is_err()
+        );
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
         assert!(!older.exists());
         hashi.config.save(&config_path).unwrap();
 
         let output = hashi
-            .maintain_backups_after_epoch_change(7, true)
+            .maintain_backups_after_epoch_change(7, &backup::BackupAction::SaveNodeState)
             .unwrap()
             .expect("backup should run");
 
@@ -1846,7 +1879,11 @@ mod test {
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
 
         std::fs::remove_file(config_path).unwrap();
-        assert!(hashi.maintain_backups_after_epoch_change(8, true).is_err());
+        assert!(
+            hashi
+                .maintain_backups_after_epoch_change(8, &backup::BackupAction::SaveNodeState)
+                .is_err()
+        );
         assert!(!expired.exists());
         assert!(output.is_file());
     }
@@ -1875,7 +1912,9 @@ mod test {
         std::fs::write(&newest, b"last recovery archive").unwrap();
 
         assert_eq!(
-            hashi.maintain_backups_after_epoch_change(7, false).unwrap(),
+            hashi
+                .maintain_backups_after_epoch_change(7, &backup::BackupAction::CleanupOnly)
+                .unwrap(),
             None
         );
 
@@ -1907,7 +1946,7 @@ mod test {
         .unwrap();
 
         let error = hashi
-            .maintain_backups_after_epoch_change(7, true)
+            .maintain_backups_after_epoch_change(7, &backup::BackupAction::SaveNodeState)
             .unwrap_err();
         assert!(
             error.to_string().contains(config_path.to_str().unwrap()),

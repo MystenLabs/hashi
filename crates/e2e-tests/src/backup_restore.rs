@@ -22,6 +22,8 @@ mod tests {
     use anyhow::Context;
     use anyhow::Result;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
+    use hashi::backup::MPC_RECOVERY_FILE_NAME;
+    use hashi::backup::MpcRecoveryRecord;
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
@@ -93,7 +95,7 @@ mod tests {
             .value()
     }
 
-    async fn wait_for_scheduled_backup(node: &HashiNodeHandle) -> Result<()> {
+    async fn wait_for_scheduled_backup(node: &HashiNodeHandle, expected: f64) -> Result<()> {
         tokio::time::timeout(ROTATION_TIMEOUT, async {
             let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
             loop {
@@ -102,15 +104,141 @@ mod tests {
                     scheduled_successes(node, "hashi_backup_scheduled_local_successes_total");
                 let remote =
                     scheduled_successes(node, "hashi_backup_scheduled_remote_successes_total");
-                if local >= 1.0 && remote >= 1.0 {
-                    assert_eq!(local, 1.0, "Expected one scheduled local backup");
-                    assert_eq!(remote, 1.0, "Expected one scheduled S3 upload");
+                if local >= expected && remote >= expected {
+                    assert_eq!(local, expected, "Unexpected scheduled local backup count");
+                    assert_eq!(remote, expected, "Unexpected scheduled S3 upload count");
                     return;
                 }
             }
         })
         .await
         .context("Scheduled local backup and S3 upload did not both complete")
+    }
+
+    fn scheduled_archives(config: &HashiConfig) -> Result<Vec<PathBuf>> {
+        Ok(std::fs::read_dir(&config.backup_dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|path| path.to_string_lossy().ends_with(".tar.asc"))
+            .collect())
+    }
+
+    async fn wait_for_local_backup(node: &HashiNodeHandle, expected: f64) -> Result<()> {
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                let actual =
+                    scheduled_successes(node, "hashi_backup_scheduled_local_successes_total");
+                if actual >= expected {
+                    assert_eq!(actual, expected, "Expected one backup per recovered epoch");
+                    return;
+                }
+            }
+        })
+        .await
+        .context("Scheduled local recovery backup did not complete")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_automatic_recovery_backup_on_startup_and_rotation() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        for node in networks.hashi_network().nodes() {
+            node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        }
+        let recovery_dir = tempfile::tempdir()?;
+        let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
+        let node = &mut networks.hashi_network_mut().nodes_mut()[0];
+        let initial_epoch = node.current_epoch().unwrap();
+        let public_key = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+        node.shutdown().await;
+        node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient)?;
+        // Keep this test local even when the surrounding environment has S3 credentials.
+        node.config_mut().backup_s3 = None;
+        node.config_path = Some(write_node_config_to_disk(
+            node.config(),
+            recovery_dir.path(),
+        ));
+        node.start().await?;
+        node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        wait_for_local_backup(node, 1.0).await?;
+        let startup_archives = scheduled_archives(node.config())?;
+        assert_eq!(startup_archives.len(), 1);
+        let startup_archive = startup_archives.into_iter().next().unwrap();
+
+        // Recover a late missing manager through the production sync path.
+        // This must not schedule another archive for the already captured epoch.
+        node.hashi().clear_signing_manager_for_test();
+        tokio::time::timeout(DKG_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if node.hashi().signing_manager_for(initial_epoch).is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Late signing manager restoration did not complete")?;
+
+        networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(networks.hashi_network().nodes(), initial_epoch + 1).await;
+        let node = &networks.hashi_network().nodes()[0];
+        wait_for_local_backup(node, 2.0).await?;
+        let archives = scheduled_archives(node.config())?;
+        assert_eq!(
+            archives.len(),
+            2,
+            "Late restoration must not duplicate an epoch"
+        );
+        let rotation_archive = archives
+            .into_iter()
+            .find(|path| path != &startup_archive)
+            .expect("Rotation must produce a new recovery archive");
+
+        // Inspect the actual encrypted archives through the normal restore command,
+        // not an in-memory record or a synthetic MPC fixture.
+        for (archive, expected_epoch) in [
+            (startup_archive, initial_epoch),
+            (rotation_archive, initial_epoch + 1),
+        ] {
+            assert!(
+                archive
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("hashi-backup-epoch-{expected_epoch}-"))
+            );
+            let restored = tempfile::tempdir()?;
+            commands::backup::restore(
+                &archive,
+                RestoreDecryptor::LocalSecretKey {
+                    secret_key_path: secret_key_path.clone(),
+                },
+                restored.path(),
+            )?;
+            let root = restored.path().join(extract_dir_name(&archive)?);
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
+            record.validate()?;
+            let MpcRecoveryRecord::V1(record) = record;
+            assert_eq!(record.chain_id, node.config().sui_chain_id());
+            assert_eq!(
+                record.hashi_object_id,
+                node.config().hashi_ids().hashi_object_id,
+            );
+            assert_eq!(record.validator_address, node.config().validator_address()?);
+            assert_eq!(record.epoch, expected_epoch);
+            assert_eq!(record.public_key, public_key);
+            assert!(record.threshold > 0);
+            assert!(!record.key_shares.shares.is_empty());
+            assert!(!record.commitments.is_empty());
+        }
+        assert_nodes_agree_on_mpc_key(networks.hashi_network().nodes());
+        Ok(())
     }
 
     fn live_s3_config() -> Result<BackupS3Config> {
@@ -267,6 +395,7 @@ mod tests {
             .tempdir()?;
         let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
         let node_config_path = config_dir.path().join("node-config.toml");
+        let mut startup_archive = None;
         if let Some(s3) = &s3 {
             let node = &mut test_networks.hashi_network_mut().nodes_mut()[0];
             node.shutdown().await;
@@ -276,12 +405,10 @@ mod tests {
             node.config_path = Some(node_config_path.clone());
             node.start().await?;
             node.wait_for_mpc_key(DKG_TIMEOUT).await?;
-            for name in [
-                "hashi_backup_scheduled_local_successes_total",
-                "hashi_backup_scheduled_remote_successes_total",
-            ] {
-                assert_eq!(scheduled_successes(node, name), 0.0);
-            }
+            wait_for_scheduled_backup(node, 1.0).await?;
+            let archives = scheduled_archives(node.config())?;
+            assert_eq!(archives.len(), 1, "Expected the startup archive only");
+            startup_archive = archives.into_iter().next();
         }
         let initial_epoch = test_networks.hashi_network().nodes()[0]
             .current_epoch()
@@ -294,7 +421,7 @@ mod tests {
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
         if s3.is_some() {
             // Observe the real epoch-change worker, not a direct backup call.
-            wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0]).await?;
+            wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0], 2.0).await?;
         }
 
         // The on-chain epoch can advance before node 0 prepares its next
@@ -358,11 +485,12 @@ mod tests {
             .clone();
 
         let (tarball, remote_uri) = if let Some(s3) = &s3 {
-            let archives = std::fs::read_dir(&node0_config.backup_dir)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<std::io::Result<Vec<_>>>()?;
-            assert_eq!(archives.len(), 1, "Expected the scheduled archive only");
-            let tarball = archives.into_iter().next().unwrap();
+            let archives = scheduled_archives(&node0_config)?;
+            assert_eq!(archives.len(), 2, "Expected startup and rotation archives");
+            let tarball = archives
+                .into_iter()
+                .find(|path| Some(path) != startup_archive.as_ref())
+                .expect("Rotation must produce a distinct archive");
             assert!(tarball.to_string_lossy().ends_with(".tar.asc"));
             let uri = format!(
                 "s3://{}/{}{}",

@@ -3275,6 +3275,14 @@ impl MpcManager {
         self.current_output.is_some()
     }
 
+    /// Borrow only this epoch's completed private output, never a previous or
+    /// public-only output reconstructed for a node without shares.
+    pub(crate) fn recovery_output_for_epoch(&self, epoch: u64) -> Option<&MpcOutput> {
+        self.current_output
+            .as_ref()
+            .filter(|output| self.mpc_config.epoch == epoch && !output.key_shares.shares.is_empty())
+    }
+
     pub(crate) fn ensure_manager_epoch(&self, epoch: u64) -> MpcResult<()> {
         if self.mpc_config.epoch != epoch {
             return Err(MpcError::InvalidConfig(format!(

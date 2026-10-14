@@ -101,7 +101,15 @@ pub async fn save(
         }
     })?;
 
-    let output_path = backup::save(node_config_path, &node_config, &db, &recipient, output_dir)?;
+    let output_path = backup::save(
+        node_config_path,
+        &node_config,
+        &db,
+        &recipient,
+        output_dir,
+        None,
+        None,
+    )?;
     // Release the database lock before potentially slow remote I/O.
     drop(db);
 

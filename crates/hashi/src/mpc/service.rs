@@ -129,6 +129,8 @@ pub struct MpcService {
     /// after a failed one, keyed by epoch; see `restore_current_manager`.
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
+    // Process-local capture deduplication, not confirmation of archive/upload success.
+    last_recovery_backup_epoch: Mutex<Option<u64>>,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
     presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
@@ -195,6 +197,7 @@ impl MpcService {
             next_batch_repair: Mutex::new(None),
             next_manager_restore: Mutex::new(None),
             backup_handle,
+            last_recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
             presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
@@ -378,8 +381,62 @@ impl MpcService {
         if tombstoned {
             self.run_major_compaction(target_epoch).await;
         }
+        let action = match backup {
+            Backup::Write => match self.capture_recovery_backup(target_epoch) {
+                Ok(Some(recovery)) => {
+                    crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery))
+                }
+                Ok(None) => crate::backup::BackupAction::SaveNodeState,
+                Err(error) => {
+                    warn!(
+                        epoch = target_epoch,
+                        "Skipping epoch backup after MPC recovery capture failed: {error:#}"
+                    );
+                    return;
+                }
+            },
+            Backup::Skip => crate::backup::BackupAction::CleanupOnly,
+        };
         self.backup_handle
-            .maintain_backups_after_epoch_change(target_epoch, backup == Backup::Write);
+            .maintain_backups_after_epoch_change(target_epoch, action);
+    }
+
+    fn capture_recovery_backup(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<Option<crate::backup::MpcRecoveryRecord>> {
+        let mut last_epoch = self.last_recovery_backup_epoch.lock().unwrap();
+        if last_epoch.is_some_and(|last| last >= epoch) {
+            return Ok(None);
+        }
+        let Some(manager) = self.inner.mpc_manager() else {
+            return Ok(None);
+        };
+        let manager = manager.read().unwrap();
+        let Some(output) = manager.recovery_output_for_epoch(epoch) else {
+            return Ok(None);
+        };
+        let recovery = self.inner.capture_mpc_recovery(epoch, output)?;
+        if recovery.is_some() {
+            *last_epoch = Some(epoch);
+        }
+        Ok(recovery)
+    }
+
+    fn backup_recovered_epoch(&self, epoch: u64) {
+        match self.capture_recovery_backup(epoch) {
+            Ok(Some(recovery)) => self.backup_handle.maintain_backups_after_epoch_change(
+                epoch,
+                crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+            ),
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    epoch,
+                    "Skipping recovered epoch backup after MPC recovery capture failed: {error:#}"
+                );
+            }
+        }
     }
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
@@ -1197,6 +1254,7 @@ impl MpcService {
         match self.recover_mpc_state().await {
             Ok(_) => {
                 *self.next_manager_restore.lock().unwrap() = None;
+                self.backup_recovered_epoch(epoch);
                 info!(
                     "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
                      reconfiguration that did not complete had left it on {installed:?} \
@@ -1243,6 +1301,9 @@ impl MpcService {
                 return;
             }
         };
+        // Private key recovery is sufficient: unavailable presignatures must
+        // not prevent archiving the completed epoch's key shares.
+        self.backup_recovered_epoch(epoch);
         match self.recover_presigning_state(&output).await {
             Ok(PresigRecovery::Installed) => {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
