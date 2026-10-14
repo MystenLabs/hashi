@@ -4,8 +4,9 @@
 //! Checks on the Hashi approvals that the monitor reads from Sui.
 //!
 //! Why it exists: Move validates a withdrawal's user outputs against the user
-//! requests, but not its txid. A compromised committee controls the txid, so
-//! the monitor checks it here before an approval enters the state machine.
+//! requests, but not its txid or its change outputs. A compromised committee
+//! controls both, so the monitor checks them here before an approval enters
+//! the state machine.
 //!
 //! Goals of the approval checks, together with Move and the state machine:
 //! 1. The transaction the guardian signs is the one posted on Sui: the same
@@ -28,14 +29,21 @@
 //! 4. The guardian computes its own txid from the outputs it signs, and the
 //!    state machine requires the guardian's txid to equal the approval's.
 //!    Together: the guardian signed exactly the outputs that Move validated.
+//! 5. A txid does not commit to Sui's change label, so this file also rejects
+//!    a change output that does not pay the bridge change address. With step
+//!    4, every signed output is a user output or change to the bridge, which
+//!    completes both goals.
 //!
 //! Assumptions:
+//! - The bridge change address never changes. The caller derives it once.
 //! - An approval comes from a `WithdrawalPickedForProcessing` event or from the
 //!   `WithdrawalTransaction` object created with it. Both carry the same txid,
 //!   inputs, outputs and timestamp.
 
 use anyhow::Context;
+use bitcoin::ScriptBuf;
 use bitcoin::Txid;
+use hashi_types::bitcoin::script_pubkey_from_witness_program;
 use hashi_types::bitcoin::unsigned_withdrawal_tx;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
@@ -68,18 +76,33 @@ pub enum HashiApproval {
 }
 
 /// Check what Move does not on the Hashi approval of `wid`: the claimed
-/// txid must be the txid of the transaction its inputs and outputs build.
-/// Otherwise a committee can commit a user's outputs under the txid of a
-/// transaction that pays itself.
+/// txid must be the txid of the transaction its inputs and outputs build, and
+/// every change output must pay `change_script`. Otherwise a committee can
+/// commit a user's outputs under the txid of a transaction that pays itself,
+/// or label a payout to itself as change.
 fn validate_withdrawal(
     wid: WithdrawalID,
     claimed_txid: Txid,
     inputs: &[Utxo],
-    outputs: &[OutputUtxo],
+    withdrawal_outputs: &[OutputUtxo],
+    change_outputs: &[OutputUtxo],
+    change_script: &ScriptBuf,
     timestamp_secs: UnixSeconds,
 ) -> HashiApproval {
     let mut findings = Vec::new();
-    match unsigned_withdrawal_tx(inputs, outputs) {
+    for (index, output) in change_outputs.iter().enumerate() {
+        let script = script_pubkey_from_witness_program(&output.bitcoin_address).ok();
+        if script.as_ref() != Some(change_script) {
+            findings.push(MonitorFinding::ChangeOutputNotToBridge {
+                wid,
+                vout: (withdrawal_outputs.len() + index) as u32,
+                bitcoin_address: output.bitcoin_address.clone(),
+            });
+        }
+    }
+
+    let outputs = [withdrawal_outputs, change_outputs].concat();
+    match unsigned_withdrawal_tx(inputs, &outputs) {
         Ok(tx) if tx.compute_txid() == claimed_txid => {}
         Ok(tx) => findings.push(MonitorFinding::WithdrawalTxidMismatch {
             wid,
@@ -109,6 +132,7 @@ fn validate_withdrawal(
 /// is not a Hashi `WithdrawalTransaction`.
 pub fn parse_withdrawal_object(
     package_versions: &PackageVersions,
+    change_script: &ScriptBuf,
     wid: WithdrawalID,
     object: &Object,
 ) -> anyhow::Result<Option<HashiApproval>> {
@@ -133,7 +157,9 @@ pub fn parse_withdrawal_object(
         wid,
         txn.txid.into(),
         &txn.inputs,
-        &txn.all_outputs(),
+        &txn.withdrawal_outputs,
+        &txn.change_outputs,
+        change_script,
         unix_millis_to_seconds(txn.created_timestamp_ms),
     )))
 }
@@ -142,6 +168,7 @@ pub fn parse_withdrawal_object(
 /// findings into `findings` if it fails a check.
 pub fn parse_event(
     package_versions: &PackageVersions,
+    change_script: &ScriptBuf,
     event: Event,
     transaction_timestamp_secs: UnixSeconds,
     events: &mut Vec<MonitorEvent>,
@@ -155,12 +182,13 @@ pub fn parse_event(
 
     match event {
         Some(HashiEvent::WithdrawalPickedForProcessing(event)) => {
-            let outputs = [event.withdrawal_outputs, event.change_outputs].concat();
             let approval = validate_withdrawal(
                 event.withdrawal_txn_id,
                 event.txid.into(),
                 &event.inputs,
-                &outputs,
+                &event.withdrawal_outputs,
+                &event.change_outputs,
+                change_script,
                 unix_millis_to_seconds(event.timestamp_ms),
             );
             match approval {
@@ -190,6 +218,13 @@ pub mod tests {
     use std::collections::BTreeMap;
 
     use crate::findings::FindingCategory;
+    use hashi_types::bitcoin::BTC_LIB;
+    use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::bitcoin::BitcoinKeypair;
+    use hashi_types::bitcoin::DerivationPath;
+    use hashi_types::bitcoin::HashiMasterG;
+    use hashi_types::bitcoin::taproot_address;
+    use hashi_types::bitcoin::witness_program_from_address;
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
     use hashi_types::move_types::UtxoId;
@@ -203,6 +238,28 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
+    /// The bridge change address for the test guardian and MPC keys.
+    pub fn test_change_address() -> BitcoinAddress {
+        let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
+            .unwrap()
+            .x_only_public_key()
+            .0;
+        let mpc = HashiMasterG::with_even_y_from_x_be_bytes(
+            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32])
+                .unwrap()
+                .x_only_public_key()
+                .0
+                .serialize(),
+        )
+        .unwrap();
+        taproot_address(
+            &guardian,
+            &mpc,
+            &DerivationPath::ZERO,
+            bitcoin::Network::Signet,
+        )
+    }
+
     /// `txn` with the txid that its inputs and outputs build.
     pub fn with_rebuilt_txid(mut txn: WithdrawalTransaction) -> WithdrawalTransaction {
         let txid = unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())
@@ -212,8 +269,8 @@ pub mod tests {
         txn
     }
 
-    /// A withdrawal of one input into one user output and one change output,
-    /// whose txid is the one its inputs and outputs build.
+    /// A withdrawal of one input into one user output and one change output to
+    /// the bridge, whose txid is the one its inputs and outputs build.
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
         let inputs = vec![Utxo {
             id: UtxoId {
@@ -229,7 +286,7 @@ pub mod tests {
         }];
         let change_outputs = vec![OutputUtxo {
             amount: 19_000,
-            bitcoin_address: vec![0x54; 32],
+            bitcoin_address: witness_program_from_address(&test_change_address()).unwrap(),
         }];
         let txn = WithdrawalTransaction {
             id,
@@ -292,9 +349,14 @@ pub mod tests {
 
     /// The approval of `txn`'s object at `WID`.
     fn approval(txn: &WithdrawalTransaction) -> HashiApproval {
-        parse_withdrawal_object(&package_versions(), WID, &object_at_wid(PACKAGE_ID, txn))
-            .unwrap()
-            .unwrap()
+        parse_withdrawal_object(
+            &package_versions(),
+            &test_change_address().script_pubkey(),
+            WID,
+            &object_at_wid(PACKAGE_ID, txn),
+        )
+        .unwrap()
+        .unwrap()
     }
 
     /// The findings of a rejected approval.
@@ -341,6 +403,26 @@ pub mod tests {
     }
 
     #[test]
+    fn a_change_output_to_another_address_rejects_the_approval() {
+        let mut txn = withdrawal_transaction(WID);
+        txn.change_outputs[0].bitcoin_address = vec![0x54; 32];
+        // An honest txid, as a committee paying itself as change would commit.
+        let txn = with_rebuilt_txid(txn);
+
+        let findings = rejection(approval(&txn));
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::ChangeOutputNotToBridge {
+                wid: WID,
+                vout: 1,
+                bitcoin_address: vec![0x54; 32],
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
     fn a_tampered_change_output_rejects_the_approval() {
         let mut txn = withdrawal_transaction(WID);
         txn.change_outputs[0].amount += 1;
@@ -361,14 +443,18 @@ pub mod tests {
 
         let findings = rejection(approval(&txn));
 
+        // The bad address is not the bridge's either.
         assert!(
             matches!(
                 findings[..],
-                [MonitorFinding::WithdrawalTxUnbuildable { wid: WID, claimed: c, .. }] if c == claimed
+                [
+                    MonitorFinding::ChangeOutputNotToBridge { wid: WID, vout: 1, .. },
+                    MonitorFinding::WithdrawalTxUnbuildable { wid: WID, claimed: c, .. },
+                ] if c == claimed
             ),
             "{findings:?}"
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
+        assert_eq!(findings[1].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -379,7 +465,12 @@ pub mod tests {
         package.object_type = Some("package".to_string());
 
         for object in [foreign_type, package] {
-            let approval = parse_withdrawal_object(&package_versions(), WID, &object);
+            let approval = parse_withdrawal_object(
+                &package_versions(),
+                &test_change_address().script_pubkey(),
+                WID,
+                &object,
+            );
             assert_eq!(approval.unwrap(), None);
         }
     }
@@ -394,21 +485,31 @@ pub mod tests {
         undecodable.contents = Some(Bcs::from(vec![1, 2, 3]));
 
         for object in [another_withdrawal, undecodable] {
-            let approval = parse_withdrawal_object(&package_versions(), WID, &object);
+            let approval = parse_withdrawal_object(
+                &package_versions(),
+                &test_change_address().script_pubkey(),
+                WID,
+                &object,
+            );
             assert!(approval.is_err());
         }
     }
 
     #[test]
     fn lookup_and_event_scan_build_the_same_approval() {
+        let change_script = test_change_address().script_pubkey();
         for txn in [
             withdrawal_transaction(WID),
             with_wrong_txid(withdrawal_transaction(WID)),
         ] {
-            let looked_up =
-                parse_withdrawal_object(&package_versions(), WID, &object_at_wid(PACKAGE_ID, &txn))
-                    .unwrap()
-                    .unwrap();
+            let looked_up = parse_withdrawal_object(
+                &package_versions(),
+                &change_script,
+                WID,
+                &object_at_wid(PACKAGE_ID, &txn),
+            )
+            .unwrap()
+            .unwrap();
             let expected = match looked_up {
                 HashiApproval::Valid(event) => (vec![MonitorEvent::Withdrawal(event)], vec![]),
                 HashiApproval::Rejected(findings) => (vec![], findings),
@@ -417,6 +518,7 @@ pub mod tests {
             let (mut events, mut findings) = (Vec::new(), Vec::new());
             parse_event(
                 &package_versions(),
+                &change_script,
                 picked_for_processing_event(&txn),
                 0,
                 &mut events,

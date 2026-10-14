@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Context;
+use bitcoin::ScriptBuf;
 use futures::StreamExt;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
@@ -96,6 +97,8 @@ pub struct SuiEventsPoller {
     client: sui_rpc::Client,
     /// Deployed package versions used to identify Hashi event and object types.
     package_versions: PackageVersions,
+    /// The script every withdrawal change output must pay.
+    change_script: ScriptBuf,
     /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
     /// Timestamp from which the poller scans every checkpoint.
@@ -113,7 +116,12 @@ pub struct SuiEventsPoller {
 }
 
 impl SuiEventsPoller {
-    pub fn new(config: &SuiConfig, start: UnixSeconds) -> anyhow::Result<Self> {
+    /// `change_script` is the script every withdrawal change output must pay.
+    pub fn new(
+        config: &SuiConfig,
+        change_script: ScriptBuf,
+        start: UnixSeconds,
+    ) -> anyhow::Result<Self> {
         let package_id = Address::from_str(&config.package_id)
             .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
 
@@ -125,6 +133,7 @@ impl SuiEventsPoller {
         Ok(Self {
             client,
             package_versions,
+            change_script,
             package_id: config.package_id.clone(),
             start_seconds: start,
             cursor_seconds: start,
@@ -320,7 +329,12 @@ impl SuiEventsPoller {
             .await
             .with_context(|| format!("Sui lookup of withdrawal transaction {wid} timed out"))??;
         match object {
-            Some(object) => approval::parse_withdrawal_object(&self.package_versions, wid, &object),
+            Some(object) => approval::parse_withdrawal_object(
+                &self.package_versions,
+                &self.change_script,
+                wid,
+                &object,
+            ),
             None => Ok(None),
         }
     }
@@ -599,6 +613,7 @@ impl SuiEventsPoller {
         for sui_event in sui_events {
             approval::parse_event(
                 &self.package_versions,
+                &self.change_script,
                 sui_event,
                 timestamp_secs,
                 events,
@@ -614,6 +629,7 @@ pub mod tests {
     use super::approval::tests::PACKAGE_ID;
     use super::approval::tests::WID;
     use super::approval::tests::object_at_wid;
+    use super::approval::tests::test_change_address;
     use super::approval::tests::withdrawal_transaction;
     use super::*;
     use crate::domain::MonitorWithdrawalEvent;
@@ -763,7 +779,7 @@ pub mod tests {
             rpc_url: format!("http://{addr}"),
             package_id: PACKAGE_ID.to_string(),
         };
-        SuiEventsPoller::new(&config, 0).unwrap()
+        SuiEventsPoller::new(&config, test_change_address().script_pubkey(), 0).unwrap()
     }
 
     /// The approval a lookup of `WID` returns from `poller_scanned`'s ledger.
@@ -974,7 +990,8 @@ pub mod tests {
             rpc_url: "http://127.0.0.1:9".to_string(),
             package_id: PACKAGE_ID.to_string(),
         };
-        let mut poller = SuiEventsPoller::new(&config, 100).unwrap();
+        let mut poller =
+            SuiEventsPoller::new(&config, test_change_address().script_pubkey(), 100).unwrap();
         assert!(!poller.has_scanned(100));
 
         poller.cursor_seconds = 200;
