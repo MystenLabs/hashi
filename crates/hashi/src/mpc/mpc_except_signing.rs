@@ -6371,10 +6371,11 @@ impl MpcManager {
         batch_index: u32,
         dealer: &Address,
     ) -> MpcResult<Option<AvidRoundState>> {
+        let epoch = self.mpc_config.epoch;
         self.public_messages_store
-            .get_avid_round_state(self.mpc_config.epoch, batch_index, dealer)
+            .get_avid_round_state(epoch, batch_index, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| stored_rows::avid_round_state(&self.shape_params(), dealer, &bytes))
+            .map(|bytes| stored_rows::avid_round_state(&self.shape_params(), epoch, dealer, &bytes))
             .transpose()
     }
 
@@ -6383,10 +6384,11 @@ impl MpcManager {
         batch_index: u32,
         dealer: &Address,
     ) -> MpcResult<Option<HeldAvidEchoes>> {
+        let epoch = self.mpc_config.epoch;
         self.public_messages_store
-            .get_avid_held_echoes(self.mpc_config.epoch, batch_index, dealer)
+            .get_avid_held_echoes(epoch, batch_index, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| stored_rows::held_avid_echoes(&self.shape_params(), dealer, &bytes))
+            .map(|bytes| stored_rows::held_avid_echoes(&self.shape_params(), epoch, dealer, &bytes))
             .transpose()
     }
 
@@ -6856,7 +6858,9 @@ pub(crate) fn finish_avid_retrieval(
         Lookup::Pending => store
             .get_avid_held_echoes(pending.epoch, pending.batch_index, &pending.dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| stored_rows::held_avid_echoes(shape, &pending.dealer, &bytes))
+            .map(|bytes| {
+                stored_rows::held_avid_echoes(shape, pending.epoch, &pending.dealer, &bytes)
+            })
             .transpose()
             .map_err(not_found_if_refused)?,
     };
@@ -6865,7 +6869,9 @@ pub(crate) fn finish_avid_retrieval(
         Lookup::Pending => store
             .get_avid_round_state(pending.epoch, pending.batch_index, &pending.dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| stored_rows::avid_round_state(shape, &pending.dealer, &bytes))
+            .map(|bytes| {
+                stored_rows::avid_round_state(shape, pending.epoch, &pending.dealer, &bytes)
+            })
             .transpose()
             .map_err(not_found_if_refused)?
             .map(|state| state.common),
@@ -6953,9 +6959,12 @@ pub(crate) fn retrieve_from_store(
 
 fn not_found_if_refused(e: MpcError) -> MpcError {
     match e {
-        MpcError::StoredRowRefused { dealer, reason } => MpcError::NotFound(format!(
-            "stored row for dealer {dealer:?} refused: {reason}"
-        )),
+        MpcError::StoredRowRefused { dealer, reason } => {
+            tracing::warn!("Stored row for dealer {dealer:?} refused ({reason}); not served");
+            MpcError::NotFound(format!(
+                "stored row for dealer {dealer:?} refused: {reason}"
+            ))
+        }
         e => e,
     }
 }

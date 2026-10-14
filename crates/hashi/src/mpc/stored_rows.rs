@@ -55,11 +55,11 @@ pub(crate) fn rotation_messages(
 
 pub(crate) fn avid_round_state(
     shape: &ShapeParams,
+    epoch: u64,
     dealer: &Address,
     bytes: &[u8],
 ) -> MpcResult<AvidRoundState> {
-    let dealer_party = shape
-        .current()
+    let dealer_party = avid_committee(shape, epoch, dealer)?
         .party_of(dealer)
         .ok_or_else(|| refused(dealer, "not in the committee".into()))?;
     decode(
@@ -71,10 +71,11 @@ pub(crate) fn avid_round_state(
 
 pub(crate) fn held_avid_echoes(
     shape: &ShapeParams,
+    epoch: u64,
     dealer: &Address,
     bytes: &[u8],
 ) -> MpcResult<HeldAvidEchoes> {
-    let current = shape.current();
+    let current = avid_committee(shape, epoch, dealer)?;
     let holder = current
         .own_party()
         .ok_or_else(|| refused(dealer, "this node is not in the committee".into()))?;
@@ -109,6 +110,16 @@ fn avss_shape(
         .committee_for_epoch(epoch)
         .map(CommitteeShape::avss_shape)
         .ok_or_else(|| refused(dealer, format!("no committee known for epoch {epoch}")))
+}
+
+fn avid_committee<'a>(
+    shape: &'a ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+) -> MpcResult<&'a CommitteeShape> {
+    (epoch == shape.epoch())
+        .then(|| shape.current())
+        .ok_or_else(|| refused(dealer, format!("no AVID parameters for epoch {epoch}")))
 }
 
 fn decode<T: DeserializeOwned>(

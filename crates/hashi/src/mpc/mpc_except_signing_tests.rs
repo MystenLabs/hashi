@@ -19003,6 +19003,50 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
 }
 
 #[test]
+fn stored_avid_state_is_refused_under_another_epochs_parameters() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let store = Arc::new(InMemoryPublicMessagesStore::new());
+    let mut voter = setup.create_manager_with_store(1, store.clone());
+    for messages in [fx.optimistic[1].1.clone(), dispersals[1].1.clone()] {
+        voter
+            .handle_send_messages_request(fx.dealer_addr, &SendMessagesRequest { messages })
+            .unwrap();
+    }
+    let epoch = voter.mpc_config.epoch;
+    let shape = voter.shape_params();
+    let ahead = ShapeParams::new(
+        epoch + 1,
+        epoch,
+        shape.protocol_type().clone(),
+        voter.batch_size_per_weight,
+        shape.current().clone(),
+        None,
+        None,
+    );
+    let pending = || AvidPending {
+        epoch,
+        batch_index,
+        dealer: fx.dealer_addr,
+        requester: setup.address(4),
+        common: Lookup::Pending,
+        held: Lookup::Pending,
+    };
+
+    assert!(finish_avid_retrieval(&*store, pending(), &shape).is_ok());
+    let refused = finish_avid_retrieval(&*store, pending(), &ahead);
+    assert!(
+        matches!(&refused, Err(MpcError::NotFound(reason)) if reason.contains("no AVID parameters for epoch")),
+        "{refused:?}"
+    );
+}
+
+#[test]
 fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
