@@ -12,6 +12,7 @@ use clap::Subcommand;
 mod bootstrap;
 mod env;
 mod guardian;
+mod nonce;
 mod workload;
 
 #[derive(Parser)]
