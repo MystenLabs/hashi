@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Checks on the Hashi approvals that the monitor reads from Sui.
+//! Withdrawal-side checks on the Hashi approvals that the monitor reads from Sui.
 //!
 //! Why it exists: Move validates a withdrawal's user outputs against the user
 //! requests, but not its txid or its change outputs. A compromised committee
@@ -10,9 +10,9 @@
 //!
 //! Goals of the approval checks, together with Move and the state machine:
 //! 1. The transaction the guardian signs is the one posted on Sui: the same
-//!    input UTXOs, the same external outputs and the same internal outputs.
-//! 2. Every output pays either a user-requested address with the requested
-//!    amount less the fee share, or a change address owned by Hashi.
+//!    input UTXOs and the same output UTXOs.
+//! 2. Every output is either a user-requested payout, with the requested
+//!    amount less the fee share, or change to a Hashi address.
 //!
 //! Chain of trust, from the user's request to the guardian's signature:
 //! 1. Move builds the `WithdrawalTransaction` object in `new_withdrawal_txn`
