@@ -218,10 +218,10 @@ pub struct MpcManager {
     stored_row_hashes: HashMap<(ProtocolTypeIndicator, Address), MessagesHash>,
     skipped_rows: HashSet<(ProtocolTypeIndicator, Address)>,
     pub rotation_ack_signatures: HashMap<Address, (MessagesHash, BLS12381Signature)>,
-    pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
+    pub current_avid_round_state: HashMap<(u32, Address), Arc<AvidRoundState>>,
     pub current_avid_verified_common:
         HashMap<(u32, Address), batch_avss_avid::VerifiedAvssCommonMessage>,
-    pub avid_held_echoes: HashMap<(u32, Address), HeldAvidEchoes>,
+    pub avid_held_echoes: HashMap<(u32, Address), Arc<HeldAvidEchoes>>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
@@ -672,15 +672,16 @@ impl MpcManager {
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
         let shape = self.shape_params();
-        let reply = match self.begin_retrieve(requester, request)? {
-            RetrieveOutcome::Ready(reply) => reply,
-            RetrieveOutcome::NeedsStore => {
-                retrieve_from_store(&*self.public_messages_store, request)?
-            }
-            RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Decoded(
-                finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
-            ),
-        };
+        let reply =
+            match self.begin_retrieve(requester, request)? {
+                RetrieveOutcome::Ready(reply) => reply,
+                RetrieveOutcome::NeedsStore => {
+                    retrieve_from_store(&*self.public_messages_store, request)?
+                }
+                RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Avid(
+                    finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
+                ),
+            };
         RetrieveMessagesResponse::try_from(&reply.to_proto(&shape, request)?)
             .map_err(|e| MpcError::ProtocolFailed(e.to_string()))
     }
@@ -726,18 +727,15 @@ impl MpcManager {
                     ));
                 }
                 let key = (batch_index, request.dealer);
-                let common = self
-                    .current_avid_round_state
-                    .get(&key)
-                    .map(|state| state.common.clone());
+                let round_state = self.current_avid_round_state.get(&key).cloned();
                 let held = self.avid_held_echoes.get(&key).cloned();
                 return Ok(RetrieveOutcome::NeedsAvidStore(AvidPending {
                     epoch: self.mpc_config.epoch,
                     batch_index,
                     dealer: request.dealer,
                     requester,
-                    common: match common {
-                        Some(common) => Lookup::Resolved(common),
+                    round_state: match round_state {
+                        Some(state) => Lookup::Resolved(state),
                         None => Lookup::Pending,
                     },
                     held: match held {
@@ -2258,7 +2256,7 @@ impl MpcManager {
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         if epoch == self.mpc_config.epoch {
             self.current_avid_round_state
-                .insert((batch_index, dealer), state.clone());
+                .insert((batch_index, dealer), Arc::new(state.clone()));
         }
         Ok(())
     }
@@ -2272,7 +2270,8 @@ impl MpcManager {
         self.public_messages_store
             .store_avid_held_echoes(self.mpc_config.epoch, batch_index, &dealer, &held)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
-        self.avid_held_echoes.insert((batch_index, dealer), held);
+        self.avid_held_echoes
+            .insert((batch_index, dealer), Arc::new(held));
         Ok(())
     }
 
@@ -2280,12 +2279,16 @@ impl MpcManager {
         &self,
         batch_index: u32,
         dealer: &Address,
-    ) -> MpcResult<Option<HeldAvidEchoes>> {
+    ) -> MpcResult<Option<Arc<HeldAvidEchoes>>> {
         self.avid_held_echoes
             .get(&(batch_index, *dealer))
             .cloned()
             .map(|echoes| Ok(Some(echoes)))
-            .unwrap_or_else(|| self.read_held_avid_echoes(batch_index, dealer))
+            .unwrap_or_else(|| {
+                Ok(self
+                    .read_held_avid_echoes(batch_index, dealer)?
+                    .map(Arc::new))
+            })
     }
 
     fn try_sign_dkg_message(
@@ -2546,13 +2549,13 @@ impl MpcManager {
         dispersal: batch_avss_avid::Dispersal,
         confirm_cert: AvidConfirmCertificate,
     ) -> MpcResult<AvidEchoAndVote> {
-        let own_common = self
+        let own_common_hash = self
             .get_avid_round_state(batch_index, &dealer)?
-            .map(|state| state.common)
+            .map(|state| state.common.hash())
             .ok_or_else(|| {
                 MpcError::NotReady("no verified common message for this AVID round".into())
             })?;
-        if own_common.hash() != common.hash() {
+        if own_common_hash != common.hash() {
             return Err(MpcError::InvalidMessage {
                 sender: dealer,
                 reason: "dispersal common does not match this node's verified round state".into(),
@@ -2561,7 +2564,7 @@ impl MpcManager {
         self.ensure_avid_nonce_output(
             dealer,
             batch_index,
-            &MessagesHash::from(own_common.hash().digest),
+            &MessagesHash::from(own_common_hash.digest),
         )?;
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
@@ -2658,7 +2661,7 @@ impl MpcManager {
                     complaint,
                     accuser_id,
                     &verified_common,
-                    state.own_ciphertext,
+                    state.own_ciphertext.clone(),
                     &mut rng,
                 )
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?,
@@ -2666,8 +2669,9 @@ impl MpcManager {
                 complaint,
                 vote_cert,
             } => {
-                let (held_vote, _, _) = self
+                let held_vote = self
                     .try_get_avid_held_echoes(batch_index, &request.dealer)?
+                    .map(|held| held.0.clone())
                     .ok_or_else(|| {
                         MpcError::NotFound("no held vote for the complained round".into())
                     })?;
@@ -2701,7 +2705,7 @@ impl MpcManager {
                         accuser_id,
                         &verified_common,
                         &cert,
-                        state.own_ciphertext,
+                        state.own_ciphertext.clone(),
                         &mut rng,
                     )
                     .map_err(|e| MpcError::CryptoError(e.to_string()))?
@@ -2753,8 +2757,8 @@ impl MpcManager {
             });
         }
         let message = batch_avss_avid::AvssMessage {
-            common: state.common,
-            ciphertext: state.own_ciphertext,
+            common: state.common.clone(),
+            ciphertext: state.own_ciphertext.clone(),
         };
         self.try_sign_avid_nonce_optimistic(dealer, batch_index, &message)?;
         tracing::info!(
@@ -2769,12 +2773,16 @@ impl MpcManager {
         &self,
         batch_index: u32,
         dealer: &Address,
-    ) -> MpcResult<Option<AvidRoundState>> {
+    ) -> MpcResult<Option<Arc<AvidRoundState>>> {
         self.current_avid_round_state
             .get(&(batch_index, *dealer))
             .cloned()
             .map(|s| Ok(Some(s)))
-            .unwrap_or_else(|| self.read_avid_round_state(batch_index, dealer))
+            .unwrap_or_else(|| {
+                Ok(self
+                    .read_avid_round_state(batch_index, dealer)?
+                    .map(Arc::new))
+            })
     }
 
     fn avid_round_verified_common(
@@ -2795,8 +2803,8 @@ impl MpcManager {
             })?;
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let message = batch_avss_avid::AvssMessage {
-            common: state.common,
-            ciphertext: state.own_ciphertext,
+            common: state.common.clone(),
+            ciphertext: state.own_ciphertext.clone(),
         };
         let (_, _, verified_common) = receiver
             .process_avss_message(&message)
@@ -2872,7 +2880,7 @@ impl MpcManager {
                 }
                 let common = self
                     .get_avid_round_state(batch_index, &sender)?
-                    .map(|state| state.common)
+                    .map(|state| state.common.clone())
                     .ok_or_else(|| {
                         MpcError::NotReady("no verified common message for this AVID round".into())
                     })?;
@@ -2884,9 +2892,8 @@ impl MpcManager {
                     confirm_cert.clone(),
                 )?;
                 let vote_hash = hash_avid_vote(&avid_vote);
-                if let Some((held_vote, _, _)) =
-                    self.try_get_avid_held_echoes(batch_index, &sender)?
-                    && hash_avid_vote(&held_vote) != vote_hash
+                if let Some(held) = self.try_get_avid_held_echoes(batch_index, &sender)?
+                    && hash_avid_vote(&held.0) != vote_hash
                 {
                     return Err(MpcError::InvalidMessage {
                         sender,
@@ -2957,7 +2964,7 @@ impl MpcManager {
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight =
             Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
-        let stored_confirm_cert = held.map(|(_, _, cert)| cert);
+        let stored_confirm_cert = held.map(|held| held.2.clone());
         Ok(AvidDealerFlowData {
             builder,
             confirm_target,
@@ -3522,10 +3529,10 @@ impl MpcManager {
                 })
             }),
             CertKind::AvidVote => self.try_get_avid_held_echoes(batch_index, dealer).map(|e| {
-                e.map(|(vote, _, _)| {
+                e.map(|held| {
                     (
-                        hash_avid_vote(&vote),
-                        MessagesHash::from(vote.common_message_hash.digest),
+                        hash_avid_vote(&held.0),
+                        MessagesHash::from(held.0.common_message_hash.digest),
                     )
                 })
             }),
@@ -6946,11 +6953,10 @@ pub(crate) enum RetrieveOutcome {
     NeedsAvidStore(AvidPending),
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum RetrieveReply {
     Dkg(Bytes),
     Rotation(Bytes),
-    Decoded(RetrieveMessagesResponse),
+    Avid(AvidRetrieval),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -6982,15 +6988,15 @@ pub(crate) struct AvidPending {
     batch_index: u32,
     dealer: Address,
     requester: Address,
-    common: Lookup<batch_avss_avid::AvssCommonMessage>,
-    held: Lookup<HeldAvidEchoes>,
+    round_state: Lookup<Arc<AvidRoundState>>,
+    held: Lookup<Arc<HeldAvidEchoes>>,
 }
 
 pub(crate) fn finish_avid_retrieval(
     store: &dyn PublicMessagesStore,
     pending: AvidPending,
     shape: &ShapeParams,
-) -> MpcResult<RetrieveMessagesResponse> {
+) -> MpcResult<AvidRetrieval> {
     let held = match pending.held {
         Lookup::Resolved(resolved) => Some(resolved),
         Lookup::Pending => store
@@ -7000,9 +7006,10 @@ pub(crate) fn finish_avid_retrieval(
                 stored_rows::held_avid_echoes(shape, pending.epoch, &pending.dealer, &bytes)
             })
             .transpose()
-            .map_err(not_found_if_refused)?,
+            .map_err(not_found_if_refused)?
+            .map(Arc::new),
     };
-    let common = match pending.common {
+    let round_state = match pending.round_state {
         Lookup::Resolved(resolved) => Some(resolved),
         Lookup::Pending => store
             .get_avid_round_state(pending.epoch, pending.batch_index, &pending.dealer)
@@ -7012,60 +7019,60 @@ pub(crate) fn finish_avid_retrieval(
             })
             .transpose()
             .map_err(not_found_if_refused)?
-            .map(|state| state.common),
+            .map(Arc::new),
     };
-    build_avid_response(
-        pending.requester,
-        pending.dealer,
-        pending.batch_index,
-        common,
+    let retrieval = AvidRetrieval {
+        requester: pending.requester,
+        round_state,
         held,
-    )
-}
-
-fn build_avid_response(
-    requester: Address,
-    dealer: Address,
-    batch_index: u32,
-    common: Option<batch_avss_avid::AvssCommonMessage>,
-    held: Option<HeldAvidEchoes>,
-) -> MpcResult<RetrieveMessagesResponse> {
-    let (avid_vote, echo) = match &held {
-        Some((vote, echoes, _)) => {
-            let echo = echoes.iter().find_map(|(addr, msg)| {
-                (*addr == requester).then(|| match msg {
-                    Messages::NonceGenerationAvid(AvidNonceMessage {
-                        kind: AvidNonceMessageKind::Echo { echo, .. },
-                        ..
-                    }) => echo.clone(),
-                    _ => unreachable!("held echoes are echo messages"),
-                })
-            });
-            (Some(vote.clone()), echo)
-        }
-        None => (None, None),
     };
-    if common.is_none() && avid_vote.is_none() && echo.is_none() {
+    let (common, vote, echo) = (
+        retrieval.common().is_some(),
+        retrieval.vote().is_some(),
+        retrieval.echo().is_some(),
+    );
+    if !common && !vote && !echo {
         return Err(MpcError::NotFound(format!(
-            "no AVID round state for dealer {dealer:?}"
+            "no AVID round state for dealer {:?}",
+            pending.dealer
         )));
     }
     tracing::info!(
-        "AVID echo pull served: requester {:?}, dealer {:?}, batch_index={batch_index}, \
-         common={}, vote={}, echo={}",
-        requester,
-        dealer,
-        common.is_some(),
-        avid_vote.is_some(),
-        echo.is_some()
+        "AVID echo pull served: requester {:?}, dealer {:?}, batch_index={}, \
+         common={common}, vote={vote}, echo={echo}",
+        pending.requester,
+        pending.dealer,
+        pending.batch_index,
     );
-    Ok(RetrieveMessagesResponse {
-        messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
-            common,
-            echo,
-            avid_vote,
-        }),
-    })
+    Ok(retrieval)
+}
+
+pub(crate) struct AvidRetrieval {
+    requester: Address,
+    round_state: Option<Arc<AvidRoundState>>,
+    held: Option<Arc<HeldAvidEchoes>>,
+}
+
+impl AvidRetrieval {
+    pub(crate) fn common(&self) -> Option<&batch_avss_avid::AvssCommonMessage> {
+        self.round_state.as_deref().map(|state| &state.common)
+    }
+
+    pub(crate) fn vote(&self) -> Option<&batch_avss_avid::AvidVote> {
+        self.held.as_deref().map(|(vote, _, _)| vote)
+    }
+
+    pub(crate) fn echo(&self) -> Option<&batch_avss_avid::Echo> {
+        self.held.as_deref()?.1.iter().find_map(|(addr, msg)| {
+            (*addr == self.requester).then(|| match msg {
+                Messages::NonceGenerationAvid(AvidNonceMessage {
+                    kind: AvidNonceMessageKind::Echo { echo, .. },
+                    ..
+                }) => echo,
+                _ => unreachable!("held echoes are echo messages"),
+            })
+        })
+    }
 }
 
 pub(crate) fn retrieve_from_store(

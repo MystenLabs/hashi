@@ -136,7 +136,7 @@ impl MpcService for HttpService {
                 RetrieveOutcome::NeedsStore => {
                     retrieve_from_store(&*store, &internal_request).map_err(to_status)?
                 }
-                RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Decoded(
+                RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Avid(
                     finish_avid_retrieval(&*store, pending, &shape).map_err(to_status)?,
                 ),
             };
