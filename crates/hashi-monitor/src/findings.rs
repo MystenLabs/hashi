@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::domain::DepositId;
+use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
@@ -74,6 +76,17 @@ pub enum MonitorFinding {
         vout: u32,
         bitcoin_address: Vec<u8>,
     },
+    /// The confirmed Bitcoin transaction has no output at the deposit's vout.
+    DepositOutputMissing {
+        deposit_id: DepositId,
+        output_count: usize,
+    },
+    /// The deposit Bitcoin confirms differs in amount or script from the one
+    /// the Sui request claims.
+    DepositMismatch {
+        sui: MonitorDepositEvent,
+        btc: MonitorDepositEvent,
+    },
 }
 
 impl MonitorFinding {
@@ -92,6 +105,8 @@ impl MonitorFinding {
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
             Self::ChangeOutputNotToBridge { .. } => FindingCategory::Safety,
+            Self::DepositOutputMissing { .. } => FindingCategory::Safety,
+            Self::DepositMismatch { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -155,6 +170,18 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "ChangeOutputNotToBridge(wid={wid}, vout={vout}, bitcoin_address={})",
                 hex::encode(bitcoin_address),
+            ),
+            Self::DepositOutputMissing {
+                deposit_id,
+                output_count,
+            } => write!(
+                f,
+                "DepositOutputMissing(deposit_id={deposit_id}, output_count={output_count})"
+            ),
+            Self::DepositMismatch { sui, btc } => write!(
+                f,
+                "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
+                sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
             ),
         }
     }
