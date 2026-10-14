@@ -2,6 +2,8 @@
 
 Recommended Prometheus alerts for hashi validator operators. A ready-to-use
 rules file lives at [`monitoring/validator-alerts.example.yml`](../monitoring/validator-alerts.example.yml).
+[`monitoring/validator-alerts.test.yml`](../monitoring/validator-alerts.test.yml) has `promtool`
+tests for the peer and MPC work alerts.
 
 Two principles shape this list:
 
@@ -31,6 +33,9 @@ Two principles shape this list:
 | Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
 | Withdrawal fails bitcoind | `increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0` | Your bitcoind says a signed withdrawal is invalid. If other operators see it too, withdrawals are broken: raise it in the operator channel. If only you see it, check your bitcoind. |
 | Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
+| Peer shed               | A per-peer shed counter rose in 1h (see the rules file) | The peer may be misbehaving, or your node may be slow or have its limits set too low. Rule your node out first. |
+| Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
+| MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
 
 Dashboard-worthy but **not** alerts:
 
@@ -52,6 +57,9 @@ Dashboard-worthy but **not** alerts:
   `hashi_withdrawal_bitcoin_check_latency_seconds` — finalize checks that got
   no answer in time, and how long answers take. A steady share of
   `unavailable` means the check is not running; `rejected_other` is normal.
+- `hashi_peer_inflight_max`, `hashi_peer_inflight_max_bytes`,
+  `hashi_peer_connections_max` — each peer's peak since start, against limits
+  such as `hashi_peer_inflight_limit_bytes`.
 
 ## What NOT to alert on
 
@@ -67,6 +75,11 @@ Dashboard-worthy but **not** alerts:
 - **Ratios of raw counters.** `a_total / b_total` spans the whole process
   lifetime and drifts with history, not health. Always window both sides:
   `increase(a_total[1h]) / increase(b_total[1h])`.
+- **`hashi_withdrawal_signing_refused_total{reason="cap"}`.** Noisy on testnet
+  until the signing cap is tuned.
+- **`increase()` alone on a per-peer counter.** It misses a shed in a series'
+  first sample, so the rules file also fires on any count from a peer first
+  seen within the window (`hashi_peer_first_seen_timestamp_seconds`).
 
 ## Scope reference
 
@@ -79,6 +92,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_withdrawal_commitment_left_out_total` | node (counts only while leading) |
 | `hashi_db_*` | node |
 | `hashi_withdrawal_bitcoin_check_*` | node |
+| `hashi_peer_*`, `hashi_mpc_unguarded_spawn_blocking_total` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

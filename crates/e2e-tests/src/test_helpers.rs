@@ -684,7 +684,11 @@ pub fn assert_no_member_refusals(networks: &TestNetworks) {
             ),
             (
                 &metrics.peer_requests_over_byte_budget_total,
-                "shed member requests over the request byte budget",
+                "shed member requests over a byte budget",
+            ),
+            (
+                &metrics.peer_mpc_work_shed_total,
+                "shed member requests over the MPC work limit",
             ),
             (
                 &metrics.peer_requests_too_large_total,
@@ -699,17 +703,16 @@ pub fn assert_no_member_refusals(networks: &TestNetworks) {
                 .collect()
                 .iter()
                 .flat_map(|family| family.get_metric())
-                .filter(|metric| {
-                    metric.get_counter().value() > 0.0
-                        && !metric
-                            .get_label()
-                            .iter()
-                            .any(|label| label.name() == "budget" && label.value() == "work")
-                })
+                .filter(|metric| metric.get_counter().value() > 0.0)
                 .map(describe_counter)
                 .collect();
             assert!(nonzero.is_empty(), "node {index} {what}: {nonzero:?}");
         }
+        assert_eq!(
+            metrics.mpc_unguarded_spawn_blocking_total.get(),
+            0,
+            "node {index} started MPC blocking work outside the MPC work budget"
+        );
     }
 }
 

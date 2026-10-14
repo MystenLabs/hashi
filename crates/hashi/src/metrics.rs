@@ -39,11 +39,12 @@ pub struct Metrics {
     pub peer_requests_too_large_total: IntCounterVec,
     pub(crate) peer_inflight_limit_bytes: IntGauge,
     pub(crate) peer_mpc_work_at_admission: HistogramVec,
-    pub(crate) peer_mpc_work_shed_total: IntCounterVec,
-    pub(crate) mpc_unguarded_spawn_blocking_total: IntCounter,
+    pub peer_mpc_work_shed_total: IntCounterVec,
+    pub mpc_unguarded_spawn_blocking_total: IntCounter,
     pub(crate) peer_connections_max: IntGaugeVec,
     pub peer_responses_shed_total: IntCounterVec,
     pub peer_requests_over_connection_limit_total: IntCounterVec,
+    pub(crate) peer_first_seen_timestamp_seconds: IntGaugeVec,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
 
@@ -509,6 +510,13 @@ impl Metrics {
             peer_requests_over_connection_limit_total: register_int_counter_vec_with_registry!(
                 "hashi_peer_requests_over_connection_limit_total",
                 "Requests refused because they arrived on a connection beyond the peer's limit",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_first_seen_timestamp_seconds: register_int_gauge_vec_with_registry!(
+                "hashi_peer_first_seen_timestamp_seconds",
+                "Unix time this node first saw the peer since start",
                 &["peer"],
                 registry,
             )
@@ -1785,13 +1793,18 @@ impl Metrics {
     /// `time() - hashi_task_last_iteration_timestamp_seconds` staleness to
     /// catch a single wedged task inside an otherwise-healthy process.
     pub fn task_heartbeat(&self, task: &str) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         self.task_last_iteration_timestamp_seconds
             .with_label_values(&[task])
-            .set(now);
+            .set(unix_time_secs());
+    }
+
+    pub(crate) fn peer_first_seen(&self, peer: &str) {
+        let first_seen = self
+            .peer_first_seen_timestamp_seconds
+            .with_label_values(&[peer]);
+        if first_seen.get() == 0 {
+            first_seen.set(unix_time_secs());
+        }
     }
 
     pub fn record_major_compaction(&self, keyspace: &crate::db::CompactedKeyspace) {
@@ -2115,6 +2128,13 @@ fn trm_outcome_label(result: &Result<crate::trm::Verdict, crate::trm::TrmError>)
         Err(TrmError::Transient(_)) => TRM_OUTCOME_TRANSIENT_ERROR,
         Err(TrmError::Permanent(_)) => TRM_OUTCOME_PERMANENT_ERROR,
     }
+}
+
+fn unix_time_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn sui_rpc_info_metric(endpoint: &str) -> Box<dyn prometheus::core::Collector> {

@@ -151,3 +151,84 @@ groups:
             This node's bitcoind cannot check withdrawals, so the node signs
             them unchecked. Usually testmempoolaccept is not allowed on the RPC
             endpoint; see the error log.
+
+      - alert: HashiPeerShed
+        expr: |
+          label_replace(
+            (increase(hashi_peer_requests_shed_total[1h]) > 0)
+            or (hashi_peer_requests_shed_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_requests_shed_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "count", "", "")
+          or label_replace(
+            (increase(hashi_peer_requests_over_byte_budget_total[1h]) > 0)
+            or (hashi_peer_requests_over_byte_budget_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_requests_over_byte_budget_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "bytes", "", "")
+          or label_replace(
+            (increase(hashi_peer_requests_too_large_total[1h]) > 0)
+            or (hashi_peer_requests_too_large_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_requests_too_large_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "size", "", "")
+          or label_replace(
+            (increase(hashi_peer_mpc_work_shed_total[1h]) > 0)
+            or (hashi_peer_mpc_work_shed_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_mpc_work_shed_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "work", "", "")
+          or label_replace(
+            (increase(hashi_peer_responses_shed_total[1h]) > 0)
+            or (hashi_peer_responses_shed_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_responses_shed_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "response", "", "")
+          or label_replace(
+            (increase(hashi_peer_requests_over_connection_limit_total[1h]) > 0)
+            or (hashi_peer_requests_over_connection_limit_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_requests_over_connection_limit_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
+            "limit", "connections", "", "")
+        labels:
+          severity: warning
+        annotations:
+          summary: "shed or refused traffic from peer {{ $labels.peer }} ({{ $labels.limit }})"
+          description: >-
+            The peer may be misbehaving, or this node may be slow or have its
+            limits set too low. Rule this node out first (hashi_request_latency),
+            then look the peer up with
+            `hashi committee -c hashi-cli.toml view {{ $labels.peer }}`.
+
+      - alert: HashiPeersShedAtOnce
+        expr: |
+          count without (peer) (max without (budget) (
+            (increase(hashi_peer_requests_shed_total[10m]) > 0)
+            or (hashi_peer_requests_shed_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 600
+              and timestamp(hashi_peer_requests_shed_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds)
+            or (increase(hashi_peer_mpc_work_shed_total[10m]) > 0)
+            or (hashi_peer_mpc_work_shed_total > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 600
+              and timestamp(hashi_peer_mpc_work_shed_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds)
+            or (increase(hashi_peer_requests_over_byte_budget_total{budget="work"}[10m]) > 0)
+            or (hashi_peer_requests_over_byte_budget_total{budget="work"} > 0
+              and ignoring (budget) time() - hashi_peer_first_seen_timestamp_seconds < 600
+              and timestamp(hashi_peer_requests_over_byte_budget_total{budget="work"}) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds)
+          )) >= 3
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} peers shed at the request or MPC work limits"
+          description: >-
+            Usually this node is slow, not the peers, though colluding members
+            can also cause it. Check hashi_request_latency.
+
+      - alert: HashiMpcWorkUnguarded
+        expr: increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "MPC work started outside the per-peer budget"
+          description: >-
+            A node bug. Report it to the hashi team with the node's version.

@@ -1,0 +1,361 @@
+rule_files:
+  - validator-alerts.example.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: peer-shed-in-its-first-sample-on-a-long-running-node
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '_x131 7830x120'
+      - series: 'hashi_peer_requests_too_large_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x131 1x120'
+    alert_rule_test:
+      - eval_time: 135m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: size, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (size)
+              description: &peer_shed >-
+                The peer may be misbehaving, or this node may be slow or have its
+                limits set too low. Rule this node out first (hashi_request_latency),
+                then look the peer up with `hashi committee -c hashi-cli.toml view A`.
+      - eval_time: 190m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: size, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (size)
+              description: *peer_shed
+      - eval_time: 200m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: peer-series-created-at-zero-then-increases
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x240'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x119 1x120'
+    alert_rule_test:
+      - eval_time: 119m
+        alertname: HashiPeerShed
+        exp_alerts: []
+      - eval_time: 125m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: work, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (work)
+              description: *peer_shed
+      - eval_time: 185m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: restart-back-at-zero
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x119 stale _x4 7500x80'
+      - series: 'hashi_peer_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '5x119 stale _x4 0x80'
+    alert_rule_test:
+      - eval_time: 130m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: restart-back-below-the-old-value
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x119 stale _x4 7500x80'
+      - series: 'hashi_peer_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '5x119 stale _x4 1x80'
+    alert_rule_test:
+      - eval_time: 130m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: count, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (count)
+              description: *peer_shed
+
+  - name: restart-back-at-the-old-value
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x119 stale _x4 7500x80'
+      - series: 'hashi_peer_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '5x119 stale _x4 5x80'
+    alert_rule_test:
+      - eval_time: 130m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: count, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (count)
+              description: *peer_shed
+      - eval_time: 190m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: restart-from-zero-back-at-one
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x119 stale _x4 7500x80'
+      - series: 'hashi_peer_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x119 stale _x4 1x80'
+    alert_rule_test:
+      - eval_time: 130m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: count, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (count)
+              description: *peer_shed
+
+  - name: each-limit-gets-its-own-alert
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '_x130 7800x70'
+      - series: 'hashi_peer_responses_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x130 1x70'
+      - series: 'hashi_peer_requests_over_byte_budget_total{peer="A",budget="request",instance="n1",job="hashi"}'
+        values: '_x130 1x70'
+      - series: 'hashi_peer_requests_over_byte_budget_total{peer="A",budget="work",instance="n1",job="hashi"}'
+        values: '_x130 1x70'
+      - series: 'hashi_peer_requests_over_connection_limit_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x130 1x70'
+    alert_rule_test:
+      - eval_time: 150m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: response, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (response)
+              description: *peer_shed
+          - exp_labels: {peer: A, budget: request, instance: n1, job: hashi, limit: bytes, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (bytes)
+              description: *peer_shed
+          - exp_labels: {peer: A, budget: work, instance: n1, job: hashi, limit: bytes, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (bytes)
+              description: *peer_shed
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: connections, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (connections)
+              description: *peer_shed
+
+  - name: single-failed-scrape-does-not-refire-an-old-shed
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x179 stale 60x70'
+      - series: 'hashi_peer_requests_too_large_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x9 1x169 stale 1x70'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: HashiPeerShed
+        exp_alerts: []
+      - eval_time: 240m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: outage-longer-than-the-window-does-not-refire-old-sheds
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x99 _x80 60x100'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x99 _x80 60x100'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n1",job="hashi"}'
+        values: '60x99 _x80 60x100'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x9 1x89 _x80 1x100'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="B",instance="n1",job="hashi"}'
+        values: '0x9 1x89 _x80 1x100'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="C",instance="n1",job="hashi"}'
+        values: '0x9 1x89 _x80 1x100'
+    alert_rule_test:
+      - eval_time: 185m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+      - eval_time: 230m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: host-reboot-does-not-refire-old-sheds
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x99 _x2 6120x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x99 _x2 6120x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n1",job="hashi"}'
+        values: '60x99 _x2 6120x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '5x99'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="B",instance="n1",job="hashi"}'
+        values: '5x99'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="C",instance="n1",job="hashi"}'
+        values: '5x99'
+    alert_rule_test:
+      - eval_time: 103m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+      - eval_time: 103m
+        alertname: HashiPeerShed
+        exp_alerts: []
+
+  - name: three-peers-shed-within-ten-minutes
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_requests_over_byte_budget_total{peer="B",budget="work",instance="n1",job="hashi"}'
+        values: '0x71 1x30'
+      - series: 'hashi_peer_requests_shed_total{peer="C",instance="n1",job="hashi"}'
+        values: '0x74 1x30'
+    alert_rule_test:
+      - eval_time: 72m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+      - eval_time: 76m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: 3 peers shed at the request or MPC work limits
+              description: &peers_shed >-
+                Usually this node is slow, not the peers, though colluding members
+                can also cause it. Check hashi_request_latency.
+      - eval_time: 82m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+
+  - name: three-new-peers-shed-in-their-first-samples
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '_x89 5310x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '_x89 5310x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n1",job="hashi"}'
+        values: '_x89 5310x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x89 1x30'
+      - series: 'hashi_peer_requests_over_byte_budget_total{peer="B",budget="work",instance="n1",job="hashi"}'
+        values: '_x89 1x30'
+      - series: 'hashi_peer_requests_shed_total{peer="C",instance="n1",job="hashi"}'
+        values: '_x89 1x30'
+    alert_rule_test:
+      - eval_time: 95m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: 3 peers shed at the request or MPC work limits
+              description: *peers_shed
+      - eval_time: 105m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+
+  - name: one-peer-across-several-terms-counts-once
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_requests_over_byte_budget_total{peer="A",budget="work",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_requests_shed_total{peer="B",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+
+  - name: page-does-not-refire-after-one-failed-scrape
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x119 stale 60x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x119 stale 60x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n1",job="hashi"}'
+        values: '60x119 stale 60x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x29 1x89 stale 1x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="B",instance="n1",job="hashi"}'
+        values: '0x29 1x89 stale 1x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="C",instance="n1",job="hashi"}'
+        values: '0x29 1x89 stale 1x30'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+      - eval_time: 130m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+
+  - name: peers-on-different-nodes-are-not-added-together
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="C",instance="n2",job="hashi"}'
+        values: '60x200'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="B",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_peer_mpc_work_shed_total{peer="C",instance="n2",job="hashi"}'
+        values: '0x69 1x30'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: HashiPeersShedAtOnce
+        exp_alerts: []
+
+  - name: unguarded-mpc-work
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_unguarded_spawn_blocking_total{instance="n1",job="hashi"}'
+        values: '0x59 1x60 stale _x3 0x10 1x60'
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: HashiMpcWorkUnguarded
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: HashiMpcWorkUnguarded
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: MPC work started outside the per-peer budget
+              description: &unguarded >-
+                A node bug. Report it to the hashi team with the node's version.
+      - eval_time: 140m
+        alertname: HashiMpcWorkUnguarded
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: MPC work started outside the per-peer budget
+              description: *unguarded
