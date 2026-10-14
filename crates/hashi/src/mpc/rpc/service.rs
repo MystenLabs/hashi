@@ -84,9 +84,10 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
-        let shape = self.shape_params()?;
+        let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
+            let shape = service.shape_params()?;
             let to_status = |e: MpcError| {
                 match &e {
                     MpcError::NotFound(_) => {
