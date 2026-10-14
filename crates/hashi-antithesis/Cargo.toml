@@ -11,11 +11,14 @@ hashi-types = { path = "../hashi-types" }
 
 antithesis_sdk.workspace = true
 anyhow.workspace = true
+bcs.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
 corepc-client.workspace = true
 fastcrypto.workspace = true
+fastcrypto-tbls.workspace = true
 futures.workspace = true
+hex.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
