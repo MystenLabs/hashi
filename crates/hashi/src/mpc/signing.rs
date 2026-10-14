@@ -140,6 +140,9 @@ struct SigningPoolState {
     batches: Vec<PresigBatch>,
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     next_batch: Option<PrefetchedBatch>,
+    /// DELIBERATE BUG (Antithesis validation; do not merge): set when the pool
+    /// was rebuilt after a restart.
+    recovered: bool,
 }
 
 /// A refill result staged for installation, tagged with the batch index it
@@ -334,6 +337,7 @@ impl SigningManager {
                 batches: vec![batch],
                 partial_signing_outputs: HashMap::new(),
                 next_batch: None,
+                recovered: false,
             }),
             refill_tx,
             peer_cooldowns: PeerCooldowns::new(),
@@ -369,14 +373,14 @@ impl SigningManager {
                 .map(|(i, presig)| {
                     let global = start_index + i as u64;
                     let is_pending = pending.contains(&global);
-                    if global >= num_consumed || is_pending {
-                        if is_pending {
-                            covered_pending += 1;
-                        }
-                        Some(presig)
-                    } else {
-                        None
+                    if is_pending {
+                        covered_pending += 1;
                     }
+                    // DELIBERATE BUG (Antithesis validation; do not merge):
+                    // re-enables presignatures consumed before the restart
+                    // (`global < num_consumed`), forgetting that they were used.
+                    let _ = num_consumed;
+                    Some(presig)
                 })
                 .collect();
             tracing::info!(
@@ -417,6 +421,7 @@ impl SigningManager {
                     batches,
                     partial_signing_outputs: HashMap::new(),
                     next_batch: None,
+                    recovered: true,
                 }),
                 refill_tx,
                 peer_cooldowns: PeerCooldowns::new(),
@@ -885,6 +890,7 @@ impl SigningManager {
         let config = &self.config;
         let taken = {
             let mut state = self.state.write().unwrap();
+            let recovered = state.recovered;
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
                 let digest = signing_request_digest(message, derivation_address);
                 let beacon = signing_delta(message_delta, &existing.presig_delta());
@@ -987,7 +993,26 @@ impl SigningManager {
                             batch_index: batch.batch_index,
                         }
                     })?;
-                let target_position = (global_presig_index - batch.start_index) as usize;
+                let mut target_position = (global_presig_index - batch.start_index) as usize;
+                let mut global_presig_index = global_presig_index;
+                // DELIBERATE BUG (Antithesis validation; do not merge): a
+                // recovered pool hands out its first free slot, which after
+                // the forgetting above is a presignature already used for
+                // another message.
+                if recovered
+                    && let Some(first_free) = batch.pool.iter().position(Option::is_some)
+                    && first_free != target_position
+                {
+                    antithesis_sdk::assert_reachable!(
+                        "deliberate bug: a recovered signer served a forgotten presignature"
+                    );
+                    tracing::warn!(
+                        "DELIBERATE BUG: serving presig position {first_free} instead of \
+                         {target_position} for {signing_id}"
+                    );
+                    target_position = first_free;
+                    global_presig_index = batch.start_index + first_free as u64;
+                }
                 let presig = batch
                     .pool
                     .get_mut(target_position)
