@@ -144,8 +144,8 @@ from the sui-operations branch named by `SUI_OPERATIONS_REF`. That workflow
 only runs from `main` or a `workflows-testing*` branch, so until your pull
 request merges, push your branch under such a name and set
 `SUI_OPERATIONS_REF` to it in your environment file. The step prints the
-branch it uses and asks you to type the stack's name. It then waits for the
-workflow and ends with `The proxy answers at <url>.`
+branch it uses and asks you to confirm. It then waits for the workflow and
+ends with `The proxy answers at <url>.`
 
 Rolling a proxy that is already serving takes the guardian's address down
 while it restarts, and drops the shares KPs have sent in a provisioning round
@@ -208,8 +208,9 @@ the configuration.
 ./operator/scripts/guardian.sh guardian.env ceremony
 ```
 
-The step first asks you to type the Bitcoin network and the retention class
-from your environment file: the ceremony fixes both for the life of the key.
+The step first prints the Bitcoin network, the retention class and the log
+bucket, and asks you to confirm them: the ceremony fixes all three for the life
+of the key.
 
 The guardian generates its Bitcoin key and deals one encrypted share to each
 KP. The step then waits, printing a line each minute. Ask every KP to run the

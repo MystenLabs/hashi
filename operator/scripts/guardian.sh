@@ -359,10 +359,13 @@ case "$STEP" in
     sui_operations_ref="${SUI_OPERATIONS_REF:-main}"
     printf 'Proxy stack configuration: sui-operations %s\n' "$sui_operations_ref"
     warn "Rolling a proxy that is serving takes the guardian's address down while it restarts, and drops the shares key provisioners have sent in a provisioning round that has not finished."
-    if ! IFS= read -r -p "Type ${GUARDIAN_STACK##*/} to roll its proxy: " typed_stack; then
+    if ! IFS= read -r -p "Roll the proxy of ${GUARDIAN_STACK##*/}? Type y/yes to continue: " roll_confirmation; then
       die "No input received; nothing was rolled."
     fi
-    [[ "$typed_stack" == "${GUARDIAN_STACK##*/}" ]] || die "Not confirmed; nothing was rolled."
+    case "$roll_confirmation" in
+      y | yes) ;;
+      *) die "Not confirmed; nothing was rolled." ;;
+    esac
     if ! run_url="$(gh workflow run hashi-guardian-proxy-deploy.yaml --repo MystenLabs/sui-operations \
       --ref "$sui_operations_ref" -f env="${GUARDIAN_STACK##*/}" -f hashi_commit="$HASHI_COMMIT")"; then
       die "Could not dispatch the proxy deploy."
@@ -422,11 +425,13 @@ case "$STEP" in
     require_fronted "$signing_key"
     if [[ "$STEP" == ceremony ]]; then
       warn "The ceremony fixes three things for the life of the guardian's key: Bitcoin network $BITCOIN_NETWORK, retention class $RETENTION_ENVIRONMENT, and log bucket s3://$GUARDIAN_BUCKET."
-      if ! IFS= read -r -p "Type $BITCOIN_NETWORK $RETENTION_ENVIRONMENT to run the ceremony: " typed_choice; then
+      if ! IFS= read -r -p "Run the ceremony with them? Type y/yes to continue: " ceremony_confirmation; then
         die "No input received; the ceremony was not run."
       fi
-      [[ "$typed_choice" == "$BITCOIN_NETWORK $RETENTION_ENVIRONMENT" ]] \
-        || die "Not confirmed; the ceremony was not run."
+      case "$ceremony_confirmation" in
+        y | yes) ;;
+        *) die "Not confirmed; the ceremony was not run." ;;
+      esac
     fi
     # The configuration lists certificates relative to its own directory.
     cd "$OUT_DIR"
