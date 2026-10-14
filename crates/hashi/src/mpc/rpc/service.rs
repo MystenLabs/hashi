@@ -84,10 +84,8 @@ impl MpcService for HttpService {
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
-        let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let shape = service.shape_params()?;
             let to_status = |e: MpcError| {
                 match &e {
                     MpcError::NotFound(_) => {
@@ -99,7 +97,7 @@ impl MpcService for HttpService {
                 }
                 mpc_error_to_status(e)
             };
-            let (outcome, store) = {
+            let (outcome, store, shape) = {
                 let mgr = mpc_manager.read().unwrap();
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
@@ -125,7 +123,11 @@ impl MpcService for HttpService {
                 let outcome = mgr
                     .begin_retrieve(requester, &internal_request)
                     .map_err(to_status)?;
-                (outcome, std::sync::Arc::clone(&mgr.public_messages_store))
+                (
+                    outcome,
+                    std::sync::Arc::clone(&mgr.public_messages_store),
+                    mgr.shape_params(),
+                )
             };
             let messages = match outcome {
                 RetrieveOutcome::Ready(messages) => messages,
