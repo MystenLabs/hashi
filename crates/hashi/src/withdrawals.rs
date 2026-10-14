@@ -1545,25 +1545,11 @@ impl Hashi {
         selected_utxos: &[Utxo],
         outputs: &[OutputUtxo],
     ) -> anyhow::Result<bitcoin::Transaction> {
-        let inputs: Vec<bitcoin::TxIn> = selected_utxos
-            .iter()
-            .map(|utxo| hashi_bitcoin::InputUTXO::from(utxo).txin())
-            .collect();
-
-        let tx_outputs: Vec<bitcoin::TxOut> = outputs
-            .iter()
-            .map(|output| {
-                let script_pubkey =
-                    hashi_bitcoin::script_pubkey_from_witness_program(&output.bitcoin_address)
-                        .expect("invalid bitcoin address in output");
-                bitcoin::TxOut {
-                    value: bitcoin::Amount::from_sat(output.amount),
-                    script_pubkey,
-                }
-            })
-            .collect();
-
-        Ok(hashi_bitcoin::construct_tx(inputs, tx_outputs))
+        // Output addresses are checked upstream, so a bad one is a bug.
+        Ok(
+            hashi_bitcoin::unsigned_withdrawal_tx(selected_utxos, outputs)
+                .expect("invalid bitcoin address in output"),
+        )
     }
 
     /// Build a withdrawal commitment for a batch of approved requests: select

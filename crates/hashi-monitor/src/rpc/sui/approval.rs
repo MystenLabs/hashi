@@ -1,29 +1,50 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parsing of the Hashi approvals that the monitor reads from Sui.
+//! Checks on the Hashi approvals that the monitor reads from Sui.
 //!
-//! Why it exists: what the monitor accepts as a Hashi approval is security
-//! sensitive, so it lives apart from the checkpoint scanning and RPC
-//! transport in `mod.rs`.
+//! Why it exists: Move validates a withdrawal's user outputs against the user
+//! requests, but not its txid. A compromised committee controls the txid, so
+//! the monitor checks it here before an approval enters the state machine.
 //!
-//! How it works:
-//! - `parse_event` turns a scanned Sui event into a monitor event.
-//! - `parse_withdrawal_object` turns a fetched `WithdrawalTransaction` object
-//!   into the Hashi approval it records.
+//! Goals of the approval checks, together with Move and the state machine:
+//! 1. The transaction the guardian signs is the one posted on Sui: the same
+//!    input UTXOs, the same external outputs and the same internal outputs.
+//! 2. Every output pays either a user-requested address with the requested
+//!    amount less the fee share, or a change address owned by Hashi.
+//!
+//! Chain of trust, from the user's request to the guardian's signature:
+//! 1. Move builds the `WithdrawalTransaction` object in `new_withdrawal_txn`
+//!    (`withdrawal_queue.move`). It asserts that each user output pays the
+//!    request's address and the request's amount less the per-user miner fee,
+//!    and it caps that fee. The inputs are copied from the UTXO pool by id in
+//!    `commit_withdrawal_tx` (`withdraw.move`). Change outputs are not checked.
+//! 2. `commit_withdrawal_tx` then calls `emit_withdrawal_picked_for_processing`,
+//!    which emits `WithdrawalPickedForProcessing` from that object's own
+//!    fields. So the event and the object carry the same txid, inputs and
+//!    outputs, and both reach this file.
+//! 3. This file rebuilds the transaction from those inputs and outputs and
+//!    rejects the approval if the claimed txid differs.
+//! 4. The guardian computes its own txid from the outputs it signs, and the
+//!    state machine requires the guardian's txid to equal the approval's.
+//!    Together: the guardian signed exactly the outputs that Move validated.
 //!
 //! Assumptions:
 //! - An approval comes from a `WithdrawalPickedForProcessing` event or from the
-//!   `WithdrawalTransaction` object created with it. Both carry the same txid
-//!   and timestamp.
+//!   `WithdrawalTransaction` object created with it. Both carry the same txid,
+//!   inputs, outputs and timestamp.
 
 use anyhow::Context;
+use bitcoin::Txid;
+use hashi_types::bitcoin::unsigned_withdrawal_tx;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::MoveType;
+use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::PackageVersions;
+use hashi_types::move_types::Utxo;
 use hashi_types::move_types::WithdrawalTransaction;
 use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::Object;
@@ -35,6 +56,54 @@ use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
+use crate::findings::MonitorFinding;
+
+/// A Hashi approval read from Sui.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HashiApproval {
+    /// The approval passed every check.
+    Valid(MonitorWithdrawalEvent),
+    /// The approval failed a check. It is reported and not ingested.
+    Rejected(Vec<MonitorFinding>),
+}
+
+/// Check what Move does not on the Hashi approval of `wid`: the claimed
+/// txid must be the txid of the transaction its inputs and outputs build.
+/// Otherwise a committee can commit a user's outputs under the txid of a
+/// transaction that pays itself.
+fn validate_withdrawal(
+    wid: WithdrawalID,
+    claimed_txid: Txid,
+    inputs: &[Utxo],
+    outputs: &[OutputUtxo],
+    timestamp_secs: UnixSeconds,
+) -> HashiApproval {
+    let mut findings = Vec::new();
+    match unsigned_withdrawal_tx(inputs, outputs) {
+        Ok(tx) if tx.compute_txid() == claimed_txid => {}
+        Ok(tx) => findings.push(MonitorFinding::WithdrawalTxidMismatch {
+            wid,
+            claimed: claimed_txid,
+            computed: tx.compute_txid(),
+        }),
+        Err(error) => findings.push(MonitorFinding::WithdrawalTxUnbuildable {
+            wid,
+            claimed: claimed_txid,
+            reason: format!("{error:#}"),
+        }),
+    }
+
+    if findings.is_empty() {
+        HashiApproval::Valid(MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E1HashiApproved,
+            wid,
+            timestamp_secs,
+            btc_txid: claimed_txid,
+        })
+    } else {
+        HashiApproval::Rejected(findings)
+    }
+}
 
 /// The Hashi approval recorded by the object at `wid`, or `None` if that object
 /// is not a Hashi `WithdrawalTransaction`.
@@ -42,7 +111,7 @@ pub fn parse_withdrawal_object(
     package_versions: &PackageVersions,
     wid: WithdrawalID,
     object: &Object,
-) -> anyhow::Result<Option<MonitorWithdrawalEvent>> {
+) -> anyhow::Result<Option<HashiApproval>> {
     let is_withdrawal_transaction = object
         .object_type_opt()
         .context("Sui object is missing its type")?
@@ -60,47 +129,58 @@ pub fn parse_withdrawal_object(
         "Sui returned withdrawal transaction {} for {wid}",
         txn.id
     );
-    Ok(Some(MonitorWithdrawalEvent {
-        event_type: WithdrawalEventType::E1HashiApproved,
+    Ok(Some(validate_withdrawal(
         wid,
-        timestamp_secs: unix_millis_to_seconds(txn.created_timestamp_ms),
-        btc_txid: txn.txid.into(),
-    }))
+        txn.txid.into(),
+        &txn.inputs,
+        &txn.all_outputs(),
+        unix_millis_to_seconds(txn.created_timestamp_ms),
+    )))
 }
 
-/// The monitored event a Sui event carries, if any.
+/// Parse the monitored event a Sui event carries into `events`, or its
+/// findings into `findings` if it fails a check.
 pub fn parse_event(
     package_versions: &PackageVersions,
     event: Event,
     transaction_timestamp_secs: UnixSeconds,
-) -> anyhow::Result<Option<MonitorEvent>> {
+    events: &mut Vec<MonitorEvent>,
+    findings: &mut Vec<MonitorFinding>,
+) -> anyhow::Result<()> {
     let contents = event
         .contents
         .context("Sui event is missing BCS contents")?;
     let event = HashiEvent::try_parse(package_versions, &contents)
         .context("failed to parse Hashi Sui event")?;
 
-    Ok(match event {
+    match event {
         Some(HashiEvent::WithdrawalPickedForProcessing(event)) => {
-            Some(MonitorEvent::Withdrawal(MonitorWithdrawalEvent {
-                event_type: WithdrawalEventType::E1HashiApproved,
-                wid: event.withdrawal_txn_id,
-                timestamp_secs: unix_millis_to_seconds(event.timestamp_ms),
-                btc_txid: event.txid.into(),
-            }))
+            let outputs = [event.withdrawal_outputs, event.change_outputs].concat();
+            let approval = validate_withdrawal(
+                event.withdrawal_txn_id,
+                event.txid.into(),
+                &event.inputs,
+                &outputs,
+                unix_millis_to_seconds(event.timestamp_ms),
+            );
+            match approval {
+                HashiApproval::Valid(event) => events.push(MonitorEvent::Withdrawal(event)),
+                HashiApproval::Rejected(rejection) => findings.extend(rejection),
+            }
         }
         Some(HashiEvent::DepositConfirmed(event)) => {
-            Some(MonitorEvent::Deposit(MonitorDepositEvent {
+            events.push(MonitorEvent::Deposit(MonitorDepositEvent {
                 event_type: DepositEventType::E2HashiDeposited,
                 // DepositConfirmed has no timestamp in its Move payload.
                 // ListTransactions supplies the containing checkpoint's
                 // timestamp alongside the nested events.
                 timestamp_secs: transaction_timestamp_secs,
                 deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
-            }))
+            }));
         }
-        Some(_) | None => None,
-    })
+        Some(_) | None => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -109,8 +189,10 @@ pub mod tests {
 
     use std::collections::BTreeMap;
 
+    use crate::findings::FindingCategory;
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
+    use hashi_types::move_types::UtxoId;
     use sui_rpc::proto::sui::rpc::v2::Bcs;
     use sui_sdk_types::Address;
 
@@ -121,14 +203,41 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
+    /// `txn` with the txid that its inputs and outputs build.
+    pub fn with_rebuilt_txid(mut txn: WithdrawalTransaction) -> WithdrawalTransaction {
+        let txid = unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())
+            .unwrap()
+            .compute_txid();
+        txn.txid = txid.into();
+        txn
+    }
+
+    /// A withdrawal of one input into one user output and one change output,
+    /// whose txid is the one its inputs and outputs build.
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
-        WithdrawalTransaction {
+        let inputs = vec![Utxo {
+            id: UtxoId {
+                txid: BitcoinTxid::from(Address::new([0x51; 32])),
+                vout: 1,
+            },
+            amount: 120_000,
+            derivation_path: Some(Address::new([0x52; 32])),
+        }];
+        let withdrawal_outputs = vec![OutputUtxo {
+            amount: 100_000,
+            bitcoin_address: vec![0x53; 20],
+        }];
+        let change_outputs = vec![OutputUtxo {
+            amount: 19_000,
+            bitcoin_address: vec![0x54; 32],
+        }];
+        let txn = WithdrawalTransaction {
             id,
-            txid: BitcoinTxid::from(Address::new([0x47; 32])),
-            request_ids: vec![],
-            inputs: vec![],
-            withdrawal_outputs: vec![],
-            change_outputs: vec![],
+            txid: BitcoinTxid::ZERO,
+            request_ids: vec![Address::new([0x55; 32])],
+            inputs,
+            withdrawal_outputs,
+            change_outputs,
             created_timestamp_ms: 1_789_805_327_448,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: None,
@@ -138,7 +247,14 @@ pub mod tests {
                 epoch: 0,
             },
             guardian_signatures: None,
-        }
+        };
+        with_rebuilt_txid(txn)
+    }
+
+    /// `txn` with a txid that its inputs and outputs do not build.
+    pub fn with_wrong_txid(mut txn: WithdrawalTransaction) -> WithdrawalTransaction {
+        txn.txid = BitcoinTxid::from(Address::new([0x47; 32]));
+        txn
     }
 
     /// The `WithdrawalTransaction` object of `txn`, served at `WID`.
@@ -174,6 +290,87 @@ pub mod tests {
         event
     }
 
+    /// The approval of `txn`'s object at `WID`.
+    fn approval(txn: &WithdrawalTransaction) -> HashiApproval {
+        parse_withdrawal_object(&package_versions(), WID, &object_at_wid(PACKAGE_ID, txn))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// The findings of a rejected approval.
+    fn rejection(approval: HashiApproval) -> Vec<MonitorFinding> {
+        match approval {
+            HashiApproval::Rejected(findings) => findings,
+            HashiApproval::Valid(event) => panic!("approval was not rejected: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn a_valid_approval_is_its_hashi_event() {
+        let txn = withdrawal_transaction(WID);
+
+        assert_eq!(
+            approval(&txn),
+            HashiApproval::Valid(MonitorWithdrawalEvent {
+                event_type: WithdrawalEventType::E1HashiApproved,
+                wid: WID,
+                timestamp_secs: 1_789_805_327,
+                btc_txid: txn.txid.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_wrong_txid_rejects_the_approval() {
+        let txn = withdrawal_transaction(WID);
+        let computed: Txid = txn.txid.into();
+        let txn = with_wrong_txid(txn);
+        let claimed: Txid = txn.txid.into();
+
+        let findings = rejection(approval(&txn));
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::WithdrawalTxidMismatch {
+                wid: WID,
+                claimed,
+                computed,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_tampered_change_output_rejects_the_approval() {
+        let mut txn = withdrawal_transaction(WID);
+        txn.change_outputs[0].amount += 1;
+
+        let findings = rejection(approval(&txn));
+
+        assert!(matches!(
+            findings[..],
+            [MonitorFinding::WithdrawalTxidMismatch { wid: WID, .. }]
+        ));
+    }
+
+    #[test]
+    fn an_unbuildable_output_rejects_the_approval() {
+        let mut txn = withdrawal_transaction(WID);
+        txn.change_outputs[0].bitcoin_address = vec![0x54; 5];
+        let claimed: Txid = txn.txid.into();
+
+        let findings = rejection(approval(&txn));
+
+        assert!(
+            matches!(
+                findings[..],
+                [MonitorFinding::WithdrawalTxUnbuildable { wid: WID, claimed: c, .. }] if c == claimed
+            ),
+            "{findings:?}"
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
     #[test]
     fn a_foreign_object_is_no_approval() {
         let txn = withdrawal_transaction(WID);
@@ -204,14 +401,29 @@ pub mod tests {
 
     #[test]
     fn lookup_and_event_scan_build_the_same_approval() {
-        let txn = withdrawal_transaction(WID);
+        for txn in [
+            withdrawal_transaction(WID),
+            with_wrong_txid(withdrawal_transaction(WID)),
+        ] {
+            let looked_up =
+                parse_withdrawal_object(&package_versions(), WID, &object_at_wid(PACKAGE_ID, &txn))
+                    .unwrap()
+                    .unwrap();
+            let expected = match looked_up {
+                HashiApproval::Valid(event) => (vec![MonitorEvent::Withdrawal(event)], vec![]),
+                HashiApproval::Rejected(findings) => (vec![], findings),
+            };
 
-        let looked_up =
-            parse_withdrawal_object(&package_versions(), WID, &object_at_wid(PACKAGE_ID, &txn))
-                .unwrap();
-        assert_eq!(
-            parse_event(&package_versions(), picked_for_processing_event(&txn), 0).unwrap(),
-            looked_up.map(MonitorEvent::Withdrawal)
-        );
+            let (mut events, mut findings) = (Vec::new(), Vec::new());
+            parse_event(
+                &package_versions(),
+                picked_for_processing_event(&txn),
+                0,
+                &mut events,
+                &mut findings,
+            )
+            .unwrap();
+            assert_eq!((events, findings), expected);
+        }
     }
 }

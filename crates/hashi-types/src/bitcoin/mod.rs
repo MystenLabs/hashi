@@ -25,6 +25,7 @@ pub use utxo::TxUTXOs;
 pub use utxo::TxUTXOsWire;
 pub use utxo::construct_tx;
 pub use utxo::sign_btc_tx;
+pub use utxo::unsigned_withdrawal_tx;
 
 use anyhow::anyhow;
 use bitcoin::Network;

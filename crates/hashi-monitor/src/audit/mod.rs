@@ -37,6 +37,7 @@ use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
+use crate::rpc::sui::approval::HashiApproval;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -281,13 +282,15 @@ impl AuditorCore {
         let mut approvals = Vec::new();
         for (wid, btc_txid) in missing {
             match self.sui_poller.fetch_withdrawal_approval(wid).await {
-                // A contradiction, not a scan miss: the state machine rejects even a scanned one.
-                Ok(Some(approval)) if approval.btc_txid != btc_txid => {
-                    findings.push(MonitorFinding::InvalidEventAdded(
-                        "invalid btc_txid".to_string(),
-                    ));
-                }
-                Ok(Some(approval)) => {
+                Ok(Some(HashiApproval::Rejected(rejection))) => findings.extend(rejection),
+                Ok(Some(HashiApproval::Valid(approval))) => {
+                    // A contradiction, not a scan miss: the state machine rejects even a scanned one.
+                    if approval.btc_txid != btc_txid {
+                        findings.push(MonitorFinding::InvalidEventAdded(
+                            "invalid btc_txid".to_string(),
+                        ));
+                        continue;
+                    }
                     if self.sui_poller.has_scanned(approval.timestamp_secs) {
                         findings.push(MonitorFinding::SuiScanMissedEvent {
                             event: MonitorEvent::Withdrawal(approval.clone()),
@@ -466,8 +469,11 @@ impl AuditorCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::sui::approval::tests::with_wrong_txid;
+    use crate::rpc::sui::approval::tests::withdrawal_transaction;
     use crate::rpc::sui::tests::looked_up_approval;
     use crate::rpc::sui::tests::poller_scanned;
+    use crate::rpc::sui::tests::poller_scanned_with;
     use bitcoin::hashes::Hash as _;
 
     const CONFIG: &str = r#"
@@ -563,6 +569,34 @@ btc:
                 .is_empty()
         );
         assert!(auditor.detect_violations(&AllTime).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_looked_up_approval_with_a_wrong_txid_is_rejected() {
+        let approval = looked_up_approval();
+        let cursor = approval.timestamp_secs + 3_600;
+        let mut auditor =
+            auditor_missing_approval(approval.timestamp_secs - 3_600, cursor, approval.btc_txid)
+                .await;
+        let txn = with_wrong_txid(withdrawal_transaction(approval.wid));
+        auditor.sui_poller =
+            poller_scanned_with(txn.clone(), approval.timestamp_secs - 3_600, cursor).await;
+
+        let findings = auditor.fetch_missing_hashi_approvals(&AllTime).await;
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::WithdrawalTxidMismatch {
+                wid: approval.wid,
+                claimed: txn.txid.into(),
+                computed: approval.btc_txid,
+            }]
+        );
+        // The rejected approval is not ingested, so the E1 stays missing.
+        assert!(matches!(
+            auditor.detect_violations(&AllTime)[..],
+            [MonitorFinding::ExpectedEventMissing { .. }]
+        ));
     }
 
     #[tokio::test]

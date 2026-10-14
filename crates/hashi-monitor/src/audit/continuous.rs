@@ -121,7 +121,10 @@ impl ContinuousAuditor {
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
         let up_to = now_timestamp_secs();
-        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
+        while let PollOutcome::CursorAdvanced { events, findings } =
+            self.inner.poll_sui(up_to).await?
+        {
+            self.report_findings("sui", &findings);
             self.ingest_batch(events);
             self.metrics
                 .set_checked_through(SOURCE_SUI, self.inner.get_sui_cursor());
@@ -130,7 +133,10 @@ impl ContinuousAuditor {
     }
 
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
+        while let PollOutcome::CursorAdvanced { events, findings } =
+            self.inner.poll_guardian().await?
+        {
+            self.report_findings("guardian", &findings);
             self.ingest_batch(events);
             self.metrics
                 .set_checked_through(SOURCE_GUARDIAN, self.inner.get_guardian_cursor());

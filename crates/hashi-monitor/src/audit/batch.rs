@@ -10,6 +10,7 @@ use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
+use crate::findings::MonitorFinding;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -134,12 +135,16 @@ impl BatchAuditor {
         })
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
-        let findings = self.inner.ingest_batch(events);
-        log_findings("batch", "ingest", &findings);
+    fn report_findings(&mut self, phase: &'static str, findings: &[MonitorFinding]) {
+        log_findings("batch", phase, findings);
         if !findings.is_empty() {
             self.violation_found = true;
         }
+    }
+
+    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
+        let findings = self.inner.ingest_batch(events);
+        self.report_findings("ingest", &findings);
     }
 
     async fn fetch_all_sui_guardian_events(&mut self) -> anyhow::Result<()> {
@@ -158,17 +163,20 @@ impl BatchAuditor {
 
             let mut sui_cursor_moved = false;
             if should_poll_sui
-                && let PollOutcome::CursorAdvanced(events) =
+                && let PollOutcome::CursorAdvanced { events, findings } =
                     self.inner.poll_sui(self.audit_window.sui_end).await?
             {
+                self.report_findings("sui", &findings);
                 self.ingest_batch(events);
                 sui_cursor_moved = true;
             }
 
             let mut guardian_cursor_moved = false;
             if should_poll_guardian
-                && let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await?
+                && let PollOutcome::CursorAdvanced { events, findings } =
+                    self.inner.poll_guardian().await?
             {
+                self.report_findings("guardian", &findings);
                 self.ingest_batch(events);
                 guardian_cursor_moved = true;
             }

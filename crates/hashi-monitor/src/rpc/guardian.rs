@@ -96,7 +96,10 @@ impl GuardianWithdrawalsPoller {
             events = withdrawal_events.len(),
             "completed Guardian event range"
         );
-        Ok(PollOutcome::CursorAdvanced(withdrawal_events))
+        Ok(PollOutcome::CursorAdvanced {
+            events: withdrawal_events,
+            findings: Vec::new(),
+        })
     }
 }
 

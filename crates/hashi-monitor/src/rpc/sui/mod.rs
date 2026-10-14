@@ -30,11 +30,13 @@ use sui_sdk_types::Address;
 
 use crate::config::SuiConfig;
 use crate::domain::MonitorEvent;
-use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::utc_timestamp;
+use crate::findings::MonitorFinding;
 
 pub mod approval;
+
+use approval::HashiApproval;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
@@ -241,6 +243,7 @@ impl SuiEventsPoller {
         };
 
         let mut events = Vec::with_capacity(scan.transactions.len());
+        let mut findings = Vec::new();
         for transaction in scan.transactions {
             let checkpoint = transaction
                 .checkpoint
@@ -252,7 +255,7 @@ impl SuiEventsPoller {
             if checkpoint > completed_checkpoint {
                 continue;
             }
-            events.extend(self.parse_transaction(transaction)?);
+            self.parse_transaction(transaction, &mut events, &mut findings)?;
         }
 
         let scanned_through_timestamp = self.checkpoint_timestamp(completed_checkpoint).await?;
@@ -265,9 +268,10 @@ impl SuiEventsPoller {
             end_reason = ?scan.end_reason,
             cursor = %utc_timestamp(self.cursor_seconds),
             events = events.len(),
+            findings = findings.len(),
             "completed Sui event range"
         );
-        Ok(PollOutcome::CursorAdvanced(events))
+        Ok(PollOutcome::CursorAdvanced { events, findings })
     }
 
     /// Read the Hashi approval of `wid` from its `WithdrawalTransaction` object, which is
@@ -275,7 +279,7 @@ impl SuiEventsPoller {
     pub async fn fetch_withdrawal_approval(
         &mut self,
         wid: WithdrawalID,
-    ) -> anyhow::Result<Option<MonitorWithdrawalEvent>> {
+    ) -> anyhow::Result<Option<HashiApproval>> {
         let request = GetObjectRequest::new(&wid).with_read_mask(FieldMask::from_paths([
             Object::path_builder().object_type(),
             Object::path_builder().contents().finish(),
@@ -573,30 +577,35 @@ impl SuiEventsPoller {
         TransactionFilter::any(event_types.into_iter().map(tx_filter::event_type))
     }
 
+    /// Parse the monitored events of one transaction into `events`. An event
+    /// that fails a check adds its findings to `findings` instead.
     fn parse_transaction(
         &self,
         transaction: ExecutedTransaction,
-    ) -> anyhow::Result<Vec<MonitorEvent>> {
+        events: &mut Vec<MonitorEvent>,
+        findings: &mut Vec<MonitorFinding>,
+    ) -> anyhow::Result<()> {
         let timestamp = transaction
             .timestamp
             .context("Sui transaction is missing checkpoint timestamp")?;
         let timestamp_ms =
             proto_to_timestamp_ms(timestamp).context("invalid Sui transaction timestamp")?;
         let timestamp_secs = unix_millis_to_seconds(timestamp_ms);
-        let events = transaction
+        let sui_events = transaction
             .events
             .context("filtered Sui transaction is missing events")?
             .events;
 
-        let mut parsed = Vec::new();
-        for event in events {
-            if let Some(event) =
-                approval::parse_event(&self.package_versions, event, timestamp_secs)?
-            {
-                parsed.push(event);
-            }
+        for sui_event in sui_events {
+            approval::parse_event(
+                &self.package_versions,
+                sui_event,
+                timestamp_secs,
+                events,
+                findings,
+            )?;
         }
-        Ok(parsed)
+        Ok(())
     }
 }
 
@@ -607,7 +616,9 @@ pub mod tests {
     use super::approval::tests::object_at_wid;
     use super::approval::tests::withdrawal_transaction;
     use super::*;
+    use crate::domain::MonitorWithdrawalEvent;
     use crate::domain::WithdrawalEventType;
+    use hashi_types::move_types::WithdrawalTransaction;
 
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -768,24 +779,45 @@ pub mod tests {
 
     /// A poller over a ledger holding `WID`'s approval that has scanned `[start, cursor)`.
     pub async fn poller_scanned(start: UnixSeconds, cursor: UnixSeconds) -> SuiEventsPoller {
-        let mut poller = poller_for(ledger_with_approval()).await;
-        poller.start_seconds = start;
-        poller.cursor_seconds = cursor;
-        poller
+        poller_scanned_with(withdrawal_transaction(WID), start, cursor).await
     }
 
-    #[tokio::test]
-    async fn approval_is_read_from_the_withdrawal_transaction() {
-        let txn = withdrawal_transaction(WID);
+    /// A poller over a ledger holding `txn` at `WID` that has scanned `[start, cursor)`.
+    pub async fn poller_scanned_with(
+        txn: WithdrawalTransaction,
+        start: UnixSeconds,
+        cursor: UnixSeconds,
+    ) -> SuiEventsPoller {
         let mut poller = poller_for(OneObjectLedger {
             object: Some(object_at_wid(PACKAGE_ID, &txn)),
             miss: tonic::Code::NotFound,
         })
         .await;
+        poller.start_seconds = start;
+        poller.cursor_seconds = cursor;
+        poller
+    }
+
+    async fn fetch_approval(txn: &WithdrawalTransaction) -> HashiApproval {
+        let mut poller = poller_for(OneObjectLedger {
+            object: Some(object_at_wid(PACKAGE_ID, txn)),
+            miss: tonic::Code::NotFound,
+        })
+        .await;
+        poller
+            .fetch_withdrawal_approval(WID)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn approval_is_read_from_the_withdrawal_transaction() {
+        let txn = withdrawal_transaction(WID);
 
         assert_eq!(
-            poller.fetch_withdrawal_approval(WID).await.unwrap(),
-            Some(MonitorWithdrawalEvent {
+            fetch_approval(&txn).await,
+            HashiApproval::Valid(MonitorWithdrawalEvent {
                 event_type: WithdrawalEventType::E1HashiApproved,
                 wid: WID,
                 timestamp_secs: 1_789_805_327,
