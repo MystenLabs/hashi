@@ -17,6 +17,7 @@ use crate::domain::WithdrawalEventType;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
+use crate::rpc::btc::TxConfirmation;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
@@ -355,29 +356,26 @@ impl DepositStateMachine {
             return Ok(BtcFetchOutcome::NotExpected);
         }
 
-        let deadline = self.btc_event_expected_at;
-        let deposit_id = self.hashi_deposit_event.deposit_id;
-        let cur_time = now_timestamp_secs();
+        let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid())?;
+        self.btc_checked_at = Some(now_timestamp_secs());
+        Ok(match confirmation {
+            Some(confirmation) => BtcFetchOutcome::Confirmed(self.resolve(&confirmation)),
+            None => BtcFetchOutcome::Unconfirmed,
+        })
+    }
 
-        let confirmation = match btc_rpc_client.lookup_confirmation(deposit_id.txid()) {
-            Ok(Some(confirmation)) => confirmation,
-            Ok(None) => {
-                self.btc_checked_at = Some(cur_time);
-                return Ok(BtcFetchOutcome::Unconfirmed);
-            }
-            Err(e) => return Err(e),
-        };
-        self.btc_checked_at = Some(cur_time);
+    /// Complete the flow with the confirmed transaction and return its findings.
+    fn resolve(&mut self, confirmation: &TxConfirmation) -> Vec<MonitorFinding> {
         self.btc_resolved = true;
+        let deposit_id = self.deposit_id();
         let Some(e_btc) = confirmation.deposit_event(deposit_id) else {
-            return Ok(BtcFetchOutcome::Confirmed(vec![
-                MonitorFinding::DepositOutputMissing {
-                    deposit_id,
-                    output_count: confirmation.outputs.len(),
-                },
-            ]));
+            return vec![MonitorFinding::DepositOutputMissing {
+                deposit_id,
+                output_count: confirmation.outputs.len(),
+            }];
         };
 
+        let deadline = self.btc_event_expected_at;
         let mut findings = Vec::new();
         if deadline < e_btc.timestamp_secs {
             findings.push(MonitorFinding::EventOccurredAfterDeadline {
@@ -388,7 +386,7 @@ impl DepositStateMachine {
             });
         }
         findings.extend(deposit_mismatch(&self.hashi_deposit_event, &e_btc));
-        Ok(BtcFetchOutcome::Confirmed(findings))
+        findings
     }
 
     pub fn violations(&self) -> Vec<MonitorFinding> {
@@ -444,7 +442,6 @@ mod tests {
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use crate::findings::FindingCategory;
-    use crate::rpc::btc::TxConfirmation;
     use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
@@ -961,6 +958,28 @@ mod tests {
             .unwrap();
 
         assert!(deposit_mismatch(&sui, &btc).is_some());
+    }
+
+    #[test]
+    fn a_confirmed_transaction_without_the_deposit_output_is_output_missing() {
+        let deposit_id = DepositId::new(txid(9), 2);
+        let sui = MonitorDepositEvent {
+            deposit_id,
+            ..sui_deposit(50_000, p2wpkh(0x54))
+        };
+        let mut sm = DepositStateMachine::new(sui, &cfg());
+
+        let findings = sm.resolve(&confirmation(50_000, p2wpkh(0x54)));
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::DepositOutputMissing {
+                deposit_id,
+                output_count: 2,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+        assert!(!sm.is_expecting_events());
     }
 
     #[test]
