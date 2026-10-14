@@ -87,6 +87,15 @@ impl WithdrawalStateMachine {
         self.btc_txid
     }
 
+    /// Timestamp of the earliest event seen for this withdrawal.
+    pub fn earliest_seen_at(&self) -> UnixSeconds {
+        self.seen_events
+            .iter()
+            .map(|e| e.timestamp_secs)
+            .min()
+            .expect("a state machine holds at least one event")
+    }
+
     pub fn wid(&self) -> WithdrawalID {
         self.wid
     }
@@ -460,6 +469,10 @@ mod tests {
     impl AuditWindow for TestWindow {
         fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
             timestamp_secs >= self.start && timestamp_secs <= self.end
+        }
+
+        fn end(&self) -> UnixSeconds {
+            self.end
         }
     }
 

@@ -51,6 +51,10 @@ impl AuditWindow for ContinuousAuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
         timestamp_secs >= self.user_start
     }
+
+    fn end(&self) -> UnixSeconds {
+        u64::MAX
+    }
 }
 
 impl ContinuousAuditWindow {

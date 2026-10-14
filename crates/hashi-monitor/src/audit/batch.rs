@@ -71,6 +71,10 @@ impl AuditWindow for BatchAuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
         timestamp_secs >= self.user_start && timestamp_secs <= self.user_end
     }
+
+    fn end(&self) -> UnixSeconds {
+        self.user_end
+    }
 }
 
 /// A batch auditor that tries to validate all events emitted during a given time period `[t1, t2]`.

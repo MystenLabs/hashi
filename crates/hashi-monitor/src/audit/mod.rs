@@ -50,6 +50,8 @@ use std::fmt;
 
 pub trait AuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
+    /// Last timestamp the window covers. A window with no end returns `u64::MAX`.
+    fn end(&self) -> UnixSeconds;
 }
 
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
@@ -111,7 +113,9 @@ impl fmt::Display for WithdrawalProgressBlockers {
 struct WithdrawalProgressBlocker {
     wid: WithdrawalID,
     btc_txid: Txid,
-    guardian_approved_at: UnixSeconds,
+    /// Guardian approval time, or the earliest seen event when the guardian
+    /// has not approved yet.
+    anchored_at: UnixSeconds,
     waiting_for: Vec<WithdrawalEventType>,
 }
 
@@ -119,10 +123,10 @@ impl fmt::Display for WithdrawalProgressBlocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "wid={}, btc_txid={}, guardian_approved_at={}, waiting_for={:?}",
+            "wid={}, btc_txid={}, anchored_at={}, waiting_for={:?}",
             self.wid,
             self.btc_txid,
-            utc_timestamp(self.guardian_approved_at),
+            utc_timestamp(self.anchored_at),
             self.waiting_for,
         )
     }
@@ -390,32 +394,36 @@ impl AuditorCore {
         }
     }
 
+    /// Where the next audit can start without losing a pending check.
+    ///
+    /// The guardian cursor sits on an hour boundary, so a batch window that
+    /// ends mid-hour caps the watermark at its end. A pending withdrawal
+    /// lowers it to its guardian approval time, or to its earliest seen
+    /// event when the guardian has not approved yet, so a restart from the
+    /// watermark reads that withdrawal again inside its window.
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
-        let mut verified_up_to_withdrawals = self.get_guardian_cursor();
+        let mut verified_up_to_withdrawals = self.get_guardian_cursor().min(window.end());
         let mut withdrawal_blockers = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_in_audit_window(window) || !sm.is_expecting_events() {
                 continue;
             }
 
-            if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
-                if e2.timestamp_secs < verified_up_to_withdrawals {
-                    verified_up_to_withdrawals = e2.timestamp_secs;
-                    withdrawal_blockers.clear();
-                }
-                if e2.timestamp_secs == verified_up_to_withdrawals {
-                    withdrawal_blockers.push(WithdrawalProgressBlocker {
-                        wid: sm.wid(),
-                        btc_txid: sm.btc_txid(),
-                        guardian_approved_at: e2.timestamp_secs,
-                        waiting_for: sm.expected_event_types(),
-                    });
-                }
-            } else {
-                tracing::debug!(
-                    wid = %sm.wid(),
-                    "in-window withdrawal missing guardian anchor; skipping in verified_up_to computation"
-                );
+            let anchored_at = match sm.get(WithdrawalEventType::E2GuardianApproved) {
+                Some(e2) => e2.timestamp_secs,
+                None => sm.earliest_seen_at(),
+            };
+            if anchored_at < verified_up_to_withdrawals {
+                verified_up_to_withdrawals = anchored_at;
+                withdrawal_blockers.clear();
+            }
+            if anchored_at == verified_up_to_withdrawals {
+                withdrawal_blockers.push(WithdrawalProgressBlocker {
+                    wid: sm.wid(),
+                    btc_txid: sm.btc_txid(),
+                    anchored_at,
+                    waiting_for: sm.expected_event_types(),
+                });
             }
         }
 
@@ -508,6 +516,80 @@ btc:
         fn in_window(&self, _: UnixSeconds) -> bool {
             true
         }
+
+        fn end(&self) -> UnixSeconds {
+            u64::MAX
+        }
+    }
+
+    /// A batch-style window over `[start, end]`.
+    struct Between(UnixSeconds, UnixSeconds);
+
+    impl AuditWindow for Between {
+        fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
+            timestamp_secs >= self.0 && timestamp_secs <= self.1
+        }
+
+        fn end(&self) -> UnixSeconds {
+            self.1
+        }
+    }
+
+    /// An auditor whose guardian poller has read the hour directories up to
+    /// `guardian_cursor` and whose Sui scan covered `[sui_start, sui_cursor)`.
+    async fn auditor_at(
+        guardian_cursor: UnixSeconds,
+        sui_start: UnixSeconds,
+        sui_cursor: UnixSeconds,
+    ) -> AuditorCore {
+        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        AuditorCore {
+            pending_withdrawals: HashMap::new(),
+            pending_deposits: HashMap::new(),
+            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
+            sui_poller: poller_scanned(sui_start, sui_cursor).await,
+            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            cfg,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_ending_mid_hour_caps_the_withdrawals_watermark_at_its_end() {
+        // The guardian poller read the whole hour [3600, 7200) for a window
+        // ending at 5400.
+        let auditor = auditor_at(7200, 3600, 7200).await;
+
+        let progress = auditor.progress_watermarks(&Between(3600, 5400));
+
+        assert_eq!(progress.verified_up_to_withdrawals, 5400);
+        assert_eq!(progress.restart_start, 5400);
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_without_a_guardian_approval_anchors_the_watermark() {
+        let mut auditor = auditor_at(7200, 3600, 7200).await;
+        let approval = MonitorWithdrawalEvent {
+            timestamp_secs: 5000,
+            ..looked_up_approval()
+        };
+        assert!(
+            auditor
+                .ingest(MonitorEvent::Withdrawal(approval.clone()))
+                .is_empty()
+        );
+
+        let progress = auditor.progress_watermarks(&Between(3600, 5400));
+
+        assert_eq!(progress.verified_up_to_withdrawals, 5000);
+        assert_eq!(progress.restart_start, 5000);
+        let blockers = &progress.withdrawal_blockers().0;
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].wid, approval.wid);
+        assert_eq!(blockers[0].anchored_at, 5000);
+        assert_eq!(
+            blockers[0].waiting_for,
+            vec![WithdrawalEventType::E2GuardianApproved]
+        );
     }
 
     /// An auditor holding a guardian approval for `btc_txid` of `looked_up_approval`'s
