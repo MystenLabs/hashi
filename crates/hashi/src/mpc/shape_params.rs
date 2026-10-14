@@ -140,7 +140,7 @@ impl ShapeParams {
     }
 
     pub(crate) fn dealing_committee_for_epoch(&self, epoch: u64) -> Option<&CommitteeShape> {
-        if epoch == self.epoch {
+        if epoch == self.epoch && epoch != self.previous_epoch {
             self.previous.as_ref()
         } else if epoch == self.previous_epoch {
             self.previous_input.as_ref()

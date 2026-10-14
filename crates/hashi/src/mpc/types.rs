@@ -350,6 +350,8 @@ pub enum Messages {
 }
 
 impl Messages {
+    pub(crate) const DKG_VARIANT: u8 = 0;
+    pub(crate) const ROTATION_VARIANT: u8 = 1;
     pub(crate) const NONCE_GENERATION_AVID_VARIANT: u8 = 2;
 
     pub(crate) fn compute_hash(&self) -> MessagesHash {

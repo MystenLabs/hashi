@@ -8377,6 +8377,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
+    test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.previous_output = Some(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -8478,6 +8479,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
+    test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.previous_output = Some(test_dkg_output.clone());
     for (dealer, msgs) in &dealer_rotation_messages {
         if *dealer != past_prefix {
@@ -8591,6 +8593,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
+    test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.previous_output = Some(test_dkg_output.clone());
     test_manager
         .persist_and_cache_rotation_messages(epoch, diverged_dealer, &diverged)
@@ -8715,6 +8718,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
+    test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.previous_output = Some(test_dkg_output.clone());
     for (dealer_addr, msgs) in &certified {
         test_manager
@@ -8996,6 +9000,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
+    test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.previous_output = Some(test_dkg_output.clone());
     test_manager
         .persist_and_cache_rotation_messages(epoch, unrepairable, &diverged_first)
@@ -18767,7 +18772,7 @@ fn a_stored_row_that_fails_the_count_check_is_skipped_and_never_decoded() {
         },
     );
     assert!(
-        matches!(&resend, Err(MpcError::InvalidMessage { reason, .. }) if reason == "Dealer sent different messages"),
+        matches!(&resend, Err(MpcError::InvalidMessage { reason, .. }) if reason == "Dealer's message differs from this node's stored copy"),
         "{resend:?}"
     );
     let retrieved = manager.handle_retrieve_messages_request(
@@ -18782,6 +18787,47 @@ fn a_stored_row_that_fails_the_count_check_is_skipped_and_never_decoded() {
     assert!(
         matches!(retrieved, Err(MpcError::NotFound(_))),
         "{retrieved:?}"
+    );
+}
+
+#[test]
+fn a_manager_rebuilt_during_a_pending_reconfig_takes_rotation_ownership_from_the_input_committee() {
+    let mut setup = TestSetup::new(5);
+    let epoch = setup.epoch();
+    let committee = |size: usize, epoch: u64| {
+        Committee::new(
+            (0..size)
+                .map(|i| {
+                    CommitteeMember::new(
+                        setup.address(i),
+                        setup.signing_keys[i].public_key(),
+                        setup.encryption_keys[i].public_key(),
+                        1,
+                    )
+                })
+                .collect(),
+            epoch,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let committees = BTreeMap::from([
+        (epoch - 1, committee(4, epoch - 1)),
+        (epoch, committee(5, epoch)),
+    ]);
+    setup
+        .committee_set
+        .set_pending_epoch_change(Some(epoch + 1))
+        .set_committees(committees);
+
+    let shape = setup.create_manager(0).shape_params();
+
+    assert_eq!(shape.previous_epoch(), epoch);
+    assert_eq!(
+        shape
+            .dealing_committee_for_epoch(epoch)
+            .map(|dealing| dealing.avss_shape().num_nodes),
+        Some(4)
     );
 }
 
@@ -19003,7 +19049,7 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
 }
 
 #[test]
-fn stored_avid_state_is_refused_under_another_epochs_parameters() {
+fn stored_avid_state_is_refused_when_the_snapshot_is_for_another_epoch() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
