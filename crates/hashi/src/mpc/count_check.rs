@@ -1,26 +1,43 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::mpc::types::AvidNonceMessageKind;
+use crate::mpc::types::Messages;
+use crate::mpc::types::ProtocolComplaint;
+use fastcrypto::bls12381::BLS_G2_LENGTH;
+use fastcrypto::groups::ristretto255::RISTRETTO_POINT_BYTE_LENGTH;
+use fastcrypto::groups::ristretto255::RISTRETTO_SCALAR_BYTE_LENGTH;
+use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
+use fastcrypto::groups::secp256k1::SCALAR_SIZE_IN_BYTES;
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
+use fastcrypto::merkle::DIGEST_LEN;
+use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::types::ShareIndex;
 use std::collections::BTreeMap;
 use std::ops::Range;
+use sui_sdk_types::Address;
 
-const POINT: usize = 33;
-const SCALAR: usize = 32;
-const EG_POINT: usize = 32;
-const DDH_NIZK: usize = 3 * 32;
-const SHARE: usize = 2 + SCALAR;
-const DIGEST: usize = 32;
-const ADDRESS: usize = 32;
-const PARTY_ID: usize = 2;
-const BATCH_INDEX: usize = 4;
-const EPOCH: usize = 8;
-const AGGREGATE_SIGNATURE: usize = 96;
+const POINT: usize = POINT_SIZE_IN_BYTES;
+const SCALAR: usize = SCALAR_SIZE_IN_BYTES;
+const EG_POINT: usize = RISTRETTO_POINT_BYTE_LENGTH;
+const DDH_NIZK: usize = 2 * EG_POINT + RISTRETTO_SCALAR_BYTE_LENGTH;
+const SHARE: usize = size_of::<ShareIndex>() + SCALAR;
+const HASH: usize = Blake2b256::OUTPUT_SIZE;
+const MERKLE_DIGEST: usize = DIGEST_LEN;
+const ADDRESS: usize = Address::LENGTH;
+const PARTY_ID: usize = size_of::<PartyId>();
+const BATCH_INDEX: usize = size_of::<u32>();
+const EPOCH: usize = size_of::<u64>();
+const AGGREGATE_SIGNATURE: usize = BLS_G2_LENGTH;
 const SHARED_COMPONENTS: usize = 2 * EG_POINT + DDH_NIZK;
 const RECOVERY_PACKAGE: usize = EG_POINT + DDH_NIZK;
 const MAX_MERKLE_PATH: usize = usize::BITS as usize - 1;
-const MESSAGES_NONCE_GENERATION_AVID: usize = 2;
-const AVID_NONCE_MESSAGE_KIND_ECHO: usize = 2;
+const MESSAGES_NONCE_GENERATION_AVID: usize = Messages::NONCE_GENERATION_AVID_VARIANT as usize;
+const AVID_NONCE_MESSAGE_KIND_ECHO: usize = AvidNonceMessageKind::ECHO_VARIANT as usize;
+const PROTOCOL_COMPLAINT_AVSS: usize = ProtocolComplaint::AVSS_VARIANT as usize;
+const PROTOCOL_COMPLAINT_AVID_REVEAL: usize = ProtocolComplaint::AVID_REVEAL_VARIANT as usize;
+const PROTOCOL_COMPLAINT_AVID_BLAME: usize = ProtocolComplaint::AVID_BLAME_VARIANT as usize;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CountCheckError {
@@ -174,14 +191,14 @@ pub fn check_protocol_complaint(bytes: &[u8], weights: PartyWeights<'_>) -> Coun
     const FIELD: &str = "complaint";
     let mut cursor = Cursor::new(bytes);
     match cursor.variant(FIELD)? {
-        0 => {
+        PROTOCOL_COMPLAINT_AVSS => {
             cursor.take(FIELD, RECOVERY_PACKAGE)?;
         }
-        1 => {
+        PROTOCOL_COMPLAINT_AVID_REVEAL => {
             walk_bytes(&mut cursor, "complaint.ciphertext")?;
             cursor.take("complaint.proof", RECOVERY_PACKAGE)?;
         }
-        2 => {
+        PROTOCOL_COMPLAINT_AVID_BLAME => {
             walk_u16_map(
                 &mut cursor,
                 "complaint.shards",
@@ -266,7 +283,7 @@ fn walk_avss_common_message(
     cursor.take("ciphertext_shared", SHARED_COMPONENTS)?;
     let hashes = cursor.length(HASHES)?;
     expect_count(HASHES, hashes, shape.weights.num_nodes())?;
-    cursor.skip_elements(HASHES, hashes, DIGEST)?;
+    cursor.skip_elements(HASHES, hashes, HASH)?;
     let coefficients = cursor.length(POLYNOMIAL)?;
     expect_count(POLYNOMIAL, coefficients, shape.threshold.into())?;
     cursor.skip_elements(POLYNOMIAL, coefficients, SCALAR)
@@ -295,7 +312,7 @@ fn walk_merkle_path(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckR
 fn walk_merkle_node(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckResult<()> {
     match cursor.variant(field)? {
         0 => Ok(()),
-        1 => cursor.take(field, DIGEST).map(drop),
+        1 => cursor.take(field, MERKLE_DIGEST).map(drop),
         variant => Err(CountCheckError::BadVariant { field, variant }),
     }
 }
@@ -306,7 +323,7 @@ fn walk_avid_vote(cursor: &mut Cursor<'_>, weights: PartyWeights<'_>) -> CountCh
     let recipients = cursor.length(RECIPIENTS)?;
     at_most(RECIPIENTS, recipients, weights.num_nodes())?;
     cursor.skip_elements(RECIPIENTS, recipients, PARTY_ID)?;
-    cursor.take("common_message_hash", DIGEST).map(drop)
+    cursor.take("common_message_hash", HASH).map(drop)
 }
 
 fn walk_vote_certificate(cursor: &mut Cursor<'_>) -> CountCheckResult<()> {
