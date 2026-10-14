@@ -337,7 +337,13 @@ impl RetrieveReply {
                         .collect(),
                 })
             }
-            Self::Decoded(response) => return Ok(proto::RetrieveMessagesResponse::from(response)),
+            Self::Avid(retrieval) => {
+                Messages::AvidNonceRetrievalMessage(proto::AvidNonceRetrievalMessage {
+                    common: retrieval.common().map(serialize_bcs),
+                    echo: retrieval.echo().map(serialize_bcs),
+                    avid_vote: retrieval.vote().map(serialize_bcs),
+                })
+            }
         };
         Ok(proto::RetrieveMessagesResponse {
             messages: Some(messages),

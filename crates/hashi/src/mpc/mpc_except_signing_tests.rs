@@ -13162,6 +13162,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .expect("echoes held for the round")
+        .as_ref()
         .clone();
     let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
@@ -13247,7 +13248,8 @@ fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
     let (non_signer_vote, _, _) = non_signer
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
-        .expect("the non-signer holds echoes after voting");
+        .expect("the non-signer holds echoes after voting")
+        .as_ref();
 
     let confirmer = &mut fx.confirmers[1];
     confirmer
@@ -13261,7 +13263,8 @@ fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
     let (confirmer_vote, _, _) = confirmer
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
-        .unwrap();
+        .unwrap()
+        .as_ref();
     assert_eq!(
         hash_avid_vote(non_signer_vote),
         hash_avid_vote(confirmer_vote),
@@ -13460,6 +13463,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .unwrap()
+        .as_ref()
         .clone();
 
     let second = receiver.handle_send_messages_request(
@@ -13476,6 +13480,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .unwrap()
+        .as_ref()
         .clone();
     assert_eq!(
         hash_avid_vote(&held_vote_after),
@@ -13675,7 +13680,8 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
     let (held_vote, _, _) = mgr
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
-        .expect("the dealer voted on its own dispersal and held its echoes");
+        .expect("the dealer voted on its own dispersal and held its echoes")
+        .as_ref();
     assert_eq!(
         cert.message().messages_hash,
         hash_avid_vote(held_vote),
@@ -16554,6 +16560,7 @@ fn test_avid_voter_state_survives_restart() {
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
+        .as_ref()
         .clone();
     let echo_before = extract_echo_for(&held_echoes, setup.address(5));
     let vote_target = AvidVoteMessagesHash {
@@ -16623,6 +16630,7 @@ fn test_avid_voter_state_survives_restart() {
                 .avid_held_echoes
                 .get(&(batch_index, dealer_addr))
                 .unwrap()
+                .as_ref()
                 .clone();
             (i, extract_echo_for(&held, setup.address(5)))
         }))
@@ -16643,7 +16651,8 @@ fn test_avid_voter_state_survives_restart() {
         .get_avid_round_state(batch_index, &dealer_addr)
         .unwrap()
         .unwrap()
-        .common;
+        .common
+        .clone();
     let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
@@ -16738,6 +16747,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
             .avid_held_echoes
             .get(&(batch_index, dealer_addr))
             .unwrap()
+            .as_ref()
             .clone();
         echoes_for_victim.push((
             setup.committee().index_of(&addr).unwrap() as PartyId,
@@ -16770,6 +16780,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
+        .as_ref()
         .clone();
     let vote_target = AvidVoteMessagesHash {
         dealer_address: dealer_addr,
@@ -16850,6 +16861,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
+        .as_ref()
         .clone();
     let blame_target = AvidVoteMessagesHash {
         dealer_address: dealer_addr,
@@ -16931,7 +16943,7 @@ fn test_prune_nonce_state_drops_old_avid_round_state() {
         let mut mgr = manager.write().unwrap();
         for b in [0u32, 1, 2] {
             mgr.current_avid_round_state
-                .insert((b, fake_dealer), state.clone());
+                .insert((b, fake_dealer), Arc::new(state.clone()));
         }
     }
 
@@ -19077,7 +19089,7 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
         batch_index,
         dealer: fx.dealer_addr,
         requester: setup.address(4),
-        common: Lookup::Pending,
+        round_state: Lookup::Pending,
         held: Lookup::Pending,
     };
 
@@ -19093,12 +19105,9 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
     *store.published.lock().unwrap() = true;
     release_tx.send(()).unwrap();
 
-    let response = reader.join().unwrap().unwrap();
-    let Messages::AvidNonceRetrieval(bundle) = response.messages else {
-        panic!("expected an AVID retrieval bundle");
-    };
+    let retrieval = reader.join().unwrap().unwrap();
     assert!(
-        bundle.avid_vote.is_none() || bundle.common.is_some(),
+        retrieval.vote().is_none() || retrieval.common().is_some(),
         "served an AVID vote with no common message"
     );
 }
@@ -19135,12 +19144,12 @@ fn stored_avid_state_is_refused_when_the_snapshot_is_for_another_epoch() {
         batch_index,
         dealer: fx.dealer_addr,
         requester: setup.address(4),
-        common: Lookup::Pending,
+        round_state: Lookup::Pending,
         held: Lookup::Pending,
     };
 
     assert!(finish_avid_retrieval(&*store, pending(), &shape).is_ok());
-    let refused = finish_avid_retrieval(&*store, pending(), &ahead);
+    let refused = finish_avid_retrieval(&*store, pending(), &ahead).map(drop);
     assert!(
         matches!(&refused, Err(MpcError::NotFound(reason)) if reason.contains("no AVID parameters for epoch")),
         "{refused:?}"
@@ -19210,6 +19219,46 @@ async fn retrieve_messages_serves_stored_avid_state_while_a_newer_snapshot_is_pu
             ref retrieval
         )) if retrieval.common.is_some()
     ));
+}
+
+#[test]
+fn avid_retrieval_shares_the_held_state_instead_of_cloning_it() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let mut voter = setup.create_manager(1);
+    for messages in [fx.optimistic[1].1.clone(), dispersals[1].1.clone()] {
+        voter
+            .handle_send_messages_request(fx.dealer_addr, &SendMessagesRequest { messages })
+            .unwrap();
+    }
+    let request = RetrieveMessagesRequest {
+        dealer: fx.dealer_addr,
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: voter.mpc_config.epoch,
+        batch_index: Some(batch_index),
+    };
+
+    let Ok(RetrieveOutcome::NeedsAvidStore(pending)) =
+        voter.begin_retrieve(setup.address(4), &request)
+    else {
+        panic!("expected an AVID retrieval");
+    };
+    let (Lookup::Resolved(round_state), Lookup::Resolved(held)) =
+        (&pending.round_state, &pending.held)
+    else {
+        panic!("round state and held echoes are in memory");
+    };
+    let key = (batch_index, fx.dealer_addr);
+    assert!(Arc::ptr_eq(
+        round_state,
+        &voter.current_avid_round_state[&key]
+    ));
+    assert!(Arc::ptr_eq(held, &voter.avid_held_echoes[&key]));
 }
 
 #[test]
