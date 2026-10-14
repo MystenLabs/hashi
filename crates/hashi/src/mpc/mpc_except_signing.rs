@@ -2249,14 +2249,14 @@ impl MpcManager {
         epoch: u64,
         batch_index: u32,
         dealer: Address,
-        state: &AvidRoundState,
+        state: AvidRoundState,
     ) -> MpcResult<()> {
         self.public_messages_store
-            .store_avid_round_state(epoch, batch_index, &dealer, state)
+            .store_avid_round_state(epoch, batch_index, &dealer, &state)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         if epoch == self.mpc_config.epoch {
             self.current_avid_round_state
-                .insert((batch_index, dealer), Arc::new(state.clone()));
+                .insert((batch_index, dealer), Arc::new(state));
         }
         Ok(())
     }
@@ -2453,12 +2453,7 @@ impl MpcManager {
             common: message.common.clone(),
             own_ciphertext: message.ciphertext.clone(),
         };
-        self.persist_and_cache_avid_round_state(
-            self.mpc_config.epoch,
-            batch_index,
-            dealer,
-            &state,
-        )?;
+        self.persist_and_cache_avid_round_state(self.mpc_config.epoch, batch_index, dealer, state)?;
         self.dealer_avid_nonce_outputs.insert(
             (batch_index, dealer),
             TaggedAvidOutput {
@@ -6946,7 +6941,6 @@ fn consume_certified_nonce_outputs<T>(
     (pre_filter, dealers, outputs)
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum RetrieveOutcome {
     Ready(RetrieveReply),
     NeedsStore,
