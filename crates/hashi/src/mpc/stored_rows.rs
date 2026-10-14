@@ -7,6 +7,7 @@ use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::HeldAvidEchoes;
+use crate::mpc::types::Messages;
 use crate::mpc::types::MessagesHash;
 use crate::mpc::types::MpcError;
 use crate::mpc::types::MpcResult;
@@ -16,9 +17,6 @@ use fastcrypto::hash::HashFunction;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use serde::de::DeserializeOwned;
 use sui_sdk_types::Address;
-
-const DKG_VARIANT: u8 = 0;
-const ROTATION_VARIANT: u8 = 1;
 
 pub(crate) fn dkg_message(
     shape: &ShapeParams,
@@ -39,7 +37,13 @@ pub(crate) fn rotation_messages(
     let avss = avss_shape(shape, epoch, dealer)?;
     let owned = shape
         .dealing_committee_for_epoch(epoch)
-        .and_then(|committee| committee.share_ids_of(dealer))
+        .ok_or_else(|| {
+            refused(
+                dealer,
+                format!("no dealing committee known for epoch {epoch}"),
+            )
+        })?
+        .share_ids_of(dealer)
         .ok_or_else(|| {
             refused(
                 dealer,
@@ -87,11 +91,11 @@ pub(crate) fn held_avid_echoes(
 }
 
 pub(crate) fn dkg_message_hash(bytes: &[u8]) -> MessagesHash {
-    variant_hash(DKG_VARIANT, bytes)
+    variant_hash(Messages::DKG_VARIANT, bytes)
 }
 
 pub(crate) fn rotation_messages_hash(bytes: &[u8]) -> MessagesHash {
-    variant_hash(ROTATION_VARIANT, bytes)
+    variant_hash(Messages::ROTATION_VARIANT, bytes)
 }
 
 fn variant_hash(variant: u8, bytes: &[u8]) -> MessagesHash {

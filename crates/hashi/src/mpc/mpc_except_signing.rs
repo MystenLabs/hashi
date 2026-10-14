@@ -595,9 +595,17 @@ impl MpcManager {
         if let Some(existing_hash) = existing {
             let incoming_hash = request.messages.compute_hash();
             if existing_hash != incoming_hash {
+                let held = self
+                    .get_dealer_messages(request.messages.protocol_type(), &sender)
+                    .is_some();
+                let reason = if held {
+                    "Dealer sent different messages"
+                } else {
+                    "Dealer's message differs from this node's stored copy"
+                };
                 return Err(MpcError::InvalidMessage {
                     sender,
-                    reason: "Dealer sent different messages".to_string(),
+                    reason: reason.to_string(),
                 });
             }
             if let Some(cached) = cache_key.and_then(|key| self.message_responses.get(&key)) {
@@ -4281,8 +4289,8 @@ impl MpcManager {
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::warn!(
-                    "Self in certificate signers but DKG message not in memory or DB for dealer {:?} \
-                     — retrieving from other signers",
+                    "Self in certificate signers but DKG message for dealer {:?} is missing or \
+                     unusable locally — retrieving from other signers",
                     message.dealer_address
                 );
             }
@@ -4417,8 +4425,8 @@ impl MpcManager {
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?
             {
                 tracing::warn!(
-                    "Self in certificate signers but rotation message not in memory or DB for dealer {:?} \
-                     — retrieving from other signers",
+                    "Self in certificate signers but rotation message for dealer {:?} is missing or \
+                     unusable locally — retrieving from other signers",
                     message.dealer_address
                 );
             }
@@ -5177,7 +5185,7 @@ impl MpcManager {
             let dealer_address = msg.dealer_address;
             let message = self
                 .read_dkg_message(context.epoch, &dealer_address)
-                .map_err(diverged_if_refused)?
+                .map_err(warn_if_refused)?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
                         "DKG message not found for dealer: {:?}",
@@ -5351,7 +5359,7 @@ impl MpcManager {
             let dealer_address = msg.dealer_address;
             let rotation_msgs = self
                 .read_rotation_messages(context.epoch, &dealer_address)
-                .map_err(diverged_if_refused)?
+                .map_err(warn_if_refused)?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
                         "Rotation messages not found for dealer: {:?}",
@@ -6969,17 +6977,14 @@ fn not_found_if_refused(e: MpcError) -> MpcError {
     }
 }
 
-fn diverged_if_refused(e: MpcError) -> MpcError {
-    match e {
-        MpcError::StoredRowRefused { dealer, reason } => {
-            tracing::warn!(
-                "Stored message for dealer {dealer:?} refused ({reason}); not usable for \
-                 reconstruction"
-            );
-            MpcError::StoredMessageDiverged { dealer }
-        }
-        e => e,
+fn warn_if_refused(e: MpcError) -> MpcError {
+    if let MpcError::StoredRowRefused { dealer, reason } = &e {
+        tracing::warn!(
+            "Stored message for dealer {dealer:?} refused ({reason}); not usable for \
+             reconstruction"
+        );
     }
+    e
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
