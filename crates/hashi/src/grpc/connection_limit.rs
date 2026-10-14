@@ -65,6 +65,7 @@ impl ConnectionLimiter {
         let State { live, members } = &mut *state;
         let entry = members.entry(member).or_insert_with(|| {
             let label = member.to_string();
+            self.0.metrics.peer_first_seen(&label);
             Member {
                 connections: Vec::new(),
                 high_water: 0,
@@ -247,5 +248,14 @@ mod tests {
         let state = limiter.0.state.lock().unwrap();
         assert_eq!(state.members[&MEMBER].refused.get(), 1);
         assert_eq!(state.members[&MEMBER].max.get(), 4);
+        assert!(
+            limiter
+                .0
+                .metrics
+                .peer_first_seen_timestamp_seconds
+                .with_label_values(&[&MEMBER.to_string()])
+                .get()
+                > 0
+        );
     }
 }

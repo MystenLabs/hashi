@@ -217,6 +217,7 @@ impl PeerInflightLimiter {
             .or_insert_with(|| {
                 let label = address.to_string();
                 let metrics = &self.0.metrics;
+                metrics.peer_first_seen(&label);
                 Arc::new(Peer {
                     inflight: AtomicU32::new(0),
                     high_water: AtomicU32::new(0),
@@ -614,6 +615,15 @@ mod tests {
         assert_eq!(shed.status(), http::StatusCode::OK);
         assert_eq!(shed.headers().get("grpc-status").unwrap(), "14");
         assert_eq!(limiter.peer(peer(b'a')).shed.get(), 2);
+        assert!(
+            limiter
+                .0
+                .metrics
+                .peer_first_seen_timestamp_seconds
+                .with_label_values(&[&peer(b'a').to_string()])
+                .get()
+                > 0
+        );
 
         let served = call(&app, request(b'b', false, false)).await;
         assert_eq!(served.status(), http::StatusCode::OK);

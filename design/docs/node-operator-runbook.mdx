@@ -1408,8 +1408,13 @@ Notes:
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`, or `-1` until the pool holds a UTXO to probe. |
+| `hashi_peer_requests_shed_total`, `hashi_peer_requests_over_byte_budget_total`, `hashi_peer_requests_too_large_total`, `hashi_peer_mpc_work_shed_total`, `hashi_peer_responses_shed_total`, `hashi_peer_requests_over_connection_limit_total` | counter | Traffic a per-peer limit shed or refused, by `peer`. Healthy: flat. |
+| `hashi_mpc_unguarded_spawn_blocking_total` | counter | MPC work started outside the per-peer budget. Healthy: `0`. |
+| `hashi_peer_first_seen_timestamp_seconds` | gauge | When this node first saw each peer since start. The peer alerts need it. |
 
 > **Not in the 1.0 releases.** `hashi_withdrawal_bitcoin_check_script_failures_total` and `hashi_withdrawal_bitcoin_check_blind` come with the `testmempoolaccept` withdrawal check, which `testnet-1.0` and `mainnet-1.0` do not have. On 1.0 both metrics are absent and their alerts in [8.4](#84-suggested-alerts) never fire.
+
+> **Also not in the 1.0 releases.** Of the `hashi_peer_*` and `hashi_mpc_unguarded_*` metrics, 1.0 has only `hashi_peer_requests_shed_total`, so there the alerts miss a shed in a series' first sample.
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count.
 
@@ -1438,6 +1443,9 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 | `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
 | `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
+| A per-peer counter from [8.3](#83-key-metrics) counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | The `peer` may be misbehaving, or your node may be slow or have its limits set too low. Rule your node out first (`hashi_request_latency`), then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
+| 3 or more peers hit the request count or MPC work limits within 10 min | Critical | Usually your node is slow, not the peers, though colluding members can also cause it. Check `hashi_request_latency` and tell the operator channel. |
+| `hashi_mpc_unguarded_spawn_blocking_total` increasing | Warning | A node bug. Report it to the hashi team with your version. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 ---
