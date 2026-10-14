@@ -355,33 +355,6 @@ fn named_bcs<T>(bytes: Bytes) -> Bcs {
     Bcs::from(bytes).with_name(std::any::type_name::<T>())
 }
 
-impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse {
-    fn from(value: &types::RetrieveMessagesResponse) -> Self {
-        use proto::retrieve_messages_response::Messages;
-        let messages = match &value.messages {
-            types::Messages::Dkg(message) => Messages::DkgMessage(serialize_bcs(message)),
-            types::Messages::Rotation(messages) => {
-                Messages::RotationMessages(proto::RotationMessages {
-                    messages: rotation_messages_to_proto(messages),
-                })
-            }
-            types::Messages::NonceGenerationAvid(_) => {
-                unreachable!("AVID nonce generation send message in a RetrieveMessagesResponse")
-            }
-            types::Messages::AvidNonceRetrieval(retrieval) => {
-                Messages::AvidNonceRetrievalMessage(proto::AvidNonceRetrievalMessage {
-                    common: retrieval.common.as_ref().map(serialize_bcs),
-                    echo: retrieval.echo.as_ref().map(serialize_bcs),
-                    avid_vote: retrieval.avid_vote.as_ref().map(serialize_bcs),
-                })
-            }
-        };
-        Self {
-            messages: Some(messages),
-        }
-    }
-}
-
 impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesResponse {
     type Error = TryFromProtoError;
 
