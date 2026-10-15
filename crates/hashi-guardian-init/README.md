@@ -428,6 +428,7 @@ Guardian helper tooling lives under `tools`:
 ```bash
 cargo run -p hashi-guardian-init -- tools fetch-info --endpoint <guardian-endpoint>
 cargo run -p hashi-guardian-init -- tools verify-kp-cert --kp-pgp-cert-path /path/to/kp1.asc
+cargo run -p hashi-guardian-init -- tools check-config --config /path/to/guardian-init.yaml
 cargo run -p hashi-guardian-init --features non-enclave-dev -- tools dev-attest --kp-pgp-cert-path /path/to/kp1.asc
 ```
 
@@ -438,6 +439,11 @@ PCRs.
 
 `verify-kp-cert` checks a KP certificate and its three PEM sidecars exactly as
 certificate-loading commands do, then prints the primary-key fingerprint.
+
+`check-config` loads a config the way every production command does, verifies
+the whole certificate roster, and prints what the file says, without the S3
+credentials. Run it on a rendered config before sharing it: a field the CLI
+would reject otherwise surfaces only when a command first loads the file.
 
 `dev-attest` exists only in `non-enclave-dev` builds. It writes a software KP
 key's three PEM sidecars from a self-signed device that only `non-enclave-dev`
