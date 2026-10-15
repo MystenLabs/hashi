@@ -45,8 +45,7 @@ pub fn measure(ctx: &Ctx, arg: Option<Slot>, run_id: Option<String>) -> Result<(
                 "guardian-enclave.yml",
                 "main",
                 &[("git_revision", &view.commit)],
-            )
-            .context("Could not dispatch the measurement.")?
+            )?
         }
     };
     if run_id.is_empty() || !run_id.bytes().all(|b| b.is_ascii_digit()) {
@@ -112,6 +111,7 @@ pub fn proxy(ctx: &Ctx) -> Result<()> {
     };
     let view = stack.slot(ctx, active)?;
     say(&format!("Roll the guardian proxy to {}", view.commit));
+    let url = ctx.env.proxy_url()?.url;
     github::require_run_urls(ctx)?;
     // The workflow builds the image and applies the proxy stack from the sui-operations ref it runs on.
     let sui_operations_ref = ctx.env.get("SUI_OPERATIONS_REF").unwrap_or("main");
@@ -133,14 +133,16 @@ pub fn proxy(ctx: &Ctx) -> Result<()> {
         "hashi-guardian-proxy-deploy.yaml",
         sui_operations_ref,
         &[("env", stack.short_name()), ("hashi_commit", &view.commit)],
-    )
-    .context("Could not dispatch the proxy deploy.")?;
+    )?;
     println!("Proxy deploy run: https://github.com/{REPO}/actions/runs/{run_id}");
     github::watch(ctx, REPO, &run_id).context("The proxy deploy did not succeed.")?;
-    let url = ctx.env.proxy_url()?.url;
     proxy_health(ctx)
         .with_context(|| format!("The proxy deployed but {url}/health does not answer."))?;
     println!("The proxy answers at {url}.");
+    next(&format!(
+        "tunnel {}, left running in its own terminal; then info {}",
+        view.slot, view.slot
+    ));
     Ok(())
 }
 

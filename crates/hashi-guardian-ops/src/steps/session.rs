@@ -17,7 +17,6 @@ use crate::ask::confirm_typed;
 use crate::commit::Tree;
 use crate::guardian::completed_ceremonies;
 use crate::guardian::require_reached;
-use crate::guardian::slot_info;
 use crate::host;
 use crate::next;
 use crate::render::require_fresh;
@@ -123,7 +122,8 @@ pub fn new_session(ctx: &Ctx, arg: Option<Slot>, abandon: bool) -> Result<()> {
         &view.commit,
         &format!("the commit slot {}'s guardian runs", view.slot),
     )?;
-    let lifecycle = slot_info(ctx, &tree, &view)?.lifecycle;
+    // Another guardian's tunnel can be holding the local port, and its state would pass the gates below.
+    let lifecycle = require_reached(ctx, &stack, &view, &tree)?.info.lifecycle;
     // Restarting a ceremony session before it commits loses the ceremony.
     if completed_ceremonies(ctx, &bucket)? == 0 {
         bail!(
@@ -216,6 +216,11 @@ mod tests {
 
     /// A two-slot stack whose slot b reaches a guardian in `lifecycle`, over a bucket holding `ceremonies`.
     fn world(lifecycle: &'static str, ceremonies: u64) -> Fake {
+        world_relaying_to(lifecycle, ceremonies, KEY)
+    }
+
+    /// The same, with the relay sending key provisioners to the guardian whose signing key is `relayed`.
+    fn world_relaying_to(lifecycle: &'static str, ceremonies: u64, relayed: &'static str) -> Fake {
         let stack = crate::stack::tests::two_slots();
         Fake::new(move |words| {
             let w: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -231,6 +236,15 @@ mod tests {
                 ] => Some((
                     true,
                     json!({ "info": info_json(KEY, None, lifecycle) }).to_string(),
+                )),
+                [
+                    "grpcurl",
+                    ..,
+                    "sui.hashi.v1alpha.GuardianRelayService/GetProvisioningTargetInfo",
+                ] => Some((
+                    true,
+                    json!({ "signedInfo": { "data": info_json(relayed, None, lifecycle) } })
+                        .to_string(),
                 )),
                 ["aws", "s3api", "list-objects-v2", ..] => Some((true, format!("{ceremonies}\n"))),
                 ["aws", "ssm", "send-command", ..] => Some((true, "cmd-1\n".to_owned())),
@@ -271,6 +285,21 @@ mod tests {
             run(&exec, &["i-0bbb"], false).unwrap_err().to_string(),
             "s3://guardian-bucket/ceremony/ holds no completed ceremony, so a fresh session would have no key to be provisioned with."
         );
+    }
+
+    #[test]
+    fn restarts_only_the_guardian_the_proxy_leads_to() {
+        // Slot b's port reaches some other guardian, whose state would pass every gate.
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let exec = world_relaying_to("ceremony/COMPLETED", 1, other);
+        let error = run(&exec, &["i-0bbb"], false).unwrap_err().to_string();
+        assert!(
+            error.starts_with(&format!(
+                "The proxy's relay sends key provisioners to guardian {other}"
+            )),
+            "{error}"
+        );
+        assert!(!exec.ran(&["aws", "ssm", "send-command"]));
     }
 
     #[test]

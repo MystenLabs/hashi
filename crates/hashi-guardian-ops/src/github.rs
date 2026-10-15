@@ -46,11 +46,12 @@ pub fn dispatch(
     for (key, value) in inputs {
         cmd = cmd.arg("-f").arg(format!("{key}={value}"));
     }
-    let url = read(ctx.exec, &cmd)?;
+    let url = read(ctx.exec, &cmd).with_context(|| format!("Could not dispatch {workflow}."))?;
     let url = url.trim();
     let id = url.rsplit('/').next().unwrap_or("");
+    // The run exists by now, so the message must not read as though dispatching again were safe.
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
-        bail!("Could not tell which run the dispatch started: {url}");
+        bail!("Dispatched {workflow}, but could not tell which run it started: {url}");
     }
     Ok(id.to_owned())
 }
