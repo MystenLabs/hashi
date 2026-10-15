@@ -16,6 +16,7 @@ pub mod env;
 pub mod exec;
 pub mod guardian;
 pub mod host;
+pub mod render;
 pub mod stack;
 pub mod steps;
 pub mod sui;
@@ -61,4 +62,59 @@ pub fn say(title: &str) {
 
 pub fn warn(message: &str) {
     eprintln!("\nWARNING: {message}");
+}
+
+/// Ends a step by naming the one after it, so the steps and the runbook can't drift apart.
+pub fn next(step: &str) {
+    println!("\nNext: {step}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    /// hashi is public, so fixtures keep the shapes of real records with none of their account data.
+    #[test]
+    fn fixtures_hold_no_credentials_or_account_data() {
+        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let words: Vec<&str> = text
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == ':'))
+                    .collect();
+                for word in words {
+                    let found = (word.len() >= 20
+                        && word.starts_with("AKIA")
+                        && word[4..20]
+                            .bytes()
+                            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+                        || (word.len() == 12 && word.bytes().all(|b| b.is_ascii_digit()))
+                        || word.starts_with("arn:aws:")
+                        || is_private_ip(word);
+                    assert!(!found, "{} holds {word}", path.display());
+                }
+            }
+        }
+    }
+
+    fn is_private_ip(word: &str) -> bool {
+        let octets: Vec<u8> = word
+            .split('.')
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        octets.len() == 4
+            && word.split('.').count() == 4
+            && match octets[..2] {
+                [10, _] => true,
+                [172, second] => (16..=31).contains(&second),
+                [192, 168] => true,
+                _ => false,
+            }
+    }
 }

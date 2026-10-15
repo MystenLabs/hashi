@@ -19,9 +19,9 @@ use crate::host;
 use crate::say;
 use crate::stack::Role;
 use crate::stack::Slot;
-use crate::stack::SlotView;
 use crate::stack::Stack;
 use crate::stack::pulumi_version;
+use crate::steps::slot;
 use crate::sui;
 use crate::warn;
 
@@ -138,14 +138,6 @@ fn describe_proxy(info: &ProxyInfo) -> String {
             None => "not activated".to_owned(),
         }
     )
-}
-
-/// Loads the stack and the slot a step names.
-fn slot(ctx: &Ctx, arg: Option<Slot>, step: &str) -> Result<(Stack, SlotView)> {
-    let stack = Stack::load(ctx)?;
-    let slot = stack.select(arg, step)?;
-    let view = stack.slot(ctx, slot)?;
-    Ok((stack, view))
 }
 
 /// Prints a slot's guardian through its tunnel, once the proxy is shown to lead to it.

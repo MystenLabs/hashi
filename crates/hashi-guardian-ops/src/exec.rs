@@ -36,6 +36,8 @@ pub struct Cmd {
     program: OsString,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
+    env_remove: Vec<OsString>,
+    stdin_null: bool,
 }
 
 impl Cmd {
@@ -44,7 +46,25 @@ impl Cmd {
             program: program.as_ref().to_owned(),
             args: Vec::new(),
             cwd: None,
+            env_remove: Vec::new(),
+            stdin_null: false,
         }
+    }
+
+    /// Leaves `name` out of the command's environment.
+    pub fn env_remove(mut self, name: impl AsRef<OsStr>) -> Self {
+        self.env_remove.push(name.as_ref().to_owned());
+        self
+    }
+
+    /// Gives the command no stdin, as `< /dev/null` does.
+    pub fn stdin_null(mut self) -> Self {
+        self.stdin_null = true;
+        self
+    }
+
+    pub fn removed_env(&self) -> &[OsString] {
+        &self.env_remove
     }
 
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
@@ -85,6 +105,9 @@ impl Cmd {
         if let Some(dir) = &self.cwd {
             command.current_dir(dir);
         }
+        for name in &self.env_remove {
+            command.env_remove(name);
+        }
         command
     }
 
@@ -119,9 +142,14 @@ pub struct System;
 
 impl Exec for System {
     fn output(&self, cmd: &Cmd) -> io::Result<Output> {
+        let stdin = if cmd.stdin_null {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        };
         let output = cmd
             .command()
-            .stdin(Stdio::inherit())
+            .stdin(stdin)
             .stderr(Stdio::inherit())
             .output()?;
         Ok(Output {
@@ -197,6 +225,8 @@ pub mod fake {
     pub struct Fake {
         handler: Handler,
         pub log: RefCell<Vec<Vec<String>>>,
+        /// The variables each logged command leaves out of its environment.
+        pub removed_env: RefCell<Vec<Vec<String>>>,
     }
 
     impl Fake {
@@ -206,6 +236,7 @@ pub mod fake {
             Self {
                 handler: Box::new(handler),
                 log: RefCell::default(),
+                removed_env: RefCell::default(),
             }
         }
 
@@ -220,6 +251,12 @@ pub mod fake {
         fn output(&self, cmd: &Cmd) -> io::Result<Output> {
             let words = cmd.words();
             self.log.borrow_mut().push(words.clone());
+            self.removed_env.borrow_mut().push(
+                cmd.removed_env()
+                    .iter()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .collect(),
+            );
             let (success, stdout) =
                 (self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}"));
             Ok(Output { success, stdout })

@@ -262,6 +262,16 @@ impl Stack {
         })
     }
 
+    /// One output read on its own, so a secret one can be shown.
+    pub fn output_value(&self, ctx: &Ctx, key: &str, secret: bool) -> Result<String> {
+        let mut cmd = pulumi(&self.dir).args(["stack", "output", key]);
+        if secret {
+            cmd = cmd.arg("--show-secrets");
+        }
+        let value = read(ctx.exec, &cmd.args(["--stack", &self.name]))?;
+        Ok(value.trim_end_matches('\n').to_owned())
+    }
+
     /// The `rotation:*` tags sui-operations' rotation scripts keep on the stack.
     pub fn rotation_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
         let tags: BTreeMap<String, Value> = read_json(
