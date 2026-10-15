@@ -369,10 +369,10 @@ tests:
       - series: 'hashi_kyoto_synced{instance="n1",job="hashi"}'
         values: '1x220'
     alert_rule_test:
-      - eval_time: 140m
+      - eval_time: 160m
         alertname: HashiBtcViewFrozen
         exp_alerts: []
-      - eval_time: 155m
+      - eval_time: 170m
         alertname: HashiBtcViewFrozen
         exp_alerts:
           - exp_labels: {instance: n1, job: hashi, severity: critical}
@@ -429,10 +429,10 @@ tests:
       - series: 'hashi_kyoto_connected_peers{instance="n1",job="hashi"}'
         values: '0x95'
     alert_rule_test:
-      - eval_time: 44m
+      - eval_time: 60m
         alertname: HashiNoBtcPeers
         exp_alerts: []
-      - eval_time: 50m
+      - eval_time: 70m
         alertname: HashiNoBtcPeers
         exp_alerts:
           - exp_labels: {instance: n1, job: hashi, severity: warning}
@@ -451,67 +451,90 @@ tests:
       - eval_time: 34m
         alertname: HashiSuiMirrorStale
         exp_alerts: []
-      - eval_time: 93m
+      - eval_time: 83m
         alertname: HashiSuiMirrorStale
         exp_alerts: []
-      - eval_time: 100m
+      - eval_time: 90m
         alertname: HashiSuiMirrorStale
         exp_alerts:
           - exp_labels: {instance: n1, job: hashi, severity: critical}
             exp_annotations:
               summary: Sui state mirror stale
               description: >-
-                No Sui checkpoint newer than 10 minutes has been applied to the
-                node's bridge-state mirror for 10 minutes. The watcher, mirror, or
-                fullnode RPC is wedged; the node is acting on stale state even if
-                other metrics look healthy.
+                No Sui checkpoint newer than 5 minutes has been applied to the
+                node's bridge-state mirror for 5 minutes. The watcher, mirror, or
+                fullnode RPC is wedged or falling behind; the node is acting on
+                stale state even if other metrics look healthy.
 
   - name: low-gas-ignores-the-unread-balance
     interval: 1m
     input_series:
       - series: 'hashi_sui_balance{address="0xa",instance="n1",job="hashi"}'
-        values: '-1x10 500000000x20'
+        values: '-1x10 2000000000x60'
     alert_rule_test:
-      - eval_time: 5m
+      - eval_time: 9m
         alertname: HashiLowGas
         exp_alerts: []
-      - eval_time: 15m
+      - eval_time: 35m
+        alertname: HashiLowGas
+        exp_alerts: []
+      - eval_time: 45m
         alertname: HashiLowGas
         exp_alerts:
           - exp_labels: {address: 0xa, instance: n1, job: hashi, severity: warning}
             exp_annotations:
-              summary: operator wallet below 1 SUI
+              summary: operator wallet below 5 SUI
               description: Refill the operator gas wallet.
 
-  - name: task-wedged-for-half-an-hour
+  # mpc_service stops heartbeating at 10m with no reconfiguration running.
+  - name: task-wedged-for-twenty-minutes
     interval: 1m
     input_series:
       - series: 'hashi_task_last_iteration_timestamp_seconds{task="mpc_service",instance="n1",job="hashi"}'
         values: '0+60x10 600x60'
+      - series: 'hashi_reconfig_in_progress{instance="n1",job="hashi"}'
+        values: '0x70'
     alert_rule_test:
-      - eval_time: 45m
+      - eval_time: 28m
         alertname: HashiTaskWedged
         exp_alerts: []
-      - eval_time: 55m
+      - eval_time: 35m
         alertname: HashiTaskWedged
         exp_alerts:
           - exp_labels: {task: mpc_service, instance: n1, job: hashi, severity: critical}
             exp_annotations:
               summary: task loop mpc_service wedged
               description: >-
-                The mpc_service loop has not recorded a heartbeat in 30
+                The mpc_service loop has not recorded a heartbeat in 20
                 minutes. It has deadlocked or is stuck; check its logs.
 
-  # A 20-minute key rotation records no heartbeat.
-  - name: task-quiet-through-a-long-rotation
+  # A 25-minute reconfiguration: mpc_service records no heartbeat, but the
+  # state watcher must keep its own.
+  - name: task-wedged-respects-a-running-reconfiguration
     interval: 1m
     input_series:
       - series: 'hashi_task_last_iteration_timestamp_seconds{task="mpc_service",instance="n1",job="hashi"}'
-        values: '0+60x10 600x20 1920+60x30'
+        values: '0+60x10 600x25 2160+60x30'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{task="state_watcher",instance="n1",job="hashi"}'
+        values: '0+60x10 600x60'
+      - series: 'hashi_reconfig_in_progress{instance="n1",job="hashi"}'
+        values: '0x9 1x26 0x40'
     alert_rule_test:
-      - eval_time: 31m
+      - eval_time: 36m
         alertname: HashiTaskWedged
-        exp_alerts: []
-      - eval_time: 45m
+        exp_alerts:
+          - exp_labels: {task: state_watcher, instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: task loop state_watcher wedged
+              description: >-
+                The state_watcher loop has not recorded a heartbeat in 20
+                minutes. It has deadlocked or is stuck; check its logs.
+      - eval_time: 50m
         alertname: HashiTaskWedged
-        exp_alerts: []
+        exp_alerts:
+          - exp_labels: {task: state_watcher, instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: task loop state_watcher wedged
+              description: >-
+                The state_watcher loop has not recorded a heartbeat in 20
+                minutes. It has deadlocked or is stuck; check its logs.
