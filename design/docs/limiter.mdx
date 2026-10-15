@@ -64,7 +64,7 @@ withdrawal.
 To process withdrawal requests, Hashi selects them from the queue and performs
 a number of checks. If all checks are satisfied and there is capacity, Hashi
 works with the Guardian to sign and broadcast a Bitcoin transaction to satisfy
-the requests. The limit is checked at three points:
+the requests. The limit is checked at 3 points:
 
 1. Before committing a batch, the leader checks it against its own copy of the
    Guardian's limiter, which every node seeds from the Guardian and keeps in

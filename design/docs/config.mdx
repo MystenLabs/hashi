@@ -60,25 +60,33 @@ keys are introduced with `AddConfig`, which names the store and is insert-only
 (see [Adding a parameter](#adding-a-parameter-without-a-package-upgrade) and
 [Governance Actions](governance-actions.mdx)).
 
-## Which configuration keys exist?
+## Configuration keys at a glance
 
-Every key documented on this page, grouped as in the sections below:
+Every key documented below, with its type and default where one exists:
 
-- **Parameters**: `bitcoin_deposit_minimum`, `bitcoin_deposit_time_delay_ms`,
-  `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `paused`,
-  `reconfig_hold`, `withdrawal_cancellation_cooldown_ms`,
-  `governance_emergency_pause_threshold_bps`,
-  `governance_emergency_unpause_threshold_bps`.
-- **MPC parameters** (epoch config, tuned with `UpdateEpochConfig`):
-  `mpc_max_faulty_in_basis_points`, `mpc_weight_reduction_allowed_delta`,
-  `mpc_nonce_accumulation_window_ms`.
-- **Governable guardian endpoints**: `guardian_url`, `guardian_node_url` (see
-  `guardian_btc_public_key` below).
-- **Read-only or genesis-only**: `bitcoin_chain_id`, `guardian_btc_public_key`.
-- **Retired** (refused by the epoch config): `mpc_threshold_in_basis_points`,
-  `mpc_nonce_generation_protocol`.
-- **Derived** (computed, not stored as keys): `deposit_minimum`,
-  `worst_case_network_fee`.
+| Key | Type | Default | Section |
+| --- | --- | --- | --- |
+| `bitcoin_deposit_minimum` | `u64` | `30000` | [Parameters](#parameters) |
+| `bitcoin_deposit_time_delay_ms` | `u64` | `600000` | [Parameters](#parameters) |
+| `bitcoin_withdrawal_minimum` | `u64` | `30000` | [Parameters](#parameters) |
+| `bitcoin_confirmation_threshold` | `u64` | `6` | [Parameters](#parameters) |
+| `paused` | `bool` | `false` | [Parameters](#parameters) |
+| `reconfig_hold` | `bool` | `false` | [Parameters](#parameters) |
+| `withdrawal_cancellation_cooldown_ms` | `u64` | `3600000` | [Parameters](#parameters) |
+| `governance_emergency_pause_threshold_bps` | `u64` | `500` | [Parameters](#parameters) |
+| `governance_emergency_unpause_threshold_bps` | `u64` | `6667` | [Parameters](#parameters) |
+| `mpc_max_faulty_in_basis_points` | `u64` | `3333` | [MPC parameters](#mpc-parameters) |
+| `mpc_weight_reduction_allowed_delta` | `u64` | `800` | [MPC parameters](#mpc-parameters) |
+| `mpc_nonce_accumulation_window_ms` | `u64` | `2000` | [MPC parameters](#mpc-parameters) |
+| `guardian_url` | `string` | Set at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `guardian_node_url` | `string` | Set at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `bitcoin_chain_id` | `address` | Pinned at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `guardian_btc_public_key` | `bytes` | Pinned at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+
+The epoch config refuses the retired keys `mpc_threshold_in_basis_points` and
+`mpc_nonce_generation_protocol`. `deposit_minimum` and `worst_case_network_fee`
+are [derived values](#derived-values), computed from the keys above rather than
+stored.
 
 ## Parameters
 

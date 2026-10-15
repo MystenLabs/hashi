@@ -52,7 +52,7 @@ graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
 
-### How does a reconfiguration proceed?
+## How does a reconfiguration proceed?
 
 On the happy path, a reconfiguration runs these steps in order:
 
@@ -81,7 +81,7 @@ On the happy path, a reconfiguration runs these steps in order:
 If Sui's epoch moves on before step 6 lands, the pending reconfiguration is
 resolved by [abort reconfig](#abort-reconfig) instead.
 
-### Start Reconfig
+## Start Reconfig
 
 Each Hashi node monitors Sui for epoch changes. When a new Sui epoch is
 detected and the Hashi epoch has not yet advanced to match, the node knows
@@ -120,7 +120,7 @@ floor on a normal reconfig would let validators brick reconfiguration by
 withholding registration.
 
 
-### DKG or Key Rotation
+## DKG or Key Rotation
 
 The MPC key protocol runs among the new committee members. Which protocol
 runs depends on whether this is the first Hashi epoch or a subsequent one:
@@ -149,7 +149,7 @@ collect its signatures over a `CommitteeTransitionRequest` with the
 does not activate a rotation without it. Initial DKG has no outgoing committee
 and skips this step.
 
-### End Reconfig
+## End Reconfig
 
 A committee member submits the aggregate signature certificate onchain by
 calling `hashi::reconfig::end_reconfig`:
@@ -205,7 +205,7 @@ presignatures needed for the threshold Schnorr signing protocol (see
 commitment, resume as soon as `end_reconfig` lands; signing withdrawal inputs
 waits until the new committee's presignatures are ready.
 
-### Abort Reconfig
+## Abort Reconfig
 
 ```mermaid
 graph LR
@@ -295,13 +295,13 @@ stalled for an entire Sui epoch with deposits and withdrawals halted, so it is
 worth alerting on and investigating even though the system recovers on its
 own.
 
-### Which CLI commands can operators run?
+## Which CLI commands can operators run?
 
 Nodes normally submit these transactions themselves; `abort-reconfig` and
 `start-reconfig` are fallbacks for when no node is doing so.
 
 | Command | What it does | Refuses when |
 | --- | --- | --- |
-| `hashi launch` | Sends `hashi::finish_publish` at genesis, finalizing the deploy configuration and handing the package `UpgradeCap` into onchain custody, which opens the launch switch | — |
+| `hashi launch` | Sends `hashi::finish_publish` at genesis, finalizing the deploy configuration and handing the package `UpgradeCap` into onchain custody, which opens the launch switch | None |
 | `hashi committee abort-reconfig` | Submits the abort for the pending reconfiguration | Nothing is pending, or the pending epoch is still Sui's current epoch |
 | `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | Governance holds reconfiguration (`reconfig_hold` is set), a reconfiguration is already pending, a committee already exists for Sui's current epoch, Hashi is already on Sui's current epoch, or the fullnode's Sui epoch is behind Hashi's |

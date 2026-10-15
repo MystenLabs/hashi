@@ -48,7 +48,7 @@ graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
 ```
 
-## Who does what in a withdrawal?
+## Roles in a withdrawal
 
 1. **User**: calls `hashi::withdraw::request_withdrawal` with the `hBTC` and a
    Bitcoin destination address. Until the request is committed to a
@@ -59,16 +59,17 @@ graph LR
    commits it with `hashi::withdraw::commit_withdrawal_tx`.
 3. **Committee and Guardian**: the committee produces MPC signatures
    (`hashi::withdraw::commit_input_signatures`), the Guardian enclave produces
-   the second signature, and the committee attaches it with
+   the second signature, and the leader attaches it with
    `hashi::withdraw::finalize_withdrawal`.
-4. **Committee**: broadcasts the signed transaction and, after the required
-   confirmations, calls `hashi::withdraw::confirm_withdrawal`.
+4. **Leader and committee**: the leader broadcasts the signed transaction and,
+   after the required confirmations, a committee member calls
+   `hashi::withdraw::confirm_withdrawal`.
 
 Beyond the request, the user's only optional actions are cancelling and, if
 the transaction gets stuck, fee bumping through CPFP (see
 [Broadcast](#broadcast)).
 
-## How long does a withdrawal take?
+## Withdrawal timing
 
 The time from request to settlement depends mainly on these stages:
 

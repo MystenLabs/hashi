@@ -50,7 +50,7 @@ The withdrawal v2 work exposed a concrete example. A request committed by v2
 could remain in a location that v1 treated as cancellable. While v1 remained
 enabled, its cancellation path could destroy that committed request, stranding
 burned hBTC and locked UTXOs. This is why package publication and version
-retirement sometimes need to be one atomic governance action. The testnet v1 to
+retirement sometimes need to be one atomic governance action. The Testnet v1 to
 v2 plan below walks through the replay path that produces this state and how
 the emergency pause closes it.
 
@@ -80,7 +80,7 @@ cross-version tests for state both versions can mutate. A desire to let old
 validator binaries keep working is not, by itself, enough: binary rollout is an
 operational concern and must not weaken an onchain safety invariant.
 
-Each upgrade proposal goes through four stages: creation, voting to quorum,
+Each upgrade proposal goes through 4 stages: creation, voting to quorum,
 execution, and finalization. The `upgrade::Upgrade` proposal records this
 decision in its `exclusive`
 field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
@@ -122,7 +122,7 @@ Use this sequence for every upgrade:
 This ordering means the network retains quorum-capable updated software before
 an exclusive publication causes old binaries to stop writing.
 
-## What is the testnet v1 to v2 upgrade plan?
+## What is the Testnet v1 to v2 upgrade plan?
 
 The deployed testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first

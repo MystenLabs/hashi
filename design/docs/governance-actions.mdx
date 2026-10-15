@@ -58,25 +58,25 @@ steps:
    when the proposal executes, so votes from members who left at a
    [reconfiguration](reconfiguration.mdx) no longer count. Executed proposals
    stay onchain.
-4. A proposal expires seven days after it is created; it can then no longer be
+4. A proposal expires 7 days after it is created; it can then no longer be
    voted on or executed, and anyone can delete it.
 
 ## What proposal types are available?
 
 The following is the current set of available proposal types.
 
-| Proposal | Effect | Abort codes cited on this page |
+| Proposal | Effect | Abort codes |
 | --- | --- | --- |
-| `Upgrade` | Authorizes a package upgrade and records whether it is exclusive | — |
-| `EnableVersion` | Re-enables a previously disabled package version | — |
+| `Upgrade` | Authorizes a package upgrade and records whether it is exclusive | None |
+| `EnableVersion` | Re-enables a previously disabled package version | None |
 | `DisableVersion` | Disables a package version | `EDisableCurrentVersion` |
 | `UpdateConfig` | Updates existing keys in the instant config | `EInvalidConfigEntry`, `EProtectedConfigKey` |
 | `UpdateEpochConfig` | Updates existing keys in the epoch config, including the MPC parameters | `EInvalidConfigEntry`, `EInconsistentMpcConfig` |
-| `AddConfig` | Introduces new keys into the instant or epoch config | — |
-| `IgnoreMember` | Flags a registered member as ignored, or clears the flag | — |
-| `EmergencyPause` | Pauses or unpauses the bridge | — |
+| `AddConfig` | Introduces new keys into the instant or epoch config | None |
+| `IgnoreMember` | Flags a registered member as ignored, or clears the flag | None |
+| `EmergencyPause` | Pauses or unpauses the bridge | None |
 
-Configuration proposals target one of two stores: the instant config, where
+Configuration proposals target one of 2 stores: the instant config, where
 new values apply when the proposal executes, and the epoch config, where new
 values are copied onto the next committee formed after execution while the
 active committee keeps its pinned copy.

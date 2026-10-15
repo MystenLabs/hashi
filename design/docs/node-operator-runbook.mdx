@@ -73,7 +73,7 @@ These details trip up most operators:
 
 ## Common questions
 
-### Is the Hashi node connected to my Sui validator?
+### Does the Hashi node connect to your Sui validator?
 
 The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your validator, and the Hashi node should run on a separate host from your Sui validator ([1.1](#11-resources)). The link to your validator is onchain: `validator-address` in the validator config is your Sui validator address, and your validator account key signs the initial registration ([2.3](#23-registration-must-be-signed-by-the-account-key)).
 
@@ -81,7 +81,7 @@ The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your
 
 Only active Sui validators. Onchain registration asserts that the sender is in the Sui active validator set, so the registration must come from your Sui validator account key ([2.3](#23-registration-must-be-signed-by-the-account-key), [11.3](#113-registration-and-offline-signing)). [Committee](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators) explains why the committee is not exactly the set of Sui validators.
 
-### Do I need to generate a backup key?
+### Do you need to generate a backup key?
 
 Yes. The backup key is required: `backup-pgp-cert` and `backup-dir` are both required in the validator config. Generate an OpenPGP key on a YubiKey or locally with `sq` or `gpg`, and give the node only the public certificate. See [2.5](#25-backup-key-openpgp) and [Hashi Node Backups](node-backup.mdx).
 
@@ -1283,7 +1283,7 @@ Keep a resigned node running until the next committee forms. Members ignored by 
 
 ### 7.2 Proposal types
 
-Config parameters live in two stores: **instant config**, where a change applies as soon as the proposal executes, and **epoch config**, where a change lands in the next committee.
+Config parameters live in 2 stores: **instant config**, where a change applies as soon as the proposal executes, and **epoch config**, where a change lands in the next committee.
 
 | Type | Threshold | Purpose | Parameters |
 |------|-----------|---------|-----------|
@@ -1539,7 +1539,7 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ### 10.1 What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configure-hashi-backups). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Each archive holds:
 
@@ -1554,7 +1554,7 @@ The optional `[backup-s3]` table in the [config template](#31-validator-config)
 enables uploads using the AWS default credential chain. Without it, backups
 remain local-only. Each scheduled backup saves locally before one upload
 attempt; failed uploads retain the local archive and are not queued or retried.
-See [Cloud backup](node-backup.mdx#cloud-backup) for the server-side
+See [Back up to S3](node-backup.mdx#back-up-to-s3) for the server-side
 missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
 read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
 read access is unchanged; per-node AWS credentials remain to be provisioned.

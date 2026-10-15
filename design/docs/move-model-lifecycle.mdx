@@ -64,7 +64,7 @@ pending.
 | Cleanup entries: `cleanup_spent_utxos`, `archive_confirmed_withdrawals`, `archive_withdrawal_requests`, `finish_archive_withdrawal_txns`, `destroy_key_gen_certs`, `destroy_nonce_certs`, `delete_expired_deposit`, `proposal::delete_expired` | No | No |
 | Validator registration or key rotation | No | No |
 
-The last four rows never check pause, because an
+The last 4 rows never check pause, because an
 emergency pause must not block operators from maintaining nodes or the chain
 from shedding dead state. Nodes themselves stop all leader work while paused,
 garbage collection included, so during a pause that state is shed only by a
@@ -147,12 +147,12 @@ flowchart TD
 | 1    | User              | User sends BTC to bridge address                 | Bitcoin UTXO created                                                                  |
 | 2    | User              | User calls `deposit()`                           | `DepositRequest` → `DepositRequestQueue`                                              |
 | 3    | Committee members | Committee members wait for Bitcoin confirmations | `bitcoin_confirmation_threshold` blocks on the deposit transaction                    |
-| 4    | Committee members | Committee members screen and sign request        | Members with a TRM API key screen it (mainnet only); BLS signatures aggregated → `CommitteeSignature` |
+| 4    | Committee members | Committee members screen and sign request        | Members with a TRM API key screen it (Mainnet only); BLS signatures aggregated → `CommitteeSignature` |
 | 5    | Leader            | Leader calls `approve_deposit()` with cert       | `verify_certificate()` → request stores `approval_cert` and `approved_timestamp_ms`   |
-| 6    | —                 | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before anything is minted) |
+| 6    | None              | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before anything is minted) |
 | 7    | Anyone            | Anyone calls `confirm_deposit()`                 | Re-`verify_certificate()` → `CertifiedMessage<DepositConfirmationMessage>`            |
 | 8    | Treasury          | Treasury mints tokens                            | If the UTXO has a derivation path, `Utxo.amount` → `Balance<BTC>` sent to that address |
-| 9    | —                 | Certified request processed                      | `Utxo` → `UtxoPool`; `DepositRequest` → `DepositRequestQueue.processed` with `confirmed_timestamp_ms` set |
+| 9    | None              | Certified request processed                      | `Utxo` → `UtxoPool`; `DepositRequest` → `DepositRequestQueue.processed` with `confirmed_timestamp_ms` set |
 
 ---
 
@@ -290,11 +290,11 @@ drifted and adopting a new limiter policy after a guardian rotation.
 | Step | Actor           | Action                                       | Model Transformation                                                         |
 | ---- | --------------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
 | 1    | User            | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`     |
-| 2    | Committee       | Committee screens and approves request       | Members with a TRM API key screen it (mainnet only); `approve_request()` records `approval_cert` on the request |
+| 2    | Committee       | Committee screens and approves request       | Members with a TRM API key screen it (Mainnet only); `approve_request()` records `approval_cert` on the request |
 | 3    | Leader          | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns` |
-| 4    | Committee (MPC) | MPC protocol signs Bitcoin transaction       | Committee signs each input via MPC; `commit_input_signatures()` stores the signatures onchain in chunks |
+| 4    | Committee (MPC) | MPC protocol signs Bitcoin transaction       | Committee signs each input through MPC; `commit_input_signatures()` stores the signatures onchain in chunks |
 | 5    | Leader          | Leader checks its `LocalLimiter`             | `LocalLimiter::validate_consume(seq, ts, amt)` (read-only) before calling the guardian |
-| 6    | Leader          | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC     |
+| 6    | Leader          | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)`, the input to the guardian RPC |
 | 7    | Guardian        | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(seq, ts, amt)` → enclave signatures |
 | 8    | Leader          | Leader finalizes with guardian signatures    | Members re-run `validate_consume` and certify both signature sets; `finalize_withdrawal()` attaches the guardian signatures |
 | 9    | Each node       | Each node advances its `LocalLimiter`        | Object mirror sees the tx become fully signed → `apply_consume(seq, ts, amt)` |
@@ -304,7 +304,7 @@ drifted and adopting a new limiter policy after a guardian rotation.
 
 ---
 
-## Key models reference
+## What are the key Move models?
 
 | Model                    | Location                                 | Description                                                            |
 | ------------------------ | ---------------------------------------- | ---------------------------------------------------------------------- |

@@ -86,7 +86,7 @@ the `delay` to have elapsed and a signature from `h` alone.
 ## How is the 60-day delay encoded?
 
 Use the BIP-68 sequence value `0x0040278D` (`4_204_429`) for `delay`. It is
-built in three steps:
+built in 3 steps:
 
 1. Express 60 days in seconds: `60 * 24 * 60 * 60` = `5_184_000`.
 2. Convert to 512-second units, rounding up:
