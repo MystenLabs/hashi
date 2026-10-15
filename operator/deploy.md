@@ -39,7 +39,7 @@ You need:
   a step reports an expired token.
 - The GitHub CLI at version 2.87 or later, which reports the run a dispatch
   starts, able to dispatch workflows in hashi and sui-operations.
-- `cargo`, `jq` and `curl`.
+- `cargo`, `jq`, `curl` and `grpcurl`.
 - The package ID and Hashi object ID of the published Hashi package, from the
   publisher.
 
@@ -184,7 +184,7 @@ never reach a guardian through a tunnel left open to another stack.
 ```
 
 `render` reads the stack and writes three things under
-`.hashi/guardian/<stack>/`: `guardian-init.yaml` for the KPs, `operator.yaml`
+`.hashi/guardian/<stack>/a/`: `guardian-init.yaml` for the KPs, `operator.yaml`
 for you, and `certs/`. `operator.yaml` holds the guardian's S3 key; never share
 it. `publish` uploads the KPs' copy and prints a guardian commit and a
 configuration digest.
@@ -312,7 +312,7 @@ first waits until the earlier session has been silent for ten minutes.
 
 - Revoke the KPs' access key:
   `./operator/scripts/revoke-kp-upload-key.sh <name>`.
-- Delete `.hashi/guardian/<stack>/operator.yaml`, which holds the guardian's
+- Delete `.hashi/guardian/<stack>/a/operator.yaml`, which holds the guardian's
   S3 key. `render` writes it again when a step needs it.
 - Merge the sui-operations pull request, so the next deploy from `main` does
   not roll the guardian back.
