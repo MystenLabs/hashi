@@ -13,7 +13,6 @@ use fastcrypto_tbls::types::ShareIndex;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::io::Read;
 use sui_sdk_types::Address;
 
@@ -144,12 +143,7 @@ impl MpcRecoveryRecord {
             !record.key_shares.shares.is_empty(),
             "Recovery record contains no private shares"
         );
-        let mut indices = BTreeSet::new();
         for share in &record.key_shares.shares {
-            ensure!(
-                indices.insert(share.index),
-                "Recovery record contains duplicate private share indices"
-            );
             let commitment = record
                 .commitments
                 .get(&share.index)
@@ -167,9 +161,9 @@ impl MpcRecoveryRecord {
 ///
 /// `expected_public_key` must be trusted independently of the supplied records.
 /// Matching commitment maps establish consistency, not authenticity. Every record
-/// is validated, including surplus shares; interpolation uses the lowest `threshold`
-/// indices without searching alternative subsets. The returned scalar is secret
-/// material and must not be logged.
+/// is validated, including surplus shares; validated duplicate indices count only
+/// once. Interpolation uses the lowest `threshold` distinct indices without searching
+/// alternative subsets. The returned scalar is secret material and must not be logged.
 pub fn reconstruct_root_scalar(
     records: &[MpcRecoveryRecord],
     expected_public_key: &G,
@@ -213,15 +207,7 @@ pub fn reconstruct_root_scalar(
         shares.extend(record.key_shares.shares.iter());
     }
     shares.sort_unstable_by_key(|share| share.index);
-    if let Some(pair) = shares
-        .windows(2)
-        .find(|pair| pair[0].index == pair[1].index)
-    {
-        anyhow::bail!(
-            "MPC recovery records contain duplicate share index {}",
-            pair[0].index.get()
-        );
-    }
+    shares.dedup_by_key(|share| share.index);
     let threshold = usize::from(first.threshold);
     ensure!(
         shares.len() >= threshold,
@@ -293,9 +279,6 @@ mod tests {
             ("zero threshold", |r| r.threshold = 0),
             ("threshold exceeds commitments", |r| r.threshold = 4),
             ("no local shares", |r| r.key_shares.shares.clear()),
-            ("duplicate share", |r| {
-                r.key_shares.shares.push(r.key_shares.shares[0].clone());
-            }),
             ("missing commitment", |r| {
                 r.commitments.remove(&ShareIndex::new(1).unwrap());
             }),
@@ -341,13 +324,54 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_and_duplicate_root_shares() {
+    fn rejects_missing_or_insufficient_distinct_root_shares() {
         let expected = G::generator() * S::from(7u128);
-        let mut records = recovery_records();
+        let mut records = vec![test_record(); 3];
         assert!(reconstruct_root_scalar(&[], &expected).is_err());
         assert!(reconstruct_root_scalar(&records[..1], &expected).is_err());
-        // A duplicate surplus index must not be ignored after finding a quorum.
-        records.push(records[2].clone());
+        assert!(reconstruct_root_scalar(&records, &expected).is_err());
+        let MpcRecoveryRecord::V1(inner) = &mut records[0];
+        inner
+            .key_shares
+            .shares
+            .push(inner.key_shares.shares[0].clone());
+        records[0].validate().unwrap();
+        assert!(reconstruct_root_scalar(&records[..1], &expected).is_err());
+    }
+
+    #[test]
+    fn reconstructs_root_with_duplicate_records_and_local_indices() {
+        let secret = S::from(7u128);
+        let expected = G::generator() * secret;
+        let mut records = recovery_records();
+        records.push(records[0].clone());
+        assert!(reconstruct_root_scalar(&records, &expected).unwrap() == secret);
+
+        let MpcRecoveryRecord::V1(other) = records.remove(1);
+        let MpcRecoveryRecord::V1(inner) = &mut records[0];
+        inner
+            .key_shares
+            .shares
+            .push(inner.key_shares.shares[0].clone());
+        inner.key_shares.shares.extend(other.key_shares.shares);
+        records[0].validate().unwrap();
+        assert!(reconstruct_root_scalar(&records[..1], &expected).unwrap() == secret);
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_after_valid_quorum() {
+        let expected = G::generator() * S::from(7u128);
+        let mut records = recovery_records();
+        let mut duplicate = records[0].clone();
+        let MpcRecoveryRecord::V1(inner) = &mut duplicate;
+        inner.key_shares.shares[0].value += S::from(1u128);
+        records.push(duplicate);
+        assert!(reconstruct_root_scalar(&records, &expected).is_err());
+
+        let MpcRecoveryRecord::V1(duplicate) = records.pop().unwrap();
+        let MpcRecoveryRecord::V1(inner) = &mut records[0];
+        inner.key_shares.shares.extend(duplicate.key_shares.shares);
+        assert!(records[0].validate().is_err());
         assert!(reconstruct_root_scalar(&records, &expected).is_err());
     }
 

@@ -405,9 +405,9 @@ impl MpcService {
                     Err(error) => {
                         warn!(
                             epoch = target_epoch,
-                            "Skipping epoch backup after MPC recovery capture failed: {error:#}"
+                            "MPC recovery capture failed; saving an ordinary epoch backup instead: {error:#}"
                         );
-                        return;
+                        crate::backup::BackupAction::SaveNodeState
                     }
                 }
             }
@@ -450,7 +450,11 @@ impl MpcService {
             Err(error) => {
                 warn!(
                     epoch,
-                    "Skipping recovered epoch backup after MPC recovery capture failed: {error:#}"
+                    "MPC recovery capture failed; saving an ordinary backup for the recovered epoch instead: {error:#}"
+                );
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveNodeState,
                 );
             }
         }

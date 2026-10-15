@@ -316,6 +316,26 @@ fn recovers_weighted_quorum_from_encrypted_plain_raw_and_mixed_inputs() {
         &fixture.local_backend(),
     );
     fixture.succeeds(&fixture.raw, &[]);
+    fixture.succeeds(
+        &[
+            fixture.encrypted[0].clone(),
+            fixture.encrypted[1].clone(),
+            fixture.encrypted[0].clone(),
+        ],
+        &fixture.local_backend(),
+    );
+
+    let mut record = fixture.records[0].clone();
+    let MpcRecoveryRecord::V1(inner) = &mut record;
+    inner
+        .key_shares
+        .shares
+        .push(inner.key_shares.shares[0].clone());
+    let path = fixture.dir.path().join("repeated-local-index.bcs");
+    fs::write(&path, bcs::to_bytes(&record).unwrap()).unwrap();
+    fixture.succeeds(&[path.clone(), fixture.raw[1].clone()], &[]);
+    // Repeating local indices does not add weight toward the threshold.
+    fixture.rejects(&[path], &fixture.public, &[]);
 }
 
 #[test]
@@ -323,11 +343,7 @@ fn rejects_invalid_quorums_and_validates_every_surplus_record() {
     let fixture = Fixture::new();
     fixture.rejects(&fixture.raw[..1], &fixture.public, &[]);
     fixture.rejects(
-        &[
-            fixture.encrypted[0].clone(),
-            fixture.encrypted[1].clone(),
-            fixture.encrypted[0].clone(),
-        ],
+        &[fixture.encrypted[0].clone(), fixture.encrypted[0].clone()],
         &fixture.public,
         &fixture.local_backend(),
     );
@@ -345,8 +361,13 @@ fn rejects_invalid_quorums_and_validates_every_surplus_record() {
         "commitment",
         "key",
         "share",
+        "duplicate share",
     ] {
-        let mut record = fixture.records[3].clone();
+        let mut record = if mutation == "duplicate share" {
+            fixture.records[0].clone()
+        } else {
+            fixture.records[3].clone()
+        };
         let MpcRecoveryRecord::V1(inner) = &mut record;
         match mutation {
             "epoch" => inner.epoch += 1,
@@ -363,7 +384,7 @@ fn rejects_invalid_quorums_and_validates_every_surplus_record() {
                 *commitment += G::generator();
             }
             "key" => inner.public_key += G::generator(),
-            "share" => inner.key_shares.shares[0].value += S::from(1u128),
+            "share" | "duplicate share" => inner.key_shares.shares[0].value += S::from(1u128),
             _ => unreachable!(),
         }
         let path = fixture.dir.path().join(format!("invalid-{mutation}.bcs"));
