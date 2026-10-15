@@ -379,6 +379,9 @@ The destination is derived from the node identity, with no custom prefix:
 s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
 ```
 
+If the `-mpc-` marker is present after the epoch number, it identifies backups
+containing MPC key-recovery information.
+
 Scheduled backups upload the completed encrypted local archive once, without
 retries or a queue. Failures preserve local backups and retention, and log the
 local path and S3 URI.

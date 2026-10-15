@@ -176,6 +176,18 @@ mod tests {
         let startup_archives = scheduled_archives(node.config())?;
         assert_eq!(startup_archives.len(), 1);
         let startup_archive = startup_archives.into_iter().next().unwrap();
+        let startup_ciphertext = std::fs::read(&startup_archive)?;
+
+        // A fresh worker must reuse the completed same-epoch recovery archive,
+        // rather than relying on the previous process's in-memory guard.
+        node.shutdown().await;
+        node.start().await?;
+        node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        assert_eq!(
+            scheduled_successes(node, "hashi_backup_scheduled_local_successes_total"),
+            0.0,
+            "Reusing an archive must not count as a new local backup",
+        );
 
         // Recover a late missing manager through the production sync path.
         // This must not schedule another archive for the already captured epoch.
@@ -195,17 +207,41 @@ mod tests {
         networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(networks.hashi_network().nodes(), initial_epoch + 1).await;
         let node = &networks.hashi_network().nodes()[0];
-        wait_for_local_backup(node, 2.0).await?;
+        // Waiting for the next epoch's archive also lets the serialized worker
+        // finish the startup reuse before checking files and fresh-process counts.
+        let rotation_archive = tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            let prefix = format!("hashi-backup-epoch-{}-mpc-", initial_epoch + 1);
+            loop {
+                poll.tick().await;
+                if let Some(archive) = scheduled_archives(node.config())?.into_iter().find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&prefix)
+                }) {
+                    return Ok::<_, anyhow::Error>(archive);
+                }
+            }
+        })
+        .await
+        .context("Rotation recovery archive did not appear")??;
+        wait_for_local_backup(node, 1.0).await?;
         let archives = scheduled_archives(node.config())?;
         assert_eq!(
             archives.len(),
             2,
-            "Late restoration must not duplicate an epoch"
+            "Restart and late restoration must not duplicate an epoch"
         );
-        let rotation_archive = archives
-            .into_iter()
-            .find(|path| path != &startup_archive)
-            .expect("Rotation must produce a new recovery archive");
+        assert!(
+            archives.contains(&startup_archive),
+            "Restart must preserve the original recovery archive path",
+        );
+        assert_eq!(
+            std::fs::read(&startup_archive)?,
+            startup_ciphertext,
+            "Restart must reuse the original encrypted bytes",
+        );
 
         // Inspect the actual encrypted archives through the normal restore command,
         // not an in-memory record or a synthetic MPC fixture.
@@ -219,7 +255,7 @@ mod tests {
                     .unwrap()
                     .to_str()
                     .unwrap()
-                    .starts_with(&format!("hashi-backup-epoch-{expected_epoch}-"))
+                    .starts_with(&format!("hashi-backup-epoch-{expected_epoch}-mpc-"))
             );
             let restored = tempfile::tempdir()?;
             commands::backup::restore(
@@ -308,7 +344,7 @@ mod tests {
                 let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
                 loop {
                     poll.tick().await;
-                    let prefix = format!("hashi-backup-epoch-{historical_epoch}-");
+                    let prefix = format!("hashi-backup-epoch-{historical_epoch}-mpc-");
                     if let Some(archive) =
                         scheduled_archives(node.config())?.into_iter().find(|path| {
                             path.file_name()

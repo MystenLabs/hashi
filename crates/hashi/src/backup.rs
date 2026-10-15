@@ -156,6 +156,7 @@ impl BackupService {
 
     async fn process_epoch_change(&mut self, epoch: u64, action: BackupAction) -> Result<()> {
         let hashi = self.inner.clone();
+        let with_recovery = matches!(&action, BackupAction::SaveWithRecovery(_));
         let archive = tokio::task::spawn_blocking(move || {
             hashi.maintain_backups_after_epoch_change(epoch, &action)
         })
@@ -168,6 +169,13 @@ impl BackupService {
                     info!(epoch, %uri, "Scheduled remote backup completed");
                 }
                 Ok(None) => {}
+                Err(error) if with_recovery && is_precondition_failed(&error) => {
+                    info!(
+                        epoch,
+                        path = %archive.display(),
+                        "Scheduled remote backup already exists; remote contents not verified"
+                    );
+                }
                 Err(error) => {
                     self.inner.metrics.backup_scheduled_remote_failures.inc();
                     return Err(error);
@@ -176,6 +184,15 @@ impl BackupService {
         }
         Ok(())
     }
+}
+
+fn is_precondition_failed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<
+            aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+        >()
+        .and_then(|error| error.raw_response())
+        .is_some_and(|response| response.status().as_u16() == 412)
 }
 
 /// Upload a published local archive if S3 is configured. Initialization failures
@@ -468,10 +485,11 @@ pub fn save(
         "Backing up files + database",
     );
 
-    let epoch = recovery
-        .map(|MpcRecoveryRecord::V1(record)| record.epoch)
-        .or(epoch);
-    let output_path = output_dir.join(encrypted_backup_file_name(epoch));
+    let kind = match recovery {
+        Some(MpcRecoveryRecord::V1(record)) => BackupKind::Mpc(record.epoch),
+        None => epoch.map_or(BackupKind::Manual, BackupKind::Node),
+    };
+    let output_path = output_dir.join(encrypted_backup_file_name(kind));
     encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path, recovery)?;
 
     Ok(output_path)
@@ -525,17 +543,88 @@ fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<V
     Ok(paths)
 }
 
-pub fn encrypted_backup_file_name(epoch: Option<u64>) -> PathBuf {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackupKind {
+    Manual,
+    Node(u64),
+    Mpc(u64),
+}
+
+fn encrypted_backup_file_name(kind: BackupKind) -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
     // common filesystem.
     let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
     let timestamp = now.strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT);
-    match epoch {
-        Some(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}{timestamp}"),
-        None => format!("{BACKUP_FILE_NAME_PREFIX}{timestamp}"),
+    match kind {
+        BackupKind::Manual => format!("{BACKUP_FILE_NAME_PREFIX}{timestamp}"),
+        BackupKind::Node(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}{timestamp}"),
+        BackupKind::Mpc(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}-mpc{timestamp}"),
     }
     .into()
+}
+
+fn parse_backup_file_name(name: &str) -> Option<(BackupKind, jiff::Timestamp)> {
+    let suffix = name.strip_prefix(BACKUP_FILE_NAME_PREFIX)?;
+    let (kind, suffix) = if let Some(rest) = suffix.strip_prefix("-epoch-") {
+        let (epoch, rest) = rest.split_once('-')?;
+        if epoch.is_empty()
+            || !epoch.bytes().all(|byte| byte.is_ascii_digit())
+            || (epoch.len() > 1 && epoch.starts_with('0'))
+        {
+            return None;
+        }
+        let epoch = epoch.parse().ok()?;
+        match rest.strip_prefix("mpc-") {
+            Some(timestamp) => (BackupKind::Mpc(epoch), timestamp),
+            None => (BackupKind::Node(epoch), rest),
+        }
+    } else {
+        (BackupKind::Manual, suffix.strip_prefix('-')?)
+    };
+    let timestamp = suffix.strip_suffix(".tar.asc")?;
+    if timestamp.len() != 16
+        || timestamp.as_bytes()[8] != b'T'
+        || timestamp.as_bytes()[15] != b'Z'
+        || !timestamp
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let created_at = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", timestamp)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .ok()?
+        .timestamp();
+    Some((kind, created_at))
+}
+
+pub(crate) fn find_mpc_backup(output_dir: &Path, epoch: u64) -> Result<Option<PathBuf>> {
+    let entries = match fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut newest = None;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((kind, timestamp)) = name.to_str().and_then(parse_backup_file_name) else {
+            continue;
+        };
+        if kind != BackupKind::Mpc(epoch) || !entry.file_type()?.is_file() {
+            continue;
+        }
+        if newest
+            .as_ref()
+            .is_none_or(|(latest, _)| timestamp > *latest)
+        {
+            newest = Some((timestamp, entry.path()));
+        }
+    }
+    Ok(newest.map(|(_, path)| path))
 }
 
 #[derive(Default)]
@@ -618,34 +707,13 @@ pub(crate) fn cleanup_old_backups(
             }
             continue;
         }
-        let Some(suffix) = file_name.strip_prefix(BACKUP_FILE_NAME_PREFIX.as_bytes()) else {
-            continue;
-        };
-        let suffix = if let Some(epoch_and_suffix) = suffix.strip_prefix(b"-epoch-") {
-            let Some(separator) = epoch_and_suffix.iter().position(|byte| *byte == b'-') else {
-                continue;
-            };
-            let (epoch, suffix) = epoch_and_suffix.split_at(separator);
-            if epoch.is_empty()
-                || !epoch.iter().all(u8::is_ascii_digit)
-                || std::str::from_utf8(epoch)
-                    .ok()
-                    .and_then(|epoch| epoch.parse::<u64>().ok())
-                    .is_none()
-            {
-                continue;
-            }
-            suffix
-        } else {
-            suffix
-        };
-        let Ok(created_at) =
-            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, suffix)
-                .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
+        let Some((_, created_at)) = std::str::from_utf8(file_name)
+            .ok()
+            .and_then(parse_backup_file_name)
         else {
             continue;
         };
-        if created_at.timestamp() > now {
+        if created_at > now {
             continue;
         }
         let path = entry.path();
@@ -663,7 +731,7 @@ pub(crate) fn cleanup_old_backups(
         if !file_type.is_file() {
             continue;
         }
-        let candidate = (created_at.timestamp(), path);
+        let candidate = (created_at, path);
         let (created_at, path) = match newest.as_mut() {
             Some(newest) if candidate.0 > newest.0 => std::mem::replace(newest, candidate),
             Some(_) => candidate,
@@ -1433,11 +1501,305 @@ mod tests {
         (service, directory)
     }
 
+    fn restart_backup_service(service: BackupService) -> BackupService {
+        let config = service.inner.config.clone();
+        let config_path = service.inner.config_path.clone();
+        drop(service);
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            config_path,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        BackupService::new(hashi).0
+    }
+
+    #[test]
+    fn recovery_discovery_ignores_non_root_and_non_mpc_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("backups");
+        assert_eq!(find_mpc_backup(&root, 42).unwrap(), None);
+        fs::create_dir(&root).unwrap();
+        for name in [
+            "hashi-backup-20260101T000000Z.tar.asc",
+            "hashi-backup-epoch-42-20260101T000000Z.tar.asc",
+            "hashi-backup-epoch-43-mpc-20260101T000000Z.tar.asc",
+            "hashi-backup-epoch-042-mpc-20260101T000000Z.tar.asc",
+            "hashi-backup-epoch-42-mpc-20260230T000000Z.tar.asc",
+            "hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc.partial",
+            ".hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc",
+        ] {
+            fs::write(root.join(name), b"not a completed matching archive").unwrap();
+        }
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let name = "hashi-backup-epoch-42-mpc-20260103T000000Z.tar.asc";
+        fs::write(nested.join(name), b"nested archive").unwrap();
+        std::os::unix::fs::symlink(nested.join(name), root.join(name)).unwrap();
+        fs::create_dir(root.join("hashi-backup-epoch-42-mpc-20260104T000000Z.tar.asc")).unwrap();
+        assert_eq!(find_mpc_backup(&root, 42).unwrap(), None);
+        let older = root.join("hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc");
+        let newer = root.join("hashi-backup-epoch-42-mpc-20260102T000000Z.tar.asc");
+        fs::write(&newer, b"newer").unwrap();
+        fs::write(&older, b"older").unwrap();
+        assert_eq!(find_mpc_backup(&root, 42).unwrap(), Some(newer));
+    }
+
+    #[test]
+    fn scheduled_recovery_reuses_published_archive_after_restart() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let ordinary = service
+            .inner
+            .maintain_backups_after_epoch_change(42, &BackupAction::SaveNodeState)
+            .unwrap()
+            .unwrap();
+        let action = BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
+        let archive = service
+            .inner
+            .maintain_backups_after_epoch_change(99, &action)
+            .unwrap()
+            .unwrap();
+        assert_ne!(ordinary, archive);
+        assert!(
+            archive
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-42-mpc-")
+        );
+        let bytes = fs::read(&archive).unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            2
+        );
+        let service = restart_backup_service(service);
+        assert_eq!(
+            service
+                .inner
+                .maintain_backups_after_epoch_change(100, &action)
+                .unwrap(),
+            Some(archive.clone())
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .count(),
+            2
+        );
+        let mut invalid = recovery::test_record();
+        let MpcRecoveryRecord::V1(record) = &mut invalid;
+        record.chain_id.clear();
+        assert!(
+            service
+                .inner
+                .maintain_backups_after_epoch_change(
+                    42,
+                    &BackupAction::SaveWithRecovery(Box::new(invalid)),
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(archive).unwrap(), bytes);
+    }
+
+    #[test]
+    fn scheduled_recovery_cleans_expired_match_before_discovery() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let root = &service.inner.config.backup_dir;
+        fs::create_dir(root).unwrap();
+        let expired = root.join("hashi-backup-epoch-42-mpc-20000101T000000Z.tar.asc");
+        fs::write(&expired, b"expired recovery").unwrap();
+        let newer = root.join(encrypted_backup_file_name(BackupKind::Node(43)));
+        fs::write(&newer, b"newer node archive").unwrap();
+        let archive = service
+            .inner
+            .maintain_backups_after_epoch_change(
+                42,
+                &BackupAction::SaveWithRecovery(Box::new(recovery::test_record())),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!expired.exists());
+        assert_ne!(archive, expired);
+        assert!(archive.is_file());
+        assert_eq!(find_mpc_backup(root, 42).unwrap(), Some(archive));
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_recovery_restart_retries_same_object_and_classifies_collisions() {
+        use axum::body::Bytes;
+        use axum::http::HeaderMap;
+        use axum::http::StatusCode;
+        use axum::http::Uri;
+        use std::sync::Mutex;
+
+        let (mut service, _directory) = backup_service_fixture(true, true);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let router = axum::Router::new().fallback_service(axum::routing::put(
+            move |uri: Uri, headers: HeaderMap, body: Bytes| {
+                let captured = captured.clone();
+                async move {
+                    assert_eq!(headers.get("if-none-match").unwrap(), "*");
+                    let mut captured = captured.lock().unwrap();
+                    captured.push((uri.path().to_owned(), body));
+                    match captured.len() {
+                        1 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "<Error><Code>SlowDown</Code></Error>",
+                        ),
+                        2 => (StatusCode::OK, ""),
+                        3 | 5 | 6 => (
+                            StatusCode::PRECONDITION_FAILED,
+                            "<Error><Code>PreconditionFailed</Code></Error>",
+                        ),
+                        4 => (
+                            StatusCode::CONFLICT,
+                            "<Error><Code>ConditionalRequestConflict</Code></Error>",
+                        ),
+                        _ => panic!("unexpected additional request"),
+                    }
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        let recovery_action = || BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
+        assert!(
+            service
+                .process_epoch_change(42, recovery_action())
+                .await
+                .is_err()
+        );
+        let archive = find_mpc_backup(&service.inner.config.backup_dir, 42)
+            .unwrap()
+            .unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            1
+        );
+
+        service = restart_backup_service(service);
+        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        service
+            .process_epoch_change(42, recovery_action())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            service
+                .inner
+                .metrics
+                .backup_scheduled_remote_successes
+                .get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            0
+        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
+            assert!(
+                requests[0]
+                    .0
+                    .ends_with(archive.file_name().unwrap().to_str().unwrap())
+            );
+        }
+        service
+            .process_epoch_change(42, recovery_action())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            service
+                .inner
+                .metrics
+                .backup_scheduled_remote_successes
+                .get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            0
+        );
+        assert!(
+            service
+                .process_epoch_change(42, recovery_action())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            1
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        assert_eq!(
+            fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .count(),
+            1
+        );
+
+        // The same HTTP status remains an error for ordinary scheduled and manual uploads.
+        assert!(
+            service
+                .process_epoch_change(42, BackupAction::SaveNodeState)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            2
+        );
+        assert!(
+            upload(&service.inner.config, &mut service.s3_client, &archive)
+                .await
+                .is_err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 6);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_remote_results() {
         for (config_path_present, action, remove_config) in [
             (true, BackupAction::CleanupOnly, false),
             (false, BackupAction::SaveNodeState, false),
+            (
+                false,
+                BackupAction::SaveWithRecovery(Box::new(recovery::test_record())),
+                false,
+            ),
             (true, BackupAction::SaveNodeState, true),
         ] {
             let (mut service, directory) = backup_service_fixture(true, config_path_present);
@@ -1636,7 +1998,9 @@ mod tests {
                 .to_zoned(jiff::tz::TimeZone::UTC)
                 .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
         ));
-        let generated = tmpdir.path().join(encrypted_backup_file_name(Some(42)));
+        let generated = tmpdir
+            .path()
+            .join(encrypted_backup_file_name(BackupKind::Mpc(42)));
         fs::write(&older, b"older archive").unwrap();
         fs::write(&generated, b"generated recovery archive").unwrap();
         let sweep_time = now
@@ -1745,7 +2109,8 @@ mod tests {
         let wrong_type = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}regular-file"));
         fs::write(&wrong_type, b"not a staging directory").unwrap();
         File::open(&wrong_type).unwrap().set_times(times).unwrap();
-        let completed = dir.join(extract_dir_name(&encrypted_backup_file_name(None)).unwrap());
+        let completed =
+            dir.join(extract_dir_name(&encrypted_backup_file_name(BackupKind::Manual)).unwrap());
         let db_restore = dir.join(".hashi-db-restore-abandoned");
         for path in [&completed, &db_restore] {
             fs::create_dir(path).unwrap();
@@ -2294,7 +2659,7 @@ mod tests {
         for (epoch, recovery, prefix) in [
             (None, None, "hashi-backup"),
             (Some(43), None, "hashi-backup-epoch-43"),
-            (Some(43), Some(&recovery), "hashi-backup-epoch-42"),
+            (Some(43), Some(&recovery), "hashi-backup-epoch-42-mpc"),
         ] {
             let out = tempfile::tempdir().unwrap();
             let output_path = save(

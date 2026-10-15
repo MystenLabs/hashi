@@ -515,6 +515,25 @@ impl Hashi {
             );
             return Ok(None);
         };
+        if let Some(recovery) = recovery {
+            recovery.validate()?;
+            let backup::MpcRecoveryRecord::V1(record) = recovery;
+            match crate::backup::find_mpc_backup(&self.config.backup_dir, record.epoch) {
+                Ok(Some(path)) => {
+                    tracing::info!(
+                        epoch = record.epoch,
+                        output = %path.display(),
+                        "Reusing scheduled local MPC recovery backup"
+                    );
+                    return Ok(Some(path));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    epoch = record.epoch,
+                    "Failed to discover existing MPC recovery backup; creating a new archive: {error:#}"
+                ),
+            }
+        }
         let output_path = crate::backup::save(
             config_path,
             &self.config,
