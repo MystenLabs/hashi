@@ -43,8 +43,8 @@ answer: >-
 ---
 
 A deposit moves BTC from a user's Bitcoin wallet into the Hashi-managed UTXO
-pool, minting a corresponding amount of `hBTC` into the user's account on Sui.
-The process has four phases:
+(unspent transaction output) pool, minting a corresponding amount of `hBTC`
+into the user's account on Sui. The process has 4 phases:
 
 ```mermaid
 graph LR
@@ -181,7 +181,10 @@ before it can be confirmed. The window gives operators a chance to detect a
 faulty or fraudulent approval and pause the service before funds are minted.
 While the service is paused, `approve_deposit` and `confirm_deposit` are both
 rejected, so pending approvals stay parked in the queue until the system is
-unpaused, unless the request expires first.
+unpaused, unless the request expires first. The 24-hour expiry described in
+[Approve](#approve) counts from when the request is created, so it keeps
+running through the time-delay window; an expired request is deleted and the
+user can submit the UTXO again.
 
 If the committee rotates before the deposit is confirmed, the existing
 approval becomes invalid and the deposit must be re-approved by the new
@@ -219,6 +222,6 @@ graph LR
 
 After both checks in `confirm_deposit` pass, the function mints the
 corresponding amount of `hBTC` and sends it to the Sui address in the UTXO's
-`derivation_path` (a UTXO without one mints nothing). The
+`derivation_path` (a UTXO whose `derivation_path` is `None` mints nothing). The
 deposited UTXO is added to the Hashi-managed UTXO pool, making it available
 for future withdrawal coin selection.
