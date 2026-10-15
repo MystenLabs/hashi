@@ -32,6 +32,31 @@ pub fn require_run_urls(ctx: &Ctx) -> Result<()> {
     }
 }
 
+/// Stops while a sui-operations workflow that applies the guardian stacks runs, since it would race this step.
+pub fn require_no_guardian_runs(ctx: &Ctx) -> Result<()> {
+    for workflow in [
+        "hashi-guardian-proxy-deploy.yaml",
+        "hashi-guardian-rotate.yaml",
+    ] {
+        for status in ["queued", "in_progress"] {
+            let runs = read(
+                ctx.exec,
+                &Cmd::new("gh")
+                    .args(["run", "list", "--repo", "MystenLabs/sui-operations"])
+                    .args(["--workflow", workflow, "--status", status])
+                    .args(["--json", "databaseId", "--jq", "length"]),
+            )
+            .with_context(|| format!("Could not list the runs of sui-operations' {workflow}."))?;
+            if runs.trim() != "0" {
+                bail!(
+                    "sui-operations' {workflow} has a run {status}, and it applies the guardian stacks too. Wait for it to finish."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Dispatches a workflow and returns the ID of the run it started.
 pub fn dispatch(
     ctx: &Ctx,

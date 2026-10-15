@@ -17,6 +17,7 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::rotate;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -75,6 +76,14 @@ enum Step {
     },
     /// Activate a slot's provisioned guardian.
     Activate { slot: Option<Slot> },
+    /// Create a standby guardian host in a slot, next to the serving guardian in the other.
+    Arm { slot: Slot },
+    /// Apply the proxy stack so the proxy follows the enclave stack's slots.
+    ProxyUpdate,
+    /// Make a slot's provisioned standby the serving guardian, and stop the old one for good.
+    Switchover { slot: Slot },
+    /// Destroy a standby slot's host.
+    Teardown { slot: Slot },
     /// Create the key provisioners' upload bucket and an access key that can only upload into it.
     CreateKpUploadBucket,
     /// Delete the upload key once the key provisioners no longer need it.
@@ -133,6 +142,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
         }
         Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
+        Step::Arm { slot } => rotate::arm(&ctx, slot),
+        Step::ProxyUpdate => rotate::proxy_update(&ctx),
+        Step::Switchover { slot } => rotate::switchover(&ctx, slot),
+        Step::Teardown { slot } => rotate::teardown(&ctx, slot),
         Step::CreateKpUploadBucket => kp_keys::create_kp_upload_bucket(&ctx),
         Step::RevokeKpUploadKey => kp_keys::revoke_kp_upload_key(&ctx),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),

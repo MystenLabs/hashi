@@ -20,10 +20,13 @@ pub mod guardian;
 pub mod host;
 pub mod kp_bucket;
 pub mod plan;
+pub mod proxy;
 pub mod render;
 pub mod stack;
 pub mod steps;
 pub mod sui;
+#[cfg(test)]
+mod world;
 
 use ask::Ask;
 use env::Env;

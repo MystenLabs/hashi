@@ -86,6 +86,32 @@ pub fn window(ctx: &Ctx, now: i64) -> Result<Window> {
     ))
 }
 
+/// Stops unless the Sui epoch, and hashi's committee with it, stays put while guardians switch: a committee handoff
+/// that lands before activation leaves the new guardian a committee behind until the next epoch.
+pub fn require_epoch_window(ctx: &Ctx, committee_epoch: Option<&str>) -> Result<()> {
+    let window = window(ctx, now())?;
+    let epoch = window.epoch;
+    if window.since < SETTLE_SECS {
+        anyhow::bail!(
+            "Sui epoch {epoch} began {} minutes ago. Switch over once hashi's committee handoff has settled, 30 minutes after the epoch turns.",
+            window.since / 60
+        );
+    }
+    if window.remaining < REMAINING_SECS {
+        anyhow::bail!(
+            "Sui epoch {epoch} ends in about {} minutes. Switch over after the next epoch has settled, so its committee handoff reaches the new guardian.",
+            window.remaining / 60
+        );
+    }
+    if committee_epoch != Some(epoch.to_string().as_str()) {
+        anyhow::bail!(
+            "The serving guardian is at committee epoch {}, but Sui is at epoch {epoch}. Wait for hashi's committee handoff to reach it.",
+            committee_epoch.unwrap_or("none")
+        );
+    }
+    Ok(())
+}
+
 /// A GraphQL timestamp in whole seconds since the Unix epoch.
 fn seconds(timestamp: &str) -> Result<i64> {
     Ok(timestamp
