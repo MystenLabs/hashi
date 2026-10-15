@@ -58,6 +58,7 @@ use crate::keys::HashiBTCKeys;
 use crate::time::utc_timestamp;
 
 pub mod approval;
+pub mod utxo_pool;
 
 use approval::HashiApproval;
 
@@ -123,6 +124,8 @@ pub struct SuiEventsPoller {
     hashi_btc_keys: HashiBTCKeys,
     /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
+    /// The `BitcoinState` dynamic field of the Hashi object, which holds the UTXO pool.
+    bitcoin_state_id: Address,
     /// Timestamp from which the poller scans every checkpoint.
     start_seconds: UnixSeconds,
     /// Latest timestamp through which the poller has completely scanned transactions.
@@ -141,6 +144,7 @@ impl SuiEventsPoller {
     pub fn new(
         config: &SuiConfig,
         hashi_btc_keys: HashiBTCKeys,
+        hashi_object_id: Address,
         start: UnixSeconds,
     ) -> anyhow::Result<Self> {
         let package_id = Address::from_str(&config.package_id)
@@ -156,6 +160,7 @@ impl SuiEventsPoller {
             package_versions,
             hashi_btc_keys,
             package_id: config.package_id.clone(),
+            bitcoin_state_id: utxo_pool::bitcoin_state_field_id(hashi_object_id, package_id),
             start_seconds: start,
             cursor_seconds: start,
             next_checkpoint_to_scan: None,
@@ -622,6 +627,7 @@ impl SuiEventsPoller {
 
 #[cfg(test)]
 pub mod tests {
+    use super::approval::tests::HASHI_OBJECT_ID;
     use super::approval::tests::PACKAGE_ID;
     use super::approval::tests::WID;
     use super::approval::tests::approval_tx;
@@ -762,22 +768,26 @@ pub mod tests {
     }
 
     async fn poller_for(ledger: impl LedgerService) -> SuiEventsPoller {
+        poller_for_router(
+            tonic::transport::Server::builder().add_service(LedgerServiceServer::new(ledger)),
+        )
+        .await
+    }
+
+    /// A poller over an in-process fullnode serving `router`'s services.
+    pub async fn poller_for_router(router: tonic::transport::server::Router) -> SuiEventsPoller {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = futures::stream::unfold(listener, |listener| async move {
             let result = listener.accept().await.map(|(stream, _)| stream);
             Some((result, listener))
         });
-        tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(LedgerServiceServer::new(ledger))
-                .serve_with_incoming(incoming),
-        );
+        tokio::spawn(router.serve_with_incoming(incoming));
         let config = SuiConfig {
             rpc_url: format!("http://{addr}"),
             package_id: PACKAGE_ID.to_string(),
         };
-        SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap()
+        SuiEventsPoller::new(&config, test_hashi_btc_keys(), HASHI_OBJECT_ID, 0).unwrap()
     }
 
     /// The approval a lookup of `WID` returns from `poller_scanned`'s ledger.
@@ -990,7 +1000,8 @@ pub mod tests {
             rpc_url: "http://127.0.0.1:9".to_string(),
             package_id: PACKAGE_ID.to_string(),
         };
-        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), 100).unwrap();
+        let mut poller =
+            SuiEventsPoller::new(&config, test_hashi_btc_keys(), HASHI_OBJECT_ID, 100).unwrap();
         assert!(!poller.has_scanned(100));
 
         poller.cursor_seconds = 200;
