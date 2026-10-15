@@ -1045,6 +1045,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_rejects_a_record_without_last_modified() {
+        let signing_key = GuardianSignKeyPair::from([16u8; 32]);
+        let record = SignedLogEntry::new_at_timestamp(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let key = record.object_key().to_string();
+        let mock_key = key.clone();
+        let body = serde_json::to_vec(&record).unwrap();
+        let get_without_time = mock!(Client::get_object)
+            .match_requests(move |req| {
+                req.bucket() == Some("bucket") && req.key() == Some(mock_key.as_str())
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_without_time]);
+        let logger = mk_logger_with_client(client);
+
+        let error = logger
+            .get_log_record_inner(&key, ImmutabilityCheck::Skipped)
+            .await
+            .expect_err("a record without LastModified must be rejected");
+
+        assert!(matches!(error, S3Error(message) if message.contains("Missing LastModified")));
+        assert_eq!(get_without_time.num_calls(), 1);
+    }
+
+    #[tokio::test]
     async fn attestation_log_replay_is_rejected_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
