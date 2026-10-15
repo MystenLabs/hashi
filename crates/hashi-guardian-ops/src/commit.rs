@@ -50,9 +50,10 @@ impl Tree {
     }
 }
 
-/// Extracts beside `dir` and renames into place, so an interrupted extraction never looks complete.
+/// Extracts beside `dir` and renames into place, so an interrupted extraction never looks complete. Each process
+/// extracts into its own directory, since two steps can reach a new commit at once.
 fn extract(ctx: &Ctx, commit: &str, root: &Path, dir: &Path) -> Result<()> {
-    let partial = root.join(format!(".{commit}.partial"));
+    let partial = root.join(format!(".{commit}.partial-{}", std::process::id()));
     if partial.exists() {
         std::fs::remove_dir_all(&partial)?;
     }
@@ -75,9 +76,13 @@ fn extract(ctx: &Ctx, commit: &str, root: &Path, dir: &Path) -> Result<()> {
             .arg("-C")
             .arg(&tree),
     )?;
-    std::fs::rename(&tree, dir)?;
+    let renamed = std::fs::rename(&tree, dir);
     std::fs::remove_dir_all(&partial)?;
-    Ok(())
+    match renamed {
+        // Another step's extraction finished first.
+        Err(_) if dir.is_dir() => Ok(()),
+        renamed => Ok(renamed?),
+    }
 }
 
 fn git(repo: &Path) -> Cmd {
@@ -139,11 +144,12 @@ mod tests {
         let ctx = Ctx::for_test(&repo, &crate::exec::System, &[]);
         let root = scratch.path().join("guardian-init");
         let dir = root.join(&head);
+        let proto = dir.join("crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto");
         extract(&ctx, &head, &root, &dir).unwrap();
-        assert!(
-            dir.join("crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto")
-                .is_file()
-        );
-        assert!(!root.join(format!(".{head}.partial")).exists());
+        assert!(proto.is_file());
+        // A step that finishes second keeps the first one's tree.
+        extract(&ctx, &head, &root, &dir).unwrap();
+        assert!(proto.is_file());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     }
 }
