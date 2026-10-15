@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PROTO_DIR="$REPO_ROOT/crates/hashi-types/proto"
 ATTESTATION_SUFFIXES=(attestation-device.pem attestation-sig.pem attestation-dec.pem)
 HOST_UNITS="hashi-guardian-enclave.service hashi-guardian-bridge.service hashi-vsock-proxy-8101.service hashi-vsock-proxy-8102.service hashi-vsock-proxy-8103.service"
-STEPS="measure [slot] [run-id] | deploy | host [slot] | proxy | render [slot] | publish [slot] | tunnel [slot] | info [slot] | ceremony | new-session [slot] [--abandon] | provision [slot] [--do-genesis] | activate [slot] | arm <slot> | proxy-update | switchover <slot> | teardown <slot>"
+STEPS="measure [slot] [run-id] | deploy | host [slot] | proxy | render [slot] | publish [slot] [rotate-kp-set] | tunnel [slot] | info [slot] | ceremony | new-session [slot] [--abandon] | provision [slot] [--do-genesis] | activate [slot] | arm <slot> | proxy-update | switchover <slot> | teardown <slot> | rotate-kp-set [slot] (init, submit <file>... or wait)"
 GUARDIAN_UNIT_STATE='["if systemctl is-enabled --quiet hashi-guardian-enclave.service || systemctl is-active --quiet hashi-guardian-enclave.service; then echo GUARDIAN_RUNNING; else echo GUARDIAN_STOPPED; fi"]'
 
 say() {
@@ -437,17 +437,62 @@ write_config() {
     "$HASHI_COMMIT" "$EIF_PCR0"
   printf 'hashi:\n  sui_rpc: "%s"\n  package_id: "%s"\n  hashi_object_id: "%s"\n\n' \
     "$SUI_RPC" "$HASHI_PACKAGE_ID" "$HASHI_OBJECT_ID"
-  printf 'kp_roster:\n  num_shares: %d\n  threshold: %d\n  kp_pgp_cert_paths:\n' "${#CERTS[@]}" "$KP_THRESHOLD"
-  for cert in "${CERTS[@]}"; do
-    printf '    - certs/%s\n' "$cert"
-  done
+  write_roster kp_roster "$ROSTER_THRESHOLD" "${ROSTER_CERTS[@]}"
+  if ((${#NEW_ROSTER_CERTS[@]} > 0)); then
+    printf '\n'
+    write_roster new_kp_roster "$NEW_KP_THRESHOLD" "${NEW_ROSTER_CERTS[@]}"
+  fi
   printf '\nlimiter_config:\n  refill_rate: %s\n  max_bucket_capacity: %s\n' "$REFILL_RATE" "$MAX_BUCKET_CAPACITY"
 }
 
-# Writes the slot's configuration into a directory: guardian-init.yaml for the key provisioners,
-# operator.yaml for the operator, and the certificates both list.
+write_roster() {
+  local name="$1" threshold="$2" cert
+  shift 2
+  printf '%s:\n  num_shares: %d\n  threshold: %d\n  kp_pgp_cert_paths:\n' "$name" "$#" "$threshold"
+  for cert in "$@"; do
+    printf '    - certs/%s\n' "$cert"
+  done
+}
+
+# Copies a verified roster's certificates into a configuration directory's certs/ and sets ROSTER to
+# their file names. A configuration lists two rosters by file name, so one name is one certificate.
+copy_roster() {
+  local roster_dir="$1" dir="$2" cert file
+  [[ -f "$roster_dir/roster.txt" ]] || die "No verified roster in $roster_dir. Run download-kp-pubkeys.sh first."
+  ROSTER=()
+  for cert in "$roster_dir"/*/*-kp-pubkey.asc; do
+    [[ -f "$cert" ]] || die "No certificates in $roster_dir."
+    for file in "$cert" "${ATTESTATION_SUFFIXES[@]/#/${cert%.asc}.}"; do
+      if [[ -e "$dir/certs/${file##*/}" ]] && ! cmp -s -- "$file" "$dir/certs/${file##*/}"; then
+        die "${file##*/} differs between $KP_ROSTER_DIR and $NEW_KP_ROSTER_DIR. A key provisioner with a new certificate needs a new user ID."
+      fi
+    done
+    cp -- "$cert" "${ATTESTATION_SUFFIXES[@]/#/${cert%.asc}.}" "$dir/certs/"
+    ROSTER+=("${cert##*/}")
+  done
+}
+
+# Writes guardian-init.yaml for the key provisioners and operator.yaml for the operator into a directory
+# whose certs/ holds the rosters' certificates.
+write_configs() {
+  local dir="$1"
+  write_config "$GUARDIAN_PROXY_URL" > "$dir/guardian-init.yaml"
+  # The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
+  (
+    umask 077
+    rm -f -- "$dir/operator.yaml"
+    {
+      write_config "$TUNNEL_ENDPOINT"
+      printf '\ns3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n' "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY"
+    } > "$dir/operator.yaml"
+  ) || die "Could not write $dir/operator.yaml."
+}
+
+# Writes the slot's configuration into a directory. Its own files list the roster that provisions
+# guardians: the dealt one, or the new one once a KP-set rotation re-deals to it. A KP-set rotation's
+# files, which list both, go in rotate-kp-set/.
 render_into() {
-  local dir="$1" cert other other_suffix=""
+  local dir="$1" other other_suffix="" dealt=()
   read_bucket
   EIF_PCR0="$(config_value "$EIF_PCR0_KEY")"
   REFILL_RATE="$(config_value refill-rate-sats-per-sec)"
@@ -466,30 +511,32 @@ render_into() {
     die "Slots a and b of stack $GUARDIAN_STACK have different builds. Both write one log bucket, so give slot $SLOT the same hashi-commit and eif-pcr0 as slot $other."
   fi
 
-  [[ -f "$KP_ROSTER_DIR/roster.txt" ]] \
-    || die "No verified roster in $KP_ROSTER_DIR. Run download-kp-pubkeys.sh first."
-  rm -rf -- "$dir/certs"
-  mkdir -p "$dir/certs"
-  CERTS=()
-  for cert in "$KP_ROSTER_DIR"/*/*-kp-pubkey.asc; do
-    [[ -f "$cert" ]] || die "No certificates in $KP_ROSTER_DIR."
-    cp -- "$cert" "${ATTESTATION_SUFFIXES[@]/#/${cert%.asc}.}" "$dir/certs/"
-    CERTS+=("${cert##*/}")
-  done
-
-  write_config "$GUARDIAN_PROXY_URL" > "$dir/guardian-init.yaml"
   S3_ACCESS_KEY_ID="$(stack_output s3_access_key_id)" || die "Could not read the guardian's S3 access key."
   S3_SECRET_ACCESS_KEY="$(stack_output s3_secret_access_key --show-secrets)" \
     || die "Could not read the guardian's S3 secret key."
-  # The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
-  (
-    umask 077
-    rm -f -- "$dir/operator.yaml"
-    {
-      write_config "$TUNNEL_ENDPOINT"
-      printf '\ns3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n' "$S3_ACCESS_KEY_ID" "$S3_SECRET_ACCESS_KEY"
-    } > "$dir/operator.yaml"
-  ) || die "Could not write $dir/operator.yaml."
+
+  rm -rf -- "$dir/certs" "$dir/rotate-kp-set"
+  mkdir -p "$dir/certs"
+  NEW_ROSTER_CERTS=()
+  if [[ -z "$NEW_KP_ROSTER_DIR" ]]; then
+    copy_roster "$KP_ROSTER_DIR" "$dir"
+    ROSTER_CERTS=("${ROSTER[@]}")
+    ROSTER_THRESHOLD="$KP_THRESHOLD"
+    write_configs "$dir"
+    return
+  fi
+  copy_roster "$NEW_KP_ROSTER_DIR" "$dir"
+  ROSTER_CERTS=("${ROSTER[@]}")
+  ROSTER_THRESHOLD="$NEW_KP_THRESHOLD"
+  write_configs "$dir"
+  mkdir -p "$dir/rotate-kp-set/certs"
+  copy_roster "$KP_ROSTER_DIR" "$dir/rotate-kp-set"
+  dealt=("${ROSTER[@]}")
+  copy_roster "$NEW_KP_ROSTER_DIR" "$dir/rotate-kp-set"
+  NEW_ROSTER_CERTS=("${ROSTER[@]}")
+  ROSTER_CERTS=("${dealt[@]}")
+  ROSTER_THRESHOLD="$KP_THRESHOLD"
+  write_configs "$dir/rotate-kp-set"
 }
 
 # Stops unless the rendered configuration is what the render step would write now: the stack, the
@@ -501,8 +548,8 @@ require_fresh_render() {
   render_into "$WORK_DIR"
   # Only the files a render writes: Finder, for one, adds its own to a directory it has shown.
   while IFS= read -r rendered; do
-    cmp -s "$WORK_DIR/$rendered" "$SLOT_DIR/$rendered" || stale+="${stale:+, }$rendered"
-  done < <(cd "$WORK_DIR" && find guardian-init.yaml operator.yaml certs -type f | sort)
+    cmp -s "$WORK_DIR/$rendered" "$SLOT_DIR/$rendered" || stale+="${stale:+, }${rendered#./}"
+  done < <(cd "$WORK_DIR" && find . -type f | sort)
   cleanup
   WORK_DIR=""
   [[ -z "$stale" ]] \
@@ -564,6 +611,10 @@ for variable in GUARDIAN_PULUMI_DIR GUARDIAN_STACK GUARDIAN_PROXY_URL KP_NAME KP
   SUI_RPC HASHI_PACKAGE_ID HASHI_OBJECT_ID BITCOIN_NETWORK RETENTION_ENVIRONMENT; do
   [[ -n "${!variable:-}" ]] || die "$ENV_FILE does not set $variable."
 done
+NEW_KP_ROSTER_DIR="${NEW_KP_ROSTER_DIR:-}"
+NEW_KP_THRESHOLD="${NEW_KP_THRESHOLD:-}"
+[[ -z "$NEW_KP_ROSTER_DIR$NEW_KP_THRESHOLD" || (-n "$NEW_KP_ROSTER_DIR" && -n "$NEW_KP_THRESHOLD") ]] \
+  || die "$ENV_FILE sets only one of NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD. Set both for a KP-set rotation, or neither."
 TUNNEL_PORT="${TUNNEL_PORT:-3000}"
 [[ "$TUNNEL_PORT" =~ ^[0-9]+$ ]] || die "TUNNEL_PORT is not a port: $TUNNEL_PORT"
 [[ "$GUARDIAN_PROXY_URL" =~ ^https://([A-Za-z0-9.-]+)$ ]] \
@@ -788,14 +839,70 @@ case "$STEP" in
     fi
     printf 'Guardian commit:  %s\nPCR0:             %s\nLog bucket:       s3://%s\n' \
       "$HASHI_COMMIT" "$EIF_PCR0" "$GUARDIAN_BUCKET"
-    printf 'Bitcoin network:  %s\nRetention class:  %s\nKey provisioners: %d, any %d provision\n' \
-      "$BITCOIN_NETWORK" "$RETENTION_ENVIRONMENT" "${#CERTS[@]}" "$KP_THRESHOLD"
+    printf 'Bitcoin network:  %s\nRetention class:  %s\n' "$BITCOIN_NETWORK" "$RETENTION_ENVIRONMENT"
+    if ((${#NEW_ROSTER_CERTS[@]} > 0)); then
+      # render_into leaves the rosters the re-deal's own files list: the dealt one and the new one.
+      printf 'KP-set rotation:  %d key provisioners, any %d sign, re-deal to %d, any %d provision\n' \
+        "${#ROSTER_CERTS[@]}" "$ROSTER_THRESHOLD" "${#NEW_ROSTER_CERTS[@]}" "$NEW_KP_THRESHOLD"
+      printf 'For the signers:      %s\nFor the re-deal:      %s\n' \
+        "$SLOT_DIR/rotate-kp-set/guardian-init.yaml" "$SLOT_DIR/rotate-kp-set/operator.yaml"
+    else
+      printf 'Key provisioners: %d, any %d provision\n' "${#ROSTER_CERTS[@]}" "$ROSTER_THRESHOLD"
+    fi
     printf 'For key provisioners: %s\nFor the operator:     %s\n' "$SLOT_DIR/guardian-init.yaml" "$OPERATOR_CONFIG"
     ;;
   publish)
+    config_dir="$SLOT_DIR"
+    case "${1:-}" in
+      "") ;;
+      rotate-kp-set)
+        [[ -n "$NEW_KP_ROSTER_DIR" ]] \
+          || die "Set NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD in $ENV_FILE and render again to publish a KP-set rotation."
+        config_dir="$SLOT_DIR/rotate-kp-set"
+        ;;
+      *) die "Usage: $0 <env-file> publish [slot] [rotate-kp-set]" ;;
+    esac
     require_guardian_build
     require_fresh_render
-    exec "$(dirname "$0")/publish-kp-config.sh" "$KP_NAME" "$SLOT_DIR" "$GUARDIAN_BUCKET"
+    exec "$(dirname "$0")/publish-kp-config.sh" "$KP_NAME" "$config_dir" "$GUARDIAN_BUCKET"
+    ;;
+  rotate-kp-set)
+    action="${1:-}"
+    if (($# > 0)); then
+      shift
+    fi
+    case "$action" in
+      init | submit | wait) ;;
+      *) die "Usage: $0 <env-file> rotate-kp-set [slot] init | submit <file>... | wait" ;;
+    esac
+    [[ -n "$NEW_KP_ROSTER_DIR" ]] \
+      || die "Set NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD in $ENV_FILE, then render, for a KP-set rotation."
+    [[ "$SLOT_ROLE" == standby ]] \
+      || die "A KP-set rotation re-deals on a standby guardian, and slot $SLOT's is ${SLOT_ROLE/absent/not deployed}."
+    require_guardian_build
+    require_fresh_render
+    require_reached
+    submissions=()
+    if [[ "$action" == submit ]]; then
+      (($# > 0)) || die "Name the files the key provisioners sent: rotate-kp-set $SLOT submit <file>..."
+      for file in "$@"; do
+        [[ -f "$file" ]] || die "No submission file at $file."
+        submissions+=(--submission "$(cd "$(dirname "$file")" && pwd -P)/${file##*/}")
+      done
+    else
+      (($# == 0)) || die "rotate-kp-set $action takes no files."
+    fi
+    if [[ "$action" == init ]]; then
+      lifecycle="$(lifecycle_of "$SLOT_INFO")"
+      [[ "$lifecycle" == none || "$lifecycle" == ceremony/OPERATOR_INITIALIZED ]] \
+        || die "Slot $SLOT's guardian is $lifecycle. A KP-set rotation needs a fresh guardian: start one with new-session $SLOT."
+      warn "This makes slot $SLOT's guardian a ceremony guardian for good: it never serves withdrawals. Once the new key provisioners have all confirmed, start a fresh session on it with new-session $SLOT."
+      confirm "Re-deal the key on slot $SLOT's guardian?"
+    fi
+    # The configuration lists certificates relative to its own directory.
+    cd "$SLOT_DIR/rotate-kp-set"
+    exec cargo run --release --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p hashi-guardian-init -- \
+      operator rotate-kp-set "$action" --config operator.yaml ${submissions[@]+"${submissions[@]}"}
     ;;
   tunnel)
     require_instance
