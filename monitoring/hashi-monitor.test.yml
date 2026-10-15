@@ -1,0 +1,140 @@
+rule_files:
+  - hashi-monitor.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The finding is reported at 30h; the monitor restarts at 32h10m and its
+  # gauge starts again from 0.
+  - name: safety-finding-holds-for-a-day-across-a-restart
+    interval: 10m
+    input_series:
+      - series: 'hashi_monitor_last_finding_timestamp_seconds{category="safety"}'
+        values: '0x179 108000x12 stale 0x200'
+    alert_rule_test:
+      - eval_time: 29h
+        alertname: HashiMonitorSafetyFinding
+        exp_alerts: []
+      - eval_time: 31h
+        alertname: HashiMonitorSafetyFinding
+        exp_alerts:
+          - exp_labels: {category: safety, severity: critical}
+            exp_annotations:
+              summary: hashi-monitor reported a safety finding
+              description: &safety >-
+                hashi-monitor found a guardian withdrawal approval without a
+                matching Sui approval, a Sui deposit without a confirmed Bitcoin
+                transaction, or contradictory events. The wid or outpoint is in its
+                `monitor finding` ERROR log lines. A missing Sui approval older
+                than its `withdrawal_predecessor_lookback` can be a false positive.
+                This holds for a day; silence it once triaged.
+      - eval_time: 53h
+        alertname: HashiMonitorSafetyFinding
+        exp_alerts:
+          - exp_labels: {category: safety, severity: critical}
+            exp_annotations:
+              summary: hashi-monitor reported a safety finding
+              description: *safety
+      - eval_time: 55h
+        alertname: HashiMonitorSafetyFinding
+        exp_alerts: []
+
+  # Reported every 5 minutes from 2h until the flow completes at 3h.
+  - name: liveness-finding-fires-for-an-hour-after-the-last-report
+    interval: 5m
+    input_series:
+      - series: 'hashi_monitor_last_finding_timestamp_seconds{category="liveness"}'
+        values: '0x23 7200+300x12 10800x40'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiMonitorLivenessFinding
+        exp_alerts: []
+      - eval_time: 3h50m
+        alertname: HashiMonitorLivenessFinding
+        exp_alerts:
+          - exp_labels: {category: liveness, severity: warning}
+            exp_annotations:
+              summary: hashi-monitor reported a late or missing event
+              description: >-
+                A guardian signature or Bitcoin confirmation did not arrive within
+                its configured delay. Outstanding ones are reported again every 5
+                minutes, so this keeps firing until the flow completes. The wid is
+                in hashi-monitor's `monitor finding` WARN log lines.
+      - eval_time: 4h5m
+        alertname: HashiMonitorLivenessFinding
+        exp_alerts: []
+
+  # The cursor trails by 80 minutes until it stops at 5h.
+  - name: guardian-cursor-stuck-for-two-hours
+    interval: 5m
+    input_series:
+      - series: 'hashi_monitor_checked_through_timestamp_seconds{source="guardian"}'
+        values: '_x24 2400+300x36 13200x60'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: HashiMonitorGuardianStale
+        exp_alerts: []
+      - eval_time: 6h20m
+        alertname: HashiMonitorGuardianStale
+        exp_alerts: []
+      - eval_time: 6h30m
+        alertname: HashiMonitorGuardianStale
+        exp_alerts:
+          - exp_labels: {source: guardian, severity: critical}
+            exp_annotations:
+              summary: hashi-monitor has not verified guardian records for over two hours
+              description: >-
+                While this fires, a guardian approval without a Sui approval goes
+                unnoticed. Check hashi-monitor's `poll failed` log lines:
+                `BuildNotAllowlisted` after a guardian rotation means the new build
+                is missing from its `current_build`/`prev_builds` config, and S3
+                errors point at its credentials. After a restart it re-audits about
+                a week of history first.
+
+  # The Sui cursor stops at 3h while Bitcoin passes keep succeeding.
+  - name: sui-cursor-stuck-while-btc-is-fresh
+    interval: 5m
+    input_series:
+      - series: 'hashi_monitor_checked_through_timestamp_seconds{source="sui"}'
+        values: '_x12 3000+300x24 10200x40'
+      - series: 'hashi_monitor_checked_through_timestamp_seconds{source="btc"}'
+        values: '_x12 3300+300x60'
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: HashiMonitorChainsStale
+        exp_alerts: []
+      - eval_time: 4h15m
+        alertname: HashiMonitorChainsStale
+        exp_alerts:
+          - exp_labels: {source: sui, severity: critical}
+            exp_annotations:
+              summary: hashi-monitor has not checked sui for over 30 minutes
+              description: >-
+                While this fires, withdrawal approvals (sui) or deposit backing
+                (btc) go unchecked. Check hashi-monitor's `poll failed` and `btc
+                tick failed` log lines: fullnode gRPC errors for sui, `bitcoind is
+                not synced` or connection errors for btc. After a restart neither
+                source reports until its first pass finishes, and the Sui replay
+                starts `withdrawal_predecessor_lookback` before the audit window.
+
+  - name: metrics-gone-for-five-minutes
+    interval: 1m
+    input_series:
+      - series: 'hashi_monitor_checked_through_timestamp_seconds{source="sui"}'
+        values: '1x60 stale'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HashiMonitorMetricsAbsent
+        exp_alerts: []
+      - eval_time: 64m
+        alertname: HashiMonitorMetricsAbsent
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HashiMonitorMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: hashi-monitor metrics are missing
+              description: >-
+                No hashi-monitor metrics for 5 minutes: it is down, crash looping,
+                or no longer scraped. Check the process and its logs.
