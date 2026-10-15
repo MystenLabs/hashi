@@ -24,8 +24,6 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
-#[cfg(test)]
-use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
@@ -452,7 +450,7 @@ impl GuardianReader {
 /// Reads still verify the record signature and apply the S3 checks required by the read method.
 #[cfg(test)]
 pub(crate) fn reader_with_record_for_test(
-    log: Option<SignedLogEntry>,
+    log: Option<hashi_types::guardian::SignedLogEntry>,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
 ) -> GuardianReader {
@@ -556,6 +554,7 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::SecretSharingInstance;
+    use hashi_types::guardian::SignedLogEntry;
 
     async fn next(keys: &[&str]) -> GuardianResult<u64> {
         let s3 = mock_logger_with_layout(keys.iter().map(|key| key.to_string()));
