@@ -13,6 +13,7 @@ groups:
       # which takes 20-35 minutes on testnet; until then its gauges read 0.
       - alert: HashiBtcViewFrozen
         expr: changes(hashi_kyoto_best_height[90m]) == 0 and hashi_kyoto_synced == 1
+        for: 15m
         labels:
           severity: critical
         annotations:
@@ -33,50 +34,56 @@ groups:
             Brief resyncs after a restart are normal; sustained unsync is
             not. Check hashi_kyoto_sync_percent and peer count.
 
+      # Each light-client restart briefly drops the peer count to 0.
       - alert: HashiNoBtcPeers
         expr: hashi_kyoto_connected_peers < 1 unless hashi_onchain_scrape_in_progress == 1
-        for: 10m
+        for: 30m
         labels:
           severity: warning
         annotations:
           summary: "no BTC peers connected"
           description: "Without peers the BTC tip will go stale next."
 
-      # The checkpoint timestamp reads 0 until the boot scrape ends. Checkpoints
-      # normally land within a few minutes, so 10 minutes is a wedged watcher.
+      # The checkpoint timestamp reads 0 until the boot scrape ends. A higher
+      # threshold lets a chronically slow watcher flap in and out of the alert.
       - alert: HashiSuiMirrorStale
-        expr: time() - (hashi_latest_checkpoint_timestamp_ms > 0) / 1000 > 600
-        for: 10m
+        expr: time() - (hashi_latest_checkpoint_timestamp_ms > 0) / 1000 > 300
+        for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Sui state mirror stale"
           description: >-
-            No Sui checkpoint newer than 10 minutes has been applied to the
-            node's bridge-state mirror for 10 minutes. The watcher, mirror, or
-            fullnode RPC is wedged; the node is acting on stale state even if
-            other metrics look healthy.
+            No Sui checkpoint newer than 5 minutes has been applied to the
+            node's bridge-state mirror for 5 minutes. The watcher, mirror, or
+            fullnode RPC is wedged or falling behind; the node is acting on
+            stale state even if other metrics look healthy.
 
       # Each task loop heartbeats at least every 15s when idle, but mpc_service
-      # records none while a key rotation runs.
+      # records none while a reconfiguration runs.
       - alert: HashiTaskWedged
-        expr: time() - hashi_task_last_iteration_timestamp_seconds > 1800
+        expr: |
+          time() - hashi_task_last_iteration_timestamp_seconds{task!="mpc_service"} > 600
+            or (time() - hashi_task_last_iteration_timestamp_seconds{task="mpc_service"} > 600
+              unless ignoring (task) hashi_reconfig_in_progress == 1)
         for: 10m
         labels:
           severity: critical
         annotations:
           summary: "task loop {{ $labels.task }} wedged"
           description: >-
-            The {{ $labels.task }} loop has not recorded a heartbeat in 30
+            The {{ $labels.task }} loop has not recorded a heartbeat in 20
             minutes. It has deadlocked or is stuck; check its logs.
 
-      # -1 means the balance has not been read yet.
+      # -1 means the balance has not been read yet. Busy nodes burn over 10 SUI
+      # a day.
       - alert: HashiLowGas
-        expr: (hashi_sui_balance >= 0) < 1e9
+        expr: (hashi_sui_balance >= 0) < 5e9
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "operator wallet below 1 SUI"
+          summary: "operator wallet below 5 SUI"
           description: "Refill the operator gas wallet."
 
       - alert: HashiBinaryBehindChain
