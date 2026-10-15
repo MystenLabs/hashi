@@ -30,6 +30,9 @@ use tracing::info;
 use tracing::warn;
 
 /// Maximum attempts the AWS SDK makes for reads and control-plane operations.
+/// Log PUTs override this because the Guardian log writer owns their retries.
+const MAX_RETRY_ATTEMPTS: u32 = 5;
+
 /// A log record together with the time S3 recorded it.
 #[derive(Debug)]
 pub struct StoredLogRecord {
@@ -38,9 +41,6 @@ pub struct StoredLogRecord {
     /// S3 reports whole seconds, so this value is rounded down.
     pub stored_at_ms: UnixMillis,
 }
-
-/// Log PUTs override this because the Guardian log writer owns their retries.
-const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 /// Use explicit credentials or resolve them through AWS's default provider chain.
 pub async fn resolve_s3_credentials(
@@ -611,13 +611,7 @@ impl GuardianS3Client {
 
         let lock_mode = response.object_lock_mode().cloned();
         let retain_until = response.object_lock_retain_until_date().copied();
-        let stored_at_ms = response
-            .last_modified()
-            .ok_or_else(|| S3Error(format!("Missing LastModified metadata for key {key}")))?
-            .to_millis()
-            .ok()
-            .and_then(|millis| UnixMillis::try_from(millis).ok())
-            .ok_or_else(|| S3Error(format!("Invalid LastModified metadata for key {key}")))?;
+        let last_modified = response.last_modified().copied();
 
         let bytes = response.body.collect().await.map_err(|e| {
             S3Error(format!(
@@ -640,6 +634,12 @@ impl GuardianS3Client {
                 record.object_key()
             )));
         }
+        let stored_at_ms = last_modified
+            .ok_or_else(|| S3Error(format!("Missing LastModified metadata for key {key}")))?
+            .to_millis()
+            .ok()
+            .and_then(|millis| UnixMillis::try_from(millis).ok())
+            .ok_or_else(|| S3Error(format!("Invalid LastModified metadata for key {key}")))?;
         if !matches!(immutability_check, ImmutabilityCheck::Skipped)
             && !has_valid_compliance_lock(
                 lock_mode.as_ref(),

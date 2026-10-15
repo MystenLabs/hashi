@@ -206,9 +206,10 @@ impl fmt::Display for MonitorFinding {
             } => {
                 let logged_at = unix_millis_to_seconds(*logged_at_ms);
                 let stored_at = unix_millis_to_seconds(*stored_at_ms);
+                let skew_ms = i128::from(*stored_at_ms) - i128::from(*logged_at_ms);
                 write!(
                     f,
-                    "GuardianClockSkew(session_id={session_id}, key={object_key}, guardian_time={}, s3_time={}, s3_minus_guardian={})",
+                    "GuardianClockSkew(session_id={session_id}, key={object_key}, guardian_time={}, s3_time={}, s3_minus_guardian={} ({skew_ms}ms))",
                     utc_timestamp(logged_at),
                     utc_timestamp(stored_at),
                     human_timestamp_delta(stored_at, logged_at),

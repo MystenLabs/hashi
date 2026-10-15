@@ -25,9 +25,9 @@ Findings are tagged as:
   still missing after its source cursor passes the deadline, an event the
   Sui scan covered but never returned, a Hashi approval whose txid or
   change outputs do not match its inputs and outputs, a confirmed deposit
-  whose Bitcoin output does not match the Sui request, or a guardian log
-  whose signed time differs from its S3 `LastModified` time by more than
-  30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
+  whose Bitcoin output does not match the Sui request, or a guardian
+  withdrawal log whose signed time differs from its S3 `LastModified` time
+  by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
 
 Move does not validate a Hashi approval's txid or change outputs, so the
 monitor rebuilds the Bitcoin transaction from the approval and checks that the
