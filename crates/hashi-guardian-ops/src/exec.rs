@@ -36,6 +36,7 @@ pub struct Cmd {
     program: OsString,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
+    env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
     capture_stderr: bool,
 }
@@ -46,9 +47,17 @@ impl Cmd {
             program: program.as_ref().to_owned(),
             args: Vec::new(),
             cwd: None,
+            env: Vec::new(),
             env_remove: Vec::new(),
             capture_stderr: false,
         }
+    }
+
+    /// Sets `name` in the command's environment.
+    pub fn env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((name.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
     }
 
     /// Captures stderr too, for a step that reports it itself, as `2>&1` does.
@@ -65,6 +74,10 @@ impl Cmd {
 
     pub fn removed_env(&self) -> &[OsString] {
         &self.env_remove
+    }
+
+    pub fn set_env(&self) -> &[(OsString, OsString)] {
+        &self.env
     }
 
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
@@ -113,6 +126,9 @@ impl Cmd {
         }
         for name in &self.env_remove {
             command.env_remove(name);
+        }
+        for (name, value) in &self.env {
+            command.env(name, value);
         }
         command
     }
@@ -275,7 +291,7 @@ pub mod fake {
 
     use super::*;
 
-    pub type Handler = Box<dyn Fn(&[String]) -> Option<(bool, String)>>;
+    pub type Handler = Box<dyn Fn(&[String]) -> Option<Output>>;
 
     pub struct Fake {
         handler: Handler,
@@ -288,6 +304,17 @@ pub mod fake {
         /// A world answering each command with `handler`'s (success, stdout); `None` means the command is unknown,
         /// which fails the test.
         pub fn new(handler: impl Fn(&[String]) -> Option<(bool, String)> + 'static) -> Self {
+            Self::with_stderr(move |words| {
+                handler(words).map(|(success, stdout)| Output {
+                    success,
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        /// A world whose answers include what each command prints on stderr.
+        pub fn with_stderr(handler: impl Fn(&[String]) -> Option<Output> + 'static) -> Self {
             Self {
                 handler: Box::new(handler),
                 log: RefCell::default(),
@@ -312,13 +339,7 @@ pub mod fake {
                     .map(|name| name.to_string_lossy().into_owned())
                     .collect(),
             );
-            let (success, stdout) =
-                (self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}"));
-            Ok(Output {
-                success,
-                stdout,
-                stderr: String::new(),
-            })
+            Ok((self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}")))
         }
 
         fn run(&self, cmd: &Cmd) -> io::Result<bool> {

@@ -75,6 +75,10 @@ enum Step {
     },
     /// Activate a slot's provisioned guardian.
     Activate { slot: Option<Slot> },
+    /// Create the key provisioners' upload bucket and an access key that can only upload into it.
+    CreateKpUploadBucket,
+    /// Delete the upload key once the key provisioners no longer need it.
+    RevokeKpUploadKey,
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_NAME>-<UTC time>.
@@ -129,6 +133,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
         }
         Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
+        Step::CreateKpUploadBucket => kp_keys::create_kp_upload_bucket(&ctx),
+        Step::RevokeKpUploadKey => kp_keys::revoke_kp_upload_key(&ctx),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }

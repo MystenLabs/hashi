@@ -246,6 +246,26 @@ pub fn read_policy(bucket: &str, guardian_bucket: &str) -> String {
     .to_string()
 }
 
+/// What the upload key may do: upload into the bucket, outside `_config/`.
+pub fn upload_policy(bucket: &str) -> String {
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "s3:PutObject",
+                "Resource": format!("arn:aws:s3:::{bucket}/*"),
+            },
+            {
+                "Effect": "Deny",
+                "Action": "s3:PutObject",
+                "Resource": format!("arn:aws:s3:::{bucket}/{CONFIG_PREFIX}/*"),
+            },
+        ],
+    })
+    .to_string()
+}
+
 /// Whether `text` holds an AWS access key ID.
 pub fn holds_access_key(text: &str) -> bool {
     text.match_indices("AKIA").any(|(start, _)| {
