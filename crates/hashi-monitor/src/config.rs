@@ -160,7 +160,7 @@ impl Config {
                     (WithdrawalEventType::E2GuardianApproved, 30),
                 ])
                 .expect("valid predecessor skews"),
-                deposit_btc_block_time_skew: 10,
+                deposit_confirmation_skew: 10,
             },
             deployment: DeploymentConfig {
                 bucket_info: hashi_types::guardian::S3BucketInfo {

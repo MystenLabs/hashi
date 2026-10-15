@@ -35,8 +35,12 @@ const MIN_CONFIRMATIONS: u64 = 6;
 /// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
 #[derive(Clone, Debug)]
 pub struct TxConfirmation {
-    /// The time of the block that holds the transaction.
+    /// The time of the block that holds the transaction. The recovery leaf's
+    /// clock starts at this block, so a coin's age counts from here.
     pub block_time: UnixSeconds,
+    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
+    /// The bridge acts on that block, so the Bitcoin events carry this time.
+    pub confirmed_time: UnixSeconds,
     /// The transaction's outputs, in order.
     pub outputs: Vec<TxOut>,
 }
@@ -48,7 +52,7 @@ impl TxConfirmation {
         let output = self.outputs.get(deposit_id.vout() as usize)?;
         Some(MonitorDepositEvent {
             event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: self.block_time,
+            timestamp_secs: self.confirmed_time,
             deposit_id,
             amount: output.value.to_sat(),
             script_pubkey: output.script_pubkey.clone(),
@@ -91,6 +95,7 @@ struct RawTransactionInfo {
 #[derive(Deserialize)]
 struct RawBlockHeader {
     time: u64,
+    height: u64,
 }
 
 #[derive(Deserialize)]
@@ -307,25 +312,14 @@ impl HttpJsonRpcTransport {
             return Ok(None);
         };
 
-        let response = self.call(
-            "getblockheader",
-            serde_json::json!([block_hash.to_string(), true]),
-        )?;
-        if let Some(error) = response.error {
-            anyhow::bail!(
-                "bitcoin getblockheader failed for {block_hash}: {} ({})",
-                error.message,
-                error.code
-            );
-        }
-        let header: RawBlockHeader = serde_json::from_value(
-            response
-                .result
-                .context("bitcoin getblockheader response is missing its result")?,
-        )
-        .with_context(|| format!("failed to parse block header for {block_hash}"))?;
+        let times = self.confirmation_times(&[block_hash])?;
+        let (block_time, confirmed_time) = times
+            .get(&block_hash)
+            .copied()
+            .with_context(|| format!("missing block times for {block_hash}"))?;
         Ok(Some(TxConfirmation {
-            block_time: header.time,
+            block_time,
+            confirmed_time,
             outputs,
         }))
     }
@@ -409,9 +403,75 @@ impl HttpJsonRpcTransport {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let mut block_times = HashMap::with_capacity(unique_block_hashes.len());
-        for hashes in unique_block_hashes.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
-            let requests = hashes
+        let times = self.confirmation_times(&unique_block_hashes)?;
+
+        confirmed
+            .into_iter()
+            .map(|(txid, confirmed)| {
+                let confirmation = confirmed
+                    .map(|(hash, outputs)| {
+                        let (block_time, confirmed_time) = times
+                            .get(&hash)
+                            .copied()
+                            .with_context(|| format!("missing block times for {hash}"))?;
+                        Ok::<_, anyhow::Error>(TxConfirmation {
+                            block_time,
+                            confirmed_time,
+                            outputs,
+                        })
+                    })
+                    .transpose()?;
+                Ok((txid, confirmation))
+            })
+            .collect()
+    }
+
+    /// For each block that holds a confirmed transaction: its own time, and
+    /// the time of the block `MIN_CONFIRMATIONS - 1` above it. Core counts the
+    /// holding block as the first confirmation, so that block is the one that
+    /// gave the transaction `MIN_CONFIRMATIONS`.
+    fn confirmation_times(
+        &self,
+        block_hashes: &[BlockHash],
+    ) -> anyhow::Result<HashMap<BlockHash, (UnixSeconds, UnixSeconds)>> {
+        let headers = self.block_headers(block_hashes)?;
+        let confirming_height = |header: &RawBlockHeader| header.height + MIN_CONFIRMATIONS - 1;
+        let confirming_heights = headers
+            .values()
+            .map(confirming_height)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let confirming_hashes = self.block_hashes(&confirming_heights)?;
+        let confirming_headers =
+            self.block_headers(&confirming_hashes.values().copied().collect::<Vec<_>>())?;
+
+        block_hashes
+            .iter()
+            .map(|hash| {
+                let header = headers
+                    .get(hash)
+                    .with_context(|| format!("missing block header for {hash}"))?;
+                let height = confirming_height(header);
+                let confirming_hash = confirming_hashes
+                    .get(&height)
+                    .with_context(|| format!("missing block hash at height {height}"))?;
+                let confirming = confirming_headers
+                    .get(confirming_hash)
+                    .with_context(|| format!("missing block header for {confirming_hash}"))?;
+                Ok((*hash, (header.time, confirming.time)))
+            })
+            .collect()
+    }
+
+    /// `getblockheader` for each hash, in batches.
+    fn block_headers(
+        &self,
+        hashes: &[BlockHash],
+    ) -> anyhow::Result<HashMap<BlockHash, RawBlockHeader>> {
+        let mut headers = HashMap::with_capacity(hashes.len());
+        for chunk in hashes.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
+            let requests = chunk
                 .iter()
                 .enumerate()
                 .map(|(id, hash)| {
@@ -424,14 +484,14 @@ impl HttpJsonRpcTransport {
                 })
                 .collect::<Vec<_>>();
             let responses = self.call_batch(&requests)?;
-            let mut seen = HashSet::with_capacity(hashes.len());
+            let mut seen = HashSet::with_capacity(chunk.len());
             for response in responses {
-                let index = response_index(&response, hashes.len())?;
+                let index = response_index(&response, chunk.len())?;
                 anyhow::ensure!(
                     seen.insert(index),
                     "duplicate bitcoin getblockheader batch response ID {index}"
                 );
-                let block_hash = hashes[index];
+                let block_hash = chunk[index];
                 if let Some(error) = response.error {
                     anyhow::bail!(
                         "bitcoin getblockheader failed for {block_hash}: {} ({})",
@@ -445,34 +505,68 @@ impl HttpJsonRpcTransport {
                         .context("bitcoin getblockheader batch response is missing its result")?,
                 )
                 .with_context(|| format!("failed to parse block header for {block_hash}"))?;
-                block_times.insert(block_hash, header.time);
+                headers.insert(block_hash, header);
             }
             anyhow::ensure!(
-                seen.len() == hashes.len(),
+                seen.len() == chunk.len(),
                 "bitcoin getblockheader batch returned {}/{} responses",
                 seen.len(),
-                hashes.len()
+                chunk.len()
             );
         }
+        Ok(headers)
+    }
 
-        confirmed
-            .into_iter()
-            .map(|(txid, confirmed)| {
-                let confirmation = confirmed
-                    .map(|(hash, outputs)| {
-                        let block_time = block_times
-                            .get(&hash)
-                            .copied()
-                            .with_context(|| format!("missing block time for {hash}"))?;
-                        Ok::<_, anyhow::Error>(TxConfirmation {
-                            block_time,
-                            outputs,
-                        })
+    /// `getblockhash` for each height, in batches.
+    fn block_hashes(&self, heights: &[u64]) -> anyhow::Result<HashMap<u64, BlockHash>> {
+        let mut hashes = HashMap::with_capacity(heights.len());
+        for chunk in heights.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
+            let requests = chunk
+                .iter()
+                .enumerate()
+                .map(|(id, height)| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "getblockhash",
+                        "params": [height],
                     })
-                    .transpose()?;
-                Ok((txid, confirmation))
-            })
-            .collect()
+                })
+                .collect::<Vec<_>>();
+            let responses = self.call_batch(&requests)?;
+            let mut seen = HashSet::with_capacity(chunk.len());
+            for response in responses {
+                let index = response_index(&response, chunk.len())?;
+                anyhow::ensure!(
+                    seen.insert(index),
+                    "duplicate bitcoin getblockhash batch response ID {index}"
+                );
+                let height = chunk[index];
+                if let Some(error) = response.error {
+                    anyhow::bail!(
+                        "bitcoin getblockhash failed for height {height}: {} ({})",
+                        error.message,
+                        error.code
+                    );
+                }
+                let hash: String = serde_json::from_value(
+                    response
+                        .result
+                        .context("bitcoin getblockhash batch response is missing its result")?,
+                )
+                .with_context(|| format!("failed to parse block hash at height {height}"))?;
+                let hash = BlockHash::from_str(&hash)
+                    .with_context(|| format!("invalid bitcoin block hash at height {height}"))?;
+                hashes.insert(height, hash);
+            }
+            anyhow::ensure!(
+                seen.len() == chunk.len(),
+                "bitcoin getblockhash batch returned {}/{} responses",
+                seen.len(),
+                chunk.len()
+            );
+        }
+        Ok(hashes)
     }
 }
 
@@ -615,6 +709,22 @@ mod tests {
             confirmed.outputs
         );
 
+        // The tip is exactly the block that gave the transaction its
+        // confirmations, so its header time is the confirmed time.
+        let tip_height = node.get_block_count()?;
+        let tip_hash: String = node
+            .rpc_client()
+            .call("getblockhash", &[serde_json::json!(tip_height)])?;
+        let tip_header: serde_json::Value = node.rpc_client().call(
+            "getblockheader",
+            &[serde_json::json!(tip_hash), serde_json::json!(true)],
+        )?;
+        assert_eq!(
+            confirmed.confirmed_time,
+            tip_header["time"].as_u64().unwrap()
+        );
+        assert!(confirmed.block_time <= confirmed.confirmed_time);
+
         Ok(())
     }
 
@@ -622,7 +732,8 @@ mod tests {
     fn a_confirmation_builds_the_deposit_event_of_its_output() {
         let script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
         let confirmation = TxConfirmation {
-            block_time: 90,
+            block_time: 30,
+            confirmed_time: 90,
             outputs: vec![
                 bitcoin::TxOut {
                     value: Amount::from_sat(1_000),

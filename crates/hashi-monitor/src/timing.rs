@@ -17,9 +17,12 @@
 //! - Withdrawals: each successor must follow its predecessor within its
 //!   delay. Each predecessor may be recorded after its successor by at most
 //!   its skew.
-//! - Deposits: the Bitcoin block time may be after the Hashi confirmation by
-//!   at most the skew. The Bitcoin event is the user's payment, so no delay
-//!   bounds it.
+//! - Deposits: the Bitcoin confirmation time may be after the Hashi
+//!   confirmation by at most the skew. The Bitcoin event is the user's
+//!   payment, so no delay bounds it.
+//!
+//! A Bitcoin event is timed by the block that gave the transaction
+//! `MIN_CONFIRMATIONS`, not by the block that holds it.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +35,8 @@ use crate::domain::WithdrawalEventType;
 pub const WITHDRAWAL_E1_TO_E2_DELAY: u64 = 60 * 60;
 
 /// E2 -> E3. The signed transaction must confirm on Bitcoin within a day.
+/// E3 is timed by the block that gave it `MIN_CONFIRMATIONS`, so the bound
+/// includes the wait for those blocks, about 50 minutes.
 pub const WITHDRAWAL_E2_TO_E3_DELAY: u64 = 24 * 60 * 60;
 
 /// E1 after E2. The guardian's request clock tolerance is five minutes.
@@ -41,9 +46,10 @@ pub const WITHDRAWAL_E1_AFTER_E2_SKEW: u64 = 5 * 60;
 /// median of the last 11 blocks, which lags real time by about an hour.
 pub const WITHDRAWAL_E2_AFTER_E3_SKEW: u64 = 2 * 60 * 60;
 
-/// Deposit E1 after E2. How far the deposit's block time may be after the
-/// Hashi confirmation.
-pub const DEPOSIT_BTC_BLOCK_TIME_SKEW: u64 = 5 * 60;
+/// Deposit E1 after E2. E1 is timed by the block that gave the deposit its
+/// confirmations, and a miner may date a block up to two hours ahead of
+/// real time.
+pub const DEPOSIT_CONFIRMATION_SKEW: u64 = 2 * 60 * 60;
 
 /// The bounds in force. `Default` is the protocol set above. Tests build
 /// their own with small numbers.
@@ -55,8 +61,9 @@ pub struct Timing {
     /// Each withdrawal predecessor may be recorded after its successor by at
     /// most this, keyed by the predecessor.
     pub predecessor_skews: EventBounds,
-    /// How far a deposit's block time may be after its Hashi confirmation.
-    pub deposit_btc_block_time_skew: u64,
+    /// How far a deposit's confirmation time may be after its Hashi
+    /// confirmation.
+    pub deposit_confirmation_skew: u64,
 }
 
 impl Default for Timing {
@@ -84,7 +91,7 @@ impl Default for Timing {
                 ),
             ])
             .expect("one bound per non-terminal event"),
-            deposit_btc_block_time_skew: DEPOSIT_BTC_BLOCK_TIME_SKEW,
+            deposit_confirmation_skew: DEPOSIT_CONFIRMATION_SKEW,
         }
     }
 }
