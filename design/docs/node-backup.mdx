@@ -366,7 +366,7 @@ requires operators to configure:
   Expiring only current objects can leave historical versions behind. This is
   an operational default, not guaranteed deletion on day 14 or a guaranteed
   recovery window: Object Lock sets a minimum protected period, expiration is
-  asynchronous, and recovery depends on epoch-limited certificate history.
+  asynchronous.
 
 Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
 configuration defines the bucket and audit safeguards, but leaves read access
@@ -376,7 +376,7 @@ provisioning is separate.
 The destination is derived from the node identity, with no custom prefix:
 
 ```text
-s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-<timestamp>.tar.asc
+s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
 ```
 
 Scheduled backups upload the completed encrypted local archive once, without
@@ -466,3 +466,24 @@ For a **single compromised node with sufficient healthy peers**:
 Suspected quorum-wide or global MPC key compromise requires coordinated incident
 response, not this single-node procedure. Resharing preserves the global Bitcoin
 key; it does not repair a stolen global private key.
+
+## Catastrophic MPC key recovery
+
+A zero-day compromise could steal and delete MPC key shares across the validator
+fleet. Catastrophic data loss could also leave every node without its shares.
+Backups allow the existing MPC key to be recovered when no functioning committee
+remains.
+
+Scheduled backups include `hashi-mpc-recovery.bcs` when the node holds MPC shares.
+This file contains the node's shares and the information needed to combine them
+with other nodes' backups to recover the MPC key. Recovery needs a sufficient set
+of backups from the same epoch and works even after old onchain certificates have
+been deleted. Manual backups do not include this file.
+
+Operators should preserve off-machine encrypted backups and keep access to their
+backup decryption keys separate from the validator fleet. MPC key recovery is
+an incident-response operation, not part of ordinary node restoration.
+
+Recovery assembles the full MPC private key, which must be handled as a highly
+sensitive secret. It does not invalidate a copy already stolen by an attacker.
+
