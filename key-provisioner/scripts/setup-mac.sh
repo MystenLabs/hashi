@@ -14,6 +14,7 @@ else
     sudo installer -pkg /tmp/determinate-nix.pkg -target /
 fi
 
+# shellcheck source=/dev/null
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 
 echo "Applying nix-darwin config..."

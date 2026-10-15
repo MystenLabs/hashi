@@ -157,6 +157,9 @@ jobs:
       - run: make buf-lint
       - run: make proto
 
+      - name: shellcheck
+        run: shellcheck key-provisioner/scripts/*.sh
+
       - run: make is-dirty
 
   docs:
