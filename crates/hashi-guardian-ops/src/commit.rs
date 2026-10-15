@@ -1,0 +1,149 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The guardian's own commit. Everything that must match the guardian (its CLI, its protos, the key provisioners'
+//! scripts) comes from the tree at that commit, never from the checkout this tool runs from.
+
+use std::path::Path;
+use std::path::PathBuf;
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
+
+use crate::Ctx;
+use crate::exec::Cmd;
+use crate::exec::read;
+
+pub struct Tree {
+    pub commit: String,
+    pub dir: PathBuf,
+}
+
+impl Tree {
+    /// The tree at `commit`, extracted once into `.hashi/guardian-init/<commit>/`. `whose` names what runs the
+    /// commit, for the message when this checkout doesn't have it.
+    pub fn at(ctx: &Ctx, commit: &str, whose: &str) -> Result<Self> {
+        let root = ctx.repo.join(".hashi/guardian-init");
+        let dir = root.join(commit);
+        if !dir.is_dir() {
+            let has_commit = ctx
+                .exec
+                .output(&git(&ctx.repo).args(["cat-file", "-e", &format!("{commit}^{{commit}}")]))
+                .with_context(|| format!("Could not run git in {}.", ctx.repo.display()))?
+                .success;
+            if !has_commit {
+                bail!("This checkout does not have {commit}, {whose}. Fetch it first.");
+            }
+            extract(ctx, commit, &root, &dir)
+                .with_context(|| format!("Could not extract {commit} into {}.", dir.display()))?;
+        }
+        Ok(Self {
+            commit: commit.to_owned(),
+            dir,
+        })
+    }
+
+    /// The protos the guardian at this commit speaks, for grpcurl's `-import-path`.
+    pub fn protos(&self) -> PathBuf {
+        self.dir.join("crates/hashi-types/proto")
+    }
+}
+
+/// Extracts beside `dir` and renames into place, so an interrupted extraction never looks complete.
+fn extract(ctx: &Ctx, commit: &str, root: &Path, dir: &Path) -> Result<()> {
+    let partial = root.join(format!(".{commit}.partial"));
+    if partial.exists() {
+        std::fs::remove_dir_all(&partial)?;
+    }
+    let tree = partial.join("tree");
+    std::fs::create_dir_all(&tree)?;
+    let archive = partial.join("tree.tar");
+    read(
+        ctx.exec,
+        &git(&ctx.repo)
+            .args(["archive", "--format=tar", "-o"])
+            .arg(&archive)
+            .arg(commit),
+    )?;
+    read(
+        ctx.exec,
+        &Cmd::new("tar")
+            .arg("-x")
+            .arg("-f")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&tree),
+    )?;
+    std::fs::rename(&tree, dir)?;
+    std::fs::remove_dir_all(&partial)?;
+    Ok(())
+}
+
+fn git(repo: &Path) -> Cmd {
+    Cmd::new("git").arg("-C").arg(repo)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::fake::Fake;
+
+    #[test]
+    fn refuses_a_commit_the_checkout_lacks() {
+        let repo = tempfile::tempdir().unwrap();
+        let exec = Fake::new(|words| (words[3] == "cat-file").then(|| (false, String::new())));
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        let commit = "ab".repeat(20);
+        let error = Tree::at(&ctx, &commit, "the commit slot b's guardian runs")
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "This checkout does not have {commit}, the commit slot b's guardian runs. Fetch it first."
+            )
+        );
+    }
+
+    #[test]
+    fn reuses_an_extracted_tree() {
+        let repo = tempfile::tempdir().unwrap();
+        let commit = "cd".repeat(20);
+        std::fs::create_dir_all(repo.path().join(".hashi/guardian-init").join(&commit)).unwrap();
+        let exec = Fake::new(|_| None);
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        let tree = Tree::at(&ctx, &commit, "").unwrap();
+        assert_eq!(
+            tree.protos(),
+            repo.path()
+                .join(".hashi/guardian-init")
+                .join(&commit)
+                .join("crates/hashi-types/proto")
+        );
+        assert!(exec.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn extracts_the_real_tree() {
+        // Archives this checkout's HEAD for real, so the extraction is checked against git and tar themselves.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let head = read(
+            &crate::exec::System,
+            &git(&repo).args(["rev-parse", "HEAD"]),
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let scratch = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(&repo, &crate::exec::System, &[]);
+        let root = scratch.path().join("guardian-init");
+        let dir = root.join(&head);
+        extract(&ctx, &head, &root, &dir).unwrap();
+        assert!(
+            dir.join("crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto")
+                .is_file()
+        );
+        assert!(!root.join(format!(".{head}.partial")).exists());
+    }
+}
