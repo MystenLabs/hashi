@@ -1,22 +1,12 @@
 # Sample configuration for `hashi-monitor batch` and `hashi-monitor continuous`.
-
-# All duration values are expressed in seconds.
-
-# Liveness delay bounds
-next_event_delays:
-  - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
-  - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
-
-# Clock skew tolerances: E_{i+1} can occur up to this long before E_i (defaults shown)
-# clock_skews:
-#   - [E1HashiApproved, 300]
-#   - [E2GuardianApproved, 7200]
-
-# How far a deposit's block time can be after its Sui confirmation (default: 300s)
-# deposit_clock_skew: 300
-
-# Sui withdrawal history searched before the guardian audit start (default: 1 hour)
-# withdrawal_predecessor_lookback: 3600
+#
+# The file holds the identity of one deployment. The timing bounds of the
+# withdrawal and deposit flows describe the protocol and live in the code, in
+# `crates/hashi-monitor/src/timing.rs`.
+#
+# Any string value may be `env:NAME`, which reads the environment variable
+# `NAME` at startup. Use it for bucket names, endpoints and credentials.
+# Unknown keys are an error.
 
 # Deployment identity and builds accepted when auditing Guardian logs.
 deployment:
@@ -51,8 +41,10 @@ sui:
   package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
-  rpc_url: "env:BITCOIN_RPC_URL"
-  # Optional headers for hosted JSON-RPC providers; values accept `env:` too:
+  # Cargo sets CARGO_PKG_NAME for the tests that parse this file; a deployment
+  # names its own variable.
+  rpc_url: "env:CARGO_PKG_NAME"
+  # Optional headers for hosted JSON-RPC providers:
   # http_headers:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"

@@ -319,7 +319,7 @@ impl DepositStateMachine {
             panic!("unexpected event type");
         }
         // btc confirmation is a predecessor event => we set the deadline to now (+skew).
-        let t_btc_expected = event.timestamp_secs + cfg.deposit_clock_skew;
+        let t_btc_expected = event.timestamp_secs + cfg.timing.deposit_btc_block_time_skew;
         Self {
             hashi_deposit_event: event,
             btc_resolved: false,
@@ -434,13 +434,7 @@ pub fn deposit_mismatch(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
-    use crate::config::BtcConfig;
-    use crate::config::ClockSkews;
-    use crate::config::NextEventDelays;
-    use crate::config::SuiConfig;
     use crate::findings::FindingCategory;
     use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
     use bitcoin::Amount;
@@ -449,8 +443,6 @@ mod tests {
     use bitcoin::WPubkeyHash;
     use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin::DerivationPath;
-    use hashi_types::guardian::DeploymentConfig;
-    use hashi_types::guardian::S3Credentials;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -464,46 +456,7 @@ mod tests {
     }
 
     fn cfg() -> Config {
-        Config {
-            next_event_delays: NextEventDelays::new(vec![
-                (WithdrawalEventType::E1HashiApproved, 100),
-                (WithdrawalEventType::E2GuardianApproved, 200),
-            ])
-            .expect("valid intra-event delays"),
-            clock_skews: ClockSkews::new(vec![
-                (WithdrawalEventType::E1HashiApproved, 10),
-                (WithdrawalEventType::E2GuardianApproved, 30),
-            ])
-            .expect("valid clock skews"),
-            deposit_clock_skew: 10,
-            withdrawal_predecessor_lookback: 60 * 60,
-            deployment: DeploymentConfig {
-                bucket_info: hashi_types::guardian::S3BucketInfo {
-                    name: "bucket".to_string(),
-                    region: "us-east-1".to_string(),
-                },
-                retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
-                bitcoin_network: bitcoin::Network::Regtest,
-                pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
-                    hashi_types::guardian::BuildPcrs::mock_for_testing("", 1),
-                    vec![],
-                )
-                .expect("valid PCR allowlist"),
-            },
-            s3_credentials: Some(S3Credentials {
-                access_key: "access-key".to_string(),
-                secret_key: "secret-key".to_string(),
-                session_token: None,
-            }),
-            sui: SuiConfig {
-                rpc_url: "http://sui".to_string(),
-                package_id: format!("0x{}", "11".repeat(32)),
-            },
-            btc: BtcConfig {
-                rpc_url: "http://btc".to_string(),
-                http_headers: BTreeMap::new(),
-            },
-        }
+        Config::for_tests()
     }
 
     fn txid(fill: u8) -> Txid {

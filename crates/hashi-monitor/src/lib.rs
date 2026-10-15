@@ -16,6 +16,9 @@ pub mod rpc;
 /// CLI config types.
 pub mod config;
 
+/// Timing bounds of the withdrawal and deposit flows.
+pub mod timing;
+
 /// Domain findings emitted by the monitor.
 pub mod findings;
 

@@ -51,8 +51,9 @@ already covered also raises `SuiScanMissedEvent`.
 
 ### Timeline semantics (withdrawals)
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui withdrawal events are polled from `withdrawal_predecessor_lookback`
-  seconds before the guardian window to validate E2 predecessor constraints.
+- Sui withdrawal events are polled from one E1 delay before the guardian
+  window, since an E1 older than that is a late E2 in its own right. An E1
+  outside the scan is still read from Sui by its withdrawal id.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
 - Deposits are audited over the derived Sui range rather than gated by the
   withdrawal audit-window logic.
@@ -93,31 +94,34 @@ still read by withdrawal id if the guardian signed them, but deposits and
 unsigned approvals from before it are not audited.
 
 ## Config
-See `audit.sample.yaml` for a complete batch/continuous example:
+The config file holds the identity of one deployment. See `audit.sample.yaml`
+for a complete batch/continuous example. The deployment in sui-operations
+stores that shape verbatim.
 
-The required `deployment` block contains the expected Bitcoin network, S3
-bucket/region, retention environment, and PCR allowlist. Every Guardian writing
-session must match that deployment. Historical builds remain accepted through
-`deployment.pcr_allowlist.prev_builds`. Omit `s3_credentials` to use the AWS default
-credential chain; explicit credentials require both keys and may include a session token.
+- The required `deployment` block contains the expected Bitcoin network, S3
+  bucket/region, retention environment, and PCR allowlist. Every Guardian
+  writing session must match that deployment. Historical builds remain
+  accepted through `deployment.pcr_allowlist.prev_builds`.
+- Omit `s3_credentials` to use the AWS default credential chain; explicit
+  credentials require both keys and may include a session token.
+- Any string value may be `env:NAME`. The monitor replaces it with the
+  environment variable `NAME` at startup. Use it for bucket names, endpoints
+  and credentials.
+- Unknown keys are an error, so a typo cannot be ignored.
+
+The timing bounds of the withdrawal and deposit flows are not configuration.
+They describe the protocol and are the same in every environment, so they
+are constants in `src/timing.rs`, each with its reason:
+
+| Bound | Value | Meaning |
+|---|---|---|
+| E1 -> E2 delay | 1 h | the guardian must sign within this of a Hashi approval |
+| E2 -> E3 delay | 1 d | the signed transaction must confirm on Bitcoin within this |
+| E1 after E2 skew | 5 min | the guardian's request clock tolerance |
+| E2 after E3 skew | 2 h | a block time may lag real time by this |
+| deposit block-time skew | 5 min | a deposit's block time may be after its Hashi confirmation by this |
 
 ```yaml
-# Liveness delay bounds (seconds)
-next_event_delays:
-  - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
-  - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
-
-# Optional: how far each event's successor may occur before it (defaults shown)
-# clock_skews:
-#   - [E1HashiApproved, 300]
-#   - [E2GuardianApproved, 7200]
-
-# Optional: how far a deposit's block time may be after its Sui confirmation (default: 300s)
-# deposit_clock_skew: 300
-
-# Optional: Sui withdrawal history before the guardian window (default: 1 hour)
-# withdrawal_predecessor_lookback: 3600
-
 # Deployment identity and builds accepted when auditing Guardian logs.
 deployment:
   bucket_info:
@@ -152,6 +156,7 @@ sui:
 
 btc:
   rpc_url: "env:BITCOIN_RPC_URL"
+  # Optional headers for hosted JSON-RPC providers:
   # http_headers:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"

@@ -227,7 +227,7 @@ pub struct MonitorWithdrawalEvent {
 
 /// Event source or type.
 /// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
 pub enum WithdrawalEventType {
     /// E_hashi (WithdrawalPickedForProcessing on sui)
     E1HashiApproved,

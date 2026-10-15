@@ -55,7 +55,7 @@ impl AuditWindow for ContinuousAuditWindow {
 
 impl ContinuousAuditWindow {
     pub fn new(cfg: &Config, start: UnixSeconds) -> Self {
-        let sui_start = start.saturating_sub(cfg.withdrawal_predecessor_lookback);
+        let sui_start = start.saturating_sub(cfg.timing.sui_lookback());
         let guardian_start = start;
 
         Self {
@@ -70,9 +70,10 @@ impl ContinuousAuditWindow {
     /// cursor that judges those deadlines, and one poll and state tick to report.
     pub fn default_start(cfg: &Config, now: UnixSeconds) -> UnixSeconds {
         let pending = cfg
-            .next_event_delays
-            .max_delay()
-            .saturating_add(cfg.clock_skews.max_skew())
+            .timing
+            .successor_delays
+            .max()
+            .saturating_add(cfg.timing.predecessor_skews.max())
             .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
@@ -272,49 +273,47 @@ impl ContinuousAuditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::WithdrawalEventType;
+    use crate::timing::EventBounds;
+    use crate::timing::Timing;
 
-    const CONFIG: &str = r#"
-next_event_delays:
-  - [E1HashiApproved, 1200]
-  - [E2GuardianApproved, 86400]
-deployment:
-  bucket_info:
-    name: "bucket"
-    region: "us-west-2"
-  retention_environment: "testnet"
-  bitcoin_network: "signet"
-  pcr_allowlist:
-    current_build:
-      git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
-    prev_builds: []
-sui:
-  rpc_url: "http://sui"
-  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
-btc:
-  rpc_url: "http://btc"
-"#;
+    /// The test config with a day's E2 -> E3 delay and the protocol skews.
+    fn cfg() -> Config {
+        let mut cfg = Config::for_tests();
+        cfg.timing = Timing {
+            successor_delays: EventBounds::new([
+                (WithdrawalEventType::E1HashiApproved, 1_200),
+                (WithdrawalEventType::E2GuardianApproved, 86_400),
+            ])
+            .unwrap(),
+            predecessor_skews: EventBounds::new([
+                (WithdrawalEventType::E1HashiApproved, 300),
+                (WithdrawalEventType::E2GuardianApproved, 7_200),
+            ])
+            .unwrap(),
+            deposit_btc_block_time_skew: 300,
+        };
+        cfg
+    }
 
     #[test]
     fn default_start_covers_a_week_outage_and_the_checks_pending_when_it_began() {
-        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
-
         assert_eq!(
-            ContinuousAuditWindow::default_start(&cfg, 1_000_000),
+            ContinuousAuditWindow::default_start(&cfg(), 1_000_000),
             1_000_000 - 604_800 - 86_400 - 7_200 - 4_200 - 600 - 300,
         );
     }
 
     #[test]
     fn default_start_precedes_every_deadline_the_guardian_cursor_has_yet_to_judge() {
-        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        let cfg = cfg();
         let now = 1_000_000;
 
         // A missing guardian approval is only found once the hourly cursor
         // passes its deadline, so the oldest one still unreported belongs to a
         // withdrawal that started a whole delay before the cursor's own lag.
         let oldest_unjudged_start =
-            now - MAX_DIR_COMPLETION_LAG - cfg.next_event_delays.max_delay();
+            now - MAX_DIR_COMPLETION_LAG - cfg.timing.successor_delays.max();
 
         assert!(ContinuousAuditWindow::default_start(&cfg, now) <= oldest_unjudged_start);
     }

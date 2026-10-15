@@ -480,28 +480,6 @@ mod tests {
     use crate::rpc::sui::tests::poller_scanned_with;
     use bitcoin::hashes::Hash as _;
 
-    const CONFIG: &str = r#"
-next_event_delays:
-  - [E1HashiApproved, 1200]
-  - [E2GuardianApproved, 86400]
-deployment:
-  bucket_info:
-    name: "bucket"
-    region: "us-west-2"
-  retention_environment: "testnet"
-  bitcoin_network: "signet"
-  pcr_allowlist:
-    current_build:
-      git_revision: "0000000000000000000000000000000000000000"
-      pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
-    prev_builds: []
-sui:
-  rpc_url: "http://sui"
-  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
-btc:
-  rpc_url: "http://btc"
-"#;
-
     struct AllTime;
 
     impl AuditWindow for AllTime {
@@ -517,7 +495,7 @@ btc:
         cursor: UnixSeconds,
         btc_txid: Txid,
     ) -> AuditorCore {
-        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        let cfg = Config::for_tests();
         let mut auditor = AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
