@@ -1,0 +1,62 @@
+# Prometheus alerting rules for the hashi guardian proxy. docs/alerting.md says
+# which rule files to load.
+#
+# Add this file to the rule_files of the Prometheus or Mimir tenant that
+# receives the proxy's metrics, and route on `severity`.
+
+groups:
+  - name: hashi-guardian-proxy
+    interval: 1m
+    rules:
+      # Any `unavailable_*` outcome is the proxy refusing rather than
+      # forwarding: it could not list or read the guardian's S3 withdrawal log,
+      # or a record there is not what it expects.
+      - alert: HashiGuardianProxyFailingClosed
+        expr: |
+          sum without (outcome) (rate(guardian_proxy_withdrawal_requests_total{outcome=~"unavailable_.*"}[10m]))
+            / sum without (outcome) (rate(guardian_proxy_withdrawal_requests_total[10m]))
+            > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 25% of withdrawal requests through the guardian proxy are refused"
+          description: >-
+            The guardian proxy is answering UNAVAILABLE to a quarter of
+            withdrawal requests. Nodes retry, so withdrawals wait rather than
+            fail, but the cause needs finding: S3 access from the proxy, or a
+            withdrawal log record it cannot index or read. Its logs name the
+            key.
+
+      # The allowlist gauge is exported from startup, so its absence means the
+      # proxy is down or its metrics no longer arrive.
+      - alert: HashiGuardianProxyMetricsAbsent
+        expr: absent(guardian_proxy_member_allowlist_size)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "no guardian proxy metrics have arrived in 15 minutes"
+          description: >-
+            Either the proxy is down or its metrics are not arriving; a failed
+            remote write logs `unable to push metrics`.
+
+      # The tail indexes an hour 10 minutes after it ends and rewrites the lag
+      # every 5, so the lag stays under 75 minutes and keeps changing.
+      - alert: HashiGuardianProxyIndexStalled
+        expr: |
+          guardian_proxy_widlog_cursor_lag_seconds > 7200
+            or changes(guardian_proxy_widlog_cursor_lag_seconds[30m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the guardian proxy's withdrawal log index has stalled"
+          description: >-
+            The proxy's index of the guardian's S3 withdrawal log has stopped
+            advancing, or its tail has stopped running;
+            `guardian_proxy_widlog_tail_failures_total` counts the failed
+            attempts. Each lookup that misses the index lists the
+            unindexed hours itself, and fails closed if it hits the same error.
+            The proxy's logs say why: S3 access, or a key in the log it cannot
+            parse.

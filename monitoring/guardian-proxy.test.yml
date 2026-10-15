@@ -1,0 +1,108 @@
+rule_files:
+  - guardian-proxy.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # From 20m, 2 of every 5 requests are refused.
+  - name: forty-percent-refused
+    interval: 1m
+    input_series:
+      - series: 'guardian_proxy_withdrawal_requests_total{outcome="hit"}'
+        values: '0+3x120'
+      - series: 'guardian_proxy_withdrawal_requests_total{outcome="unavailable_log_store"}'
+        values: '0x19 0+2x100'
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: HashiGuardianProxyFailingClosed
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiGuardianProxyFailingClosed
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: more than 25% of withdrawal requests through the guardian proxy are refused
+              description: >-
+                The guardian proxy is answering UNAVAILABLE to a quarter of
+                withdrawal requests. Nodes retry, so withdrawals wait rather than
+                fail, but the cause needs finding: S3 access from the proxy, or a
+                withdrawal log record it cannot index or read. Its logs name the
+                key.
+
+  - name: one-in-six-refused-stays-quiet
+    interval: 1m
+    input_series:
+      - series: 'guardian_proxy_withdrawal_requests_total{outcome="forwarded"}'
+        values: '0+5x120'
+      - series: 'guardian_proxy_withdrawal_requests_total{outcome="unavailable_log_store"}'
+        values: '0+1x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: HashiGuardianProxyFailingClosed
+        exp_alerts: []
+
+  - name: metrics-stop-arriving
+    interval: 1m
+    input_series:
+      - series: 'guardian_proxy_member_allowlist_size'
+        values: '5x30 stale'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiGuardianProxyMetricsAbsent
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: HashiGuardianProxyMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: no guardian proxy metrics have arrived in 15 minutes
+              description: >-
+                Either the proxy is down or its metrics are not arriving; a failed
+                remote write logs `unable to push metrics`.
+
+  # The lag saws between 30 and 75 minutes while the tail works, then the
+  # cursor stops at 2h and the lag climbs past 2 hours.
+  - name: index-stops-advancing
+    interval: 5m
+    input_series:
+      - series: 'guardian_proxy_widlog_cursor_lag_seconds'
+        values: '1800+300x9 1800+300x9 1800+300x3 7300+300x20'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: HashiGuardianProxyIndexStalled
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiGuardianProxyIndexStalled
+        exp_alerts: []
+      - eval_time: 2h20m
+        alertname: HashiGuardianProxyIndexStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: the guardian proxy's withdrawal log index has stalled
+              description: &index_stalled >-
+                The proxy's index of the guardian's S3 withdrawal log has stopped
+                advancing, or its tail has stopped running;
+                `guardian_proxy_widlog_tail_failures_total` counts the failed
+                attempts. Each lookup that misses the index lists the unindexed
+                hours itself, and fails closed if it hits the same error. The
+                proxy's logs say why: S3 access, or a key in the log it cannot
+                parse.
+
+  # The tail dies just before 1h and the lag gauge freezes below 2 hours.
+  - name: tail-stops-updating-the-lag
+    interval: 5m
+    input_series:
+      - series: 'guardian_proxy_widlog_cursor_lag_seconds'
+        values: '1800+300x9 1800+300x1 4000x20'
+    alert_rule_test:
+      - eval_time: 95m
+        alertname: HashiGuardianProxyIndexStalled
+        exp_alerts: []
+      - eval_time: 105m
+        alertname: HashiGuardianProxyIndexStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: the guardian proxy's withdrawal log index has stalled
+              description: *index_stalled
