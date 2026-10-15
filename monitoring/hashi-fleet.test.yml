@@ -1,0 +1,989 @@
+rule_files:
+  - hashi-fleet.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # sui-node's own uptime keeps arriving and must not count.
+  - name: every-validator-stops-reporting
+    interval: 1m
+    input_series:
+      - series: 'uptime{host="hashi-a",hashi_object_id="0x1"}'
+        values: '0+60x30 stale'
+      - series: 'uptime{host="hashi-b",hashi_object_id="0x1"}'
+        values: '0+60x30 stale'
+      - series: 'uptime{host="hashi-c",hashi_object_id="0x1"}'
+        values: '0+60x30 stale'
+      - series: 'uptime{host="validator-a"}'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetMetricsAbsent
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: HashiFleetMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "no hashi validator is reporting metrics"
+              description: &hashiFleetMetricsAbsent >-
+                Not one validator has pushed hashi metrics for 15 minutes. That is
+                almost always the metrics pipeline (sui-proxy, or the store behind
+                it), not the whole committee.
+
+  - name: two-of-five-validators-stop-reporting
+    interval: 5m
+    input_series:
+      - series: 'uptime{host="hashi-a",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-b",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-c",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-d",hashi_object_id="0x1"}'
+        values: '0+300x72 stale'
+      - series: 'uptime{host="hashi-e",hashi_object_id="0x1"}'
+        values: '0+300x72 stale'
+    alert_rule_test:
+      - eval_time: 6h15m
+        alertname: HashiFleetShrunk
+        exp_alerts: []
+      - eval_time: 6h30m
+        alertname: HashiFleetShrunk
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "more than 20% of hashi validators stopped reporting"
+              description: &hashiFleetShrunk >-
+                The number of validators pushing hashi metrics has dropped more than
+                20% below its 6h peak for over 15 minutes. Either a large slice of the
+                committee is down or the metrics proxy is not accepting pushes; check
+                `hashi_proxy_allowed_members` and the sui-proxy publish rate before
+                assuming the former.
+
+  - name: one-of-five-validators-stops-reporting
+    interval: 5m
+    input_series:
+      - series: 'uptime{host="hashi-a",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-b",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-c",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-d",hashi_object_id="0x1"}'
+        values: '0+300x100'
+      - series: 'uptime{host="hashi-e",hashi_object_id="0x1"}'
+        values: '0+300x72 stale'
+    alert_rule_test:
+      - eval_time: 6h30m
+        alertname: HashiFleetShrunk
+        exp_alerts: []
+
+  # hashi-a leads until 2h, then nobody does.
+  - name: nobody-leads-for-an-hour
+    interval: 1m
+    input_series:
+      - series: 'hashi_is_leader{host="hashi-a"}'
+        values: '1x120 0x100'
+      - series: 'hashi_is_leader{host="hashi-b"}'
+        values: '0x220'
+    alert_rule_test:
+      - eval_time: 150m
+        alertname: HashiFleetNoLeader
+        exp_alerts: []
+      - eval_time: 190m
+        alertname: HashiFleetNoLeader
+        exp_alerts: []
+      - eval_time: 200m
+        alertname: HashiFleetNoLeader
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "no hashi validator has acted as leader in the last hour"
+              description: &hashiFleetNoLeader >-
+                Not one validator reported `hashi_is_leader = 1` in the trailing hour.
+                Nothing is driving deposits, withdrawals, or confirmations: the bridge
+                is stalled even though nodes look up.
+
+  - name: a-third-of-guardian-rpcs-fail-closed
+    interval: 1m
+    input_series:
+      - series: 'hashi_guardian_rpc_total{host="hashi-a",method="sign",outcome="ok"}'
+        values: '0+6x60'
+      - series: 'hashi_guardian_rpc_total{host="hashi-a",method="sign",outcome="unavailable"}'
+        values: '0+3x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetGuardianUnreachable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "more than 25% of fleet-wide guardian RPCs are failing closed"
+              description: &hashiFleetGuardianUnreachable >-
+                Guardian RPCs across the whole committee are failing with unavailable,
+                parse_error or signature_error. Withdrawals cannot be finalised while
+                this holds. Check the guardian enclave and its proxy.
+
+  - name: sequence-mismatches-are-not-failures
+    interval: 1m
+    input_series:
+      - series: 'hashi_guardian_rpc_total{host="hashi-a",method="sign",outcome="ok"}'
+        values: '0+6x60'
+      - series: 'hashi_guardian_rpc_total{host="hashi-a",method="sign",outcome="seq_mismatch"}'
+        values: '0+6x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetGuardianUnreachable
+        exp_alerts: []
+
+  # The last one completes at 1h.
+  - name: withdrawals-stop-for-six-hours-with-a-backlog
+    interval: 5m
+    input_series:
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-a"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-b"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-c"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-a",status="approved"}'
+        values: '2x102'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-b",status="approved"}'
+        values: '2x102'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-c",status="approved"}'
+        values: '2x102'
+    alert_rule_test:
+      - eval_time: 7h20m
+        alertname: HashiFleetWithdrawalsStalled
+        exp_alerts: []
+      - eval_time: 7h30m
+        alertname: HashiFleetWithdrawalsStalled
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "withdrawals are approved but none have finalised in 6 hours"
+              description: &hashiFleetWithdrawalsStalled >-
+                There is an approved withdrawal backlog and not a single withdrawal
+                has finalised across the fleet in 6 hours. Look at the limiter (tokens
+                available, oversize skips), MPC signing failures, and the Bitcoin fee
+                rate.
+
+  - name: withdrawals-backlog-only-on-a-frozen-node
+    interval: 5m
+    input_series:
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-a"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-b"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawals_finalized_total{host="hashi-c"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-a",status="approved"}'
+        values: '2x102'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-b",status="approved"}'
+        values: '0x102'
+      - series: 'hashi_withdrawal_queue_size{host="hashi-c",status="approved"}'
+        values: '0x102'
+    alert_rule_test:
+      - eval_time: 7h30m
+        alertname: HashiFleetWithdrawalsStalled
+        exp_alerts: []
+
+  # The last one completes at 1h.
+  - name: deposits-stop-for-six-hours-with-a-backlog
+    interval: 5m
+    input_series:
+      - series: 'hashi_deposits_confirmed_total{host="hashi-a"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposits_confirmed_total{host="hashi-b"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposits_confirmed_total{host="hashi-c"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposit_queue_size{host="hashi-a"}'
+        values: '2x102'
+      - series: 'hashi_deposit_queue_size{host="hashi-b"}'
+        values: '2x102'
+      - series: 'hashi_deposit_queue_size{host="hashi-c"}'
+        values: '2x102'
+    alert_rule_test:
+      - eval_time: 7h20m
+        alertname: HashiFleetDepositsStalled
+        exp_alerts: []
+      - eval_time: 7h30m
+        alertname: HashiFleetDepositsStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "deposits are queued but none have confirmed in 6 hours"
+              description: &hashiFleetDepositsStalled >-
+                Deposit requests are pending and none have confirmed across the fleet
+                in 6 hours. Check Kyoto sync, the deposit time-delay window, and
+                whether the leader loop is running.
+
+  - name: deposits-backlog-only-on-a-frozen-node
+    interval: 5m
+    input_series:
+      - series: 'hashi_deposits_confirmed_total{host="hashi-a"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposits_confirmed_total{host="hashi-b"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposits_confirmed_total{host="hashi-c"}'
+        values: '0+1x12 12x90'
+      - series: 'hashi_deposit_queue_size{host="hashi-a"}'
+        values: '2x102'
+      - series: 'hashi_deposit_queue_size{host="hashi-b"}'
+        values: '0x102'
+      - series: 'hashi_deposit_queue_size{host="hashi-c"}'
+        values: '0x102'
+    alert_rule_test:
+      - eval_time: 7h30m
+        alertname: HashiFleetDepositsStalled
+        exp_alerts: []
+
+  - name: one-validator-two-epochs-behind
+    interval: 5m
+    input_series:
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '10x20'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '10x20'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '8x20'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetEpochDivergence
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "hashi validators are more than one epoch apart"
+              description: &hashiFleetEpochDivergence >-
+                The spread between the highest and lowest `hashi_epoch` in the fleet
+                has exceeded one epoch for 30 minutes. Validators this far behind
+                cannot contribute to the current committee's signing.
+
+  - name: a-booting-validator-reads-epoch-zero
+    interval: 5m
+    input_series:
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '10x20'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '10x20'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '9x20'
+      - series: 'hashi_epoch{host="hashi-d"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetEpochDivergence
+        exp_alerts: []
+
+  - name: one-validator-on-another-package
+    interval: 5m
+    input_series:
+      - series: 'uptime{host="hashi-a",package_id="0xa",hashi_object_id="0x1"}'
+        values: '0+300x10'
+      - series: 'uptime{host="hashi-b",package_id="0xa",hashi_object_id="0x1"}'
+        values: '0+300x10'
+      - series: 'uptime{host="hashi-c",package_id="0xb",hashi_object_id="0x1"}'
+        values: '0+300x10'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetPackageDrift
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than one hashi package ID is in use across the fleet"
+              description: &hashiFleetPackageDrift >-
+                Validators disagree on which hashi package they are running against.
+                Whoever is on the odd package ID is pointed at the wrong deployment
+                and their votes will not count.
+      - eval_time: 20m
+        alertname: HashiFleetObjectDrift
+        exp_alerts: []
+
+  - name: one-validator-on-another-hashi-object
+    interval: 5m
+    input_series:
+      - series: 'uptime{host="hashi-a",package_id="0xa",hashi_object_id="0x1"}'
+        values: '0+300x10'
+      - series: 'uptime{host="hashi-b",package_id="0xa",hashi_object_id="0x1"}'
+        values: '0+300x10'
+      - series: 'uptime{host="hashi-c",package_id="0xa",hashi_object_id="0x2"}'
+        values: '0+300x10'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetObjectDrift
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than one Hashi shared-object ID is in use across the fleet"
+              description: &hashiFleetObjectDrift >-
+                Validators disagree on which `Hashi` shared object they are watching.
+                This is a misconfiguration on at least one operator's side.
+      - eval_time: 20m
+        alertname: HashiFleetPackageDrift
+        exp_alerts: []
+
+  - name: one-in-five-limiters-drifted
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_limiter_drifted{host="hashi-a"}'
+        values: '1x10'
+      - series: 'hashi_guardian_limiter_drifted{host="hashi-b"}'
+        values: '0x10'
+      - series: 'hashi_guardian_limiter_drifted{host="hashi-c"}'
+        values: '0x10'
+      - series: 'hashi_guardian_limiter_drifted{host="hashi-d"}'
+        values: '0x10'
+      - series: 'hashi_guardian_limiter_drifted{host="hashi-e"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HashiFleetLimiterDrifted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HashiFleetLimiterDrifted
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 10% of hashi validators have lost limiter lockstep with the guardian"
+              description: &hashiFleetLimiterDrifted >-
+                A tenth of the committee drifting at once points at the guardian side
+                (a rotation or a limiter policy change), not at operators.
+                `hashi_guardian_limiter_drifted == 1` names them by `host`.
+
+  - name: half-the-fleet-unsynced
+    interval: 5m
+    input_series:
+      - series: 'hashi_kyoto_synced{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_kyoto_synced{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_kyoto_synced{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_kyoto_synced{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-d"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiFleetKyotoUnsynced
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiFleetKyotoUnsynced
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 25% of hashi validators are not synced to Bitcoin"
+              description: &hashiFleetKyotoUnsynced >-
+                A quarter of the committee cannot see the Bitcoin chain, so they
+                cannot attest to deposits or withdrawal confirmations. If this
+                coincides with a release, suspect the Kyoto client; otherwise suspect
+                their Bitcoin peers.
+
+  # hashi-a and hashi-b are still in their boot scrape; one of the other four
+  # is unsynced.
+  - name: booting-validators-are-not-unsynced
+    interval: 5m
+    input_series:
+      - series: 'hashi_kyoto_synced{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_kyoto_synced{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_kyoto_synced{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_kyoto_synced{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_kyoto_synced{host="hashi-e"}'
+        values: '1x12'
+      - series: 'hashi_kyoto_synced{host="hashi-f"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-a"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-d"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-e"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-f"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetKyotoUnsynced
+        exp_alerts: []
+
+  - name: half-the-gas-wallets-low
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_balance{host="hashi-a",address="0xa"}'
+        values: '500000000x12'
+      - series: 'hashi_sui_balance{host="hashi-b",address="0xb"}'
+        values: '500000000x12'
+      - series: 'hashi_sui_balance{host="hashi-c",address="0xc"}'
+        values: '5000000000x12'
+      - series: 'hashi_sui_balance{host="hashi-d",address="0xd"}'
+        values: '5000000000x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiFleetLowGas
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiFleetLowGas
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 25% of hashi validators have under 1 SUI of gas"
+              description: &hashiFleetLowGas >-
+                A quarter of the committee is about to stop submitting Sui
+                transactions for lack of gas. Individual operators run dry all the
+                time; this threshold means it is becoming a committee-wide problem
+                worth announcing.
+
+  # hashi-b has not read its balance yet.
+  - name: an-unread-balance-is-not-low
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_balance{host="hashi-a",address="0xa"}'
+        values: '500000000x12'
+      - series: 'hashi_sui_balance{host="hashi-b",address="0xb"}'
+        values: '-1x12'
+      - series: 'hashi_sui_balance{host="hashi-c",address="0xc"}'
+        values: '5000000000x12'
+      - series: 'hashi_sui_balance{host="hashi-d",address="0xd"}'
+        values: '5000000000x12'
+      - series: 'hashi_sui_balance{host="hashi-e",address="0xe"}'
+        values: '5000000000x12'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetLowGas
+        exp_alerts: []
+
+  - name: bridge-paused
+    interval: 5m
+    input_series:
+      - series: 'hashi_paused{host="hashi-a"}'
+        values: '1x10'
+      - series: 'hashi_paused{host="hashi-b"}'
+        values: '1x10'
+      - series: 'hashi_paused{host="hashi-c"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HashiFleetBridgePaused
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HashiFleetBridgePaused
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "the hashi bridge is paused on chain"
+              description: &hashiFleetBridgePaused >-
+                `hashi_paused` is set, so deposits and withdrawals are not being
+                processed. This is usually deliberate; the alert exists so a pause is
+                never left on by accident.
+
+  - name: pause-only-on-a-frozen-node
+    interval: 5m
+    input_series:
+      - series: 'hashi_paused{host="hashi-a"}'
+        values: '1x10'
+      - series: 'hashi_paused{host="hashi-b"}'
+        values: '0x10'
+      - series: 'hashi_paused{host="hashi-c"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetBridgePaused
+        exp_alerts: []
+
+  - name: two-of-three-validators-halted-on-the-upgrade
+    interval: 5m
+    input_series:
+      - series: 'hashi_package_version_unsupported{host="hashi-a"}'
+        values: '1x12'
+      - series: 'hashi_package_version_unsupported{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_package_version_unsupported{host="hashi-c"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiFleetVersionHalted
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiFleetVersionHalted
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "a third of hashi validators have halted on an unsupported package version"
+              description: &hashiFleetVersionHalted >-
+                More than a third of the committee reports the enabled on-chain
+                package as unsupported and has stopped processing. The remaining
+                validators cannot reach signing quorum. Those operators need to
+                upgrade before withdrawals resume.
+      - eval_time: 40m
+        alertname: HashiFleetVersionLagging
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 20% of hashi validators have halted on an unsupported package version"
+              description: &hashiFleetVersionLagging >-
+                A fifth of the committee has halted because it does not support the
+                enabled on-chain package. At a third the bridge loses signing quorum.
+                Chase the operators still on the old release.
+
+  - name: one-of-four-validators-halted-on-the-upgrade
+    interval: 5m
+    input_series:
+      - series: 'hashi_package_version_unsupported{host="hashi-a"}'
+        values: '1x12'
+      - series: 'hashi_package_version_unsupported{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_package_version_unsupported{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_package_version_unsupported{host="hashi-d"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetVersionHalted
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiFleetVersionLagging
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 20% of hashi validators have halted on an unsupported package version"
+              description: *hashiFleetVersionLagging
+
+  - name: whole-committee-mid-reconfiguration
+    interval: 5m
+    input_series:
+      - series: 'hashi_reconfig_in_progress{host="hashi-a"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-b"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-c"}'
+        values: '1x36'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiFleetReconfigStuck
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiFleetReconfigStuck
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "half the hashi committee has been mid-reconfiguration for over 2 hours"
+              description: &hashiFleetReconfigStuck >-
+                Most validators report `hashi_reconfig_in_progress = 1` and have for 2
+                hours. The MPC key resharing for the new epoch is wedged, so nothing
+                can be signed until it completes. Look at
+                `hashi_mpc_reconfig_total_duration_seconds` and the nonce and dealer
+                counters.
+
+  - name: one-of-three-mid-reconfiguration
+    interval: 5m
+    input_series:
+      - series: 'hashi_reconfig_in_progress{host="hashi-a"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-b"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-c"}'
+        values: '0x36'
+    alert_rule_test:
+      - eval_time: 2h10m
+        alertname: HashiFleetReconfigStuck
+        exp_alerts: []
+
+  - name: sui-epoch-changed-and-nothing-started
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_epoch{host="hashi-a"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-b"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-c"}'
+        values: '101x36'
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '100x36'
+      - series: 'hashi_reconfig_hold{host="hashi-a"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_hold{host="hashi-b"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_hold{host="hashi-c"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-a"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-b"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-c"}'
+        values: '0x36'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "the hashi committee has not followed a Sui epoch change for 2 hours"
+              description: &hashiFleetEpochBehindSui >-
+                Sui moved to a new epoch over 2 hours ago and no hashi reconfiguration
+                is running or held. Every node submits start_reconfig at a Sui epoch
+                change; their logs say why none landed.
+
+  - name: reconfiguration-held-by-governance
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_epoch{host="hashi-a"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-b"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-c"}'
+        values: '101x36'
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '100x36'
+      - series: 'hashi_reconfig_hold{host="hashi-a"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_hold{host="hashi-b"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_hold{host="hashi-c"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-a"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-b"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-c"}'
+        values: '0x36'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+
+  - name: reconfiguration-already-running
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_epoch{host="hashi-a"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-b"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-c"}'
+        values: '101x36'
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '100x36'
+      - series: 'hashi_reconfig_hold{host="hashi-a"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_hold{host="hashi-b"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_hold{host="hashi-c"}'
+        values: '0x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-a"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-b"}'
+        values: '1x36'
+      - series: 'hashi_reconfig_in_progress{host="hashi-c"}'
+        values: '1x36'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+
+  # Nodes too old to export the gates still alert.
+  - name: missing-gate-metrics-cannot-silence-it
+    interval: 5m
+    input_series:
+      - series: 'hashi_sui_epoch{host="hashi-a"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-b"}'
+        values: '101x36'
+      - series: 'hashi_sui_epoch{host="hashi-c"}'
+        values: '101x36'
+      - series: 'hashi_epoch{host="hashi-a"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-b"}'
+        values: '100x36'
+      - series: 'hashi_epoch{host="hashi-c"}'
+        values: '100x36'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts: []
+      - eval_time: 2h10m
+        alertname: HashiFleetEpochBehindSui
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "the hashi committee has not followed a Sui epoch change for 2 hours"
+              description: *hashiFleetEpochBehindSui
+
+  # hashi-a and hashi-b stop heartbeating at 30m.
+  - name: half-the-fleet-has-a-stalled-task
+    interval: 5m
+    input_series:
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-a",task="leader_loop"}'
+        values: '0+300x6 1800x34'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-b",task="leader_loop"}'
+        values: '0+300x6 1800x34'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-c",task="leader_loop"}'
+        values: '0+300x40'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-d",task="leader_loop"}'
+        values: '0+300x40'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: HashiFleetTasksStalled
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: HashiFleetTasksStalled
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 25% of hashi validators have a task loop that stopped iterating"
+              description: &hashiFleetTasksStalled >-
+                A quarter of the committee has a leader, MPC or watcher loop that has
+                not completed an iteration in 30 minutes while still reporting
+                metrics. A fleet-wide stall points at a shared dependency: the
+                fullnode checkpoint stream, the guardian, or a release bug.
+
+  - name: one-in-four-has-a-stalled-task
+    interval: 5m
+    input_series:
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-a",task="leader_loop"}'
+        values: '0+300x6 1800x34'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-b",task="leader_loop"}'
+        values: '0+300x40'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-c",task="leader_loop"}'
+        values: '0+300x40'
+      - series: 'hashi_task_last_iteration_timestamp_seconds{host="hashi-d",task="leader_loop"}'
+        values: '0+300x40'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: HashiFleetTasksStalled
+        exp_alerts: []
+
+  # hashi-a and hashi-b stop applying checkpoints at 30m.
+  - name: half-the-fleet-behind-on-checkpoints
+    interval: 5m
+    input_series:
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-a"}'
+        values: '0+300000x6 1800000x34'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-b"}'
+        values: '0+300000x6 1800000x34'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-c"}'
+        values: '0+300000x40'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-d"}'
+        values: '0+300000x40'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: HashiFleetCheckpointLag
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: HashiFleetCheckpointLag
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 25% of hashi validators are over 10 minutes behind the Sui checkpoint stream"
+              description: &hashiFleetCheckpointLag >-
+                A quarter of the committee is acting on on-chain state more than 10
+                minutes old. Votes from those nodes lag the current queues and
+                limiter. If it coincides with a Sui network incident it will clear on
+                its own; otherwise suspect the fullnodes operators subscribe to.
+
+  # hashi-b is booting and reads 0; only hashi-a of the other four is behind.
+  - name: booting-validators-are-not-behind
+    interval: 5m
+    input_series:
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-a"}'
+        values: '0+300000x6 1800000x34'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-b"}'
+        values: '0x40'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-c"}'
+        values: '0+300000x40'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-d"}'
+        values: '0+300000x40'
+      - series: 'hashi_latest_checkpoint_timestamp_ms{host="hashi-e"}'
+        values: '0+300000x40'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: HashiFleetCheckpointLag
+        exp_alerts: []
+
+  - name: pool-exhausted-for-over-an-hour
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{host="hashi-a",reason="pool_exhausted"}'
+        values: '0+5x100'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: HashiFleetPresigExhausted
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HashiFleetPresigExhausted
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "hashi validators are failing to sign for lack of presignatures"
+              description: &hashiFleetPresigExhausted >-
+                Signing has been failing with `pool_exhausted` across the fleet for an
+                hour. Withdrawals stall until the nonce pipeline refills. This peaked
+                at hundreds per second on 2026-08-04; check the AVID nonce counters
+                (`hashi_mpc_nonce_*`) before anything else.
+
+  # A 30-minute burst.
+  - name: pool-exhausted-burst-refills
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{host="hashi-a",reason="pool_exhausted"}'
+        values: '0+5x30 150x70'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: HashiFleetPresigExhausted
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HashiFleetPresigExhausted
+        exp_alerts: []
+
+  - name: a-fifth-of-signing-attempts-time-out
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{host="hashi-a",reason="timeout"}'
+        values: '0+2x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{host="hashi-a",outcome="success"}'
+        values: '0+10x90'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetSigningTimeouts
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "more than 10% of MPC signing attempts across the fleet are timing out"
+              description: &hashiFleetSigningTimeouts >-
+                Over a tenth of partial-signature attempts across the committee have
+                been timing out for 30 minutes, several times the normal rate. Either
+                a large share of the committee is unreachable to its peers or a
+                release slowed signing down. Compare with the fleet-shrunk and
+                reconfig alerts.
+
+  - name: one-in-twenty-signing-attempts-time-out
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{host="hashi-a",reason="timeout"}'
+        values: '0+0.5x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{host="hashi-a",outcome="success"}'
+        values: '0+10x90'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetSigningTimeouts
+        exp_alerts: []
+
+  - name: a-validator-loses-its-key
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_committee_key_lost_total{host="hashi-a"}'
+        values: '0x30 1x30'
+      - series: 'hashi_mpc_recovery_suspicious_total{host="hashi-b"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetKeyStateInconsistent
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiFleetKeyStateInconsistent
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "some hashi validators found no local key for their on-chain registration"
+              description: &hashiFleetKeyStateInconsistent >-
+                At least one validator either has no local key matching its on-chain
+                registration or recovered a key that contradicts the chain. Those
+                nodes cannot contribute signatures. Either counter's increase by
+                `host` names them.
+
+  - name: limiter-under-five-percent-for-an-hour
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_limiter_tokens_available{host="hashi-a"}'
+        values: '10x20'
+      - series: 'hashi_guardian_limiter_tokens_available{host="hashi-b"}'
+        values: '10x20'
+      - series: 'hashi_guardian_limiter_max_capacity{host="hashi-a"}'
+        values: '1000x20'
+      - series: 'hashi_guardian_limiter_max_capacity{host="hashi-b"}'
+        values: '1000x20'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: HashiFleetLimiterDrained
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HashiFleetLimiterDrained
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "the guardian's withdrawal rate limiter has been under 5% of capacity for an hour"
+              description: &hashiFleetLimiterDrained >-
+                Withdrawals are being throttled by the guardian's token bucket. Either
+                demand is genuinely above the configured rate, or a stuck oversize
+                request is holding the queue. Raising the policy needs a guardian
+                re-provision behind a KP quorum, so decide early.
+
+  - name: one-validator-still-has-tokens
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_limiter_tokens_available{host="hashi-a"}'
+        values: '500x20'
+      - series: 'hashi_guardian_limiter_tokens_available{host="hashi-b"}'
+        values: '10x20'
+      - series: 'hashi_guardian_limiter_max_capacity{host="hashi-a"}'
+        values: '1000x20'
+      - series: 'hashi_guardian_limiter_max_capacity{host="hashi-b"}'
+        values: '1000x20'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: HashiFleetLimiterDrained
+        exp_alerts: []
+
+  - name: leader-skips-an-oversize-withdrawal
+    interval: 1m
+    input_series:
+      - series: 'hashi_guardian_limiter_stuck_oversize_skipped_total{host="hashi-a"}'
+        values: '0x30 1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetOversizeWithdrawal
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiFleetOversizeWithdrawal
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "an approved withdrawal exceeds the guardian limiter's maximum capacity"
+              description: &hashiFleetOversizeWithdrawal >-
+                The leader skipped an approved withdrawal because its amount exceeds
+                the limiter's `max_bucket_capacity`. The request stays approved on
+                chain and will never be processed: raise the cap, or have the user
+                cancel and resubmit smaller withdrawals.
