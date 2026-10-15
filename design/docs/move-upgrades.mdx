@@ -50,9 +50,11 @@ The withdrawal v2 work exposed a concrete example. A request committed by v2
 could remain in a location that v1 treated as cancellable. While v1 remained
 enabled, its cancellation path could destroy that committed request, stranding
 burned hBTC and locked UTXOs. This is why package publication and version
-retirement sometimes need to be one atomic governance action.
+retirement sometimes need to be one atomic governance action. The testnet v1 to
+v2 plan below walks through the replay path that produces this state and how
+the emergency pause closes it.
 
-## Required classification
+## When must an upgrade be exclusive or non-exclusive?
 
 Every upgrade proposal must be labeled **exclusive** or **non-exclusive** in
 its design and rollout plan. Reviewers should treat a missing classification as
@@ -67,7 +69,8 @@ Use an **exclusive upgrade** when any of the following is true:
 - Cross-version behavior has not been tested directly.
 
 Exclusive should be the default when there is doubt. It atomically replaces the
-enabled-version set with the newly committed version, so no transaction can
+enabled-version set (the package versions that are still callable against the
+shared `Hashi` object) with the newly committed version, so no transaction can
 observe the new version enabled while an older version is still callable.
 
 Use a **non-exclusive upgrade** only when retaining an older version is an
@@ -77,7 +80,9 @@ cross-version tests for state both versions can mutate. A desire to let old
 validator binaries keep working is not, by itself, enough: binary rollout is an
 operational concern and must not weaken an onchain safety invariant.
 
-The `upgrade::Upgrade` proposal records this decision in its `exclusive`
+Each upgrade proposal goes through four stages: creation, voting to quorum,
+execution, and finalization. The `upgrade::Upgrade` proposal records this
+decision in its `exclusive`
 field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
 authorization carrying the approved setting. Finalization consumes both in the
 same programmable transaction, binding the committee vote to the version policy
@@ -85,7 +90,7 @@ that is applied when the package is committed. The CLI requires
 `--exclusive true` or `--exclusive false`; omission is rejected so the
 classification cannot be an accidental default.
 
-## Validator rollout contract
+## How should validators coordinate a Move package upgrade?
 
 An exclusive upgrade deliberately makes old binaries unable to perform normal
 writes once the upgrade checkpoint is observed. An old binary does not contain
@@ -117,7 +122,7 @@ Use this sequence for every upgrade:
 This ordering means the network retains quorum-capable updated software before
 an exclusive publication causes old binaries to stop writing.
 
-## Current testnet v1 to v2 plan
+## What is the testnet v1 to v2 upgrade plan?
 
 The deployed testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first
@@ -161,7 +166,8 @@ The pause is what makes the window between them safe for withdrawals.
 Commitment and approval certificates bind no package version, so while both
 versions are enabled a live certificate can be replayed through v2's
 `commit_withdrawal_tx`. That commits the request in place, where v1's
-pause-exempt `cancel_withdrawal` (which checks only the `processed` bag) can
+pause-exempt `cancel_withdrawal` (it is not gated by the emergency pause and
+checks only the `processed` bag) can
 destroy it, burning the user's hBTC while releasing no BTC and wedging the
 referencing withdrawal transaction forever. Every corrupting interleaving
 requires such a v2 commit to land while v1 is still enabled.
