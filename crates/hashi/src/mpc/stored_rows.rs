@@ -27,8 +27,18 @@ pub(crate) fn dkg_message(
     dealer: &Address,
     bytes: &[u8],
 ) -> MpcResult<avss::Message> {
-    let avss = avss_shape(shape, epoch, dealer)?;
-    decode(dealer, bytes, count_check::check_avss_message(bytes, avss))
+    check_dkg_message(shape, epoch, dealer, bytes)?;
+    bcs::from_bytes(bytes).map_err(|e| refused(dealer, e.to_string()))
+}
+
+pub(crate) fn check_dkg_message(
+    shape: &ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+    bytes: &[u8],
+) -> MpcResult<()> {
+    count_check::check_avss_message(bytes, avss_shape(shape, epoch, dealer)?)
+        .map_err(|e| refused(dealer, format!("count check: {e}")))
 }
 
 pub(crate) fn rotation_messages(
