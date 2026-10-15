@@ -35,10 +35,10 @@ The rules read only hashi's own metrics. Cover these with whatever already
 watches your other services:
 
 - The scrape target is down (`up == 0` for your hashi job).
+  `HashiNodeMetricsAbsent` fires only when no hashi node metrics are left at
+  all.
 - The volume holding the node's database is filling up. A full disk poisons
   the database (`HashiDbPoisoned`).
-- The process keeps restarting. hashi exports no `process_*` metrics, but
-  `resets(uptime{hashi_object_id!=""}[1h])` counts its restarts.
 
 ## Dashboard-worthy, not alerts
 
@@ -70,11 +70,11 @@ watches your other services:
   pool, not your node's health. Mysten monitors pool exhaustion fleet-side.
   (Before the periodic sampler landed, this gauge also read 0 after any
   restart until the next withdrawal — the archetypal activity-gated trap.)
-- **Failure ratios of `hashi_sui_tx_submissions_total{operation="confirm_deposit"}`.**
-  Deposit confirmation is a leader-submitted, aggressively-retried race with
-  several benign abort paths (already confirmed, reconfig window in progress,
-  approval from a previous committee awaiting re-approval). Per-node failure
-  ratios between 30% and 100% are all normal.
+- **Failure ratios of `hashi_sui_tx_submissions_total`.** Every operation in it
+  (`approve_*`, `commit_*`, `finalize_*`, `confirm_*`) is a leader-submitted,
+  aggressively retried race with benign abort paths (already done, reconfig
+  window in progress, approval from a previous committee awaiting
+  re-approval). Fleet-wide failure shares run from 45% to 87%.
 - **Ratios of raw counters.** `a_total / b_total` spans the whole process
   lifetime and drifts with history, not health. Always window both sides:
   `increase(a_total[1h]) / increase(b_total[1h])`.

@@ -987,3 +987,165 @@ tests:
                 the limiter's `max_bucket_capacity`. The request stays approved on
                 chain and will never be processed: raise the cap, or have the user
                 cancel and resubmit smaller withdrawals.
+
+  - name: most-validators-lose-the-guardian-endpoint
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_enabled{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-d"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiFleetGuardianNotConfigured
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HashiFleetGuardianNotConfigured
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "most hashi validators have no guardian endpoint"
+              description: &hashiFleetGuardianNotConfigured >-
+                Over half the committee has reported `hashi_guardian_enabled = 0` for
+                30 minutes, so withdrawals cannot be finalised. The on-chain guardian
+                URL was probably cleared; check the Hashi object's guardian config.
+
+  - name: booting-validators-have-no-guardian-yet
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_enabled{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-c"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-a"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_onchain_scrape_in_progress{host="hashi-d"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: HashiFleetGuardianNotConfigured
+        exp_alerts: []
+
+  - name: half-the-limiters-unseeded
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-b"}'
+        values: '0x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-a"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-d"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HashiFleetLimiterNotSeeded
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: HashiFleetLimiterNotSeeded
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "a quarter of hashi validators cannot seed their limiter from the guardian"
+              description: &hashiFleetLimiterNotSeeded >-
+                Validators with a guardian endpoint have not seeded their local rate
+                limiter for 15 minutes. Check the guardian's reachability and that it
+                has a limiter configured; `hashi_guardian_bootstrap_outcomes_total` by
+                outcome says why.
+
+  - name: validator-without-a-guardian-has-no-limiter-to-seed
+    interval: 5m
+    input_series:
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_guardian_enabled{host="hashi-a"}'
+        values: '0x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_guardian_limiter_initialized{host="hashi-d"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-b"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-c"}'
+        values: '1x12'
+      - series: 'hashi_guardian_enabled{host="hashi-d"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiFleetLimiterNotSeeded
+        exp_alerts: []
+
+  - name: a-validator-reaches-the-wrong-guardian
+    interval: 1m
+    input_series:
+      - series: 'hashi_guardian_bootstrap_outcomes_total{host="hashi-a",outcome="btc_key_mismatch"}'
+        values: '0x30 1x30'
+      - series: 'hashi_guardian_bootstrap_outcomes_total{host="hashi-b",outcome="rpc_failure"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetGuardianIdentityMismatch
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiFleetGuardianIdentityMismatch
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "a hashi validator reached a guardian whose BTC key does not match the chain"
+              description: &hashiFleetGuardianIdentityMismatch >-
+                At least one validator bootstrapped from a guardian whose BTC key is
+                missing or differs from the on-chain one: a rotation went wrong, or
+                the validator points at the wrong guardian. It will not use the
+                guardian until this is fixed.
+
+  - name: a-reconfiguration-is-aborted
+    interval: 1m
+    input_series:
+      - series: 'hashi_reconfig_aborted_total{host="hashi-a"}'
+        values: '0x30 1x30'
+      - series: 'hashi_reconfig_aborted_total{host="hashi-b"}'
+        values: '0x30 1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiFleetReconfigAborted
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiFleetReconfigAborted
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "a hashi reconfiguration was aborted"
+              description: &hashiFleetReconfigAborted >-
+                A reconfiguration overran its Sui epoch and was aborted; the
+                replacement starts on its own. Find out why the first one stalled:
+                offline stake, bad endpoints or keys, or a partition.
