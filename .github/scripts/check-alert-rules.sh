@@ -47,6 +47,7 @@ for f in "${rules[@]}"; do
 	case $(basename "$f" .rules.yml) in
 	hashi-node) src=crates/hashi/src ;;
 	hashi-monitor) src=crates/hashi-monitor/src ;;
+	guardian-proxy) src=crates/hashi-guardian-proxy/src ;;
 	*)
 		echo "::error file=$f::map $f to the crate whose metrics it reads in $0"
 		status=1
