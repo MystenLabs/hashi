@@ -1432,21 +1432,7 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 
 ### 8.4 Suggested alerts
 
-| Condition | Severity | Action |
-|-----------|----------|--------|
-| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Nodes abort and restart it themselves once it overruns its Sui epoch; `hashi committee abort-reconfig` is the manual fallback (section 9.3). |
-| `increase(hashi_reconfig_aborted_total[1h]) > 0` | Warning | A reconfiguration stalled for a full Sui epoch and was aborted; the replacement starts on its own. Find out why the first one stalled (offline stake, bad endpoints or keys, partitions). |
-| `hashi_presig_pool_remaining == 0` for > 10 min on a committee member | Critical | Node cannot sign. Check reconfig status and MPC logs. The gauge also reads 0 right after a restart and on a node that hasn't been in the committee since it started; a node that has left keeps its last value. |
-| `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
-| `hashi_kyoto_connected_peers == 0` for > 5 min | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. Each light-client restart briefly resets it to 0. |
-| `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
-| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
-| `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
-| `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
-| A per-peer counter from [8.3](#83-key-metrics) counted in the last hour (see `monitoring/hashi-node.rules.yml`) | Warning | The `peer` may be misbehaving, or your node may be slow or have its limits set too low. Rule your node out first (`hashi_request_latency`), then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
-| 3 or more peers hit the request count or MPC work limits within 10 min | Critical | Usually your node is slow, not the peers, though colluding members can also cause it. Check `hashi_request_latency` and tell the operator channel. |
-| `hashi_mpc_unguarded_spawn_blocking_total` increasing | Warning | A node bug. Report it to the hashi team with your version. |
-| `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
+Load [`monitoring/hashi-node.rules.yml`](https://github.com/MystenLabs/hashi/blob/main/monitoring/hashi-node.rules.yml) from `main` into your Prometheus and route on `severity`. Each rule's description says what fired and what to do. [`docs/alerting.md`](https://github.com/MystenLabs/hashi/blob/main/docs/alerting.md) says which other rule files exist, which metrics not to alert on, and what to cover yourself: the scrape target going down (`up == 0` for your hashi job) and the disk holding the node's database filling up.
 
 ---
 

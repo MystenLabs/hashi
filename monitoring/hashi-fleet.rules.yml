@@ -367,3 +367,62 @@ groups:
             the limiter's `max_bucket_capacity`. The request stays approved on
             chain and will never be processed: raise the cap, or have the user
             cancel and resubmit smaller withdrawals.
+
+      # A node takes its guardian endpoint from on-chain config, so a missing
+      # endpoint shows on every node at once.
+      - alert: HashiFleetGuardianNotConfigured
+        expr: |
+          count(hashi_guardian_enabled < 1 unless hashi_onchain_scrape_in_progress == 1)
+            / count(hashi_guardian_enabled)
+            > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "most hashi validators have no guardian endpoint"
+          description: >-
+            Over half the committee has reported `hashi_guardian_enabled = 0`
+            for 30 minutes, so withdrawals cannot be finalised. The on-chain
+            guardian URL was probably cleared; check the Hashi object's
+            guardian config.
+
+      - alert: HashiFleetLimiterNotSeeded
+        expr: |
+          count(hashi_guardian_limiter_initialized < 1 and hashi_guardian_enabled > 0)
+            / count(hashi_guardian_enabled > 0)
+            > 0.25
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "a quarter of hashi validators cannot seed their limiter from the guardian"
+          description: >-
+            Validators with a guardian endpoint have not seeded their local
+            rate limiter for 15 minutes. Check the guardian's reachability and
+            that it has a limiter configured; `hashi_guardian_bootstrap_outcomes_total`
+            by outcome says why.
+
+      # rpc_failure and no_limiter_yet are retried and show up as an unseeded
+      # limiter; these two mean the guardian reached is not the one on chain.
+      - alert: HashiFleetGuardianIdentityMismatch
+        expr: sum(increase(hashi_guardian_bootstrap_outcomes_total{outcome=~"btc_key_mismatch|btc_key_missing_from_info"}[1h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "a hashi validator reached a guardian whose BTC key does not match the chain"
+          description: >-
+            At least one validator bootstrapped from a guardian whose BTC key
+            is missing or differs from the on-chain one: a rotation went wrong,
+            or the validator points at the wrong guardian. It will not use the
+            guardian until this is fixed.
+
+      - alert: HashiFleetReconfigAborted
+        expr: max(increase(hashi_reconfig_aborted_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "a hashi reconfiguration was aborted"
+          description: >-
+            A reconfiguration overran its Sui epoch and was aborted; the
+            replacement starts on its own. Find out why the first one stalled:
+            offline stake, bad endpoints or keys, or a partition.

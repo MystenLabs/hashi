@@ -6,7 +6,7 @@
 # Prometheus without extra relabeling.
 
 groups:
-  - name: hashi-validator-node-health
+  - name: hashi-node-health
     interval: 1m
     rules:
       # The Bitcoin client starts only after the boot scrape of on-chain state,
@@ -88,6 +88,7 @@ groups:
 
       - alert: HashiBinaryBehindChain
         expr: hashi_package_version_unsupported == 1
+        for: 10m
         labels:
           severity: critical
         annotations:
@@ -99,6 +100,7 @@ groups:
 
       - alert: HashiDbPoisoned
         expr: hashi_db_poisoned == 1
+        for: 5m
         labels:
           severity: critical
         annotations:
@@ -109,6 +111,80 @@ groups:
             restarts; reads and signing carry on looking healthy. Free the
             disk, then restart the node.
 
+      # Every release since testnet-1.0 exports hashi_db_poisoned from startup,
+      # so its absence means the node is down or no longer scraped.
+      - alert: HashiNodeMetricsAbsent
+        expr: absent(hashi_db_poisoned)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hashi node metrics are missing"
+          description: >-
+            No hashi node metrics for 10 minutes: the node is down, crash
+            looping before it serves metrics, or no longer scraped. Every other
+            node rule is silent while this fires.
+
+      # sui-node also exports `uptime`; hashi's carries hashi_object_id.
+      - alert: HashiNodeRestarting
+        expr: resets(uptime{hashi_object_id!=""}[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "hashi node restarted more than 3 times in an hour"
+          description: >-
+            The node is crash looping. Each restart repeats the boot scrape of
+            on-chain state, so it may never finish booting; check the logs of
+            the previous run.
+
+      # The boot scrape takes 20-35 minutes on testnet. max_over_time keeps a
+      # crash-looping node, which starts the scrape again on each boot, firing.
+      - alert: HashiOnchainScrapeStuck
+        expr: max_over_time(hashi_onchain_scrape_in_progress[30m]) == 1
+        for: 90m
+        labels:
+          severity: warning
+        annotations:
+          summary: "on-chain state scrape running for over 90 minutes"
+          description: >-
+            The node's scrape of on-chain state has run, or restarted, for more
+            than 90 minutes, and the node serves nothing until it finishes.
+            Check hashi_onchain_scrape_pages_total for progress and the
+            fullnode it reads from.
+
+      # Only codes where the node failed: unavailable means a presignature batch
+      # isn't sealed yet, and failed-precondition is a refusal to sign.
+      - alert: HashiRequestErrors
+        expr: |
+          sum without (path, status, role) (rate(hashi_requests{role="server", status=~"internal|unknown|data-loss|unimplemented|5[0-9]{2}"}[10m]))
+            / sum without (path, status, role) (rate(hashi_requests{role="server"}[10m]))
+            > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node fails over 5% of the requests it serves"
+          description: >-
+            The node has failed over 5% of the peer requests it serves
+            (internal, unknown or 5xx) for 15 minutes. Its logs name the
+            failing path.
+
+      # Healthy nodes reach about 8.5 seconds at p99 on their slowest path.
+      - alert: HashiRequestLatency
+        expr: histogram_quantile(0.99, sum without (path, role) (rate(hashi_request_latency_bucket{role="server"}[10m]))) > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node takes over 10s at p99 to serve requests"
+          description: >-
+            The node has taken over 10 seconds at p99 to serve peer requests
+            for 30 minutes, so peers time out on it. Check its CPU and
+            database, and the latency of its fullnode and bitcoind.
+
+  - name: hashi-node-signing
+    interval: 1m
+    rules:
       - alert: HashiRotationPreviousSharesMissing
         expr: increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0
         labels:
@@ -239,3 +315,49 @@ groups:
           summary: "MPC work started outside the per-peer budget"
           description: >-
             A node bug. Report it to the hashi team with the node's version.
+
+      - alert: HashiMpcKeyStateInconsistent
+        expr: |
+          increase(hashi_mpc_committee_key_lost_total[30m]) > 0
+            or increase(hashi_mpc_recovery_suspicious_total[30m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "local MPC key state disagrees with the chain"
+          description: >-
+            The node found no local key matching its on-chain registration, or
+            recovered a key that contradicts the on-chain record. It cannot
+            contribute signatures until its key state is repaired; capture its
+            logs before restarting it.
+
+      # Pool exhaustion is committee-wide and has its own fleet rule.
+      - alert: HashiMpcSigningFailing
+        expr: |
+          sum without (reason) (increase(hashi_mpc_sign_failures_total{reason!="pool_exhausted"}[1h]))
+            / sum without (outcome) (increase(hashi_mpc_sign_duration_seconds_count[1h]))
+            > 0.5
+          and sum without (reason) (increase(hashi_mpc_sign_failures_total{reason!="pool_exhausted"}[1h])) > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node fails over half its MPC signing attempts"
+          description: >-
+            The node has failed over half of its MPC signing attempts in the
+            past hour, for 30 minutes, so withdrawals are not getting its
+            partial signatures. Check hashi_mpc_sign_failures_total by reason,
+            and its logs.
+
+      # The flag stays set until the limiter reconciles with the guardian or the
+      # node restarts.
+      - alert: HashiGuardianLimiterDrifted
+        expr: hashi_guardian_limiter_drifted > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "local guardian limiter out of lockstep with the guardian"
+          description: >-
+            The node's copy of the guardian's rate limiter failed to apply a
+            signed withdrawal, so it won't reliably enforce the limit until it
+            reconciles. If the flag stays set, restart the node to re-seed it.

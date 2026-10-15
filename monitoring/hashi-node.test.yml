@@ -538,3 +538,281 @@ tests:
               description: >-
                 The state_watcher loop has not recorded a heartbeat in 20
                 minutes. It has deadlocked or is stuck; check its logs.
+
+  - name: node-metrics-disappear
+    interval: 1m
+    input_series:
+      - series: 'hashi_db_poisoned{instance="n1",job="hashi"}'
+        values: '0x30 stale'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiNodeMetricsAbsent
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiNodeMetricsAbsent
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HashiNodeMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "hashi node metrics are missing"
+              description: &hashiNodeMetricsAbsent >-
+                No hashi node metrics for 10 minutes: the node is down, crash looping
+                before it serves metrics, or no longer scraped. Every other node rule
+                is silent while this fires.
+
+  # sui-node's own uptime restarts just as often and must not count.
+  - name: node-restarts-every-ten-minutes
+    interval: 1m
+    input_series:
+      - series: 'uptime{hashi_object_id="0x1",instance="n1",job="hashi"}'
+        values: '0+60x9 0+60x9 0+60x9 0+60x9 0+60x9 0+60x30'
+      - series: 'uptime{instance="n1",job="sui"}'
+        values: '0+60x9 0+60x9 0+60x9 0+60x9 0+60x9 0+60x30'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: HashiNodeRestarting
+        exp_alerts:
+          - exp_labels: {hashi_object_id: 0x1, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "hashi node restarted more than 3 times in an hour"
+              description: &hashiNodeRestarting >-
+                The node is crash looping. Each restart repeats the boot scrape of
+                on-chain state, so it may never finish booting; check the logs of the
+                previous run.
+
+  - name: one-restart-is-not-a-crash-loop
+    interval: 1m
+    input_series:
+      - series: 'uptime{hashi_object_id="0x1",instance="n1",job="hashi"}'
+        values: '0+60x29 0+60x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: HashiNodeRestarting
+        exp_alerts: []
+
+  # Each boot scrapes for 25 minutes, then the node crashes.
+  - name: boot-scrape-restarts-in-a-crash-loop
+    interval: 1m
+    input_series:
+      - series: 'hashi_onchain_scrape_in_progress{instance="n1",job="hashi"}'
+        values: '1x25 0x2 1x25 0x2 1x25 0x2 1x25 0x2 1x25'
+    alert_rule_test:
+      - eval_time: 85m
+        alertname: HashiOnchainScrapeStuck
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: HashiOnchainScrapeStuck
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "on-chain state scrape running for over 90 minutes"
+              description: &hashiOnchainScrapeStuck >-
+                The node's scrape of on-chain state has run, or restarted, for more
+                than 90 minutes, and the node serves nothing until it finishes. Check
+                hashi_onchain_scrape_pages_total for progress and the fullnode it
+                reads from.
+
+  - name: one-long-boot-scrape
+    interval: 1m
+    input_series:
+      - series: 'hashi_onchain_scrape_in_progress{instance="n1",job="hashi"}'
+        values: '1x35 0x100'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: HashiOnchainScrapeStuck
+        exp_alerts: []
+
+  - name: node-fails-a-tenth-of-served-requests
+    interval: 1m
+    input_series:
+      - series: 'hashi_requests{path="/p",role="server",status="ok",instance="n1",job="hashi"}'
+        values: '0+90x60'
+      - series: 'hashi_requests{path="/p",role="server",status="internal",instance="n1",job="hashi"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HashiRequestErrors
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "node fails over 5% of the requests it serves"
+              description: &hashiRequestErrors >-
+                The node has failed over 5% of the peer requests it serves (internal,
+                unknown or 5xx) for 15 minutes. Its logs name the failing path.
+
+  - name: unsealed-batch-refusals-are-not-failures
+    interval: 1m
+    input_series:
+      - series: 'hashi_requests{path="/p",role="server",status="ok",instance="n1",job="hashi"}'
+        values: '0+50x60'
+      - series: 'hashi_requests{path="/p",role="server",status="unavailable",instance="n1",job="hashi"}'
+        values: '0+50x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HashiRequestErrors
+        exp_alerts: []
+
+  - name: a-tenth-of-requests-take-over-ten-seconds
+    interval: 1m
+    input_series:
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="1",instance="n1",job="hashi"}'
+        values: '0+50x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="10",instance="n1",job="hashi"}'
+        values: '0+90x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="30",instance="n1",job="hashi"}'
+        values: '0+100x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="+Inf",instance="n1",job="hashi"}'
+        values: '0+100x60'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiRequestLatency
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HashiRequestLatency
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "node takes over 10s at p99 to serve requests"
+              description: &hashiRequestLatency >-
+                The node has taken over 10 seconds at p99 to serve peer requests for
+                30 minutes, so peers time out on it. Check its CPU and database, and
+                the latency of its fullnode and bitcoind.
+
+  - name: all-requests-under-ten-seconds
+    interval: 1m
+    input_series:
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="1",instance="n1",job="hashi"}'
+        values: '0+50x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="10",instance="n1",job="hashi"}'
+        values: '0+100x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="30",instance="n1",job="hashi"}'
+        values: '0+100x60'
+      - series: 'hashi_request_latency_bucket{path="/p",role="server",le="+Inf",instance="n1",job="hashi"}'
+        values: '0+100x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: HashiRequestLatency
+        exp_alerts: []
+
+  - name: node-loses-its-key
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_committee_key_lost_total{instance="n1",job="hashi"}'
+        values: '0x30 1x30'
+      - series: 'hashi_mpc_recovery_suspicious_total{instance="n1",job="hashi"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiMpcKeyStateInconsistent
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiMpcKeyStateInconsistent
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: "local MPC key state disagrees with the chain"
+              description: &hashiMpcKeyStateInconsistent >-
+                The node found no local key matching its on-chain registration, or
+                recovered a key that contradicts the on-chain record. It cannot
+                contribute signatures until its key state is repaired; capture its
+                logs before restarting it.
+
+  - name: two-thirds-of-signing-attempts-fail
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{reason="timeout",instance="n1",job="hashi"}'
+        values: '0+1x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{outcome="success",instance="n1",job="hashi"}'
+        values: '0+0.5x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{outcome="failure",instance="n1",job="hashi"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: HashiMpcSigningFailing
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "node fails over half its MPC signing attempts"
+              description: &hashiMpcSigningFailing >-
+                The node has failed over half of its MPC signing attempts in the past
+                hour, for 30 minutes, so withdrawals are not getting its partial
+                signatures. Check hashi_mpc_sign_failures_total by reason, and its
+                logs.
+
+  - name: pool-exhaustion-does-not-count-as-signing-failure
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_sign_failures_total{reason="timeout",instance="n1",job="hashi"}'
+        values: '0+0.5x90'
+      - series: 'hashi_mpc_sign_failures_total{reason="pool_exhausted",instance="n1",job="hashi"}'
+        values: '0+5x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{outcome="success",instance="n1",job="hashi"}'
+        values: '0+2x90'
+      - series: 'hashi_mpc_sign_duration_seconds_count{outcome="failure",instance="n1",job="hashi"}'
+        values: '0+0.5x90'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: HashiMpcSigningFailing
+        exp_alerts: []
+
+  - name: limiter-drifts
+    interval: 1m
+    input_series:
+      - series: 'hashi_guardian_limiter_drifted{instance="n1",job="hashi"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: HashiGuardianLimiterDrifted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HashiGuardianLimiterDrifted
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: "local guardian limiter out of lockstep with the guardian"
+              description: &hashiGuardianLimiterDrifted >-
+                The node's copy of the guardian's rate limiter failed to apply a
+                signed withdrawal, so it won't reliably enforce the limit until it
+                reconciles. If the flag stays set, restart the node to re-seed it.
+
+  - name: binary-behind-the-chain
+    interval: 1m
+    input_series:
+      - series: 'hashi_package_version_unsupported{instance="n1",job="hashi"}'
+        values: '0x10 1x30'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: HashiBinaryBehindChain
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: HashiBinaryBehindChain
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: "binary does not support the live package version"
+              description: &hashiBinaryBehindChain >-
+                The chain has moved past every package version this build implements;
+                autonomous writes are halted. Upgrade the node binary immediately.
+
+  - name: database-poisoned
+    interval: 1m
+    input_series:
+      - series: 'hashi_db_poisoned{instance="n1",job="hashi"}'
+        values: '0x10 1x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: HashiDbPoisoned
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HashiDbPoisoned
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: "database poisoned; restart required"
+              description: &hashiDbPoisoned >-
+                fjall refused a write after a failed flush or fsync (usually a full
+                disk) and will refuse every write until the process restarts; reads
+                and signing carry on looking healthy. Free the disk, then restart the
+                node.
