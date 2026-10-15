@@ -107,8 +107,10 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
         Action::Init => {
             format!("once the signers have sent their files, rotate-kp-set {slot} submit <file>...")
         }
+        // The re-deal leaves the slot's own files as they are, but a render with NEW_KP_* set would point at the
+        // signers' publication, whose old roster the new set can't provision with.
         Action::Submit(_) | Action::Wait => format!(
-            "while this waits, publish {slot} for the new set to confirm; once it reports the rotation complete, new-session {slot}"
+            "once this logs `ceremony proposal published`, publish {slot} in another terminal, and have every key provisioner of the new set confirm into a new --encrypted-shares-path, so an earlier ceremony's file stays. Once this reports the rotation complete, set KP_ROSTER_DIR and KP_THRESHOLD to the new set's and remove NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD, without publishing again; then new-session {slot}"
         ),
     });
     let mut cmd = guardian_init
@@ -249,6 +251,16 @@ mod tests {
                 "--config",
                 "operator.yaml"
             ]
+        );
+        // There, operator.yaml is the one listing both rosters.
+        assert_eq!(
+            run.exec.exec_dirs.borrow().last().unwrap().as_deref(),
+            Some(
+                run.repo
+                    .path()
+                    .join(".hashi/guardian/testnet/b/rotate-kp-set")
+                    .as_path()
+            )
         );
     }
 
