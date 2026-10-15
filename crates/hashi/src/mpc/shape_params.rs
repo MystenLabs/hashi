@@ -72,6 +72,10 @@ impl CommitteeShape {
             num_nodes: self.weights.len() as u16,
         }
     }
+
+    pub(crate) fn rotation_messages_bcs(&self) -> bool {
+        self.committee.config().mpc_rotation_messages_bcs()
+    }
 }
 
 pub struct ShapeParams {

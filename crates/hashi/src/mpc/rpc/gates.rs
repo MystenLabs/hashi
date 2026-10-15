@@ -42,16 +42,7 @@ pub(super) fn check_send_messages(
         }
         Some(Messages::RotationMessages(rotation)) => {
             reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)?;
-            let owned = shape
-                .dealing_committee_for_epoch(shape.epoch())
-                .ok_or_else(|| {
-                    MpcError::InvalidConfig("Key rotation requires previous committee".into())
-                })?
-                .share_ids_of(&sender)
-                .ok_or_else(|| MpcError::InvalidMessage {
-                    sender,
-                    reason: "Dealer not in previous committee".into(),
-                })?;
+            let owned = rotation_shares_of(shape, sender)?;
             rotation.messages.iter().try_for_each(|(&index, message)| {
                 u16::try_from(index)
                     .ok()
@@ -66,6 +57,15 @@ pub(super) fn check_send_messages(
                     count_check::check_avss_message(bytes(message), current.avss_shape()),
                 )
             })
+        }
+        Some(Messages::RotationMessagesBcs(messages)) => {
+            reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)?;
+            let owned = rotation_shares_of(shape, sender)?;
+            count_checked(
+                sender,
+                count_check::check_rotation_messages(bytes(messages), current.avss_shape(), &owned)
+                    .map(drop),
+            )
         }
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
@@ -179,6 +179,17 @@ fn check_complained_share(
         .ok_or_else(|| MpcError::InvalidMessage {
             sender: caller,
             reason: format!("Share index {share_index} does not belong to dealer {dealer}"),
+        })
+}
+
+fn rotation_shares_of(shape: &ShapeParams, dealer: Address) -> MpcResult<Vec<ShareIndex>> {
+    shape
+        .dealing_committee_for_epoch(shape.epoch())
+        .ok_or_else(|| MpcError::InvalidConfig("Key rotation requires previous committee".into()))?
+        .share_ids_of(&dealer)
+        .ok_or_else(|| MpcError::InvalidMessage {
+            sender: dealer,
+            reason: "Dealer not in previous committee".into(),
         })
 }
 
