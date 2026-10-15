@@ -27,6 +27,10 @@ fmt-move: ## Format Move code
 buf-lint: ## Run buf lint
 	$(MAKE) -C crates/hashi-types buf-lint
 
+.PHONY: check-alerts
+check-alerts: ## Check the alert rules in monitoring/ and run their promtool tests
+	.github/scripts/check-alert-rules.sh
+
 .PHONY: test
 test: ## Run all tests
 	cargo nextest run --workspace --all-features
