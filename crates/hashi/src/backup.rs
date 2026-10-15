@@ -42,6 +42,7 @@ use crate::db::Database;
 
 pub use recovery::MpcRecoveryRecord;
 pub use recovery::MpcRecoveryRecordV1;
+pub use recovery::reconstruct_root_scalar;
 
 pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";

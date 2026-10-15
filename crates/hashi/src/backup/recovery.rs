@@ -1,10 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use fastcrypto::groups::GroupElement;
+use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::types::ShareIndex;
 use serde::Deserialize;
@@ -92,6 +95,80 @@ impl MpcRecoveryRecord {
     }
 }
 
+/// Reconstruct the root scalar from a quorum of distinct global shares.
+///
+/// `expected_public_key` must be trusted independently of the supplied records.
+/// Matching commitment maps establish consistency, not authenticity. Every record
+/// is validated, including surplus shares; interpolation uses the lowest `threshold`
+/// indices without searching alternative subsets. The returned scalar is secret
+/// material and must not be logged.
+pub fn reconstruct_root_scalar(
+    records: &[MpcRecoveryRecord],
+    expected_public_key: &G,
+) -> Result<S> {
+    let MpcRecoveryRecord::V1(first) = records
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No MPC recovery records provided"))?;
+    let mut share_count = 0;
+    for (index, record) in records.iter().enumerate() {
+        let record_number = index + 1;
+        record
+            .validate()
+            .with_context(|| format!("Invalid MPC recovery record {record_number}"))?;
+        let MpcRecoveryRecord::V1(record) = record;
+        ensure!(
+            record.chain_id == first.chain_id
+                && record.hashi_object_id == first.hashi_object_id
+                && record.epoch == first.epoch,
+            "MPC recovery record {record_number} has different deployment metadata from record 1"
+        );
+        ensure!(
+            record.public_key == first.public_key,
+            "MPC recovery record {record_number} has a different public key from record 1"
+        );
+        ensure!(
+            record.threshold == first.threshold,
+            "MPC recovery record {record_number} has a different threshold from record 1"
+        );
+        ensure!(
+            record.commitments == first.commitments,
+            "MPC recovery record {record_number} has different public commitments from record 1"
+        );
+        share_count += record.key_shares.shares.len();
+    }
+    ensure!(
+        first.public_key == *expected_public_key,
+        "MPC recovery record 1 public key does not match the expected public key"
+    );
+    let mut shares = Vec::with_capacity(share_count);
+    for MpcRecoveryRecord::V1(record) in records {
+        shares.extend(record.key_shares.shares.iter());
+    }
+    shares.sort_unstable_by_key(|share| share.index);
+    if let Some(pair) = shares
+        .windows(2)
+        .find(|pair| pair[0].index == pair[1].index)
+    {
+        anyhow::bail!(
+            "MPC recovery records contain duplicate share index {}",
+            pair[0].index.get()
+        );
+    }
+    let threshold = usize::from(first.threshold);
+    ensure!(
+        shares.len() >= threshold,
+        "Insufficient distinct MPC recovery shares: have {}, need {threshold}",
+        shares.len()
+    );
+    let scalar = Poly::<S>::recover_c0(first.threshold, shares[..threshold].iter().copied())
+        .context("Failed to reconstruct MPC root scalar")?;
+    ensure!(
+        G::generator() * scalar == *expected_public_key,
+        "Reconstructed MPC root scalar does not match the expected public key"
+    );
+    Ok(scalar)
+}
+
 #[cfg(test)]
 pub(super) fn test_record() -> MpcRecoveryRecord {
     use fastcrypto_tbls::polynomial::Eval;
@@ -164,5 +241,95 @@ mod tests {
             invalidate(inner);
             assert!(record.validate().is_err(), "{case}");
         }
+    }
+
+    fn recovery_records() -> Vec<MpcRecoveryRecord> {
+        (1..=3)
+            .map(|i| {
+                let mut record = test_record();
+                let MpcRecoveryRecord::V1(inner) = &mut record;
+                inner.validator_address = Address::new([i as u8; 32]);
+                inner.key_shares.shares[0].index = ShareIndex::new(i).unwrap();
+                inner.key_shares.shares[0].value = S::from(7u128 + 3 * u128::from(i));
+                record
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reconstructs_root_from_threshold_weighted_and_surplus_shares() {
+        let secret = S::from(7u128);
+        let expected = G::generator() * secret;
+        let mut records = recovery_records();
+        assert!(reconstruct_root_scalar(&records[..2], &expected).unwrap() == secret);
+        records.reverse();
+        assert!(reconstruct_root_scalar(&records, &expected).unwrap() == secret);
+
+        // A single weighted validator can supply the threshold of global shares.
+        let MpcRecoveryRecord::V1(other) = records.remove(1);
+        let MpcRecoveryRecord::V1(weighted) = &mut records[0];
+        weighted.key_shares.shares.extend(other.key_shares.shares);
+        assert!(reconstruct_root_scalar(&records[..1], &expected).unwrap() == secret);
+    }
+
+    #[test]
+    fn rejects_missing_and_duplicate_root_shares() {
+        let expected = G::generator() * S::from(7u128);
+        let mut records = recovery_records();
+        assert!(reconstruct_root_scalar(&[], &expected).is_err());
+        assert!(reconstruct_root_scalar(&records[..1], &expected).is_err());
+        // A duplicate surplus index must not be ignored after finding a quorum.
+        records.push(records[2].clone());
+        assert!(reconstruct_root_scalar(&records, &expected).is_err());
+    }
+
+    #[test]
+    fn rejects_inconsistent_root_recovery_records() {
+        type Invalidate = fn(&mut MpcRecoveryRecordV1);
+        let cases: &[(&str, Invalidate)] = &[
+            ("chain", |r| r.chain_id.push_str("-other")),
+            ("object", |r| r.hashi_object_id = Address::new([9; 32])),
+            ("epoch", |r| r.epoch += 1),
+            ("key", |r| r.public_key = G::generator()),
+            ("threshold", |r| r.threshold = 3),
+            ("commitments", |r| {
+                r.commitments
+                    .insert(ShareIndex::new(1).unwrap(), G::generator());
+            }),
+            ("invalid surplus share", |r| {
+                r.key_shares.shares[0].value = S::from(99u128);
+            }),
+        ];
+        let expected = G::generator() * S::from(7u128);
+        for (case, invalidate) in cases {
+            let mut records = recovery_records();
+            let MpcRecoveryRecord::V1(surplus) = &mut records[2];
+            invalidate(surplus);
+            assert!(
+                reconstruct_root_scalar(&records, &expected).is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_reconstructed_root_to_independently_trusted_key() {
+        let expected = G::generator() * S::from(7u128);
+        let mut records = recovery_records();
+        assert!(reconstruct_root_scalar(&records, &G::generator()).is_err());
+
+        // Internally valid shares of 8 + 3*x still claim the trusted key for 7.
+        for MpcRecoveryRecord::V1(record) in &mut records {
+            for share in &mut record.key_shares.shares {
+                share.value += S::from(1u128);
+            }
+            for commitment in record.commitments.values_mut() {
+                *commitment += G::generator();
+            }
+        }
+        for record in &records {
+            record.validate().unwrap();
+        }
+        assert!(reconstruct_root_scalar(&records, &expected).is_err());
     }
 }
