@@ -18,6 +18,7 @@ pub mod exec;
 pub mod guardian;
 pub mod host;
 pub mod kp_bucket;
+pub mod plan;
 pub mod render;
 pub mod stack;
 pub mod steps;

@@ -287,25 +287,68 @@ impl Stack {
 
     /// The Pulumi CLI version that last wrote the stack's state.
     pub fn written_by(&self, ctx: &Ctx) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Export {
-            deployment: Deployment,
-        }
-        #[derive(Deserialize)]
-        struct Deployment {
-            manifest: Manifest,
-        }
-        #[derive(Deserialize)]
-        struct Manifest {
-            version: String,
-        }
-        let export: Export = read_json(
-            ctx.exec,
-            &pulumi(&self.dir).args(["stack", "export", "--stack", &self.name]),
-        )
-        .with_context(|| format!("Could not read stack {} in {}.", self.name, self.dir))?;
-        Ok(export.deployment.manifest.version)
+        written_by(ctx, &self.dir, &self.name)
     }
+
+    /// The guardian instances in the stack's state, by URN and ID.
+    pub fn instances(&self, ctx: &Ctx) -> Result<Vec<Resource>> {
+        Ok(export(ctx, &self.dir, &self.name)?
+            .deployment
+            .resources
+            .into_iter()
+            .filter(|resource| resource.kind == "aws:ec2/instance:Instance")
+            .collect())
+    }
+
+    /// The state URN of the guardian instance with this ID.
+    pub fn instance_urn(&self, ctx: &Ctx, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .instances(ctx)?
+            .into_iter()
+            .find(|resource| resource.id.as_deref() == Some(id))
+            .map(|resource| resource.urn))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Export {
+    pub deployment: Deployment,
+}
+
+#[derive(Deserialize)]
+pub struct Deployment {
+    pub manifest: Manifest,
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+}
+
+#[derive(Deserialize)]
+pub struct Manifest {
+    #[serde(default)]
+    pub version: String,
+}
+
+#[derive(Deserialize)]
+pub struct Resource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub urn: String,
+    pub id: Option<String>,
+    pub outputs: Option<Value>,
+}
+
+/// A stack's state, as `pulumi stack export` prints it.
+pub fn export(ctx: &Ctx, dir: &str, stack: &str) -> Result<Export> {
+    read_json(
+        ctx.exec,
+        &pulumi(dir).args(["stack", "export", "--stack", stack]),
+    )
+    .with_context(|| format!("Could not read stack {stack} in {dir}."))
+}
+
+/// The Pulumi CLI version that last wrote a stack's state.
+pub fn written_by(ctx: &Ctx, dir: &str, stack: &str) -> Result<String> {
+    Ok(export(ctx, dir, stack)?.deployment.manifest.version)
 }
 
 /// What a step needs about one slot.

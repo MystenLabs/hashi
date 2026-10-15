@@ -14,6 +14,7 @@ use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::configs;
+use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 
@@ -45,6 +46,8 @@ enum Step {
         #[arg(value_name = "SLOT] [rotate-kp-set")]
         args: Vec<String>,
     },
+    /// Apply the whole enclave stack, for a guardian's first deployment.
+    Deploy,
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_NAME>-<UTC time>.
@@ -83,6 +86,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 _ => bail!("Usage: publish [slot] [rotate-kp-set]"),
             }
         }
+        Step::Deploy => deploy::deploy(&ctx),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }

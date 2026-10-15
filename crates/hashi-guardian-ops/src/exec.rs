@@ -138,6 +138,9 @@ pub trait Exec {
     /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does.
     fn output(&self, cmd: &Cmd) -> io::Result<Output>;
 
+    /// Runs `cmd` on the terminal, as a plain command line in a script does, and returns whether it succeeded.
+    fn run(&self, cmd: &Cmd) -> io::Result<bool>;
+
     /// Replaces this process with `cmd`, as bash's `exec` does. Returns only if that fails.
     fn exec(&self, cmd: &Cmd) -> io::Error;
 
@@ -167,6 +170,18 @@ impl Exec for System {
             stdout: text(output.stdout)?,
             stderr: text(output.stderr)?,
         })
+    }
+
+    fn run(&self, cmd: &Cmd) -> io::Result<bool> {
+        let mut child = cmd.command().spawn()?;
+        // Ctrl-C still reaches the child, which shares the terminal, but this waits for it to stop, as bash does: an
+        // interrupted `pulumi up` must finish its own cleanup before the operator gets the prompt back.
+        // SAFETY: `signal` only swaps this process's SIGINT disposition, and nothing else here touches it.
+        let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        let status = child.wait();
+        // SAFETY: as above, restoring the disposition `signal` returned.
+        unsafe { libc::signal(libc::SIGINT, previous) };
+        Ok(status?.success())
     }
 
     fn exec(&self, cmd: &Cmd) -> io::Error {
@@ -304,6 +319,10 @@ pub mod fake {
                 stdout,
                 stderr: String::new(),
             })
+        }
+
+        fn run(&self, cmd: &Cmd) -> io::Result<bool> {
+            self.output(cmd).map(|output| output.success)
         }
 
         fn exec(&self, cmd: &Cmd) -> io::Error {
