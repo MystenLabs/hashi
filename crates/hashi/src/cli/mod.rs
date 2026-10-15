@@ -539,6 +539,40 @@ pub enum BackupCommands {
         local_only: bool,
     },
 
+    /// Export the current full on-chain MPC public key as BCS for trusted offline recovery
+    ExportMpcPublicKey {
+        /// New output file (existing destinations are never overwritten)
+        #[clap(long)]
+        output: std::path::PathBuf,
+    },
+
+    /// Recover the root MPC key on a trusted offline machine (contains private key material)
+    RecoverMpcKey {
+        /// Local .tar, .tar.asc, or extracted recovery-record .bcs files
+        #[clap(required = true, num_args = 1..)]
+        inputs: Vec<std::path::PathBuf>,
+
+        /// Independently trusted full MPC public key in BCS format
+        #[clap(long)]
+        mpc_public_key: std::path::PathBuf,
+
+        /// New private root-key BCS file (existing destinations are never overwritten)
+        #[clap(long)]
+        output: std::path::PathBuf,
+
+        /// OpenPGP secret key for encrypted archives
+        #[clap(long, conflicts_with = "use_gpg_agent")]
+        backup_pgp_secret_key: Option<std::path::PathBuf>,
+
+        /// Decrypt encrypted archives using the local or forwarded gpg-agent
+        #[clap(long)]
+        use_gpg_agent: bool,
+
+        /// GNUPGHOME to use with --use-gpg-agent
+        #[clap(long, requires = "use_gpg_agent")]
+        gpg_homedir: Option<std::path::PathBuf>,
+    },
+
     /// Restore files from a backup archive.
     ///
     /// Files are extracted only into the selected output directory. Original
@@ -1358,28 +1392,12 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     region.as_deref(),
                     version_id.as_deref(),
                 )?;
-                let decryptor = match crate::backup::archive_format(&backup_tarball)? {
-                    crate::backup::BackupArchiveFormat::Unencrypted => {
-                        commands::backup::RestoreDecryptor::Unencrypted
-                    }
-                    crate::backup::BackupArchiveFormat::Encrypted => {
-                        match (backup_pgp_secret_key, use_gpg_agent) {
-                            (Some(secret_key_path), false) => {
-                                commands::backup::RestoreDecryptor::LocalSecretKey {
-                                    secret_key_path,
-                                }
-                            }
-                            (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
-                                homedir: gpg_homedir,
-                            },
-                            (Some(_), true) | (None, false) => {
-                                anyhow::bail!(
-                                    "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
-                                );
-                            }
-                        }
-                    }
-                };
+                let decryptor = commands::backup::select_restore_decryptor(
+                    &backup_tarball,
+                    backup_pgp_secret_key.as_deref(),
+                    use_gpg_agent,
+                    gpg_homedir.as_deref(),
+                )?;
                 if remote {
                     commands::backup::restore_from_s3(
                         backup_tarball.to_str().expect("validated S3 URI"),
@@ -1392,6 +1410,26 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 } else {
                     commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
                 }
+            }
+            BackupCommands::ExportMpcPublicKey { output } => {
+                commands::backup::export_mpc_public_key(&config, &output).await?;
+            }
+            BackupCommands::RecoverMpcKey {
+                inputs,
+                mpc_public_key,
+                output,
+                backup_pgp_secret_key,
+                use_gpg_agent,
+                gpg_homedir,
+            } => {
+                commands::backup::recover_mpc_key(
+                    &inputs,
+                    &mpc_public_key,
+                    &output,
+                    backup_pgp_secret_key.as_deref(),
+                    use_gpg_agent,
+                    gpg_homedir.as_deref(),
+                )?;
             }
         },
         CliCommand::Deposit { action } => {

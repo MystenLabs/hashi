@@ -42,6 +42,9 @@ use crate::db::Database;
 
 pub use recovery::MpcRecoveryRecord;
 pub use recovery::MpcRecoveryRecordV1;
+pub use recovery::RecoveredMpcKey;
+pub use recovery::RecoveredMpcKeyV1;
+pub use recovery::read_mpc_recovery_record;
 pub use recovery::reconstruct_root_scalar;
 
 pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
@@ -1341,6 +1344,59 @@ mod tests {
             archive.finish().unwrap();
         }
         tar_bytes
+    }
+
+    #[test]
+    fn read_mpc_recovery_record_rejects_missing_and_duplicate_entries() {
+        let record = bcs::to_bytes(&recovery::test_record()).unwrap();
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from(MPC_RECOVERY_FILE_NAME));
+        for (entries, expected_error) in [
+            (vec![], "Missing recovery entry"),
+            (
+                vec![
+                    (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                    (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                ],
+                "Duplicate recovery entry",
+            ),
+        ] {
+            let bytes = build_archive_bytes(&manifest, &entries);
+            let error = read_mpc_recovery_record(bytes.as_slice()).err().unwrap();
+            assert!(error.to_string().contains(expected_error));
+        }
+    }
+
+    #[test]
+    fn read_mpc_recovery_record_checks_decrypted_reader_eof() {
+        struct FailAtEof(Cursor<Vec<u8>>);
+
+        impl Read for FailAtEof {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let count = self.0.read(buf)?;
+                if count == 0 && !buf.is_empty() {
+                    return Err(io::Error::other("late decryption failure"));
+                }
+                Ok(count)
+            }
+        }
+
+        let record = bcs::to_bytes(&recovery::test_record()).unwrap();
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from(MPC_RECOVERY_FILE_NAME));
+        let bytes = build_archive_bytes(
+            &manifest,
+            &[
+                (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                ("ignored/config.toml", b"not extracted"),
+            ],
+        );
+        let recovered = read_mpc_recovery_record(bytes.as_slice()).unwrap();
+        assert_eq!(bcs::to_bytes(&recovered).unwrap(), record);
+        let error = read_mpc_recovery_record(FailAtEof(Cursor::new(bytes)))
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("late decryption failure"));
     }
 
     fn backup_service_fixture(

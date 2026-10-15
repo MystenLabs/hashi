@@ -14,9 +14,77 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io::Read;
 use sui_sdk_types::Address;
 
 use crate::mpc::types::MpcOutput;
+
+use super::MPC_RECOVERY_FILE_NAME;
+use super::read_backup_manifest;
+
+/// Versioned root key recovered on a trusted machine. Contains secret material.
+#[derive(Serialize, Deserialize)]
+pub enum RecoveredMpcKey {
+    V1(RecoveredMpcKeyV1),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RecoveredMpcKeyV1 {
+    pub chain_id: String,
+    pub hashi_object_id: Address,
+    /// Historical sharing epoch; the full public key remains stable across resharings.
+    pub epoch: u64,
+    pub public_key: G,
+    pub private_key: S,
+}
+
+/// Read only the recovery record from a decrypted backup TAR, without extracting files.
+///
+/// Consume the complete archive and underlying reader before returning secret material:
+/// decryption authentication or subprocess exit errors may arrive only at EOF.
+pub fn read_mpc_recovery_record<R: Read>(reader: R) -> Result<MpcRecoveryRecord> {
+    let mut archive = tar::Archive::new(reader);
+    let mut entries = archive.entries().context("Failed to read backup archive")?;
+    let manifest_entry = entries
+        .next()
+        .context("Backup archive is missing its manifest")??;
+    let (manifest, _) = read_backup_manifest(manifest_entry)?;
+    ensure!(
+        manifest.recovery.is_some(),
+        "Backup manifest does not declare MPC recovery material"
+    );
+    let mut record = None;
+    for entry in entries {
+        let mut entry = entry.context("Failed to read backup archive entry")?;
+        let path = entry.path().context("Invalid backup archive entry path")?;
+        if path
+            .file_name()
+            .is_none_or(|name| name != MPC_RECOVERY_FILE_NAME)
+        {
+            continue;
+        }
+        ensure!(
+            path.as_os_str() == std::ffi::OsStr::new(MPC_RECOVERY_FILE_NAME),
+            "Recovery entry must be at the fixed tar root path"
+        );
+        ensure!(record.is_none(), "Duplicate recovery entry");
+        ensure!(
+            entry.header().entry_type() == tar::EntryType::Regular,
+            "Recovery entry must be a regular file"
+        );
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .context("Failed to read MPC recovery record")?;
+        let decoded: MpcRecoveryRecord =
+            bcs::from_bytes(&bytes).context("Malformed MPC recovery record")?;
+        decoded.validate().context("Invalid MPC recovery record")?;
+        record = Some(decoded);
+    }
+    std::io::copy(&mut archive.into_inner(), &mut std::io::sink())
+        .context("Failed to finish reading decrypted backup")?;
+    record.context("Missing recovery entry")
+}
 
 /// Versioned, owned recovery material, serialized with BCS inside the encrypted archive.
 /// Deliberately does not implement `Debug`: private shares must not enter logs.
