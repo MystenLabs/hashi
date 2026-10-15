@@ -46,17 +46,26 @@ using a self-signed cert (each member registers its ed25519 public key in the
 `CommitteeSet` on the `Hashi` object), and serves the gRPC `BridgeService` and
 `MpcService`. Peers connect with their own registered TLS key, and the node
 refuses any caller whose key belongs to no registered validator, except on
-`/health` and `/ready`. The `/health` there always answers; liveness probes
-should use the `/health` on the plain-HTTP metrics listener
-(`metrics-http-address`, default `127.0.0.1:9180`) instead, which fails once
-the node's main runtime stops running tasks for two minutes.
+`/health` and `/ready`.
 
-## Sui contracts
+## How should liveness probes check the node?
+
+The node runs two HTTP listeners: the TLS-secured service described above, and
+a separate plain-HTTP metrics listener. The `/health` on the TLS service always
+answers; liveness probes should use the `/health` on the plain-HTTP metrics
+listener instead, which fails once the node's main runtime stops running tasks
+for 2 minutes.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `metrics-http-address` | `127.0.0.1:9180` | Address of the plain-HTTP metrics listener, whose `/health` liveness probes should use. |
+
+## How is the Hashi Move package published?
 
 - The Hashi Move package is published as a normal package. It is not a system
   package and is not part of the Sui framework.
 
-## Stateless
+## Is the Hashi service stateless?
 
 A main goal of this design is to make the Hashi service as stateless as
 possible. Outside of any cryptographic material required for participating in

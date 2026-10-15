@@ -81,7 +81,8 @@ struct HashiNodeInfo {
 ```
 
 The voting weight each validator possesses is mirrored from the
-`SuiSystemState`.
+`SuiSystemState`. This is the stake weight behind the `2f+1` participation
+requirement described in [Committee hand-offs](#committee-hand-offs).
 
 ## Why the committee is not exactly the set of Sui validators
 
@@ -107,8 +108,13 @@ Addressing any of the above would require deep changes to Sui's
 reconfiguration process. Some of those changes are directly opposed by the
 core team, and any of them would take significant time to implement correctly.
 
+## Committee hand-offs
+
 The one downside of not having tight coupling is the need to handle the
-hand-off from an old committee to a new committee. The hand-off requires that
+hand-off from an old committee to a new committee. At each epoch boundary after
+genesis, the key rotation protocol transfers key shares from the old committee
+to the new one (at genesis the first committee runs DKG instead, with no old
+committee to hand off from). The hand-off requires that
 `2f+1` stake-weighted members of the old committee are alive and willing to
 participate in the hand-off protocol. This design makes that assumption,
 because of the challenges of enforcing tight coupling, and an economic
