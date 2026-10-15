@@ -30,7 +30,11 @@ pub fn run(ctx: &Ctx, region: &str, instance: &str, commands: &[&str]) -> Result
             .arg("--parameters")
             .arg(format!("commands={}", serde_json::to_string(commands)?)),
     )
-    .with_context(|| format!("Could not send commands to {instance}."))?
+    .with_context(|| {
+        format!(
+            "Could not send commands to {instance}. A new instance takes a minute to accept them."
+        )
+    })?
     .trim()
     .to_owned();
     let success = ctx

@@ -168,6 +168,9 @@ fn parse_value(raw: &str, home: Option<&str>) -> Result<String> {
             if word.contains(['"', '\'', ';', '&', '|', '<', '>', '(', ')']) {
                 bail!("a value with quotes or shell operators inside it");
             }
+            if word.starts_with('~') || word.contains(":~") {
+                bail!("a ~, which bash would expand: write $HOME instead");
+            }
             (expand(word, home)?, &raw[end..])
         }
     };
@@ -254,6 +257,8 @@ mod tests {
             "KP_NAME=\"a\"b",
             "KP_NAME=a#b c",
             "KP_NAME=a\nKP_NAME=b",
+            "KP_ROSTER_DIR=~/roster",
+            "KP_ROSTER_DIR=/a:~/b",
         ] {
             assert!(parsed(text).is_err(), "accepted {text:?}");
         }

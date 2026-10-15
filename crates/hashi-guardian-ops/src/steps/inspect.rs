@@ -88,7 +88,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
                 sui::duration(window.since),
                 sui::duration(window.remaining),
                 if window.allows_switchover() {
-                    "; a switchover can start"
+                    "; the time allows a switchover"
                 } else {
                     "; too close to the turn for a switchover"
                 }
