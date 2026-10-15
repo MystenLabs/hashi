@@ -676,7 +676,7 @@ impl MpcManager {
             match self.begin_retrieve(requester, request)? {
                 RetrieveOutcome::Ready(reply) => reply,
                 RetrieveOutcome::NeedsStore => {
-                    retrieve_from_store(&*self.public_messages_store, request, &shape)?
+                    retrieve_from_store(&*self.public_messages_store, request)?
                 }
                 RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Avid(
                     finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
@@ -7072,19 +7072,13 @@ impl AvidRetrieval {
 pub(crate) fn retrieve_from_store(
     store: &dyn PublicMessagesStore,
     request: &RetrieveMessagesRequest,
-    shape: &ShapeParams,
 ) -> MpcResult<RetrieveReply> {
     let (epoch, dealer) = (request.epoch, &request.dealer);
     let reply = match request.protocol_type {
         ProtocolTypeIndicator::Dkg => store
             .get_dealer_message(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
-            .map(|bytes| {
-                stored_rows::check_dkg_message(shape, epoch, dealer, &bytes)
-                    .map(|()| RetrieveReply::Dkg(Bytes::from(bytes)))
-            })
-            .transpose()
-            .map_err(not_found_if_refused)?,
+            .map(|bytes| RetrieveReply::Dkg(Bytes::from(bytes))),
         ProtocolTypeIndicator::KeyRotation => store
             .get_rotation_messages(epoch, dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
