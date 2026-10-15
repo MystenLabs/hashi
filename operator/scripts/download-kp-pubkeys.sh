@@ -11,6 +11,8 @@ export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 # publish-kp-config.sh writes the guardian configuration here; it is not an upload.
 CONFIG_PREFIX=_config
+# key-provisioner rotate-kp-set uploads its submissions here; they are not public keys.
+ROTATION_PREFIX=_rotate-kp-set
 KP_FILE_SUFFIXES=(
   kp-pubkey.asc
   kp-fingerprint.txt
@@ -142,7 +144,7 @@ jq -r '(.Versions // [])[] | [.Key, .VersionId, (.IsLatest | tostring)] | @tsv' 
 : > "$WORK_DIR/all-kp-keys"
 : > "$WORK_DIR/unexpected"
 while IFS=$'\t' read -r key version_id is_latest; do
-  if [[ "$key" == "$CONFIG_PREFIX"/* ]]; then
+  if [[ "$key" == "$CONFIG_PREFIX"/* || "$key" == "$ROTATION_PREFIX"/* ]]; then
     continue
   fi
   id="${key%%/*}"

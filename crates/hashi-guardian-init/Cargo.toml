@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-s3.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
 hashi = { path = "../hashi" }
@@ -35,6 +37,8 @@ non-enclave-dev = [
 ]
 
 [dev-dependencies]
+aws-sdk-s3 = { workspace = true, features = ["test-util"] }
+aws-smithy-mocks = "0.1"
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
 hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tempfile.workspace = true

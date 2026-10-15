@@ -222,9 +222,9 @@ done
 PUBLISHED_CONFIG="$DOWNLOAD_DIR/guardian-init.yaml"
 [[ -s "$PUBLISHED_CONFIG" ]] \
   || die "s3://$BUCKET/$CONFIG_PREFIX/ holds no configuration. Ask the operator to publish it."
-# This script writes both keys below; a published copy would make them ambiguous.
-if grep -qE '^(kp_pgp_cert_path|s3_credentials):' "$PUBLISHED_CONFIG"; then
-  die "The published configuration sets kp_pgp_cert_path or s3_credentials. Ask the operator to publish it again."
+# This script writes the keys below; a published copy would make them ambiguous.
+if grep -qE '^(kp_pgp_cert_path|s3_credentials|kp_bucket):' "$PUBLISHED_CONFIG"; then
+  die "The published configuration sets kp_pgp_cert_path, s3_credentials or kp_bucket. Ask the operator to publish it again."
 fi
 # The first build listed is current_build: the commit the guardian runs, which these tools must match.
 HASHI_COMMIT=""
@@ -305,7 +305,8 @@ CONFIG_FILE="$CONFIG_DIR/guardian-init.yaml"
   {
     printf '# Written by key-provisioner/scripts/download-config.sh from s3://%s/%s/.\n' "$BUCKET" "$CONFIG_PREFIX"
     printf 'kp_pgp_cert_path: "certs/%s"\n' "$MY_CERT"
-    printf 's3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n\n' "$ACCESS_KEY_ID" "$SECRET_ACCESS_KEY"
+    printf 's3_credentials:\n  access_key: "%s"\n  secret_key: "%s"\n' "$ACCESS_KEY_ID" "$SECRET_ACCESS_KEY"
+    printf 'kp_bucket:\n  name: "%s"\n  region: "%s"\n\n' "$BUCKET" "$REGION"
     cat "$PUBLISHED_CONFIG"
   } > "$CONFIG_FILE"
 ) || die "Could not write $CONFIG_FILE."

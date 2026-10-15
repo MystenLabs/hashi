@@ -37,6 +37,12 @@ pub fn report(cfg: &Config) -> Result<()> {
             "from the environment"
         }
     );
+    if let Some(bucket) = &cfg.kp_bucket {
+        println!(
+            "kp bucket:          s3://{} ({})",
+            bucket.name, bucket.region
+        );
+    }
     println!("sui rpc:            {}", cfg.hashi.sui_rpc);
     println!("hashi package:      {}", cfg.hashi.hashi_ids.package_id);
     println!(

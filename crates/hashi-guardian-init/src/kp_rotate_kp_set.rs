@@ -4,7 +4,8 @@
 //! `key-provisioner rotate-kp-set`: one current KP's half of a KP-set rotation.
 //! Verifies the fresh ceremony guardian, decrypts this KP's share and signs a
 //! submission binding it (re-encrypted to the guardian) to the proposed roster
-//! and params. The file holds nothing secret; the operator batches them.
+//! and params. The file holds nothing secret, and goes to the KP bucket when the
+//! config names one; the operator batches them.
 
 use std::path::Path;
 
@@ -132,23 +133,49 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     signed
         .verify_signature()
         .map_err(|e| anyhow!("re-verify the signed submission: {e}"))?;
-    submission::write(submission_path, signed)?;
+    let bytes = submission::encode(signed);
+    submission::write(submission_path, &bytes)?;
+    let uploaded = match &cfg.kp_bucket {
+        Some(bucket) => {
+            let key = submission::bucket_key(&session_id, &kp_cert.fingerprint().to_hex());
+            let client = submission::kp_bucket_client(bucket, &s3_credentials);
+            submission::upload(&client, &bucket.name, &key, bytes)
+                .await
+                .with_context(|| {
+                    format!(
+                        "the submission is still at {}: send that file to the operator",
+                        submission_path.display()
+                    )
+                })?;
+            Some(format!("s3://{}/{key}", bucket.name))
+        }
+        None => None,
+    };
 
     info!(
         phase = "summary",
         path = %submission_path.display(),
+        uploaded_to = ?uploaded,
         session_id = %session_id,
         share_id = share_id.get(),
         signer_fingerprint = %kp_cert.fingerprint(),
         sharing_seq,
         new_num_shares = new_params.num_shares(),
         new_threshold = new_params.threshold(),
-        "rotation submission written; send it to the operator",
+        "rotation submission written",
     );
     println!(
         "KP-set rotation submission written to {}",
         submission_path.display()
     );
+    match &uploaded {
+        Some(url) => {
+            println!(
+                "  uploaded to:    {url}; the operator collects it, so there is nothing to send"
+            )
+        }
+        None => println!("  send this file to the operator"),
+    }
     println!("  session_id:     {session_id}");
     println!("  share_id:       {}", share_id.get());
     println!("  signer:         {}", kp_cert.fingerprint());

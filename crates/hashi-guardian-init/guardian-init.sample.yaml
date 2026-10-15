@@ -58,6 +58,12 @@ deployment:
 #   secret_key: "..."
 #   session_token: "..." # Only for temporary credentials.
 
+# The bucket the operator published this config in; download-config.sh sets it.
+# `key-provisioner rotate-kp-set` uploads its submission there with s3_credentials.
+# kp_bucket:
+#   name: "..."
+#   region: "us-west-2"
+
 hashi:
   # Sui RPC URL used to fetch Hashi on-chain state.
   sui_rpc: "https://fullnode.devnet.sui.io:443"

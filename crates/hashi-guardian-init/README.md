@@ -290,7 +290,8 @@ operator still need the same set, `n` and `t`.
 attestation, verifies the latest `ceremony/` + `kp-shares/` logs against the
 dealt `kp_roster`, and prints the session and the proposal for the current KPs
 to compare against their own. Each current KP then runs
-`key-provisioner rotate-kp-set` and sends the operator its submission file.
+`key-provisioner rotate-kp-set`, which uploads its submission file to the KP
+bucket for the operator to download (below).
 
 `submit` decodes the files, checks what the enclave will check (signature,
 pinned session, each signer's share assignment, one submission per share,
@@ -310,7 +311,8 @@ previous finalized KP set remains authoritative.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
-cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/kp1.rotation --submission /path/to/kp3.rotation
+aws s3 cp --recursive s3://<kp bucket>/_rotate-kp-set/<session_id>/ /path/to/submissions/
+cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/submissions/<kp1 fingerprint>.rotation --submission /path/to/submissions/<kp3 fingerprint>.rotation
 cargo run -p hashi-guardian-init -- operator rotate-kp-set wait --config guardian-init.sample.yaml
 ```
 
@@ -334,8 +336,10 @@ One current KP's contribution to a KP-set rotation. It:
    certs and `n`/`t`. The hash comes from this KP's configured deployment policy;
    the enclave checks it against the policy installed during OI before using shares.
 4. Writes the signed request to `--submission-path`: the wire message,
-   prost-encoded. It holds nothing secret and can be sent to the operator
-   over any channel.
+   prost-encoded. It holds nothing secret. With `kp_bucket` set, as
+   `key-provisioner/scripts/download-config.sh` sets it, it also uploads it to
+   `_rotate-kp-set/<session_id>/<fingerprint>.rotation` there with
+   `s3_credentials`; otherwise the KP sends the file to the operator.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guardian-init.sample.yaml --submission-path /path/to/kp3.rotation
@@ -343,7 +347,7 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guard
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `kp_pgp_cert_path`, `guardian_endpoint`, `deployment`,
-`kp_roster` and `new_kp_roster`. Every KP must sign the same proposal (the
+`kp_roster`, `new_kp_roster` and `kp_bucket`. Every KP must sign the same proposal (the
 new set, `n`, `t` and the deployment configuration): the enclave rejects a batch whose
 submissions disagree.
 
@@ -364,9 +368,9 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
    one config.
 3. Operator: bring up a fresh ceremony-mode guardian on the standby slot,
    against the same bucket, then `operator rotate-kp-set init`.
-4. Any `t` current KPs: `key-provisioner rotate-kp-set`, each sending the
-   operator its submission file. The lost key takes no part.
-5. Operator: `operator rotate-kp-set submit` with the files. It waits for the
+4. Any `t` current KPs: `key-provisioner rotate-kp-set`, each uploading its
+   submission file to the KP bucket. The lost key takes no part.
+5. Operator: `operator rotate-kp-set submit` with the downloaded files. It waits for the
    new KPs (`wait` resumes if interrupted).
 6. Every new KP: `key-provisioner ceremony`, with `kp_roster` set to the new
    set.
