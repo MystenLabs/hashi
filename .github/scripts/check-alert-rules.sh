@@ -48,6 +48,7 @@ for f in "${rules[@]}"; do
 	hashi-node) src=crates/hashi/src ;;
 	hashi-monitor) src=crates/hashi-monitor/src ;;
 	guardian-proxy) src=crates/hashi-guardian-proxy/src ;;
+	hashi-fleet) src=crates/hashi/src ;;
 	*)
 		echo "::error file=$f::map $f to the crate whose metrics it reads in $0"
 		status=1
@@ -56,6 +57,10 @@ for f in "${rules[@]}"; do
 	esac
 	while read -r name; do
 		case $name in
+		hashi_proxy_allowed_members)
+			# sui-proxy's gauge, which the fleet rules point to.
+			continue
+			;;
 		*'*')
 			grep -rqF -- "\"${name%'*'}" "$src" && continue
 			;;

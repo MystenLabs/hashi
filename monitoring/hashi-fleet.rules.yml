@@ -1,0 +1,369 @@
+# Prometheus alerting rules for the whole hashi committee. They need every
+# node's metrics in one store, each node labelled `host` as sui-proxy labels
+# pushed metrics. docs/alerting.md says which rule files to load.
+#
+# Thresholds are fractions of the committee: a few broken nodes is the steady
+# state, and each node's operator alerts on its own with hashi-node.rules.yml.
+# Gauges that mirror on-chain state (queues, the pause flag) are read with the
+# median, because a wedged node's copy freezes.
+
+groups:
+  - name: hashi-fleet
+    interval: 1m
+    rules:
+      # sui-node also exports `uptime`; hashi's carries hashi_object_id.
+      - alert: HashiFleetMetricsAbsent
+        expr: absent(uptime{hashi_object_id!=""})
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "no hashi validator is reporting metrics"
+          description: >-
+            Not one validator has pushed hashi metrics for 15 minutes. That is
+            almost always the metrics pipeline (sui-proxy, or the store behind
+            it), not the whole committee.
+
+      # Compared with the last 6h rather than a fixed count, so the rule
+      # survives validators joining and leaving the committee.
+      - alert: HashiFleetShrunk
+        expr: count(uptime{hashi_object_id!=""}) < 0.8 * max_over_time(count(uptime{hashi_object_id!=""})[6h:5m])
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "more than 20% of hashi validators stopped reporting"
+          description: >-
+            The number of validators pushing hashi metrics has dropped more
+            than 20% below its 6h peak for over 15 minutes. Either a large
+            slice of the committee is down or the metrics proxy is not
+            accepting pushes; check `hashi_proxy_allowed_members` and the
+            sui-proxy publish rate before assuming the former.
+
+      # Leadership rotates per checkpoint, so this asks whether anyone took a
+      # turn in the last hour.
+      - alert: HashiFleetNoLeader
+        expr: sum(max_over_time(hashi_is_leader[1h])) == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "no hashi validator has acted as leader in the last hour"
+          description: >-
+            Not one validator reported `hashi_is_leader = 1` in the trailing
+            hour. Nothing is driving deposits, withdrawals, or confirmations:
+            the bridge is stalled even though nodes look up.
+
+      # seq_mismatch and rate_limited are normal retries and throttling; only
+      # the fail-closed outcomes mean the guardian is broken.
+      - alert: HashiFleetGuardianUnreachable
+        expr: |
+          sum(rate(hashi_guardian_rpc_total{outcome=~"unavailable|parse_error|signature_error"}[10m]))
+            / sum(rate(hashi_guardian_rpc_total[10m]))
+            > 0.25
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "more than 25% of fleet-wide guardian RPCs are failing closed"
+          description: >-
+            Guardian RPCs across the whole committee are failing with
+            unavailable, parse_error or signature_error. Withdrawals cannot be
+            finalised while this holds. Check the guardian enclave and its
+            proxy.
+
+      - alert: HashiFleetWithdrawalsStalled
+        expr: |
+          sum(increase(hashi_withdrawals_finalized_total[6h])) == 0
+            and quantile(0.5, hashi_withdrawal_queue_size{status="approved"}) > 0
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "withdrawals are approved but none have finalised in 6 hours"
+          description: >-
+            There is an approved withdrawal backlog and not a single withdrawal
+            has finalised across the fleet in 6 hours. Look at the limiter
+            (tokens available, oversize skips), MPC signing failures, and the
+            Bitcoin fee rate.
+
+      - alert: HashiFleetDepositsStalled
+        expr: |
+          sum(increase(hashi_deposits_confirmed_total[6h])) == 0
+            and quantile(0.5, hashi_deposit_queue_size) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "deposits are queued but none have confirmed in 6 hours"
+          description: >-
+            Deposit requests are pending and none have confirmed across the
+            fleet in 6 hours. Check Kyoto sync, the deposit time-delay window,
+            and whether the leader loop is running.
+
+      # A booting node reads epoch 0, which would look like a spread of a
+      # thousand epochs.
+      - alert: HashiFleetEpochDivergence
+        expr: max(hashi_epoch > 0) - min(hashi_epoch > 0) > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "hashi validators are more than one epoch apart"
+          description: >-
+            The spread between the highest and lowest `hashi_epoch` in the
+            fleet has exceeded one epoch for 30 minutes. Validators this far
+            behind cannot contribute to the current committee's signing.
+
+      - alert: HashiFleetPackageDrift
+        expr: count(count by (package_id) (uptime{hashi_object_id!=""})) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than one hashi package ID is in use across the fleet"
+          description: >-
+            Validators disagree on which hashi package they are running
+            against. Whoever is on the odd package ID is pointed at the wrong
+            deployment and their votes will not count.
+
+      - alert: HashiFleetObjectDrift
+        expr: count(count by (hashi_object_id) (uptime{hashi_object_id!=""})) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than one Hashi shared-object ID is in use across the fleet"
+          description: >-
+            Validators disagree on which `Hashi` shared object they are
+            watching. This is a misconfiguration on at least one operator's
+            side.
+
+      # The flag stays set until a node's limiter reconciles with the guardian
+      # or the node restarts, so a few drifted nodes is the steady state.
+      - alert: HashiFleetLimiterDrifted
+        expr: count(hashi_guardian_limiter_drifted > 0) / count(hashi_guardian_limiter_drifted) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 10% of hashi validators have lost limiter lockstep with the guardian"
+          description: >-
+            A tenth of the committee drifting at once points at the guardian
+            side (a rotation or a limiter policy change), not at operators.
+            `hashi_guardian_limiter_drifted == 1` names them by `host`.
+
+      # A node's Bitcoin client starts only after its boot scrape of on-chain
+      # state, so a fleet-wide release would otherwise read as unsynced.
+      - alert: HashiFleetKyotoUnsynced
+        expr: |
+          count(hashi_kyoto_synced == 0 unless hashi_onchain_scrape_in_progress == 1)
+            / count(hashi_kyoto_synced unless hashi_onchain_scrape_in_progress == 1)
+            > 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 25% of hashi validators are not synced to Bitcoin"
+          description: >-
+            A quarter of the committee cannot see the Bitcoin chain, so they
+            cannot attest to deposits or withdrawal confirmations. If this
+            coincides with a release, suspect the Kyoto client; otherwise
+            suspect their Bitcoin peers.
+
+      # -1 means a node has not read its balance yet.
+      - alert: HashiFleetLowGas
+        expr: count((hashi_sui_balance >= 0) < 1e9) / count(hashi_sui_balance >= 0) > 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 25% of hashi validators have under 1 SUI of gas"
+          description: >-
+            A quarter of the committee is about to stop submitting Sui
+            transactions for lack of gas. Individual operators run dry all the
+            time; this threshold means it is becoming a committee-wide problem
+            worth announcing.
+
+      - alert: HashiFleetBridgePaused
+        expr: quantile(0.5, hashi_paused) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "the hashi bridge is paused on chain"
+          description: >-
+            `hashi_paused` is set, so deposits and withdrawals are not being
+            processed. This is usually deliberate; the alert exists so a pause
+            is never left on by accident.
+
+  - name: hashi-fleet-health
+    interval: 1m
+    rules:
+      # A node that doesn't support the enabled package halts itself. Signing
+      # needs two thirds of the committee, so a third halted stops the bridge.
+      - alert: HashiFleetVersionHalted
+        expr: count(hashi_package_version_unsupported > 0) / count(hashi_package_version_unsupported) > 0.33
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "a third of hashi validators have halted on an unsupported package version"
+          description: >-
+            More than a third of the committee reports the enabled on-chain
+            package as unsupported and has stopped processing. The remaining
+            validators cannot reach signing quorum. Those operators need to
+            upgrade before withdrawals resume.
+
+      - alert: HashiFleetVersionLagging
+        expr: count(hashi_package_version_unsupported > 0) / count(hashi_package_version_unsupported) > 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 20% of hashi validators have halted on an unsupported package version"
+          description: >-
+            A fifth of the committee has halted because it does not support the
+            enabled on-chain package. At a third the bridge loses signing
+            quorum. Chase the operators still on the old release.
+
+      - alert: HashiFleetReconfigStuck
+        expr: count(hashi_reconfig_in_progress == 1) / count(hashi_reconfig_in_progress) > 0.5
+        for: 2h
+        labels:
+          severity: critical
+        annotations:
+          summary: "half the hashi committee has been mid-reconfiguration for over 2 hours"
+          description: >-
+            Most validators report `hashi_reconfig_in_progress = 1` and have
+            for 2 hours. The MPC key resharing for the new epoch is wedged, so
+            nothing can be signed until it completes. Look at
+            `hashi_mpc_reconfig_total_duration_seconds` and the nonce and
+            dealer counters.
+
+      # hashi starts a reconfiguration at each Sui epoch change. A governance
+      # hold stops that on purpose; a running one is HashiFleetReconfigStuck.
+      - alert: HashiFleetEpochBehindSui
+        expr: |
+          max(hashi_sui_epoch) > max(hashi_epoch > 0)
+            unless quantile(0.5, hashi_reconfig_hold) > 0
+            unless quantile(0.5, hashi_reconfig_in_progress) > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "the hashi committee has not followed a Sui epoch change for 2 hours"
+          description: >-
+            Sui moved to a new epoch over 2 hours ago and no hashi
+            reconfiguration is running or held. Every node submits
+            start_reconfig at a Sui epoch change; their logs say why none
+            landed.
+
+      # Each host's worst task. mpc_service went 25 minutes between iterations
+      # committee-wide on 2026-09-10 and recovered on its own.
+      - alert: HashiFleetTasksStalled
+        expr: |
+          count(max by (host) (time() - hashi_task_last_iteration_timestamp_seconds) > 1800)
+            / count(count by (host) (hashi_task_last_iteration_timestamp_seconds))
+            > 0.25
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 25% of hashi validators have a task loop that stopped iterating"
+          description: >-
+            A quarter of the committee has a leader, MPC or watcher loop that
+            has not completed an iteration in 30 minutes while still reporting
+            metrics. A fleet-wide stall points at a shared dependency: the
+            fullnode checkpoint stream, the guardian, or a release bug.
+
+      # A booting node reads 0 and counts on neither side.
+      - alert: HashiFleetCheckpointLag
+        expr: |
+          count(time() - (hashi_latest_checkpoint_timestamp_ms > 0) / 1000 > 600)
+            / count(hashi_latest_checkpoint_timestamp_ms > 0)
+            > 0.25
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 25% of hashi validators are over 10 minutes behind the Sui checkpoint stream"
+          description: >-
+            A quarter of the committee is acting on on-chain state more than 10
+            minutes old. Votes from those nodes lag the current queues and
+            limiter. If it coincides with a Sui network incident it will clear
+            on its own; otherwise suspect the fullnodes operators subscribe to.
+
+      # hashi_presig_pool_remaining only moves on a successful sign, so it
+      # can't show this. Bursts under an hour refill on their own.
+      - alert: HashiFleetPresigExhausted
+        expr: sum(increase(hashi_mpc_sign_failures_total{reason="pool_exhausted"}[15m])) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "hashi validators are failing to sign for lack of presignatures"
+          description: >-
+            Signing has been failing with `pool_exhausted` across the fleet for
+            an hour. Withdrawals stall until the nonce pipeline refills. This
+            peaked at hundreds per second on 2026-08-04; check the AVID nonce
+            counters (`hashi_mpc_nonce_*`) before anything else.
+
+      # A share of attempts: timeouts run to hundreds an hour at normal volume
+      # but stayed under 3% of attempts from 2026-09-03 to 09-15.
+      - alert: HashiFleetSigningTimeouts
+        expr: |
+          sum(increase(hashi_mpc_sign_failures_total{reason="timeout"}[1h]))
+            / sum(increase(hashi_mpc_sign_duration_seconds_count[1h]))
+            > 0.1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "more than 10% of MPC signing attempts across the fleet are timing out"
+          description: >-
+            Over a tenth of partial-signature attempts across the committee
+            have been timing out for 30 minutes, several times the normal rate.
+            Either a large share of the committee is unreachable to its peers
+            or a release slowed signing down. Compare with the fleet-shrunk and
+            reconfig alerts.
+
+      - alert: HashiFleetKeyStateInconsistent
+        expr: |
+          sum(increase(hashi_mpc_committee_key_lost_total[1h])) > 0
+            or sum(increase(hashi_mpc_recovery_suspicious_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "some hashi validators found no local key for their on-chain registration"
+          description: >-
+            At least one validator either has no local key matching its
+            on-chain registration or recovered a key that contradicts the
+            chain. Those nodes cannot contribute signatures. Either counter's
+            increase by `host` names them.
+
+      - alert: HashiFleetLimiterDrained
+        expr: max(hashi_guardian_limiter_tokens_available) < 0.05 * max(hashi_guardian_limiter_max_capacity)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "the guardian's withdrawal rate limiter has been under 5% of capacity for an hour"
+          description: >-
+            Withdrawals are being throttled by the guardian's token bucket.
+            Either demand is genuinely above the configured rate, or a stuck
+            oversize request is holding the queue. Raising the policy needs a
+            guardian re-provision behind a KP quorum, so decide early.
+
+      # Only the leader counts these.
+      - alert: HashiFleetOversizeWithdrawal
+        expr: sum(increase(hashi_guardian_limiter_stuck_oversize_skipped_total[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "an approved withdrawal exceeds the guardian limiter's maximum capacity"
+          description: >-
+            The leader skipped an approved withdrawal because its amount exceeds
+            the limiter's `max_bucket_capacity`. The request stays approved on
+            chain and will never be processed: raise the cap, or have the user
+            cancel and resubmit smaller withdrawals.
