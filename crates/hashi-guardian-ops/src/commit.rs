@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::bail;
 
 use crate::Ctx;
@@ -68,19 +69,27 @@ impl Tree {
                 );
             }
         }
-        let target = self.dir.join("target");
-        let target = target.to_str().context("The tree's path is not UTF-8.")?;
+        let path = |relative: &str| {
+            self.dir
+                .join(relative)
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow!("The tree's path is not UTF-8."))
+        };
+        // Without its own manifest, cargo would walk up to this checkout's and build that CLI instead.
         let messages = read(
             ctx.exec,
             &cargo(&[
                 "build",
+                "--manifest-path",
+                &path("Cargo.toml")?,
                 "--release",
                 "--locked",
                 "-p",
                 "hashi-guardian-init",
                 "--message-format=json-render-diagnostics",
                 "--target-dir",
-                target,
+                &path("target")?,
             ]),
         )
         .with_context(|| format!("Could not build hashi-guardian-init at {}.", self.commit))?;
@@ -108,14 +117,22 @@ impl GuardianInit {
     }
 }
 
-/// Environment variables that would build with another toolchain or configuration. A parent `cargo run` sets
-/// `RUSTUP_TOOLCHAIN`, which outranks the tree's `rust-toolchain.toml`.
+/// Environment variables that would build with another toolchain or configuration: all of cargo's but where it finds
+/// its home, its network and its registries. A parent `cargo run` sets `RUSTUP_TOOLCHAIN`, which outranks the tree's
+/// `rust-toolchain.toml`.
 fn is_build_override(name: &str) -> bool {
-    matches!(
-        name,
-        "RUSTUP_TOOLCHAIN" | "CARGO" | "CARGO_TARGET_DIR" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTFLAGS"
-    ) || name.starts_with("CARGO_BUILD_")
+    let keeps = name == "CARGO_HOME"
+        || [
+            "CARGO_NET_",
+            "CARGO_HTTP_",
+            "CARGO_REGISTRIES_",
+            "CARGO_REGISTRY_",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix));
+    matches!(name, "RUSTUP_TOOLCHAIN" | "RUSTFLAGS" | "RUSTDOCFLAGS")
         || name.starts_with("RUSTC")
+        || (name.starts_with("CARGO") && !keeps)
 }
 
 fn build_overrides() -> Vec<std::ffi::OsString> {
@@ -288,12 +305,25 @@ mod tests {
             "CARGO",
             "CARGO_TARGET_DIR",
             "CARGO_BUILD_TARGET",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+            "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS",
+            "CARGO_UNSTABLE_BUILD_STD",
             "RUSTC_WRAPPER",
             "RUSTFLAGS",
+            "RUSTDOCFLAGS",
         ] {
             assert!(is_build_override(name), "{name}");
         }
-        for name in ["CARGO_HOME", "RUSTUP_HOME", "PATH", "HOME"] {
+        for name in [
+            "CARGO_HOME",
+            "CARGO_NET_OFFLINE",
+            "CARGO_HTTP_CAINFO",
+            "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
+            "RUSTUP_HOME",
+            "PATH",
+            "HOME",
+        ] {
             assert!(!is_build_override(name), "{name}");
         }
         assert!(uses_channel(
@@ -377,6 +407,8 @@ mod tests {
             log[1][1..],
             [
                 "build",
+                "--manifest-path",
+                &dir.join("Cargo.toml").display().to_string(),
                 "--release",
                 "--locked",
                 "-p",
