@@ -18858,6 +18858,41 @@ fn a_stored_row_that_fails_the_count_check_is_skipped_and_never_decoded() {
 }
 
 #[test]
+fn a_previous_epoch_dkg_row_that_fails_the_count_check_is_not_served() {
+    let rotation_setup = RotationTestSetup::new();
+    let dealer = rotation_setup.setup.address(0);
+    let (manager, _) = rotation_setup.create_receiver_with_memory_store(0);
+    let previous_epoch = manager.mpc_config.epoch - 1;
+    let honest = manager.create_dealer_message(&mut rand::thread_rng());
+    let encs_count = 1 + usize::from(manager.mpc_config.threshold) * 33 + 64;
+    let mut miscounted = bcs::to_bytes(&honest).unwrap();
+    miscounted[encs_count] += 1;
+    miscounted.insert(miscounted.len() - 96, 0);
+    manager
+        .public_messages_store
+        .store_dealer_message(
+            previous_epoch,
+            &dealer,
+            &bcs::from_bytes(&miscounted).unwrap(),
+        )
+        .unwrap();
+
+    let retrieved = manager.handle_retrieve_messages_request(
+        rotation_setup.setup.address(2),
+        &RetrieveMessagesRequest {
+            dealer,
+            protocol_type: ProtocolTypeIndicator::Dkg,
+            epoch: previous_epoch,
+            batch_index: None,
+        },
+    );
+    assert!(
+        matches!(&retrieved, Err(MpcError::NotFound(reason)) if reason.contains("count check")),
+        "{retrieved:?}"
+    );
+}
+
+#[test]
 fn a_manager_rebuilt_during_a_pending_reconfig_takes_rotation_ownership_from_the_input_committee() {
     let mut setup = TestSetup::new(5);
     let epoch = setup.epoch();
