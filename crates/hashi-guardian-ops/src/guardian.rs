@@ -190,6 +190,26 @@ pub fn proxy_health(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// How many completed key ceremonies the log bucket holds.
+pub fn completed_ceremonies(ctx: &Ctx, bucket: &crate::stack::Bucket) -> Result<u64> {
+    // The CLI paginates this listing and drops its KeyCount, so count the keys it returns.
+    let count = read(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["s3api", "list-objects-v2", "--region", &bucket.region])
+            .args(["--bucket", &bucket.name, "--prefix", "ceremony/"])
+            .args(["--query", "length(Contents || `[]`)", "--output", "text"]),
+    )
+    .with_context(|| format!("Could not list s3://{}/ceremony/.", bucket.name))?;
+    count.trim().parse().with_context(|| {
+        format!(
+            "Could not count s3://{}/ceremony/: {}",
+            bucket.name,
+            count.trim()
+        )
+    })
+}
+
 /// A slot's guardian, as reached through its tunnel and as the proxy leads to it.
 pub struct Reached {
     pub info: GuardianInfo,

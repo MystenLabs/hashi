@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A guardian's first deployment: `deploy`.
+//! The guardian's infrastructure: `measure` its build, `deploy` the enclave stack and roll the `proxy`.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -9,16 +9,140 @@ use anyhow::bail;
 
 use crate::Ctx;
 use crate::ask::NOTHING_CHANGED;
+use crate::ask::Unchanged;
 use crate::ask::confirm;
 use crate::ask::confirm_typed;
+use crate::exec::Cmd;
 use crate::exec::read;
+use crate::github;
+use crate::guardian::proxy_health;
 use crate::next;
 use crate::plan::preview;
 use crate::plan::up;
 use crate::say;
+use crate::stack::Slot;
 use crate::stack::Stack;
 use crate::stack::pulumi;
+use crate::steps::slot;
 use crate::warn;
+
+/// Has hashi's guardian-enclave workflow measure the slot's commit on two runners, or checks run `run_id`, and stops
+/// unless both agree on the PCR0 the stack configures.
+pub fn measure(ctx: &Ctx, arg: Option<Slot>, run_id: Option<String>) -> Result<()> {
+    const REPO: &str = "MystenLabs/hashi";
+    let (_, view) = slot(ctx, arg, "measure")?;
+    say(&format!(
+        "Measure slot {}'s guardian build at {}",
+        view.slot, view.commit
+    ));
+    let run_id = match run_id {
+        Some(run_id) => run_id,
+        None => {
+            github::require_run_urls(ctx)?;
+            github::dispatch(
+                ctx,
+                REPO,
+                "guardian-enclave.yml",
+                "main",
+                &[("git_revision", &view.commit)],
+            )
+            .context("Could not dispatch the measurement.")?
+        }
+    };
+    if run_id.is_empty() || !run_id.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("Could not tell which run measures the build: {run_id}");
+    }
+    println!("Measurement run: https://github.com/{REPO}/actions/runs/{run_id}");
+    github::watch(ctx, REPO, &run_id).context("The measurement run did not succeed.")?;
+    // The run builds whatever commit and features it was given, so check it built this one on both runners.
+    let log = read(
+        ctx.exec,
+        &Cmd::new("gh").args(["run", "view", &run_id, "--repo", REPO, "--log"]),
+    )
+    .with_context(|| format!("Could not read the log of run {run_id}."))?;
+    github::require_canonical_build(&log, &run_id, &view.commit)?;
+    let downloads = tempfile::tempdir()?;
+    read(
+        ctx.exec,
+        &Cmd::new("gh")
+            .args(["run", "download", &run_id, "--repo", REPO])
+            .args(["--pattern", "nitro-pcrs-*", "--dir"])
+            .arg(downloads.path()),
+    )
+    .with_context(|| format!("Could not download the measurements of run {run_id}."))?;
+    let mut pcrs = Vec::new();
+    for entry in std::fs::read_dir(downloads.path())? {
+        let path = entry?.path().join("nitro.pcrs");
+        if path.is_file() {
+            pcrs.push(std::fs::read_to_string(path)?);
+        }
+    }
+    let measured = github::agreed_pcr0(&pcrs)?;
+    println!("PCR0: {measured}");
+    // The watch takes minutes, during which the operator may set the key it compares.
+    let stack = Stack::load(ctx)?;
+    let configured = stack.config(&view.pcr0_key);
+    if configured != Some(measured.as_str()) {
+        bail!(
+            "Stack {} has {} {}. Set it to the PCR0 above in its Pulumi.<stack>.yaml.",
+            stack.name,
+            view.pcr0_key,
+            configured.unwrap_or("unset")
+        );
+    }
+    println!(
+        "It is the {} stack {} configures.",
+        view.pcr0_key, stack.name
+    );
+    next(&format!(
+        "deploy, or arm {} next to a serving guardian",
+        view.slot
+    ));
+    Ok(())
+}
+
+/// Builds the proxy at the active slot's commit and applies the proxy stack, through sui-operations' proxy workflow.
+pub fn proxy(ctx: &Ctx) -> Result<()> {
+    const REPO: &str = "MystenLabs/sui-operations";
+    let stack = Stack::load(ctx)?;
+    // The proxy serves nodes for the active slot, so it runs that slot's build.
+    let active = match stack.output("active_slot").or(stack.config("active-slot")) {
+        Some("b") => Slot::B,
+        _ => Slot::A,
+    };
+    let view = stack.slot(ctx, active)?;
+    say(&format!("Roll the guardian proxy to {}", view.commit));
+    github::require_run_urls(ctx)?;
+    // The workflow builds the image and applies the proxy stack from the sui-operations ref it runs on.
+    let sui_operations_ref = ctx.env.get("SUI_OPERATIONS_REF").unwrap_or("main");
+    println!("Proxy stack configuration: sui-operations {sui_operations_ref}");
+    warn(
+        "Rolling a proxy that is serving takes the guardian's address down while it restarts, and drops the shares key provisioners have sent in a provisioning round that has not finished.",
+    );
+    confirm(
+        ctx.ask,
+        &format!("Roll the proxy of {}?", stack.short_name()),
+        &Unchanged {
+            no_input: "No input received; nothing was rolled.",
+            declined: "Not confirmed; nothing was rolled.",
+        },
+    )?;
+    let run_id = github::dispatch(
+        ctx,
+        REPO,
+        "hashi-guardian-proxy-deploy.yaml",
+        sui_operations_ref,
+        &[("env", stack.short_name()), ("hashi_commit", &view.commit)],
+    )
+    .context("Could not dispatch the proxy deploy.")?;
+    println!("Proxy deploy run: https://github.com/{REPO}/actions/runs/{run_id}");
+    github::watch(ctx, REPO, &run_id).context("The proxy deploy did not succeed.")?;
+    let url = ctx.env.proxy_url()?.url;
+    proxy_health(ctx)
+        .with_context(|| format!("The proxy deployed but {url}/health does not answer."))?;
+    println!("The proxy answers at {url}.");
+    Ok(())
+}
 
 /// Applies the whole enclave stack. An untargeted up re-renders every slot it plans, so it refuses a stack with two
 /// slots, and has the operator name every guardian instance it could destroy.

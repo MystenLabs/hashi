@@ -15,6 +15,7 @@ pub mod ask;
 pub mod commit;
 pub mod env;
 pub mod exec;
+pub mod github;
 pub mod guardian;
 pub mod host;
 pub mod kp_bucket;

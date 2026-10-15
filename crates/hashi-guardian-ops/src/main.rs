@@ -17,6 +17,8 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::session;
+use hashi_guardian_ops::steps::session::OperatorStep;
 
 /// Runs one operator step against the guardian stack an environment file names. With two guardian slots, name the
 /// slot. See operator/deploy.md.
@@ -46,8 +48,33 @@ enum Step {
         #[arg(value_name = "SLOT] [rotate-kp-set")]
         args: Vec<String>,
     },
+    /// Measure a slot's build on GitHub's two runners, or check a run: `measure [slot] [run-id]`.
+    Measure {
+        #[arg(value_name = "SLOT] [RUN_ID")]
+        args: Vec<String>,
+    },
     /// Apply the whole enclave stack, for a guardian's first deployment.
     Deploy,
+    /// Build the proxy at the active slot's commit and roll it, through sui-operations' workflow.
+    Proxy,
+    /// Run the key ceremony on a slot's fresh guardian.
+    Ceremony { slot: Option<Slot> },
+    /// Restart a slot's enclave, so its guardian starts a fresh session.
+    NewSession {
+        slot: Option<Slot>,
+        /// Restart even a ceremony that has dealt shares not every key provisioner has confirmed.
+        #[arg(long)]
+        abandon: bool,
+    },
+    /// Initialize a slot's guardian for the key provisioners to provision.
+    Provision {
+        slot: Option<Slot>,
+        /// For the guardian's first deployment only.
+        #[arg(long)]
+        do_genesis: bool,
+    },
+    /// Activate a slot's provisioned guardian.
+    Activate { slot: Option<Slot> },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_NAME>-<UTC time>.
@@ -86,7 +113,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 _ => bail!("Usage: publish [slot] [rotate-kp-set]"),
             }
         }
+        Step::Measure { args } => {
+            let (slot, rest) = leading_slot(&args);
+            match rest {
+                [] => deploy::measure(&ctx, slot, None),
+                [run_id] => deploy::measure(&ctx, slot, Some(run_id.clone())),
+                _ => bail!("Usage: measure [slot] [run-id]"),
+            }
+        }
         Step::Deploy => deploy::deploy(&ctx),
+        Step::Proxy => deploy::proxy(&ctx),
+        Step::Ceremony { slot } => session::operator(&ctx, slot, OperatorStep::Ceremony),
+        Step::NewSession { slot, abandon } => session::new_session(&ctx, slot, abandon),
+        Step::Provision { slot, do_genesis } => {
+            session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
+        }
+        Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
