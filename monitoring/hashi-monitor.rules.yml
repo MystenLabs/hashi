@@ -1,0 +1,81 @@
+# Prometheus alerting rules for hashi-monitor in continuous mode (batch mode
+# serves no metrics). docs/alerting.md says which rule files to load.
+#
+# Add this file to your Prometheus rule_files and route on `severity`.
+
+groups:
+  - name: hashi-monitor
+    interval: 1m
+    rules:
+      # max_over_time keeps a restarted monitor's old samples, so the alert
+      # holds for a day instead of resolving on restart.
+      - alert: HashiMonitorSafetyFinding
+        expr: max_over_time(hashi_monitor_last_finding_timestamp_seconds{category="safety"}[1d]) > time() - 86400
+        labels:
+          severity: critical
+        annotations:
+          summary: "hashi-monitor reported a safety finding"
+          description: >-
+            hashi-monitor found a guardian withdrawal approval without a
+            matching Sui approval, a Sui deposit without a confirmed Bitcoin
+            transaction, or contradictory events. The wid or outpoint is in its
+            `monitor finding` ERROR log lines. A missing Sui approval older
+            than its `withdrawal_predecessor_lookback` can be a false positive.
+            This holds for a day; silence it once triaged.
+
+      - alert: HashiMonitorLivenessFinding
+        expr: time() - hashi_monitor_last_finding_timestamp_seconds{category="liveness"} < 3600
+        labels:
+          severity: warning
+        annotations:
+          summary: "hashi-monitor reported a late or missing event"
+          description: >-
+            A guardian signature or Bitcoin confirmation did not arrive within
+            its configured delay. Outstanding ones are reported again every 5
+            minutes, so this keeps firing until the flow completes. The wid is
+            in hashi-monitor's `monitor finding` WARN log lines.
+
+      # Guardian records are read an hour at a time, so normal lag is up to
+      # about 80 minutes.
+      - alert: HashiMonitorGuardianStale
+        expr: time() - hashi_monitor_checked_through_timestamp_seconds{source="guardian"} > 7200
+        for: 45m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hashi-monitor has not verified guardian records for over two hours"
+          description: >-
+            While this fires, a guardian approval without a Sui approval goes
+            unnoticed. Check hashi-monitor's `poll failed` log lines:
+            `BuildNotAllowlisted` after a guardian rotation means the new build
+            is missing from its `current_build`/`prev_builds` config, and S3
+            errors point at its credentials. After a restart it re-audits about
+            a week of history first.
+
+      - alert: HashiMonitorChainsStale
+        expr: time() - hashi_monitor_checked_through_timestamp_seconds{source=~"sui|btc"} > 1800
+        for: 45m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hashi-monitor has not checked {{ $labels.source }} for over 30 minutes"
+          description: >-
+            While this fires, withdrawal approvals (sui) or deposit backing
+            (btc) go unchecked. Check hashi-monitor's `poll failed` and `btc
+            tick failed` log lines: fullnode gRPC errors for sui, `bitcoind is
+            not synced` or connection errors for btc. After a restart neither
+            source reports until its first pass finishes, and the Sui replay
+            starts `withdrawal_predecessor_lookback` before the audit window.
+
+      # Both gauges are exported from startup, so their absence means the
+      # monitor is down or unscraped, which also silences the rules above.
+      - alert: HashiMonitorMetricsAbsent
+        expr: absent(hashi_monitor_checked_through_timestamp_seconds)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "hashi-monitor metrics are missing"
+          description: >-
+            No hashi-monitor metrics for 5 minutes: it is down, crash looping,
+            or no longer scraped. Check the process and its logs.

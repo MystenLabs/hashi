@@ -8,6 +8,7 @@ whose metric your release doesn't export yet stays silent.
 | You run | Load |
 | --- | --- |
 | a hashi node | [`monitoring/hashi-node.rules.yml`](../monitoring/hashi-node.rules.yml) |
+| hashi-monitor (continuous mode) | [`monitoring/hashi-monitor.rules.yml`](../monitoring/hashi-monitor.rules.yml) |
 
 Each rule's description says what fired and what to do, and a comment above a
 rule explains a threshold that isn't obvious. Every rules file has a sibling
