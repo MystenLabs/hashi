@@ -359,3 +359,159 @@ tests:
             exp_annotations:
               summary: MPC work started outside the per-peer budget
               description: *unguarded
+
+  # The tip advances every 10 minutes until 60m, then stops while synced.
+  - name: btc-view-frozen-while-synced
+    interval: 1m
+    input_series:
+      - series: 'hashi_kyoto_best_height{instance="n1",job="hashi"}'
+        values: '100x9 101x9 102x9 103x9 104x9 105x9 106x160'
+      - series: 'hashi_kyoto_synced{instance="n1",job="hashi"}'
+        values: '1x220'
+    alert_rule_test:
+      - eval_time: 140m
+        alertname: HashiBtcViewFrozen
+        exp_alerts: []
+      - eval_time: 155m
+        alertname: HashiBtcViewFrozen
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: BTC view frozen
+              description: >-
+                hashi_kyoto_best_height has not changed in 90 minutes. Signet
+                ticks roughly every 10 minutes, so the node's Bitcoin view is
+                stuck (kyoto wedged, no peers, or bitcoind issue).
+
+  # A new process: the Bitcoin client reads 0 through a 35-minute boot scrape.
+  - name: btc-rules-wait-out-the-boot-scrape
+    interval: 1m
+    input_series:
+      - series: 'hashi_onchain_scrape_in_progress{instance="n1",job="hashi"}'
+        values: '1x35 0x100'
+      - series: 'hashi_kyoto_best_height{instance="n1",job="hashi"}'
+        values: '0x135'
+      - series: 'hashi_kyoto_synced{instance="n1",job="hashi"}'
+        values: '0x60 1x75'
+      - series: 'hashi_kyoto_connected_peers{instance="n1",job="hashi"}'
+        values: '0x40 8x95'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: HashiBtcNotSynced
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiNoBtcPeers
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiBtcViewFrozen
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HashiNoBtcPeers
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: HashiBtcNotSynced
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: BTC view not synced for 15m
+              description: >-
+                Brief resyncs after a restart are normal; sustained unsync is
+                not. Check hashi_kyoto_sync_percent and peer count.
+      - eval_time: 65m
+        alertname: HashiBtcNotSynced
+        exp_alerts: []
+
+  - name: no-btc-peers-after-the-boot-scrape
+    interval: 1m
+    input_series:
+      - series: 'hashi_onchain_scrape_in_progress{instance="n1",job="hashi"}'
+        values: '1x35 0x60'
+      - series: 'hashi_kyoto_connected_peers{instance="n1",job="hashi"}'
+        values: '0x95'
+    alert_rule_test:
+      - eval_time: 44m
+        alertname: HashiNoBtcPeers
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: HashiNoBtcPeers
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: no BTC peers connected
+              description: Without peers the BTC tip will go stale next.
+
+  # The timestamp reads 0 through a 35-minute boot scrape, then tracks the
+  # clock until the watcher stops at 75m.
+  - name: sui-mirror-stale-after-the-boot-scrape
+    interval: 1m
+    input_series:
+      - series: 'hashi_latest_checkpoint_timestamp_ms{instance="n1",job="hashi"}'
+        values: '0x34 2100000+60000x40 4500000x60'
+    alert_rule_test:
+      - eval_time: 34m
+        alertname: HashiSuiMirrorStale
+        exp_alerts: []
+      - eval_time: 93m
+        alertname: HashiSuiMirrorStale
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: HashiSuiMirrorStale
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: Sui state mirror stale
+              description: >-
+                No Sui checkpoint newer than 10 minutes has been applied to the
+                node's bridge-state mirror for 10 minutes. The watcher, mirror, or
+                fullnode RPC is wedged; the node is acting on stale state even if
+                other metrics look healthy.
+
+  - name: low-gas-ignores-the-unread-balance
+    interval: 1m
+    input_series:
+      - series: 'hashi_sui_balance{address="0xa",instance="n1",job="hashi"}'
+        values: '-1x10 500000000x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HashiLowGas
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HashiLowGas
+        exp_alerts:
+          - exp_labels: {address: 0xa, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: operator wallet below 1 SUI
+              description: Refill the operator gas wallet.
+
+  - name: task-wedged-for-half-an-hour
+    interval: 1m
+    input_series:
+      - series: 'hashi_task_last_iteration_timestamp_seconds{task="mpc_service",instance="n1",job="hashi"}'
+        values: '0+60x10 600x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: HashiTaskWedged
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: HashiTaskWedged
+        exp_alerts:
+          - exp_labels: {task: mpc_service, instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: task loop mpc_service wedged
+              description: >-
+                The mpc_service loop has not recorded a heartbeat in 30
+                minutes. It has deadlocked or is stuck; check its logs.
+
+  # A 20-minute key rotation records no heartbeat.
+  - name: task-quiet-through-a-long-rotation
+    interval: 1m
+    input_series:
+      - series: 'hashi_task_last_iteration_timestamp_seconds{task="mpc_service",instance="n1",job="hashi"}'
+        values: '0+60x10 600x20 1920+60x30'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: HashiTaskWedged
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HashiTaskWedged
+        exp_alerts: []
