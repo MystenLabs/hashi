@@ -143,3 +143,6 @@ Once the guardian is provisioned and activated, revoke the access key:
 step by step: measuring the build, deploying the enclave and the proxy, the key
 ceremony, and provisioning. Each step is one run of
 `operator/scripts/guardian.sh`.
+
+[Rotating a Guardian](rotate.md) moves a serving guardian's key to a fresh
+guardian on the stack's other slot.
