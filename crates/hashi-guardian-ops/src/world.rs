@@ -19,7 +19,7 @@ use crate::stack::Slot;
 
 pub const COMMIT: &str = crate::stack::tests::COMMIT;
 pub const BTC: &str = "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
-const URN_PREFIX: &str = "urn:pulumi:testnet::hashi-guardian-enclave::aws:ec2/instance:Instance::hashi-guardian-enclave-";
+pub const URN_PREFIX: &str = "urn:pulumi:testnet::hashi-guardian-enclave::aws:ec2/instance:Instance::hashi-guardian-enclave-";
 const TASK: &str =
     "urn:pulumi:testnet::hashi-guardian-proxy::aws:ecs/taskDefinition:TaskDefinition::t";
 const SERVICE: &str = "urn:pulumi:testnet::hashi-guardian-proxy::aws:ecs/service:Service::s";
@@ -34,7 +34,10 @@ pub struct Session {
 
 pub struct Host {
     pub ip: String,
+    /// Whether the guardian's unit is enabled or active.
     pub running: bool,
+    /// Whether an enclave runs, which a failed terminate leaves after the unit stops.
+    pub enclave: bool,
     pub session: Session,
 }
 
@@ -56,9 +59,13 @@ pub struct State {
     /// When the epoch began and when the one before it began, as seconds before now.
     pub epoch_age: (i64, i64),
     pub activate_false_failure: bool,
+    /// Whether stopping a guardian's unit leaves its enclave running.
+    pub terminate_fails: bool,
+    /// A change every enclave plan also holds, such as drift elsewhere in the stack.
+    pub extra_change: Option<(String, String)>,
     pub counter: u32,
-    /// What each SSM command printed, by command ID.
-    pub commands: BTreeMap<String, String>,
+    /// What each SSM command printed, and whether it succeeded, by command ID.
+    pub commands: BTreeMap<String, (String, bool)>,
 }
 
 impl State {
@@ -146,6 +153,7 @@ impl State {
             };
             steps.push((op.to_owned(), urn));
         }
+        steps.extend(self.extra_change.clone());
         steps
     }
 
@@ -163,6 +171,7 @@ impl State {
                         Host {
                             ip,
                             running: true,
+                            enclave: true,
                             session,
                         },
                     );
@@ -261,6 +270,7 @@ pub fn serving_world() -> Rc<RefCell<State>> {
             Host {
                 ip: "192.0.2.10".to_owned(),
                 running: true,
+                enclave: true,
                 session: serving,
             },
         )]
@@ -275,6 +285,8 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         sui_epoch: 1253,
         epoch_age: (3 * 3600, 27 * 3600),
         activate_false_failure: false,
+        terminate_fails: false,
+        extra_change: None,
         counter: 0,
         commands: BTreeMap::new(),
     }))
@@ -394,29 +406,37 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
             ["aws", "ssm", "send-command", .., "--parameters", parameters] => {
                 let instance = w[w.iter().position(|word| *word == "--instance-ids")? + 1];
                 let script = parameters.to_owned();
+                let terminate_fails = s.terminate_fails;
                 let host = s.hosts.get_mut(instance)?;
-                let out = if script.contains("GUARDIAN_RUNNING") {
-                    if host.running { "GUARDIAN_RUNNING" } else { "GUARDIAN_STOPPED" }.to_owned()
-                } else if script.contains("disable --now") {
+                if script.contains("disable --now") {
                     host.running = false;
-                    String::new()
+                    host.enclave = terminate_fails;
+                }
+                let out = if script.contains("GUARDIAN_RUNNING") {
+                    let state = if host.running { "GUARDIAN_RUNNING" } else { "GUARDIAN_STOPPED" };
+                    (state.to_owned(), true)
+                } else if script.contains("an enclave still runs") && (host.running || host.enclave) {
+                    ("an enclave still runs".to_owned(), false)
                 } else {
-                    String::new()
+                    (String::new(), true)
                 };
                 s.counter += 1;
                 let id = format!("cmd-{}", s.counter);
                 s.commands.insert(id.clone(), out);
                 ok(format!("{id}\n"))
             }
-            ["aws", "ssm", "wait", ..] => ok(String::new()),
+            ["aws", "ssm", "wait", "command-executed", _, _, "--command-id", id, ..] => {
+                Some((s.commands.get(*id).is_some_and(|(_, success)| *success), String::new()))
+            }
             ["aws", "ssm", "get-command-invocation", _, _, "--command-id", id, ..] => {
-                ok(format!("{}\t\n", s.commands.get(*id).cloned().unwrap_or_default()))
+                ok(format!("{}\t\n", s.commands.get(*id).map(|(out, _)| out.clone()).unwrap_or_default()))
             }
             ["gh", "run", "list", ..] => ok("0\n".to_owned()),
             ["cargo", "build", ..] => ok(r#"{"reason":"compiler-artifact","target":{"name":"hashi-guardian-init"},"executable":"/x/hashi-guardian-init"}"#.to_owned()),
             ["/x/hashi-guardian-init", "operator", "activate", ..] => {
                 let others_quiet = s.hosts.values().all(|host| {
-                    !host.running || !host.session.lifecycle.starts_with("withdraw/ACTIVATED")
+                    !(host.running || host.enclave)
+                        || !host.session.lifecycle.starts_with("withdraw/ACTIVATED")
                 });
                 let active = s.outputs_active.to_string();
                 let epoch = s.sui_epoch;

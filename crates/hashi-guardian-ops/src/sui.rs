@@ -89,6 +89,18 @@ pub fn window(ctx: &Ctx, now: i64) -> Result<Window> {
 /// Stops unless the Sui epoch, and hashi's committee with it, stays put while guardians switch: a committee handoff
 /// that lands before activation leaves the new guardian a committee behind until the next epoch.
 pub fn require_epoch_window(ctx: &Ctx, committee_epoch: Option<&str>) -> Result<()> {
+    let epoch = require_time_window(ctx)?;
+    if committee_epoch != Some(epoch.to_string().as_str()) {
+        anyhow::bail!(
+            "The serving guardian is at committee epoch {}, but Sui is at epoch {epoch}. Wait for hashi's committee handoff to reach it.",
+            committee_epoch.unwrap_or("none")
+        );
+    }
+    Ok(())
+}
+
+/// Stops unless now sits far enough from both turns of the current Sui epoch, and returns that epoch.
+pub fn require_time_window(ctx: &Ctx) -> Result<u64> {
     let window = window(ctx, now())?;
     let epoch = window.epoch;
     if window.since < SETTLE_SECS {
@@ -103,13 +115,7 @@ pub fn require_epoch_window(ctx: &Ctx, committee_epoch: Option<&str>) -> Result<
             window.remaining / 60
         );
     }
-    if committee_epoch != Some(epoch.to_string().as_str()) {
-        anyhow::bail!(
-            "The serving guardian is at committee epoch {}, but Sui is at epoch {epoch}. Wait for hashi's committee handoff to reach it.",
-            committee_epoch.unwrap_or("none")
-        );
-    }
-    Ok(())
+    Ok(epoch)
 }
 
 /// A GraphQL timestamp in whole seconds since the Unix epoch.

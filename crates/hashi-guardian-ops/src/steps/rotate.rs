@@ -42,6 +42,7 @@ use crate::stack::SlotView;
 use crate::stack::Stack;
 use crate::steps::slot;
 use crate::sui::require_epoch_window;
+use crate::sui::require_time_window;
 use crate::warn;
 
 /// The proxy's views are cached for 30 seconds, so waits for them to change poll this long.
@@ -53,6 +54,13 @@ const POLL_INTERVAL: Duration = if cfg!(test) {
 };
 
 const GUARDIAN_UNIT_STATE: &str = "if systemctl is-enabled --quiet hashi-guardian-enclave.service || systemctl is-active --quiet hashi-guardian-enclave.service; then echo GUARDIAN_RUNNING; else echo GUARDIAN_STOPPED; fi";
+
+/// Fail unless a host's guardian is stopped for good. Its unit ignores a failed `terminate-enclave` when it stops, so
+/// the enclave is checked apart from the unit.
+const STOPPED_CHECKS: [&str; 2] = [
+    "if systemctl is-enabled --quiet hashi-guardian-enclave.service || systemctl is-active --quiet hashi-guardian-enclave.service; then echo the enclave unit is still enabled or active; exit 1; fi",
+    "enclaves=\"$(nitro-cli describe-enclaves)\" || { echo could not list the enclaves; exit 1; }; if printf '%s' \"$enclaves\" | grep -q EnclaveID; then echo an enclave still runs; exit 1; fi",
+];
 
 fn tree(ctx: &Ctx, view: &SlotView) -> Result<Tree> {
     Tree::at(
@@ -223,6 +231,13 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
     let other = slot.other();
     let tree = tree(ctx, &view)?;
     let guardian_init = tree.guardian_init(ctx)?;
+    // The stack reports only an enabled slot's instance, and every run must find the old guardian to stop it.
+    if !stack.slot_enabled(other)? {
+        bail!(
+            "Keep slot-{other}-enabled \"true\" in stack {}'s Pulumi.<stack>.yaml until slot {other}'s teardown: switchover finds the guardian it stops through it.",
+            stack.name
+        );
+    }
 
     if stack.active()? != slot {
         say(&format!("Check slot {slot}'s guardian is ready to serve"));
@@ -314,6 +329,12 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
             view.endpoint
         );
     };
+    let activated = info.lifecycle.is("withdraw/ACTIVATED");
+    if !activated {
+        // A rerun can come long after the checks before the flip.
+        require_time_window(ctx)?;
+        require_no_guardian_runs(ctx)?;
+    }
     let fronts = |info: &ProxyInfo| info.signing_pub_key.as_deref() == Some(signing_key.as_str());
     if !proxy_info(ctx).is_ok_and(|info| fronts(&info)) {
         say(&format!("Point the proxy at slot {slot}'s guardian"));
@@ -330,13 +351,20 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
             .with_context(|| format!("Could not read slot {other}'s host {old_instance}."))?;
         if state.contains("GUARDIAN_RUNNING") {
             say(&format!("Stop slot {other}'s guardian"));
-            // The relay still reaches the old guardian, the last check that both hold one key.
-            let old_btc = relay_info(ctx, &tree).ok().and_then(|info| info.btc_key);
-            if old_btc.as_deref() != Some(slot_btc.as_str()) {
+            // Nothing activation needs may be found wrong only after the stop.
+            require_fresh(ctx, &stack, &view)?;
+            // The relay still reaches the old guardian: the last check that it is the one that served, with one key.
+            let old = relay_info(ctx, &tree).ok();
+            if !old.as_ref().is_some_and(|old| {
+                old.btc_key.as_deref() == Some(slot_btc.as_str())
+                    && old.signing_key.as_deref() != Some(signing_key.as_str())
+                    && old.lifecycle.is("withdraw/ACTIVATED")
+            }) {
                 bail!(
-                    "Could not confirm through the relay that slot {other}'s guardian holds slot {slot}'s BTC key {slot_btc}. Nothing was stopped."
+                    "Could not confirm through the relay that slot {other}'s guardian is the activated one, holding slot {slot}'s BTC key {slot_btc}. Nothing was stopped."
                 );
             }
+            require_time_window(ctx)?;
             warn(&format!(
                 "Stopping slot {other}'s guardian on {old_instance} cannot be undone: its copy of the key is gone, and only slot {slot}'s guardian holds it in memory after this."
             ));
@@ -352,10 +380,15 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
                 old_instance,
                 &[
                     "systemctl disable --now hashi-guardian-enclave.service hashi-guardian-bridge.service",
-                    "if systemctl is-enabled --quiet hashi-guardian-enclave.service || systemctl is-active --quiet hashi-guardian-enclave.service; then echo the enclave unit is still enabled or active; exit 1; fi",
-                    "if nitro-cli describe-enclaves | grep -q EnclaveID; then echo an enclave still runs; exit 1; fi",
+                    STOPPED_CHECKS[0],
+                    STOPPED_CHECKS[1],
                 ],
-            )?;
+            )
+            .with_context(|| {
+                format!(
+                    "The stop of slot {other}'s guardian on {old_instance} may have run. Run this step again: it checks the host first."
+                )
+            })?;
             if !stopped.success {
                 println!("{}", stopped.text);
                 bail!(
@@ -363,10 +396,19 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
                 );
             }
             println!("Stopped slot {other} guardian on {old_instance}.");
+        } else if !activated {
+            // Activation waits for the old guardian to fall quiet, which an enclave left running never does.
+            let stopped = host::run(ctx, &bucket.region, old_instance, &STOPPED_CHECKS)?;
+            if !stopped.success {
+                println!("{}", stopped.text);
+                bail!(
+                    "Slot {other}'s guardian unit on {old_instance} is stopped, but the host still runs an enclave or could not say. Terminate it there with nitro-cli terminate-enclave --all, then run this step again."
+                );
+            }
         }
     }
 
-    if !info.lifecycle.is("withdraw/ACTIVATED") {
+    if !activated {
         say(&format!("Activate slot {slot}'s guardian"));
         println!(
             "It waits until every other guardian session has been quiet for ten minutes, and prints little until then."
@@ -810,6 +852,76 @@ mod tests {
     }
 
     #[test]
+    fn activates_only_once_the_old_enclave_is_gone() {
+        let run = Run::new();
+        run.armed_and_provisioned();
+        run.set("active-slot", "b");
+        run.state.borrow_mut().terminate_fails = true;
+        let old = run.instance("a");
+        assert!(
+            error(run.step(&["yes", "yes", &old], |ctx| switchover(ctx, Slot::B)))
+                .starts_with("Stopping slot a's guardian did not finish")
+        );
+        // The unit reads stopped now, but activation would wait on the enclave it left running.
+        assert!(
+            error(run.step(&[], |ctx| switchover(ctx, Slot::B))).contains("still runs an enclave")
+        );
+        let standby = run.instance("b");
+        assert_eq!(
+            run.state.borrow().hosts[&standby].session.lifecycle,
+            "withdraw/PROVISIONER_INITIALIZED"
+        );
+        run.state.borrow_mut().hosts.get_mut(&old).unwrap().enclave = false;
+        ok(run.step(&[], |ctx| switchover(ctx, Slot::B)));
+        assert_eq!(
+            run.state.borrow().hosts[&standby].session.lifecycle,
+            "withdraw/ACTIVATED"
+        );
+    }
+
+    #[test]
+    fn rechecks_everything_before_the_stop_on_a_rerun() {
+        let run = Run::new();
+        run.armed_and_provisioned();
+        run.set("slot-a-enabled", "false");
+        run.set("active-slot", "b");
+        assert!(
+            error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B)))
+                .starts_with("Keep slot-a-enabled \"true\"")
+        );
+        assert_eq!(run.state.borrow().outputs_active, Slot::A);
+        run.set("slot-a-enabled", "true");
+
+        let old = run.instance("a");
+        assert_eq!(
+            error(run.step(&["yes", "yes", "i-0wrong"], |ctx| switchover(ctx, Slot::B))),
+            "Not confirmed; nothing was changed."
+        );
+        let operator = run
+            .repo
+            .path()
+            .join(".hashi/guardian/testnet/b/operator.yaml");
+        let rendered = std::fs::read(&operator).unwrap();
+        std::fs::write(&operator, "changed").unwrap();
+        assert!(
+            error(run.step(&[&old], |ctx| switchover(ctx, Slot::B))).starts_with("Out of date")
+        );
+        std::fs::write(&operator, rendered).unwrap();
+
+        // A relay that falls back to the new guardian cannot vouch for the old one.
+        let standby = run.state.borrow_mut().standby.take();
+        assert!(
+            error(run.step(&[&old], |ctx| switchover(ctx, Slot::B)))
+                .starts_with("Could not confirm through the relay")
+        );
+        run.state.borrow_mut().standby = standby;
+
+        run.state.borrow_mut().epoch_age = (23 * 3600 + 30 * 60, 47 * 3600 + 30 * 60);
+        assert!(error(run.step(&[&old], |ctx| switchover(ctx, Slot::B))).contains("ends in about"));
+        assert!(run.state.borrow().hosts[&old].running);
+    }
+
+    #[test]
     fn tears_down_only_a_stopped_standby() {
         let run = Run::new();
         run.armed_and_provisioned();
@@ -827,5 +939,38 @@ mod tests {
         ok(run.step(&[&standby], |ctx| teardown(ctx, Slot::B)));
         assert!(!run.state.borrow().deployed.contains_key("b"));
         assert!(Path::new(&run.repo.path().join(".hashi")).exists());
+    }
+
+    #[test]
+    fn applies_only_a_plan_of_exactly_its_shape() {
+        let run = Run::new();
+        let serving = format!("{}a", world::URN_PREFIX);
+        let drift = |op: &str| Some((op.to_owned(), serving.clone()));
+        run.state.borrow_mut().extra_change = drift("replace");
+        assert!(
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B)))
+                .starts_with("Arming slot b must create its instance and change nothing else")
+        );
+        assert!(!run.state.borrow().deployed.contains_key("b"));
+
+        run.state.borrow_mut().extra_change = None;
+        run.armed_and_provisioned();
+        run.set("active-slot", "b");
+        run.state.borrow_mut().extra_change = drift("update");
+        assert!(
+            error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B)))
+                .starts_with("Flipping the active slot must change no resource")
+        );
+        assert_eq!(run.state.borrow().outputs_active, Slot::A);
+
+        run.set("active-slot", "a");
+        run.set("slot-b-enabled", "false");
+        let standby = run.instance("b");
+        assert!(
+            error(run.step(&[&standby], |ctx| teardown(ctx, Slot::B))).starts_with(
+                "Tearing down slot b must delete its instance and change nothing else"
+            )
+        );
+        assert!(run.state.borrow().deployed.contains_key("b"));
     }
 }
