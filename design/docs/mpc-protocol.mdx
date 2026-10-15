@@ -39,7 +39,7 @@ answer: >-
   threshold, 20-33%) and t (security threshold, 33-50%).
 ---
 
-## The MPC protocols
+## What MPC protocols does Hashi use?
 
 Sui validators use several Multi-Party Computation (MPC) protocols to
 implement a threshold Schnorr signer: Distributed Key Generation (DKG) for
@@ -48,7 +48,7 @@ changes, and a distributed signing protocol for signing transactions. The
 protocols are based on prior published work, modified and improved by the
 Mysten Labs cryptography team.
 
-## Liveness and security parameters
+## What are the liveness and security parameters for Hashi MPC?
 
 These protocols are parametrized by two values, `f` and `t`, such that Hashi
 operates as long as fewer than `f` of the staking power is unresponsive
@@ -62,7 +62,7 @@ might increase in future versions of Hashi.
 | `f` | Liveness | fewer than `f` of the staking power is unresponsive | 20% to 33% |
 | `t` | Security | fewer than `t` of the staking power is colluding | 33% to 50% |
 
-## The second signer
+## Why does Hashi use a second signer?
 
 In addition to the MPC signer, Hashi uses a second signer implemented with a
 cloud enclave that enforces policies independently of the MPC protocols,

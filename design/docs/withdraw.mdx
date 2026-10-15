@@ -48,7 +48,7 @@ graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
 ```
 
-## Roles in a withdrawal
+## Who does what in a withdrawal?
 
 1. **User**: calls `hashi::withdraw::request_withdrawal` with the `hBTC` and a
    Bitcoin destination address. Until the request is committed to a
@@ -68,7 +68,7 @@ Beyond the request, the user's only optional actions are cancelling and, if
 the transaction gets stuck, fee bumping through CPFP (see
 [Broadcast](#broadcast)).
 
-## Withdrawal timing
+## How long does a withdrawal take?
 
 The time from request to settlement depends mainly on these stages:
 

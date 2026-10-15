@@ -71,25 +71,25 @@ These details trip up most operators:
 - A self-hosted Sui fullnode needs `rpc.enable-indexing: true` in its own config, which is off by default. See [1.4](#14-sui-rpc).
 - Fund the operator address with at least 2 SUI. With exactly 1 SUI, the node's gas bootstrap fails with `InsufficientCoinBalance` and retries every 10 minutes until you add SUI. See [2.4](#24-operator-key-day-to-day-signing).
 
-## Operator questions
+## Common questions
 
-### The Hashi node and your Sui validator
+### Is the Hashi node connected to my Sui validator?
 
 The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your validator, and the Hashi node should run on a separate host from your Sui validator ([1.1](#11-resources)). The link to your validator is onchain: `validator-address` in the validator config is your Sui validator address, and your validator account key signs the initial registration ([2.3](#23-registration-must-be-signed-by-the-account-key)).
 
-### Validators that can run a Hashi node
+### Which validators can run a Hashi node?
 
 Only active Sui validators. Onchain registration asserts that the sender is in the Sui active validator set, so the registration must come from your Sui validator account key ([2.3](#23-registration-must-be-signed-by-the-account-key), [11.3](#113-registration-and-offline-signing)). [Committee](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators) explains why the committee is not exactly the set of Sui validators.
 
-### The backup key is required
+### Do I need to generate a backup key?
 
 Yes. The backup key is required: `backup-pgp-cert` and `backup-dir` are both required in the validator config. Generate an OpenPGP key on a YubiKey or locally with `sq` or `gpg`, and give the node only the public certificate. See [2.5](#25-backup-key-openpgp) and [Hashi Node Backups](node-backup.mdx).
 
-### Bitcoin node storage on Mainnet
+### How much storage does the Bitcoin node need on Mainnet?
 
 Provision 2 TB of SSD storage for a self-hosted archival Mainnet Bitcoin node with `txindex` and `blockfilterindex`; see the Mainnet tab of [1.5](#15-bitcoin-node). This is separate from the Hashi process itself, which needs 10 GB of persistent storage ([1.1](#11-resources)).
 
-### Mainnet dependencies
+### What does a Mainnet node depend on?
 
 A self-hosted Sui fullnode serving the gRPC v2 API with `rpc.enable-indexing: true`, an archival Bitcoin Core v29 or newer node reachable over both JSON-RPC and P2P (self-hosting is strongly encouraged), a dedicated TLS key, an operator key funded with at least 2 SUI, and an OpenPGP backup key. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), [1.5](#15-bitcoin-node), and [2](#2-key-management-and-security).
 

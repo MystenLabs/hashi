@@ -64,10 +64,10 @@ Each item is described in detail in the section that uses it:
 - For S3 backups: AWS credentials from the default credential chain, a node role
   restricted to `s3:PutObject` within its prefix, and recovery credentials with
   `s3:GetObject` (or `s3:GetObjectVersion` for a pinned version, plus
-  `s3:ListBucketVersions` to inspect version history). See [Back up to S3](#back-up-to-s3)
+  `s3:ListBucketVersions` to inspect version history). See [How do I back up to S3?](#how-do-i-back-up-to-s3)
   for the full Mainnet baseline.
 
-## Create a backup key
+## How do I create a backup key?
 
 ### Option 1: Create a private key on a YubiKey (recommended)
 
@@ -264,7 +264,7 @@ files.
 
 6. Save the revocation, public key, and private key files in a secure location.
 
-## Configure Hashi backups
+## How do I configure Hashi backups?
 
 Every node config must provide `backup-pgp-cert` (a certificate file path or inline
 armored text) and `backup-dir`:
@@ -275,7 +275,7 @@ backup-dir = "/var/lib/hashi/backups"
 ```
 
 The `backup-pgp-cert` file is the public key you created in
-[Create a backup key](#create-a-backup-key): the `$CARD_FILE`
+[How do I create a backup key?](#how-do-i-create-a-backup-key): the `$CARD_FILE`
 output from Option 1 (for example, `yubikey-public-0006-26883270.asc`), or
 `public-key.asc` from Option 2. It is the public half of the backup key pair.
 Restore uses the matching private half, passed as `--backup-pgp-secret-key`
@@ -321,7 +321,7 @@ Automatic cleanup does not cover the following; handle them yourself:
   restore output elsewhere are not swept by automatic backup cleanup. Remove
   these plaintext copies when no longer needed.
 
-## Restore from a backup
+## How do I restore from a backup?
 
 `hashi backup restore` decrypts an archive and extracts it into a directory you
 choose. It installs nothing. The full procedure, from choosing a backup to
@@ -331,7 +331,7 @@ For S3 restore commands and an on-page recovery checklist, see
 [Restore and infrastructure limits](#restore-and-infrastructure-limits) and
 [Machine-loss recovery](#machine-loss-recovery) below.
 
-## Back up to S3
+## How do I back up to S3?
 
 Enable S3 uploads with this optional node-config table; both values are required.
 Use a bucket name, not an S3 URI. Omit the table for local-only backups.

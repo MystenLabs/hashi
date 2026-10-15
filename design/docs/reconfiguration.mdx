@@ -52,7 +52,7 @@ graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
 
-### Reconfiguration steps
+### How does a reconfiguration proceed?
 
 On the happy path, a reconfiguration runs these steps in order:
 
@@ -295,7 +295,7 @@ stalled for an entire Sui epoch with deposits and withdrawals halted, so it is
 worth alerting on and investigating even though the system recovers on its
 own.
 
-### CLI commands
+### Which CLI commands can operators run?
 
 Nodes normally submit these transactions themselves; `abort-reconfig` and
 `start-reconfig` are fallbacks for when no node is doing so.

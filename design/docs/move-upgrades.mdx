@@ -54,7 +54,7 @@ retirement sometimes need to be one atomic governance action. The testnet v1 to
 v2 plan below walks through the replay path that produces this state and how
 the emergency pause closes it.
 
-## Required classification
+## When must an upgrade be exclusive or non-exclusive?
 
 Every upgrade proposal must be labeled **exclusive** or **non-exclusive** in
 its design and rollout plan. Reviewers should treat a missing classification as
@@ -90,7 +90,7 @@ that is applied when the package is committed. The CLI requires
 `--exclusive true` or `--exclusive false`; omission is rejected so the
 classification cannot be an accidental default.
 
-## Validator rollout contract
+## How should validators coordinate a Move package upgrade?
 
 An exclusive upgrade deliberately makes old binaries unable to perform normal
 writes once the upgrade checkpoint is observed. An old binary does not contain
@@ -122,7 +122,7 @@ Use this sequence for every upgrade:
 This ordering means the network retains quorum-capable updated software before
 an exclusive publication causes old binaries to stop writing.
 
-## Current testnet v1 to v2 plan
+## What is the testnet v1 to v2 upgrade plan?
 
 The deployed testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first
