@@ -955,3 +955,49 @@ mod fire_threshold_tests {
         assert_eq!(withdrawal_fire_threshold(2), 2);
     }
 }
+
+#[cfg(test)]
+mod bridge_limit_tests {
+    use super::*;
+    use crate::grpc::route_limits::BRIDGE_REQUEST_LIMIT;
+    use crate::onchain::types::OutputUtxo;
+    use crate::utxo_pool::CoinSelectionParams;
+    use crate::withdrawals::WITHDRAWAL_MAX_CHANGE_OUTPUTS;
+    use crate::withdrawals::safe_withdrawal_flow_max_inputs;
+    use hashi_types::bitcoin_txid::BitcoinTxid;
+    use prost::Message as _;
+
+    #[test]
+    fn largest_construction_request_fits_in_half_the_bridge_limit() {
+        let len = (1..=CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
+            .map(|requests| {
+                let inputs = safe_withdrawal_flow_max_inputs(
+                    requests,
+                    CoinSelectionParams::DEFAULT_MAX_INPUTS,
+                );
+                WithdrawalTxCommitment {
+                    request_ids: vec![Address::new([0; 32]); requests],
+                    selected_utxos: vec![
+                        UtxoId {
+                            txid: BitcoinTxid::ZERO,
+                            vout: u32::MAX,
+                        };
+                        inputs
+                    ],
+                    outputs: vec![
+                        OutputUtxo {
+                            amount: u64::MAX,
+                            bitcoin_address: vec![0; 32],
+                        };
+                        requests + WITHDRAWAL_MAX_CHANGE_OUTPUTS
+                    ],
+                    txid: BitcoinTxid::ZERO,
+                }
+                .to_proto()
+                .encoded_len()
+            })
+            .max()
+            .unwrap();
+        assert!(2 * len <= BRIDGE_REQUEST_LIMIT, "{len} bytes");
+    }
+}

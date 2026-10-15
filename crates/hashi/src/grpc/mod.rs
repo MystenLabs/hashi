@@ -22,7 +22,7 @@ mod client;
 mod connection_limit;
 mod peer_limit;
 mod request_body;
-mod route_limits;
+pub(crate) mod route_limits;
 pub use client::BoxedChannel;
 pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
@@ -79,7 +79,7 @@ impl HttpService {
             let bridge_service = bridge_service_server::BridgeServiceServer::new(self.clone())
                 .max_decoding_message_size(routes.service(
                     bridge_service_server::SERVICE_NAME,
-                    max_decoding_message_size,
+                    max_decoding_message_size.min(route_limits::BRIDGE_REQUEST_LIMIT),
                 ));
             let mpc_service = mpc_service_server::MpcServiceServer::new(self.clone())
                 .max_decoding_message_size(

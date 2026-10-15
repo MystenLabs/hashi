@@ -262,9 +262,11 @@ fn safe_withdrawal_confirm_max_inputs(request_count: usize, configured_max_input
 
 /// The input cap for the whole withdrawal flow at a given request count:
 /// the configured cap, the per-request consolidation budget, and the
-/// runtime-object budgets of both the commit and confirm transactions,
-/// each priced for the bytecode the effective package version executes.
-fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+/// runtime-object budgets of both the commit and confirm transactions.
+pub(crate) fn safe_withdrawal_flow_max_inputs(
+    request_count: usize,
+    configured_max_inputs: usize,
+) -> usize {
     let request_input_budget =
         request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
     configured_max_inputs
@@ -285,7 +287,7 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
 /// Each change output becomes a pending UTXO object in the Sui flow, so
 /// the cap keeps a certified commitment's object cost inside the headroom
 /// the runtime-object budget leaves below Sui's hard cache limit.
-const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 2;
+pub(crate) const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 2;
 
 /// Batch cap while the leader is in consolidation mode: the shape in which
 /// the per-request consolidation budget exactly fills the configured input

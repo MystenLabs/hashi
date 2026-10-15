@@ -11,6 +11,8 @@ pub(crate) const REFLECTION_REQUEST_LIMIT: usize = 4 * 1024;
 
 pub(crate) const SMALL_MPC_REQUEST_LIMIT: usize = 64 * 1024;
 
+pub(crate) const BRIDGE_REQUEST_LIMIT: usize = 128 * 1024;
+
 pub(crate) const SMALL_MPC_METHODS: [&str; 5] = [
     "GetPartialSignatures",
     "RetrieveMessages",
