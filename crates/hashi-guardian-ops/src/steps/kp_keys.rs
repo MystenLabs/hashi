@@ -364,7 +364,8 @@ fn verify_upload(
         ));
     }
     let recorded_path = out.join(id).join(format!("{id}-kp-fingerprint.txt"));
-    let recorded_text = std::fs::read_to_string(&recorded_path)?;
+    // Anything the upload holds is checked against the certificate, so bytes that aren't UTF-8 just don't match.
+    let recorded_text = String::from_utf8_lossy(&std::fs::read(&recorded_path)?).into_owned();
     let recorded = recorded_text.lines().next().unwrap_or("");
     if recorded != fingerprint {
         return Ok(Status::Invalid(

@@ -359,13 +359,22 @@ pub fn publish(ctx: &Ctx, arg: Option<Slot>, rotate_kp_set: bool) -> Result<()> 
     for line in &digest_lines[1..] {
         println!("                        {line}");
     }
+    if scheme == DigestScheme::Legacy {
+        println!(
+            "This digest covers guardian-init.yaml alone, so post the fingerprints above too, for each key provisioner to compare with what the download prints."
+        );
+    }
     println!("Every key provisioner runs, from a hashi checkout at that commit:");
     println!("  ./key-provisioner/scripts/download-config.sh");
     println!("\nConfiguration published successfully! It lists {count} key provisioners.");
-    next(if rotate_kp_set {
-        "rotate-kp-set init, once the key provisioners who sign have downloaded it"
+    next(&if rotate_kp_set {
+        format!(
+            "rotate-kp-set {} init, once the key provisioners who sign have downloaded it",
+            view.slot
+        )
     } else {
         "the step this configuration is for, once every key provisioner has downloaded it"
+            .to_owned()
     });
     Ok(())
 }

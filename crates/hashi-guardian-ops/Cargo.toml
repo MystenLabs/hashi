@@ -9,6 +9,7 @@ base64ct.workspace = true
 clap.workspace = true
 hex.workspace = true
 jiff.workspace = true
+libc = "0.2.184"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = "0.10.9"

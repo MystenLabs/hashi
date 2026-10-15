@@ -28,6 +28,13 @@ impl Ask for Terminal {
     }
 
     fn line(&self, prompt: &str) -> io::Result<Option<String>> {
+        // Discard what was typed before the question was shown, so it can't answer it.
+        // SAFETY: tcflush takes no pointers; it only drops the terminal's unread input.
+        if io::stdin().is_terminal()
+            && unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         print!("{prompt}");
         io::stdout().flush()?;
         let mut line = String::new();

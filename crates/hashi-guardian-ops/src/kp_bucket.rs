@@ -348,6 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn computes_the_legacy_digest_as_download_config_sh_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("guardian-init.yaml");
+        std::fs::write(&config, "kp_roster: {}\n").unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -euo pipefail\nPUBLISHED_CONFIG=\"$1\"\n{}\n{}\nprintf '%s' \"$DIGEST\"",
+                LEGACY_LINES[0], LEGACY_LINES[1]
+            ))
+            .arg("bash")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            DigestScheme::Legacy.digest(dir.path()).unwrap(),
+            String::from_utf8(output.stdout).unwrap()
+        );
+    }
+
+    #[test]
     fn finds_access_keys() {
         assert!(holds_access_key(&format!(
             "access_key: \"AKIA{}\"",
