@@ -13,6 +13,9 @@ pub const LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE: Duration = Duration::from_mins(
 pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 /// Reader-ahead wall-clock skew reserved by the writer's earlier fence.
 pub const ACTIVATING_READER_CLOCK_SKEW_BUDGET: Duration = Duration::from_mins(1);
+/// Largest expected gap between a log's signed time and its S3 `LastModified`
+/// time. Readers warn above it. Keep it below the fencing skew budget.
+pub const MAX_EXPECTED_LOG_CLOCK_SKEW: Duration = Duration::from_secs(30);
 
 // Withdraw-mode log writes are serialized. After the first durable heartbeat,
 // every attempt must fit strictly before the last successful heartbeat plus
@@ -26,6 +29,8 @@ const _: () = assert!(
         + ACTIVATING_READER_CLOCK_SKEW_BUDGET.as_secs()
         < OTHER_SESSION_QUIET_PERIOD.as_secs()
 );
+const _: () =
+    assert!(MAX_EXPECTED_LOG_CLOCK_SKEW.as_secs() < ACTIVATING_READER_CLOCK_SKEW_BUDGET.as_secs());
 
 pub mod attestation;
 pub mod ceremony_mode;

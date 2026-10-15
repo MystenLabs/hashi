@@ -10,6 +10,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
+use crate::s3_client::StoredLogRecord;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
@@ -23,6 +24,7 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
+#[cfg(test)]
 use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::move_types::Committee;
@@ -119,13 +121,14 @@ impl GuardianReader {
 
     async fn verify_record(
         &mut self,
-        log: SignedLogEntry,
+        log: StoredLogRecord,
         require_current: bool,
     ) -> GuardianResult<VerifiedLogEntry> {
-        self.ensure_session_info_loaded(log.session_id()).await?;
+        self.ensure_session_info_loaded(log.record.session_id())
+            .await?;
         let session_info = self
             .sessions
-            .get_mut(log.session_id())
+            .get_mut(log.record.session_id())
             .expect("session info was loaded above");
         let verified_log = session_info.verify_record(&self.s3, log).await?;
         if require_current {
@@ -522,6 +525,7 @@ pub(crate) fn reader_with_record_for_test(
             GetObjectOutput::builder()
                 .object_lock_mode(ObjectLockMode::Compliance)
                 .object_lock_retain_until_date(DateTime::from(log.object_lock_expiry(policy)))
+                .last_modified(DateTime::from_millis(log.timestamp_ms() as i64))
                 .body(ByteStream::from(serde_json::to_vec(log).unwrap()))
                 .build()
         });

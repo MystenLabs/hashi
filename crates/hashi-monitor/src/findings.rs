@@ -7,10 +7,14 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::human_duration;
+use crate::domain::human_timestamp_delta;
 use crate::domain::utc_timestamp;
 use bitcoin::Txid;
+use hashi_types::guardian::SessionID;
 use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::time::UnixMillis;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::unix_millis_to_seconds;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +91,16 @@ pub enum MonitorFinding {
         sui: MonitorDepositEvent,
         btc: MonitorDepositEvent,
     },
+    /// The time the guardian signed into a log differs from the time S3
+    /// recorded the object by more than the configured skew.
+    GuardianClockSkew {
+        session_id: SessionID,
+        object_key: String,
+        /// The guardian's signed time.
+        logged_at_ms: UnixMillis,
+        /// S3's `LastModified` time.
+        stored_at_ms: UnixMillis,
+    },
 }
 
 impl MonitorFinding {
@@ -107,6 +121,7 @@ impl MonitorFinding {
             Self::ChangeOutputNotToBridge { .. } => FindingCategory::Safety,
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
+            Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -183,6 +198,22 @@ impl fmt::Display for MonitorFinding {
                 "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
                 sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
             ),
+            Self::GuardianClockSkew {
+                session_id,
+                object_key,
+                logged_at_ms,
+                stored_at_ms,
+            } => {
+                let logged_at = unix_millis_to_seconds(*logged_at_ms);
+                let stored_at = unix_millis_to_seconds(*stored_at_ms);
+                write!(
+                    f,
+                    "GuardianClockSkew(session_id={session_id}, key={object_key}, guardian_time={}, s3_time={}, s3_minus_guardian={})",
+                    utc_timestamp(logged_at),
+                    utc_timestamp(stored_at),
+                    human_timestamp_delta(stored_at, logged_at),
+                )
+            }
         }
     }
 }
