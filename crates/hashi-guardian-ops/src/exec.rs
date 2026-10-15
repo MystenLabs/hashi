@@ -37,7 +37,7 @@ pub struct Cmd {
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
     env_remove: Vec<OsString>,
-    stdin_null: bool,
+    capture_stderr: bool,
 }
 
 impl Cmd {
@@ -47,19 +47,19 @@ impl Cmd {
             args: Vec::new(),
             cwd: None,
             env_remove: Vec::new(),
-            stdin_null: false,
+            capture_stderr: false,
         }
+    }
+
+    /// Captures stderr too, for a step that reports it itself, as `2>&1` does.
+    pub fn capture_stderr(mut self) -> Self {
+        self.capture_stderr = true;
+        self
     }
 
     /// Leaves `name` out of the command's environment.
     pub fn env_remove(mut self, name: impl AsRef<OsStr>) -> Self {
         self.env_remove.push(name.as_ref().to_owned());
-        self
-    }
-
-    /// Gives the command no stdin, as `< /dev/null` does.
-    pub fn stdin_null(mut self) -> Self {
-        self.stdin_null = true;
         self
     }
 
@@ -102,6 +102,12 @@ impl Cmd {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
+        // Keeps parsed output stable regardless of the operator's locale, and the AWS CLI on its default endpoints
+        // and out of a pager.
+        command
+            .env("LC_ALL", "C")
+            .env("AWS_PAGER", "")
+            .env("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true");
         if let Some(dir) = &self.cwd {
             command.current_dir(dir);
         }
@@ -124,6 +130,8 @@ impl Cmd {
 pub struct Output {
     pub success: bool,
     pub stdout: String,
+    /// Empty unless the command captures stderr.
+    pub stderr: String,
 }
 
 pub trait Exec {
@@ -142,20 +150,22 @@ pub struct System;
 
 impl Exec for System {
     fn output(&self, cmd: &Cmd) -> io::Result<Output> {
-        let stdin = if cmd.stdin_null {
-            Stdio::null()
+        let stderr = if cmd.capture_stderr {
+            Stdio::piped()
         } else {
             Stdio::inherit()
         };
-        let output = cmd
-            .command()
-            .stdin(stdin)
-            .stderr(Stdio::inherit())
-            .output()?;
+        // Without the terminal, a command can neither take an answer typed ahead for a step's prompt nor hang on a
+        // prompt of its own that nobody sees.
+        let output = cmd.command().stdin(Stdio::null()).stderr(stderr).output()?;
+        let text = |bytes: Vec<u8>| {
+            String::from_utf8(bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        };
         Ok(Output {
             success: output.status.success(),
-            stdout: String::from_utf8(output.stdout)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            stdout: text(output.stdout)?,
+            stderr: text(output.stderr)?,
         })
     }
 
@@ -213,6 +223,36 @@ pub fn require_programs(exec: &dyn Exec) -> Result<()> {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runs_commands_in_the_scripts_environment() {
+        let command = Cmd::new("aws").env_remove("RUSTUP_TOOLCHAIN").command();
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (key, value) in [
+            ("LC_ALL", Some("C")),
+            ("AWS_PAGER", Some("")),
+            ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", Some("true")),
+            ("RUSTUP_TOOLCHAIN", None),
+        ] {
+            assert!(
+                envs.contains(&(key.to_owned(), value.map(str::to_owned))),
+                "{key}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 pub mod fake {
     //! A stand-in world: each command is answered by a handler, and every command is recorded.
 
@@ -259,7 +299,11 @@ pub mod fake {
             );
             let (success, stdout) =
                 (self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}"));
-            Ok(Output { success, stdout })
+            Ok(Output {
+                success,
+                stdout,
+                stderr: String::new(),
+            })
         }
 
         fn exec(&self, cmd: &Cmd) -> io::Error {
