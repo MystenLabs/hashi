@@ -18,6 +18,8 @@ use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 use hashi_guardian_ops::steps::rotate;
+use hashi_guardian_ops::steps::rotate_kp_set;
+use hashi_guardian_ops::steps::rotate_kp_set::Action;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -84,6 +86,11 @@ enum Step {
     Switchover { slot: Slot },
     /// Destroy a standby slot's host.
     Teardown { slot: Slot },
+    /// Re-deal the key to a new KP set on a standby: `rotate-kp-set [slot] init | submit <file>... | wait`.
+    RotateKpSet {
+        #[arg(value_name = "SLOT] init | submit <FILE>... | wait")]
+        args: Vec<String>,
+    },
     /// Create the key provisioners' upload bucket and an access key that can only upload into it.
     CreateKpUploadBucket,
     /// Delete the upload key once the key provisioners no longer need it.
@@ -146,6 +153,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::ProxyUpdate => rotate::proxy_update(&ctx),
         Step::Switchover { slot } => rotate::switchover(&ctx, slot),
         Step::Teardown { slot } => rotate::teardown(&ctx, slot),
+        Step::RotateKpSet { args } => {
+            let (slot, rest) = leading_slot(&args);
+            let action = match rest {
+                [action, files @ ..] if action == "submit" => {
+                    Action::Submit(files.iter().map(PathBuf::from).collect())
+                }
+                [action] if action == "init" => Action::Init,
+                [action] if action == "wait" => Action::Wait,
+                [action, _, ..] if action == "init" || action == "wait" => {
+                    bail!("rotate-kp-set {action} takes no files.")
+                }
+                _ => bail!("Usage: rotate-kp-set [slot] init | submit <file>... | wait"),
+            };
+            rotate_kp_set::rotate_kp_set(&ctx, slot, action)
+        }
         Step::CreateKpUploadBucket => kp_keys::create_kp_upload_bucket(&ctx),
         Step::RevokeKpUploadKey => kp_keys::revoke_kp_upload_key(&ctx),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
