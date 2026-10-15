@@ -71,25 +71,25 @@ These details trip up most operators:
 - A self-hosted Sui fullnode needs `rpc.enable-indexing: true` in its own config, which is off by default. See [1.4](#14-sui-rpc).
 - Fund the operator address with at least 2 SUI. With exactly 1 SUI, the node's gas bootstrap fails with `InsufficientCoinBalance` and retries every 10 minutes until you add SUI. See [2.4](#24-operator-key-day-to-day-signing).
 
-## Common questions
+## Operator questions
 
-### Is the Hashi node connected to my Sui validator?
+### The Hashi node and your Sui validator
 
 The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your validator, and the Hashi node should run on a separate host from your Sui validator ([1.1](#11-resources)). The link to your validator is onchain: `validator-address` in the validator config is your Sui validator address, and your validator account key signs the initial registration ([2.3](#23-registration-must-be-signed-by-the-account-key)).
 
-### Which validators can run a Hashi node?
+### Validators that can run a Hashi node
 
 Only active Sui validators. Onchain registration asserts that the sender is in the Sui active validator set, so the registration must come from your Sui validator account key ([2.3](#23-registration-must-be-signed-by-the-account-key), [11.3](#113-registration-and-offline-signing)). [Committee](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators) explains why the committee is not exactly the set of Sui validators.
 
-### Do I need to generate a backup key?
+### The backup key is required
 
 Yes. The backup key is required: `backup-pgp-cert` and `backup-dir` are both required in the validator config. Generate an OpenPGP key on a YubiKey or locally with `sq` or `gpg`, and give the node only the public certificate. See [2.5](#25-backup-key-openpgp) and [Hashi Node Backups](node-backup.mdx).
 
-### How much storage does the Bitcoin node need on Mainnet?
+### Bitcoin node storage on Mainnet
 
 Provision 2 TB of SSD storage for a self-hosted archival Mainnet Bitcoin node with `txindex` and `blockfilterindex`; see the Mainnet tab of [1.5](#15-bitcoin-node). This is separate from the Hashi process itself, which needs 10 GB of persistent storage ([1.1](#11-resources)).
 
-### What does a Mainnet node depend on?
+### Mainnet dependencies
 
 A self-hosted Sui fullnode serving the gRPC v2 API with `rpc.enable-indexing: true`, an archival Bitcoin Core v29 or newer node reachable over both JSON-RPC and P2P (self-hosting is strongly encouraged), a dedicated TLS key, an operator key funded with at least 2 SUI, and an OpenPGP backup key. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), [1.5](#15-bitcoin-node), and [2](#2-key-management-and-security).
 
@@ -386,7 +386,7 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 | **Encryption key** | ECIES | Auto-generated at startup | Encrypts MPC share exchange between validators. Stored in local DB. |
 | **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Required. |
 
-You do not generate or manage the BLS12-381 and ECIES keys: the node creates them at startup, stores them in its local database, and writes their public keys onchain when it starts ([5.3](#53-step-2-register-your-validator)). Because they live in the database, the database is the part of a backup you cannot recreate ([10.1](#101-what-a-backup-holds)).
+You do not generate or manage the BLS12-381 and ECIES keys: the node creates them at startup, stores them in its local database, and writes their public keys onchain when it starts ([5.4](#54-step-3-start-the-server)). Because they live in the database, the database is the part of a backup you cannot recreate ([10.1](#101-what-a-backup-holds)).
 
 ### 2.2 TLS key (dedicated)
 
@@ -1434,8 +1434,13 @@ Notes:
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
 | `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`. It reads `-1` until the pool holds a UTXO to probe; that is expected, not a fault. |
+| `hashi_peer_requests_shed_total`, `hashi_peer_requests_over_byte_budget_total`, `hashi_peer_requests_too_large_total`, `hashi_peer_mpc_work_shed_total`, `hashi_peer_responses_shed_total`, `hashi_peer_requests_over_connection_limit_total` | counter | Traffic a per-peer limit shed or refused, by `peer`. Healthy: flat. |
+| `hashi_mpc_unguarded_spawn_blocking_total` | counter | MPC work started outside the per-peer budget. Healthy: `0`. |
+| `hashi_peer_first_seen_timestamp_seconds` | gauge | When this node first saw each peer since start. The peer alerts need it. |
 
 > **Not in the 1.0 releases.** `hashi_withdrawal_bitcoin_check_script_failures_total` and `hashi_withdrawal_bitcoin_check_blind` come with the `testmempoolaccept` withdrawal check, which `testnet-1.0` and `mainnet-1.0` do not have. On 1.0 both metrics are absent and their alerts in [8.4](#84-suggested-alerts) never fire.
+
+> **Also not in the 1.0 releases.** Of the `hashi_peer_*` and `hashi_mpc_unguarded_*` metrics, 1.0 has only `hashi_peer_requests_shed_total`, so there the alerts miss a shed in a series' first sample.
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count.
 
@@ -1464,6 +1469,9 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 | `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
 | `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
+| A per-peer counter from [8.3](#83-key-metrics) counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | The `peer` may be misbehaving, or your node may be slow or have its limits set too low. Rule your node out first (`hashi_request_latency`), then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
+| 3 or more peers hit the request count or MPC work limits within 10 min | Critical | Usually your node is slow, not the peers, though colluding members can also cause it. Check `hashi_request_latency` and tell the operator channel. |
+| `hashi_mpc_unguarded_spawn_blocking_total` increasing | Warning | A node bug. Report it to the hashi team with your version. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 ---

@@ -56,7 +56,7 @@ two leaves:
    the UTXO confirms and is baked into the script, so changing it changes
    every deposit address.
 
-## What is the exact descriptor?
+## The exact descriptor
 
 The exact [descriptor](https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md)
 is:
@@ -83,7 +83,7 @@ leaf, which needs signatures from both the guardian key `g` and the child MPC
 key `h`. `and_v(v:older({delay}), pk({h}))` is the recovery leaf, which needs
 the `delay` to have elapsed and a signature from `h` alone.
 
-## How is the 60-day delay encoded?
+## Encoding the 60-day delay
 
 Use the BIP-68 sequence value `0x0040278D` (`4_204_429`) for `delay`. It is
 built in three steps:
@@ -95,7 +95,7 @@ built in three steps:
 3. OR in the time-based type bit, `1 << 22` (`4_194_304`):
    `4_194_304 | 10_125` = `4_204_429` = `0x0040278D`.
 
-## How is a deposit address derived from a Sui address?
+## Deriving a deposit address from a Sui address
 
 1. Take the depositor's Sui address as the derivation path `d`.
 2. Derive the child public key `h = derive(H, d)` from the base Hashi MPC
@@ -110,7 +110,7 @@ over secp256k1, keyed by the Sui address, giving each depositor a unique
 Bitcoin address while the master signing key remains shared across the MPC
 committee.
 
-## How does withdrawal funding treat older deposit UTXOs?
+## Withdrawal funding and older deposit UTXOs
 
 Normal withdrawal funding remains largest-first. Within the existing
 fee-eligible consolidation budget, confirmed UTXOs older than 4,320 blocks are

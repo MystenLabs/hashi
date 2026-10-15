@@ -60,7 +60,7 @@ keys are introduced with `AddConfig`, which names the store and is insert-only
 (see [Adding a parameter](#adding-a-parameter-without-a-package-upgrade) and
 [Governance Actions](governance-actions.mdx)).
 
-## Which configuration keys exist?
+## Configuration keys
 
 Every key documented on this page, grouped as in the sections below:
 
@@ -350,13 +350,3 @@ value (which fixes the key's type for later updates), and the store: the epoch
 config when every node must agree on the value for the whole epoch, the
 instant config otherwise. A node reads an absent key as its built-in default,
 so the key can be added before or after the node release that consumes it.
-
-## Related pages
-
-- [Governance Actions](governance-actions.mdx): the proposals that change
-  configuration, including `UpdateConfig`, `UpdateEpochConfig`, and
-  `AddConfig`.
-- [Deposit flow](deposit.mdx#confirm): how `bitcoin_deposit_time_delay_ms`
-  fits into deposit approval and confirmation.
-- [Reconfiguration](reconfiguration.mdx#abort-reconfig): how committees form
-  and abort, and where `reconfig_hold` and the epoch config apply.

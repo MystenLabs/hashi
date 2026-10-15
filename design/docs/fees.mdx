@@ -57,12 +57,12 @@ confirmed onchain.
 | Mainnet fee-rate cap | `100 sat/vB` | Applied to the estimate before the floor. |
 | Signet fee-rate cap | `9 sat/vB` | Applied to the estimate before the floor. |
 
-## Are deposits free?
+## Deposits
 
 Deposits are free. They must meet the configurable
 `bitcoin_deposit_minimum` (initially `30,000 sats`).
 
-## How are withdrawal fees calculated?
+## Withdrawal fees
 
 The only fee a user pays on withdrawal is the **miner fee**, the actual
 Bitcoin transaction fee required for onchain confirmation. This is not a
@@ -100,7 +100,7 @@ A user who withdraws exactly the minimum receives, in the worst case, a
 `546 sats` output. In practice, actual miner fees are usually well below
 the worst case, so the user receives more.
 
-## How is the fee rate estimated?
+## Fee rate estimation
 
 Hashi obtains the current fee rate from the connected Bitcoin Core node
 through `estimatesmartfee` in `ECONOMICAL` mode, targeting confirmation
@@ -177,7 +177,7 @@ the fee against three bounds:
   ensures the Move contract's upfront minimum calculation was
   sufficient.
 
-## How does Hashi handle stuck transactions?
+## Stuck transactions
 
 Hashi does not attempt to replace stuck transactions with higher-fee
 replacements (Replace-By-Fee, or RBF). Instead, if a transaction is not

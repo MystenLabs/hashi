@@ -45,7 +45,7 @@ This document illustrates the lifecycle of key Move models in the deposit and
 withdrawal flows, showing how data structures transform between onchain (Sui)
 and offchain (Bitcoin) states.
 
-## What is the entry-function gating principle?
+## Entry-function gating principle
 
 Every entry function that takes the `Hashi` object asserts the package
 version is enabled. Beyond that, **pause and reconfiguration gate only the
@@ -73,11 +73,11 @@ withdrawals during reconfiguration (a withdrawal request only escrows their
 hBTC); only committee approval, commitment, signing, and deposit confirmation
 wait for the new committee.
 
-## How do Move models change during a deposit?
+## Deposit flow
 
 During a reconfiguration, users can still call `deposit()`, but approval and
 confirmation wait for the new committee; see
-[What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
+[Entry-function gating principle](#entry-function-gating-principle).
 
 ```mermaid
 ---
@@ -156,12 +156,12 @@ flowchart TD
 
 ---
 
-## How do Move models change during a withdrawal?
+## Withdrawal flow
 
 During a reconfiguration, users can still call `request_withdrawal()` and
 withdrawal confirmation still proceeds, but approval, commitment, signing, and
 finalization wait for the new committee; see
-[What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
+[Entry-function gating principle](#entry-function-gating-principle).
 
 ```mermaid
 ---

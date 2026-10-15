@@ -48,7 +48,7 @@ graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
 ```
 
-## Who does what in a withdrawal?
+## Roles in a withdrawal
 
 1. **User**: calls `hashi::withdraw::request_withdrawal` with the `hBTC` and a
    Bitcoin destination address. Until the request is committed to a
@@ -68,7 +68,7 @@ Beyond the request, the user's only optional actions are cancelling and, if
 the transaction gets stuck, fee bumping through CPFP (see
 [Broadcast](#broadcast)).
 
-## How long does a withdrawal take?
+## Withdrawal timing
 
 The time from request to settlement depends mainly on these stages:
 
@@ -326,14 +326,3 @@ If a transaction gets stuck, fee bumping is handled through CPFP. Either the
 withdrawal recipient spends their output with a high-fee child, or a later
 withdrawal batch spends the stuck transaction's change UTXO and pays its fee
 shortfall (see [Fees: stuck transactions](fees.mdx#stuck-transactions)).
-
-## Related pages
-
-- [Fees](fees.mdx): withdrawal minimum, miner fees, UTXO consolidation, and
-  stuck transactions.
-- [Configuration](config.mdx): `bitcoin_withdrawal_minimum`,
-  `withdrawal_cancellation_cooldown_ms`, and `bitcoin_confirmation_threshold`.
-- [Bitcoin Address Scheme](address-scheme.mdx): the 2-of-2 Taproot script.
-- [MPC Protocol](mpc-protocol.mdx): threshold Schnorr signing.
-- [Handling Sanctioned Addresses](sanctions.mdx): address screening during
-  approval.

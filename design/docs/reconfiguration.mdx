@@ -52,7 +52,7 @@ graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
 
-### How does a reconfiguration proceed?
+### Reconfiguration steps
 
 On the happy path, a reconfiguration runs these steps in order:
 
@@ -295,7 +295,7 @@ stalled for an entire Sui epoch with deposits and withdrawals halted, so it is
 worth alerting on and investigating even though the system recovers on its
 own.
 
-### Which CLI commands can operators run?
+### CLI commands
 
 Nodes normally submit these transactions themselves; `abort-reconfig` and
 `start-reconfig` are fallbacks for when no node is doing so.
@@ -304,4 +304,4 @@ Nodes normally submit these transactions themselves; `abort-reconfig` and
 | --- | --- | --- |
 | `hashi launch` | Sends `hashi::finish_publish` at genesis, finalizing the deploy configuration and handing the package `UpgradeCap` into onchain custody, which opens the launch switch | — |
 | `hashi committee abort-reconfig` | Submits the abort for the pending reconfiguration | Nothing is pending, or the pending epoch is still Sui's current epoch |
-| `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | A reconfiguration is pending, or Hashi is already on Sui's current epoch |
+| `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | Governance holds reconfiguration (`reconfig_hold` is set), a reconfiguration is already pending, a committee already exists for Sui's current epoch, Hashi is already on Sui's current epoch, or the fullnode's Sui epoch is behind Hashi's |
