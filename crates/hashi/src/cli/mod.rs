@@ -556,9 +556,13 @@ pub enum BackupCommands {
         #[clap(long)]
         mpc_public_key: std::path::PathBuf,
 
-        /// New private root-key BCS file (existing destinations are never overwritten)
+        /// New encrypted root-key BCS file (recommended: root.bcs.asc; never overwritten)
         #[clap(long)]
         output: std::path::PathBuf,
+
+        /// Public OpenPGP certificate (inline armor or path) for encrypting the recovered key
+        #[clap(long, value_name = "ARMORED-CERT-OR-PATH", allow_hyphen_values = true)]
+        output_pgp_cert: String,
 
         /// OpenPGP secret key for encrypted archives
         #[clap(long, conflicts_with = "use_gpg_agent")]
@@ -1418,14 +1422,17 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 inputs,
                 mpc_public_key,
                 output,
+                output_pgp_cert,
                 backup_pgp_secret_key,
                 use_gpg_agent,
                 gpg_homedir,
             } => {
+                let output_recipient = commands::backup::resolve_pgp_recipient(output_pgp_cert)?;
                 commands::backup::recover_mpc_key(
                     &inputs,
                     &mpc_public_key,
                     &output,
+                    &output_recipient,
                     backup_pgp_secret_key.as_deref(),
                     use_gpg_agent,
                     gpg_homedir.as_deref(),

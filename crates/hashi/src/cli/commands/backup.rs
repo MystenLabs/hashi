@@ -11,6 +11,7 @@ use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::armored_encrypt_writer;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
 use std::fs;
@@ -77,8 +78,36 @@ fn open_backup_stream(archive: &Path, decryptor: &RestoreDecryptor) -> Result<Bo
     }
 }
 
-/// Publish complete BCS only, using a private sibling file and no-clobber persistence.
+/// Write raw BCS for the independently trusted public-key export.
 fn write_private_bcs<T: serde::Serialize>(output: &Path, value: &T) -> Result<()> {
+    publish_private_output(output, |staged| {
+        bcs::serialize_into(staged, value)
+            .map_err(|_| anyhow::anyhow!("Failed to serialize BCS output"))
+    })
+}
+
+/// Stream BCS directly into encryption; only ciphertext reaches the staging file.
+fn write_encrypted_bcs<T: serde::Serialize>(
+    output: &Path,
+    value: &T,
+    recipient: &PgpPublicCert,
+) -> Result<()> {
+    publish_private_output(output, |staged| {
+        let mut encrypted_writer = armored_encrypt_writer(staged, recipient)?;
+        bcs::serialize_into(&mut encrypted_writer, value)
+            .map_err(|_| anyhow::anyhow!("Failed to serialize BCS output"))?;
+        encrypted_writer
+            .finalize()
+            .context("Failed to finalize encrypted output")?;
+        Ok(())
+    })
+}
+
+/// Publish complete output only, using a private sibling file and no-clobber persistence.
+fn publish_private_output(
+    output: &Path,
+    write_output: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     match fs::symlink_metadata(output) {
         Ok(_) => anyhow::bail!(
             "Refusing to overwrite existing output: {}",
@@ -101,8 +130,7 @@ fn write_private_bcs<T: serde::Serialize>(output: &Path, value: &T) -> Result<()
     let mut staged = builder
         .tempfile_in(parent)
         .context("Failed to create private output staging file")?;
-    bcs::serialize_into(staged.as_file_mut(), value)
-        .map_err(|_| anyhow::anyhow!("Failed to serialize BCS output"))?;
+    write_output(staged.as_file_mut())?;
     staged.flush().context("Failed to flush staged output")?;
     staged
         .as_file()
@@ -135,6 +163,7 @@ pub fn recover_mpc_key(
     inputs: &[PathBuf],
     mpc_public_key: &Path,
     output: &Path,
+    output_recipient: &PgpPublicCert,
     secret_key_path: Option<&Path>,
     use_gpg_agent: bool,
     homedir: Option<&Path>,
@@ -186,7 +215,7 @@ pub fn recover_mpc_key(
         public_key,
         private_key,
     });
-    write_private_bcs(output, &recovered)?;
+    write_encrypted_bcs(output, &recovered, output_recipient)?;
     print_success(&format!("MPC root key recovered: {}", output.display()));
     Ok(())
 }
@@ -297,18 +326,21 @@ pub(crate) fn resolve_backup_recipient(
     backup_pgp_cert_override: Option<String>,
 ) -> Result<PgpPublicCert> {
     Ok(backup_pgp_cert_override
-        .map(|value| {
-            let path = Path::new(&value);
-            let cert = if path.is_file() {
-                fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
-            } else {
-                value
-            };
-            PgpPublicCert::new(cert)
-        })
+        .map(resolve_pgp_recipient)
         .transpose()?
         .unwrap_or_else(|| node_config.backup_pgp_cert.clone()))
+}
+
+/// Resolve a public recipient from either a certificate file or inline armor.
+pub(crate) fn resolve_pgp_recipient(value: String) -> Result<PgpPublicCert> {
+    let path = Path::new(&value);
+    let cert = if path.is_file() {
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
+    } else {
+        value
+    };
+    PgpPublicCert::new(cert)
 }
 
 /// Identify remote input without requiring local paths to be UTF-8.
@@ -569,13 +601,55 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_bcs_roundtrip_never_overwrites() {
+        use std::io::Read as _;
+
+        let directory = TempDir::new().unwrap();
+        let output = directory.path().join("root.bcs.asc");
+        let (public_cert, secret_key) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        write_encrypted_bcs(&output, &42u64, &recipient).unwrap();
+        let ciphertext = fs::read(&output).unwrap();
+        assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        let mut plaintext = Vec::new();
+        decrypt_with_secret_key(File::open(&output).unwrap(), secret_key.as_bytes())
+            .unwrap()
+            .read_to_end(&mut plaintext)
+            .unwrap();
+        assert_eq!(bcs::from_bytes::<u64>(&plaintext).unwrap(), 42);
+        assert!(write_encrypted_bcs(&output, &7u64, &recipient).is_err());
+        assert_eq!(fs::read(&output).unwrap(), ciphertext);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = directory.path().join("dangling.bcs.asc");
+            std::os::unix::fs::symlink(directory.path().join("missing"), &link).unwrap();
+            assert!(write_encrypted_bcs(&link, &7u64, &recipient).is_err());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[test]
     fn failed_serialization_leaves_no_output_or_staging_file() {
         struct FailingOutput;
         impl serde::Serialize for FailingOutput {
             fn serialize<S: serde::Serializer>(
                 &self,
-                _serializer: S,
+                serializer: S,
             ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeTuple as _;
+
+                let mut tuple = serializer.serialize_tuple(2)?;
+                tuple.serialize_element(&42u64)?;
                 Err(serde::ser::Error::custom(
                     "deliberate serialization failure",
                 ))
@@ -585,6 +659,12 @@ mod tests {
         let output = directory.path().join("key.bcs");
         assert!(write_private_bcs(&output, &FailingOutput).is_err());
         assert!(!output.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        let (public_cert, _) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        let encrypted_output = directory.path().join("root.bcs.asc");
+        assert!(write_encrypted_bcs(&encrypted_output, &FailingOutput, &recipient).is_err());
+        assert!(!encrypted_output.exists());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
@@ -596,8 +676,21 @@ mod tests {
         write_private_bcs(&public_key, &G::generator()).unwrap();
         let record = directory.path().join("record.bcs");
         fs::write(&record, b"invalid recovery record").unwrap();
-        let output = directory.path().join("root-key.bcs");
-        assert!(recover_mpc_key(&[record], &public_key, &output, None, false, None).is_err());
+        let output = directory.path().join("root.bcs.asc");
+        let (public_cert, _) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        assert!(
+            recover_mpc_key(
+                &[record],
+                &public_key,
+                &output,
+                &recipient,
+                None,
+                false,
+                None
+            )
+            .is_err()
+        );
         assert!(!output.exists());
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
     }

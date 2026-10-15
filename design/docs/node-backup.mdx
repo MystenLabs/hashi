@@ -484,6 +484,7 @@ Operators should preserve off-machine encrypted backups and keep access to their
 backup decryption keys separate from the validator fleet. MPC key recovery is
 an incident-response operation, not part of ordinary node restoration.
 
-Recovery assembles the full MPC private key, which must be handled as a highly
-sensitive secret. It does not invalidate a copy already stolen by an attacker.
+Recovery assembles the full MPC private key and writes it PGP-encrypted. It must
+still be handled as a highly sensitive secret. Recovering it does not invalidate
+a copy already stolen by an attacker.
 

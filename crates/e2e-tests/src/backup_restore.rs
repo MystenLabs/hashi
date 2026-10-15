@@ -16,6 +16,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -39,6 +40,7 @@ mod tests {
     use hashi_types::move_types::ProtocolType;
     use hashi_types::move_types::TobKey;
     use hashi_types::pgp::PgpPublicCert;
+    use hashi_types::pgp::decrypt_with_secret_key;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use sui_sdk_types::Address;
 
@@ -475,12 +477,17 @@ mod tests {
         // Nothing below this boundary can consult a peer or an MPC manager.
         drop(networks);
 
-        let insufficient_output = recovery_dir.path().join("insufficient.bcs");
+        // Keep the distinct output secret in memory; do not replace the archive
+        // decryption key stored in backup-secret-key.asc.
+        let (output_cert, output_secret) = mock_pgp_keypair();
+        let output_recipient = PgpPublicCert::new(output_cert)?;
+        let insufficient_output = recovery_dir.path().join("insufficient.bcs.asc");
         assert!(
             commands::backup::recover_mpc_key(
                 &archives[..subset_len - 1],
                 &public_key_path,
                 &insufficient_output,
+                &output_recipient,
                 Some(&secret_key_path),
                 false,
                 None,
@@ -492,16 +499,35 @@ mod tests {
         let subset = archives[..subset_len].to_vec();
         archives.reverse();
         for (name, inputs) in [("quorum", &subset), ("reversed-surplus", &archives)] {
-            let output = recovery_dir.path().join(format!("{name}.bcs"));
+            let output = recovery_dir.path().join(format!("{name}.bcs.asc"));
             commands::backup::recover_mpc_key(
                 inputs,
                 &public_key_path,
                 &output,
+                &output_recipient,
                 Some(&secret_key_path),
                 false,
                 None,
             )?;
-            let recovered: RecoveredMpcKey = bcs::from_bytes(&std::fs::read(&output)?)?;
+            let ciphertext = std::fs::read(&output)?;
+            assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+            let mut plaintext = Vec::new();
+            decrypt_with_secret_key(std::fs::File::open(&output)?, output_secret.as_bytes())?
+                .read_to_end(&mut plaintext)?;
+            let input_secret = std::fs::read(&secret_key_path)?;
+            let wrong_key_result =
+                decrypt_with_secret_key(std::fs::File::open(&output)?, &input_secret).and_then(
+                    |mut reader| {
+                        let mut bytes = Vec::new();
+                        reader.read_to_end(&mut bytes)?;
+                        Ok(bytes)
+                    },
+                );
+            assert!(
+                wrong_key_result.is_err(),
+                "Archive decryption key must not decrypt recovered root output"
+            );
+            let recovered: RecoveredMpcKey = bcs::from_bytes(&plaintext)?;
             let RecoveredMpcKey::V1(recovered) = recovered;
             assert_eq!(recovered.chain_id, chain_id);
             assert_eq!(recovered.hashi_object_id, ids.hashi_object_id);
@@ -509,6 +535,13 @@ mod tests {
             assert_eq!(recovered.public_key, original_public_key);
             // Never format or compare private scalar bytes in assertion output.
             assert_eq!(G::generator() * recovered.private_key, original_public_key);
+            let root_bytes = bcs::to_bytes(&recovered.private_key)?;
+            assert!(
+                !ciphertext
+                    .windows(root_bytes.len())
+                    .any(|window| window == root_bytes),
+                "Encrypted output exposed the recovered private scalar"
+            );
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

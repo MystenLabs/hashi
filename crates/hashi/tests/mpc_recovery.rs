@@ -128,6 +128,8 @@ struct Fixture {
     raw: Vec<PathBuf>,
     public: PathBuf,
     secret: PathBuf,
+    output_cert: PathBuf,
+    output_secret: String,
     public_key: G,
     forbidden: Vec<Vec<u8>>,
     originals: Vec<(PathBuf, Vec<u8>)>,
@@ -149,6 +151,9 @@ impl Fixture {
         let secret = dir.path().join("operator-secret.asc");
         fs::write(&secret, &secret_key).unwrap();
         let recipient = PgpPublicCert::new(cert).unwrap();
+        let (output_public, output_secret) = test_utils::mock_pgp_keypair();
+        let output_cert = dir.path().join("output-recipient.asc");
+        fs::write(&output_cert, output_public).unwrap();
         let db_dir = tempfile::tempdir().unwrap();
         let db = Database::open(db_dir.path()).unwrap();
         let mut manifest = build_backup_manifest(&[], db_dir.path()).unwrap();
@@ -191,7 +196,7 @@ impl Fixture {
             .iter()
             .chain(&plain)
             .chain(&raw)
-            .chain([&public, &secret])
+            .chain([&public, &secret, &output_cert])
             .map(|path| (path.clone(), fs::read(path).unwrap()))
             .collect();
         Self {
@@ -202,6 +207,8 @@ impl Fixture {
             raw,
             public,
             secret,
+            output_cert,
+            output_secret,
             public_key,
             forbidden,
             originals,
@@ -215,13 +222,30 @@ impl Fixture {
         public: &Path,
         backend: &[&std::ffi::OsStr],
     ) -> Output {
+        self.run_with_recipient(
+            inputs,
+            output,
+            public,
+            backend,
+            Some(self.output_cert.as_os_str()),
+        )
+    }
+
+    fn run_with_recipient(
+        &self,
+        inputs: &[PathBuf],
+        output: &Path,
+        public: &Path,
+        backend: &[&std::ffi::OsStr],
+        recipient: Option<&std::ffi::OsStr>,
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_hashi"));
         // No inherited credentials, CLI settings, GPG home, or logging configuration.
         command
             .env_clear()
             .env("HOME", self.dir.path())
             .env("PATH", std::env::var_os("PATH").unwrap_or_default());
-        let result = command
+        command
             .current_dir(self.dir.path())
             .args(["backup", "recover-mpc-key", "--config"])
             .arg(self.dir.path().join("cli.toml"))
@@ -230,9 +254,11 @@ impl Fixture {
             .arg("--output")
             .arg(output)
             .args(backend)
-            .args(inputs)
-            .output()
-            .unwrap();
+            .args(inputs);
+        if let Some(recipient) = recipient {
+            command.arg("--output-pgp-cert").arg(recipient);
+        }
+        let result = command.output().unwrap();
         for stream in [&result.stdout, &result.stderr] {
             for secret in &self.forbidden {
                 assert!(
@@ -258,15 +284,62 @@ impl Fixture {
     }
 
     fn succeeds(&self, inputs: &[PathBuf], backend: &[&std::ffi::OsStr]) {
+        self.succeeds_with_recipient(
+            inputs,
+            backend,
+            self.output_cert.as_os_str(),
+            "root.bcs.asc",
+        );
+    }
+
+    fn succeeds_with_recipient(
+        &self,
+        inputs: &[PathBuf],
+        backend: &[&std::ffi::OsStr],
+        recipient: &std::ffi::OsStr,
+        filename: &str,
+    ) {
         let output_dir = tempfile::tempdir_in(self.dir.path()).unwrap();
-        let output = output_dir.path().join("root.bcs");
-        let result = self.run(inputs, &output, &self.public, backend);
+        let output = output_dir.path().join(filename);
+        let result =
+            self.run_with_recipient(inputs, &output, &self.public, backend, Some(recipient));
         assert!(
             result.status.success(),
             "recovery process failed: {}",
             result.status
         );
-        let RecoveredMpcKey::V1(root) = bcs::from_bytes(&fs::read(&output).unwrap()).unwrap();
+        let ciphertext = fs::read(&output).unwrap();
+        assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        for secret in &self.forbidden {
+            assert!(
+                !ciphertext
+                    .windows(secret.len())
+                    .any(|window| window == secret),
+                "recovered output exposed private scalar material"
+            );
+        }
+        let mut plaintext = Vec::new();
+        decrypt_with_secret_key(
+            fs::File::open(&output).unwrap(),
+            self.output_secret.as_bytes(),
+        )
+        .unwrap()
+        .read_to_end(&mut plaintext)
+        .unwrap();
+        let input_secret = fs::read(&self.secret).unwrap();
+        let wrong_key_result =
+            decrypt_with_secret_key(fs::File::open(&output).unwrap(), &input_secret).and_then(
+                |mut reader| {
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes)?;
+                    Ok(bytes)
+                },
+            );
+        assert!(
+            wrong_key_result.is_err(),
+            "input backup key decrypted output encrypted to a distinct recipient"
+        );
+        let RecoveredMpcKey::V1(root) = bcs::from_bytes(&plaintext).unwrap();
         assert_eq!(root.chain_id, CHAIN);
         assert_eq!(root.hashi_object_id, Address::new([42; 32]));
         assert_eq!(root.epoch, EPOCH);
@@ -285,7 +358,12 @@ impl Fixture {
 
     fn rejects(&self, inputs: &[PathBuf], public: &Path, backend: &[&std::ffi::OsStr]) {
         let output_dir = tempfile::tempdir_in(self.dir.path()).unwrap();
-        let result = self.run(inputs, &output_dir.path().join("root.bcs"), public, backend);
+        let result = self.run(
+            inputs,
+            &output_dir.path().join("root.bcs.asc"),
+            public,
+            backend,
+        );
         assert!(
             !result.status.success(),
             "invalid recovery unexpectedly succeeded"
@@ -336,6 +414,47 @@ fn recovers_weighted_quorum_from_encrypted_plain_raw_and_mixed_inputs() {
     fixture.succeeds(&[path.clone(), fixture.raw[1].clone()], &[]);
     // Repeating local indices does not add weight toward the threshold.
     fixture.rejects(&[path], &fixture.public, &[]);
+}
+
+#[test]
+fn requires_valid_output_recipient_and_accepts_inline_armor() {
+    let fixture = Fixture::new();
+    let armor = fs::read_to_string(&fixture.output_cert).unwrap();
+    // A non-armored filename must still contain encrypted output. Passing armor
+    // as a separate argument also exercises its leading hyphens.
+    fixture.succeeds_with_recipient(
+        &fixture.encrypted[..2],
+        &fixture.local_backend(),
+        armor.as_ref(),
+        "root.bcs",
+    );
+    let invalid = fixture.dir.path().join("invalid-recipient.asc");
+    fs::write(&invalid, b"not an OpenPGP certificate").unwrap();
+    let secret_armor = fs::read_to_string(&fixture.secret).unwrap();
+    for recipient in [
+        None,
+        Some(invalid.as_os_str()),
+        Some(std::ffi::OsStr::new("not an OpenPGP certificate")),
+        Some(fixture.secret.as_os_str()),
+        Some(std::ffi::OsStr::new(&secret_armor)),
+    ] {
+        let output_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+        let result = fixture.run_with_recipient(
+            &fixture.encrypted[..2],
+            &output_dir.path().join("root.bcs.asc"),
+            &fixture.public,
+            &fixture.local_backend(),
+            recipient,
+        );
+        assert!(
+            !result.status.success(),
+            "invalid output recipient was accepted"
+        );
+        assert!(
+            fs::read_dir(output_dir.path()).unwrap().next().is_none(),
+            "invalid output recipient left output or staging files"
+        );
+    }
 }
 
 #[test]
