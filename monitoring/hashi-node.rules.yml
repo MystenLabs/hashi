@@ -1,10 +1,9 @@
-# Example Prometheus alerting rules for a hashi validator node.
-# See docs/validator-alerts.md for the rationale behind each rule and for
-# the list of metrics you should NOT alert on.
+# Prometheus alerting rules for a hashi node. docs/alerting.md says which rule
+# files to load and which metrics not to alert on.
 #
-# Drop this into your Prometheus rule_files and adjust thresholds/labels to
-# your paging setup. Expressions assume your node's hashi metrics are
-# scraped into the local Prometheus without extra relabeling.
+# Add this file to your Prometheus rule_files and route on `severity`.
+# Expressions assume your node's hashi metrics are scraped into the local
+# Prometheus without extra relabeling.
 
 groups:
   - name: hashi-validator-node-health
@@ -53,6 +52,8 @@ groups:
             is wedged; the node is acting on stale state even if other
             metrics look healthy.
 
+      # Each task loop heartbeats at least every 15s when idle, and mpc_service
+      # also while it waits for presignature certificates.
       - alert: HashiTaskWedged
         expr: time() - hashi_task_last_iteration_timestamp_seconds > 600
         labels:
@@ -140,6 +141,7 @@ groups:
             If other operators see it too, withdrawals are broken: raise it in
             the operator channel. Otherwise check this node's bitcoind.
 
+      # An hourly probe sets this; -1 means no pool UTXO has been probed yet.
       - alert: HashiWithdrawalCheckBlind
         expr: hashi_withdrawal_bitcoin_check_blind == 1
         for: 10m
@@ -152,6 +154,8 @@ groups:
             them unchecked. Usually testmempoolaccept is not allowed on the RPC
             endpoint; see the error log.
 
+      # increase() misses a shed in a series' first sample, so each term also
+      # fires on a count sampled after the peer was first seen in the window.
       - alert: HashiPeerShed
         expr: |
           label_replace(
