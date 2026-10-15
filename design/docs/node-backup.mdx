@@ -312,7 +312,7 @@ counts; expiring the newest archive also warns. Unrelated files are preserved, e
 do not stop the sweep, and a cleanup failure does not prevent the backup attempt.
 
 Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
-the same policy. Keep longer-term copies elsewhere.
+the same automatic policy. Apply [backup expiry](#backup-expiry) to all copies.
 
 Archives are staged in `backup-dir`, finalized and synced to disk before publication;
 the directory is synced afterward on a best-effort basis. A directory sync failure
@@ -326,6 +326,21 @@ contain decrypted keys and database data; use a private restore output directory
 Completed restores, `.hashi-db-restore-*` staging directories beside the destination
 database, and restore output elsewhere are not swept by automatic backup cleanup.
 Operators must remove these plaintext copies when no longer needed.
+
+### Backup expiry
+
+Use a **14-day retention policy**, measured from the archive's original creation,
+for every backup copy: local archives (including the newest), off-machine copies,
+and all S3 object versions. Copying or re-uploading must not reset this period.
+Old shares can still reconstruct the active MPC key after resharing. Keeping
+backups indefinitely gives an attacker more time to collect enough decryptable
+backups from the same epoch to recover that key. Expiry limits this opportunity
+while preserving a recent disaster-recovery window.
+
+Operators must configure deletion for each storage location; Hashi's
+newest-backup exception alone does not enforce this policy. Account for Object
+Lock and monitor deletion failures or delays. Remove temporary decrypted copies
+immediately after use.
 
 ## Restoring from a backup
 
