@@ -259,6 +259,18 @@ pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
 /// Callers that need a `bitcoin::secp256k1::Keypair` should pass the result
 /// through `k256_sk_to_btc_keypair`.
 pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<k256::SecretKey> {
+    let secret = interpolate_secret(shares, t)?;
+    info!(
+        "Bitcoin key created with fingerprint {:x}",
+        fingerprint(&secret)
+    );
+    Ok(secret)
+}
+
+/// Lagrange-interpolate `shares` at zero without logging, for callers whose
+/// secret is not the guardian's Bitcoin key. Same validation as
+/// [`combine_shares`]; also errors if the shares interpolate to zero.
+pub fn interpolate_secret(shares: &[Share], t: usize) -> GuardianResult<k256::SecretKey> {
     // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
@@ -299,10 +311,8 @@ pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<k256::Secret
         result = result.add(&share.value.mul(&lagrange_basis));
     }
 
-    info!("Bitcoin key created with fingerprint {:x}", exp_g(&result));
-
-    Ok(k256::SecretKey::from_slice(&result.to_bytes())
-        .expect("k256 scalar bytes are a valid k256 secret key"))
+    k256::SecretKey::from_slice(&result.to_bytes())
+        .map_err(|_| InvalidInputs("shares interpolate to zero".into()))
 }
 
 /// Convert a `k256::SecretKey` to a `bitcoin::secp256k1::Keypair`. Both libs

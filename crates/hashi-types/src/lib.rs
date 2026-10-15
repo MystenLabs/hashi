@@ -10,6 +10,7 @@ pub mod move_types;
 pub mod pgp;
 pub mod proto;
 pub mod telemetry;
+pub mod threshold_backup;
 pub mod utils;
 
 /// Re-export so downstream crates (e.g. the guardian enclave, which has no

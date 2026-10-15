@@ -82,13 +82,15 @@ impl PgpPublicCert {
     /// Compare the currently usable transport-encryption key fingerprints,
     /// independent of armor, key ordering, and non-encryption keys.
     pub fn has_same_encryption_recipients(&self, other: &Self) -> bool {
-        let recipients = |cert: &openpgp::Cert| {
-            usable_keys(cert)
-                .for_transport_encryption()
-                .map(|key| key.key().fingerprint())
-                .collect::<BTreeSet<_>>()
-        };
-        recipients(&self.cert) == recipients(&other.cert)
+        self.encryption_key_fingerprints() == other.encryption_key_fingerprints()
+    }
+
+    /// Fingerprints of the currently usable transport-encryption keys.
+    pub fn encryption_key_fingerprints(&self) -> BTreeSet<Fingerprint> {
+        usable_keys(&self.cert)
+            .for_transport_encryption()
+            .map(|key| key.key().fingerprint())
+            .collect()
     }
 }
 
@@ -256,6 +258,47 @@ where
     LiteralWriter::new(message)
         .build()
         .context("OpenPGP literal data setup failed")
+}
+
+/// Like [`armored_encrypt_writer`], but encrypts to a passphrase (SKESK)
+/// instead of certificate recipients. Used for threshold backups, where the
+/// passphrase is derived from a secret that only a quorum of holders can
+/// reconstruct.
+pub fn armored_password_encrypt_writer<'a, W>(output: W, passphrase: &str) -> Result<Message<'a>>
+where
+    W: 'a + Write + Send + Sync,
+{
+    let message = Message::new(output);
+    let message = Armorer::new(message)
+        .kind(openpgp::armor::Kind::Message)
+        .build()
+        .context("OpenPGP armor setup failed")?;
+    let message =
+        Encryptor::with_passwords(message, Some(openpgp::crypto::Password::from(passphrase)))
+            .symmetric_algo(SymmetricAlgorithm::AES256)
+            .build()
+            .context("OpenPGP encryption setup failed")?;
+    let message = Compressor::new(message)
+        .build()
+        .context("OpenPGP compression setup failed")?;
+    LiteralWriter::new(message)
+        .build()
+        .context("OpenPGP literal data setup failed")
+}
+
+/// Decrypt a passphrase-encrypted (SKESK) OpenPGP message, as written by
+/// [`armored_password_encrypt_writer`].
+pub fn decrypt_with_password<R>(input: R, passphrase: &str) -> Result<impl io::Read + use<R>>
+where
+    R: Read + Send + Sync + 'static,
+{
+    let helper = PasswordDecryptHelper {
+        password: openpgp::crypto::Password::from(passphrase),
+    };
+    DecryptorBuilder::from_reader(input)
+        .context("invalid OpenPGP message")?
+        .with_policy(&*POLICY, None, helper)
+        .context("OpenPGP decryption failed")
 }
 
 /// Recipient key handles found in an armored OpenPGP message's PKESK packets,
@@ -792,6 +835,42 @@ impl DecryptionHelper for LocalSecretKeyDecryptHelper {
             }
         }
         Ok(None)
+    }
+}
+
+struct PasswordDecryptHelper {
+    password: openpgp::crypto::Password,
+}
+
+impl VerificationHelper for PasswordDecryptHelper {
+    fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> openpgp::Result<Vec<openpgp::Cert>> {
+        Ok(Vec::new())
+    }
+
+    fn check(&mut self, _structure: MessageStructure) -> openpgp::Result<()> {
+        Ok(())
+    }
+}
+
+impl DecryptionHelper for PasswordDecryptHelper {
+    fn decrypt(
+        &mut self,
+        _pkesks: &[openpgp::packet::PKESK],
+        skesks: &[openpgp::packet::SKESK],
+        _sym_algo: Option<SymmetricAlgorithm>,
+        decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
+    ) -> openpgp::Result<Option<openpgp::Cert>> {
+        for skesk in skesks {
+            if skesk
+                .decrypt(&self.password)
+                .is_ok_and(|(algo, session_key)| decrypt(algo, &session_key))
+            {
+                return Ok(None);
+            }
+        }
+        Err(anyhow::anyhow!(
+            "passphrase does not decrypt this OpenPGP message"
+        ))
     }
 }
 
