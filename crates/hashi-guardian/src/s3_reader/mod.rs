@@ -10,6 +10,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
+use crate::s3_client::StoredLogRecord;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
@@ -23,7 +24,6 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::SignedLogEntry;
 use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
@@ -119,13 +119,14 @@ impl GuardianReader {
 
     async fn verify_record(
         &mut self,
-        log: SignedLogEntry,
+        log: StoredLogRecord,
         require_current: bool,
     ) -> GuardianResult<VerifiedLogEntry> {
-        self.ensure_session_info_loaded(log.session_id()).await?;
+        self.ensure_session_info_loaded(log.record.session_id())
+            .await?;
         let session_info = self
             .sessions
-            .get_mut(log.session_id())
+            .get_mut(log.record.session_id())
             .expect("session info was loaded above");
         let verified_log = session_info.verify_record(&self.s3, log).await?;
         if require_current {
@@ -449,7 +450,19 @@ impl GuardianReader {
 /// Reads still verify the record signature and apply the S3 checks required by the read method.
 #[cfg(test)]
 pub(crate) fn reader_with_record_for_test(
-    log: Option<SignedLogEntry>,
+    log: Option<hashi_types::guardian::SignedLogEntry>,
+    signing_pubkey: hashi_types::guardian::GuardianPubKey,
+    extra_keys: Vec<String>,
+) -> GuardianReader {
+    let stored_at_ms = log.as_ref().map_or(0, |log| log.timestamp_ms());
+    reader_with_record_stored_at_for_test(log, stored_at_ms, signing_pubkey, extra_keys)
+}
+
+/// Like `reader_with_record_for_test`, with an explicit S3 `LastModified` time for the record.
+#[cfg(test)]
+pub(crate) fn reader_with_record_stored_at_for_test(
+    log: Option<hashi_types::guardian::SignedLogEntry>,
+    stored_at_ms: hashi_types::guardian::UnixMillis,
     signing_pubkey: hashi_types::guardian::GuardianPubKey,
     extra_keys: Vec<String>,
 ) -> GuardianReader {
@@ -522,6 +535,7 @@ pub(crate) fn reader_with_record_for_test(
             GetObjectOutput::builder()
                 .object_lock_mode(ObjectLockMode::Compliance)
                 .object_lock_retain_until_date(DateTime::from(log.object_lock_expiry(policy)))
+                .last_modified(DateTime::from_millis(stored_at_ms as i64))
                 .body(ByteStream::from(serde_json::to_vec(log).unwrap()))
                 .build()
         });
@@ -549,9 +563,14 @@ mod tests {
     use super::*;
     use crate::test_utils::mock_logger_with_layout;
     use crate::test_utils::OperatorInitTestArgs;
+    use crate::MAX_EXPECTED_LOG_CLOCK_SKEW;
+    use hashi_types::guardian::now_timestamp_ms;
+    use hashi_types::guardian::unix_millis_to_seconds;
     use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::SecretSharingInstance;
+    use hashi_types::guardian::SignedLogEntry;
 
     async fn next(keys: &[&str]) -> GuardianResult<u64> {
         let s3 = mock_logger_with_layout(keys.iter().map(|key| key.to_string()));
@@ -586,6 +605,33 @@ mod tests {
         )
         .next_sharing_seq()
         .await
+    }
+
+    #[tokio::test]
+    async fn directory_reads_carry_the_s3_time_of_each_record() {
+        let signing_key = GuardianSignKeyPair::from([43; 32]);
+        // The mock's object lock expires relative to the signed time.
+        let logged_at_ms = now_timestamp_ms();
+        let log = SignedLogEntry::new_at_timestamp(
+            SessionID::from_signing_pubkey(&signing_key.verification_key()),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            &signing_key,
+            logged_at_ms,
+        );
+        let dir = S3HourDirectory::heartbeat(unix_millis_to_seconds(logged_at_ms)).unwrap();
+        let mut reader = reader_with_record_stored_at_for_test(
+            Some(log),
+            logged_at_ms + 45_000,
+            signing_key.verification_key(),
+            vec![],
+        );
+
+        let logs = reader.read_logs_in_dir(&dir).await.unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].stored_at_ms(), logged_at_ms + 45_000);
+        assert_eq!(logs[0].clock_skew_ms(), 45_000);
+        assert!(logs[0].exceeds_clock_skew(MAX_EXPECTED_LOG_CLOCK_SKEW));
     }
 
     #[tokio::test]

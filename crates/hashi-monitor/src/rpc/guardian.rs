@@ -8,8 +8,10 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
+use crate::findings::MonitorFinding;
 use anyhow::Context;
 use bitcoin::Network;
+use hashi_guardian::MAX_EXPECTED_LOG_CLOCK_SKEW;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::guardian::s3::S3HourDirectory;
@@ -110,10 +112,23 @@ impl GuardianWithdrawalsPoller {
         // this caller accepts any record whose session build verifies against the
         // configured allowlist. Add a cursor/cutoff policy here if tailing must
         // require the current build after the upgrade window.
-        let withdrawal_events = verified_logs
-            .into_iter()
-            .map(|log| MonitorWithdrawalEvent::try_from(log).map(MonitorEvent::Withdrawal))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut findings = Vec::new();
+        let mut withdrawal_events = Vec::with_capacity(verified_logs.len());
+        for log in verified_logs {
+            // Each record is one sample of the guardian's clock against AWS
+            // time, plus the write latency.
+            if log.exceeds_clock_skew(MAX_EXPECTED_LOG_CLOCK_SKEW) {
+                findings.push(MonitorFinding::GuardianClockSkew {
+                    session_id: log.session_id().clone(),
+                    object_key: log.entry().object_key().to_owned(),
+                    logged_at_ms: log.entry().timestamp_ms(),
+                    stored_at_ms: log.stored_at_ms(),
+                });
+            }
+            withdrawal_events.push(MonitorEvent::Withdrawal(MonitorWithdrawalEvent::try_from(
+                log,
+            )?));
+        }
 
         self.cursor = next_cursor;
         tracing::info!(
@@ -125,7 +140,7 @@ impl GuardianWithdrawalsPoller {
         );
         Ok(PollOutcome::CursorAdvanced {
             events: withdrawal_events,
-            findings: Vec::new(),
+            findings,
         })
     }
 }

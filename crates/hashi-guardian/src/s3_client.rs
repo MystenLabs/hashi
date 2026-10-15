@@ -24,6 +24,7 @@ use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::UnixMillis;
 use serde::Serialize;
 use tracing::info;
 use tracing::warn;
@@ -31,6 +32,15 @@ use tracing::warn;
 /// Maximum attempts the AWS SDK makes for reads and control-plane operations.
 /// Log PUTs override this because the Guardian log writer owns their retries.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
+
+/// A log record together with the time S3 recorded it.
+#[derive(Debug)]
+pub struct StoredLogRecord {
+    pub record: SignedLogEntry,
+    /// The object's S3 `LastModified` time in milliseconds since the Unix epoch.
+    /// S3 reports whole seconds, so this value is rounded down.
+    pub stored_at_ms: UnixMillis,
+}
 
 /// Use explicit credentials or resolve them through AWS's default provider chain.
 pub async fn resolve_s3_credentials(
@@ -551,7 +561,7 @@ impl GuardianS3Client {
     pub async fn list_all_log_records_in_dir(
         &self,
         dir: &S3HourDirectory,
-    ) -> GuardianResult<Vec<SignedLogEntry>> {
+    ) -> GuardianResult<Vec<StoredLogRecord>> {
         let keys = self.list_keys(&dir.to_string()).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -573,7 +583,7 @@ impl GuardianS3Client {
         &self,
         key: &str,
         immutability_check: ImmutabilityCheck,
-    ) -> GuardianResult<SignedLogEntry> {
+    ) -> GuardianResult<StoredLogRecord> {
         if matches!(immutability_check, ImmutabilityCheck::Required) {
             let keys = self.list_keys(key).await?;
             if keys.len() != 1 || keys[0] != key {
@@ -601,6 +611,7 @@ impl GuardianS3Client {
 
         let lock_mode = response.object_lock_mode().cloned();
         let retain_until = response.object_lock_retain_until_date().copied();
+        let last_modified = response.last_modified().copied();
 
         let bytes = response.body.collect().await.map_err(|e| {
             S3Error(format!(
@@ -623,6 +634,12 @@ impl GuardianS3Client {
                 record.object_key()
             )));
         }
+        let stored_at_ms = last_modified
+            .ok_or_else(|| S3Error(format!("Missing LastModified metadata for key {key}")))?
+            .to_millis()
+            .ok()
+            .and_then(|millis| UnixMillis::try_from(millis).ok())
+            .ok_or_else(|| S3Error(format!("Invalid LastModified metadata for key {key}")))?;
         if !matches!(immutability_check, ImmutabilityCheck::Skipped)
             && !has_valid_compliance_lock(
                 lock_mode.as_ref(),
@@ -635,11 +652,14 @@ impl GuardianS3Client {
                 "Missing, invalid, expired, or mismatched object lock metadata for key {key}"
             )));
         }
-        Ok(record)
+        Ok(StoredLogRecord {
+            record,
+            stored_at_ms,
+        })
     }
 
     /// Read an immutable-log object with history and Compliance-lock checks.
-    pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<SignedLogEntry> {
+    pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<StoredLogRecord> {
         self.get_log_record_inner(key, ImmutabilityCheck::Required)
             .await
     }
@@ -965,6 +985,7 @@ mod tests {
                         GetObjectOutput::builder()
                             .object_lock_mode(ObjectLockMode::Compliance)
                             .object_lock_retain_until_date(DateTime::from(retain_until))
+                            .last_modified(DateTime::from_secs(1_700_000_000))
                             .body(ByteStream::from(body.clone()))
                             .build()
                     });
@@ -1005,6 +1026,7 @@ mod tests {
                     .object_lock_retain_until_date(DateTime::from(
                         SystemTime::now() - Duration::from_secs(1),
                     ))
+                    .last_modified(DateTime::from_secs(1_700_000_000))
                     .body(ByteStream::from(body.clone()))
                     .build()
             });
@@ -1020,6 +1042,39 @@ mod tests {
             matches!(error, S3Error(message) if message.contains("expired, or mismatched object lock metadata"))
         );
         assert_eq!(get_expired.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_rejects_a_record_without_last_modified() {
+        let signing_key = GuardianSignKeyPair::from([16u8; 32]);
+        let record = SignedLogEntry::new_at_timestamp(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let key = record.object_key().to_string();
+        let mock_key = key.clone();
+        let body = serde_json::to_vec(&record).unwrap();
+        let get_without_time = mock!(Client::get_object)
+            .match_requests(move |req| {
+                req.bucket() == Some("bucket") && req.key() == Some(mock_key.as_str())
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_without_time]);
+        let logger = mk_logger_with_client(client);
+
+        let error = logger
+            .get_log_record_inner(&key, ImmutabilityCheck::Skipped)
+            .await
+            .expect_err("a record without LastModified must be rejected");
+
+        assert!(matches!(error, S3Error(message) if message.contains("Missing LastModified")));
+        assert_eq!(get_without_time.num_calls(), 1);
     }
 
     #[tokio::test]
@@ -1044,6 +1099,7 @@ mod tests {
             })
             .then_output(move || {
                 GetObjectOutput::builder()
+                    .last_modified(DateTime::from_secs(1_700_000_000))
                     .body(ByteStream::from(body.clone()))
                     .build()
             });
@@ -1079,6 +1135,7 @@ mod tests {
             })
             .then_output(move || {
                 GetObjectOutput::builder()
+                    .last_modified(DateTime::from_secs(1_700_000_000))
                     .body(ByteStream::from(body.clone()))
                     .build()
             });

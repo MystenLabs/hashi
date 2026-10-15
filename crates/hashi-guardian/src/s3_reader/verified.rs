@@ -4,6 +4,8 @@
 //! Verify session attestations, log signatures, and required initialization checkpoints.
 
 use crate::s3_client::GuardianS3Client;
+use crate::s3_client::StoredLogRecord;
+use crate::MAX_EXPECTED_LOG_CLOCK_SKEW;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::EnclaveMode;
@@ -16,9 +18,12 @@ use hashi_types::guardian::LogType;
 use hashi_types::guardian::OperatorInitInfo;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SignedLogEntry;
+use hashi_types::guardian::UnixMillis;
 use hashi_types::guardian::VersionedLogMessage;
+use std::time::Duration;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 /// An initialization checkpoint required for a read or verified for a session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +53,8 @@ pub struct VerifiedSessionInfo {
 pub struct VerifiedLogEntry {
     entry: LogEntry,
     build_pcrs: BuildPcrs,
+    /// The time S3 recorded the object, from its `LastModified` metadata.
+    stored_at_ms: UnixMillis,
 }
 
 impl InitCheckpoint {
@@ -99,7 +106,7 @@ impl VerifiedSessionInfo {
     ) -> GuardianResult<Self> {
         // Fetch the attestation and claimed signing key without trusting either.
         let att_key = InitLogMessage::attestation_object_key(session_id);
-        let attestation_record = s3.get_log_record(&att_key).await?;
+        let attestation_record = s3.get_log_record(&att_key).await?.record;
         let InitLogMessage::OIAttestation {
             attestation,
             signing_public_key: signing_pubkey,
@@ -112,7 +119,7 @@ impl VerifiedSessionInfo {
 
         // The unverified OI info selects a build from the reader's own allowlist.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
-        let info_record = s3.get_log_record(&info_key).await?;
+        let info_record = s3.get_log_record(&info_key).await?.record;
         let InitLogMessage::OIGuardianInfo(info) = Self::unverified_init_message(&info_record)?
         else {
             return Err(InvalidS3Log(format!(
@@ -148,16 +155,28 @@ impl VerifiedSessionInfo {
     pub(super) async fn verify_record(
         &mut self,
         s3: &GuardianS3Client,
-        record: SignedLogEntry,
+        stored: StoredLogRecord,
     ) -> GuardianResult<VerifiedLogEntry> {
-        let entry = record.validate_into_entry(&self.signing_pubkey)?;
+        let entry = stored.record.validate_into_entry(&self.signing_pubkey)?;
         let required = InitCheckpoint::required_for(entry.log_type(), self.info.mode())?;
         self.ensure_init_checkpoint(s3, entry.session_id(), required)
             .await?;
-        Ok(VerifiedLogEntry {
+        let verified = VerifiedLogEntry {
             entry,
             build_pcrs: self.build_pcrs.clone(),
-        })
+            stored_at_ms: stored.stored_at_ms,
+        };
+        if verified.exceeds_clock_skew(MAX_EXPECTED_LOG_CLOCK_SKEW) {
+            warn!(
+                session_id = %verified.session_id(),
+                key = verified.entry().object_key(),
+                logged_at_ms = verified.entry().timestamp_ms(),
+                stored_at_ms = verified.stored_at_ms(),
+                clock_skew_ms = %verified.clock_skew_ms(),
+                "The guardian's signed log time and the S3 time differ by more than expected"
+            );
+        }
+        Ok(verified)
     }
 
     /// Verify the required initialization checkpoint if this session has not reached it.
@@ -206,7 +225,7 @@ impl VerifiedSessionInfo {
         key: &str,
         signing_pubkey: &GuardianPubKey,
     ) -> GuardianResult<Box<InitLogMessage>> {
-        let record = s3.get_log_record(key).await?;
+        let record = s3.get_log_record(key).await?.record;
         let entry = record.validate_into_entry(signing_pubkey)?;
         entry
             .into_message()
@@ -290,13 +309,45 @@ fn verify_deployment_and_resolve_build(
 
 impl VerifiedLogEntry {
     /// Create a log entry for tests without signature, attestation, or initialization log verification.
+    /// The S3 time is set equal to the signed time.
     #[cfg(test)]
     pub(super) fn new_for_test(entry: LogEntry, build_pcrs: BuildPcrs) -> Self {
-        Self { entry, build_pcrs }
+        let stored_at_ms = entry.timestamp_ms();
+        Self {
+            entry,
+            build_pcrs,
+            stored_at_ms,
+        }
     }
 
     pub fn entry(&self) -> &LogEntry {
         &self.entry
+    }
+
+    /// Set the S3 time for tests.
+    #[cfg(test)]
+    pub(super) fn with_stored_at_ms(mut self, stored_at_ms: UnixMillis) -> Self {
+        self.stored_at_ms = stored_at_ms;
+        self
+    }
+
+    /// The time S3 recorded the object, in milliseconds since the Unix epoch.
+    pub fn stored_at_ms(&self) -> UnixMillis {
+        self.stored_at_ms
+    }
+
+    /// The S3 time minus the signed time, in milliseconds. A positive value
+    /// means S3 recorded the object after the guardian signed it. Write
+    /// latency adds to it; a guardian clock that runs behind AWS time adds to it too.
+    pub fn clock_skew_ms(&self) -> i128 {
+        i128::from(self.stored_at_ms) - i128::from(self.entry.timestamp_ms())
+    }
+
+    /// True when the signed time and the S3 time differ by more than `max_skew`
+    /// in either direction. S3 rounds its time down to whole seconds, so a
+    /// small negative gap is normal.
+    pub fn exceeds_clock_skew(&self, max_skew: Duration) -> bool {
+        self.clock_skew_ms().unsigned_abs() > max_skew.as_millis()
     }
 
     pub fn session_id(&self) -> &SessionID {
@@ -338,6 +389,7 @@ mod tests {
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::S3BucketInfo;
@@ -437,8 +489,43 @@ mod tests {
         GetObjectOutput::builder()
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
+            .last_modified(DateTime::from_millis(record.timestamp_ms() as i64))
             .body(ByteStream::from(serde_json::to_vec(record).unwrap()))
             .build()
+    }
+
+    const LOGGED_AT_MS: u64 = 1_700_000_000_800;
+
+    fn heartbeat_stored_at(stored_at_ms: u64) -> VerifiedLogEntry {
+        let signing_key = GuardianSignKeyPair::from([3u8; 32]);
+        let entry = SignedLogEntry::new_at_timestamp(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
+            &signing_key,
+            LOGGED_AT_MS,
+        )
+        .into_entry_unchecked();
+        VerifiedLogEntry::new_for_test(entry, build_pcrs()).with_stored_at_ms(stored_at_ms)
+    }
+
+    #[test]
+    fn clock_skew_is_s3_time_minus_signed_time() {
+        assert_eq!(heartbeat_stored_at(LOGGED_AT_MS + 250).clock_skew_ms(), 250);
+        assert_eq!(
+            heartbeat_stored_at(LOGGED_AT_MS - 800).clock_skew_ms(),
+            -800
+        );
+    }
+
+    #[test]
+    fn clock_skew_bound_applies_in_either_direction() {
+        let max_skew = Duration::from_secs(30);
+        // S3 rounds down to the second, so a perfect clock can read 800ms early.
+        assert!(!heartbeat_stored_at(LOGGED_AT_MS - 800).exceeds_clock_skew(max_skew));
+        assert!(!heartbeat_stored_at(LOGGED_AT_MS + 30_000).exceeds_clock_skew(max_skew));
+        assert!(!heartbeat_stored_at(LOGGED_AT_MS - 30_000).exceeds_clock_skew(max_skew));
+        assert!(heartbeat_stored_at(LOGGED_AT_MS + 30_001).exceeds_clock_skew(max_skew));
+        assert!(heartbeat_stored_at(LOGGED_AT_MS - 30_001).exceeds_clock_skew(max_skew));
     }
 
     // The non-enclave-dev feature bypasses Nitro verification.
