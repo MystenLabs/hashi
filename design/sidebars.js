@@ -40,6 +40,7 @@ const sidebars = {
       items: [
         'node-operator-runbook',
         'node-backup',
+        'threshold-backup',
       ],
     },
     {

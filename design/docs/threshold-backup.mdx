@@ -1,0 +1,218 @@
+---
+title: Threshold Node Backups
+description: >-
+  Design for encrypting Hashi node backups so that any t of n YubiKey holders
+  can decrypt them together, and no single key, person, or safe can.
+keywords:
+  - backup
+  - threshold
+  - Shamir
+  - YubiKey
+  - OpenPGP
+draft: true
+---
+
+# Threshold node backups
+
+Status: **draft**. Implementation in progress on `naulty/threshold-backup`.
+
+## Motivation
+
+Today every backup is encrypted to one OpenPGP certificate
+(`backup-pgp-cert`). For the mainnet Mysten nodes that leaves two bad options:
+
+- **One YubiKey per node.** Losing it, or its PINs, makes every backup for that
+  node permanently unreadable.
+- **A spare YubiKey bound into the same cert.** This works without code changes
+  (Hashi encrypts to every encryption subkey), but the spare is a second single
+  point of compromise. If one spare covers all nodes, its holder plus anyone
+  with S3 read access can decrypt every node's backups.
+
+A backup contains everything needed to impersonate the node: the operator key,
+the TLS key, and the node's MPC key shares. Decrypting a backup should take
+several independent people, and losing a few of them should not make the
+backups unreadable.
+
+## Goals
+
+- Any `t` of `n` holders can decrypt a backup; `t - 1` cannot.
+- Each holder's secret stays on their own YubiKey. No single private key opens
+  a backup.
+- The node holds no material that can decrypt its own backups, as today.
+- Restore never puts a plaintext share into chat, email, or a shared file.
+- File naming, retention, S3 upload, and the restore output are unchanged.
+- The existing single-certificate mode keeps working for external operators and
+  testnet.
+
+## Non-goals
+
+- Authenticating who created a backup. As today, decryption does not prove
+  origin. Signing archives with the operator key is a separate change.
+- Rotating the holder set for archives that already exist. A roster change
+  applies to new backups only; older archives need their original holders until
+  they expire (14 days locally, by lifecycle policy in S3).
+- Changing the archive contents.
+
+## Design
+
+### Configuration
+
+A new table replaces `backup-pgp-cert`. A node config sets exactly one of the
+two.
+
+```toml
+[backup-threshold]
+threshold = 3
+certs = [
+  "/etc/hashi/backup-holders/holder-1.asc",
+  "/etc/hashi/backup-holders/holder-2.asc",
+  "/etc/hashi/backup-holders/holder-3.asc",
+  "/etc/hashi/backup-holders/holder-4.asc",
+  "/etc/hashi/backup-holders/holder-5.asc",
+]
+```
+
+Each entry is a certificate file path or inline armored text, the same as
+`backup-pgp-cert`. Startup rejects the config unless all of these hold:
+
+- `2 <= threshold <= len(certs)`.
+- Every certificate is a valid public cert with a usable encryption key.
+- No two certificates share a primary fingerprint or an encryption key.
+
+Holder certificates are dedicated backup keys generated on YubiKeys. They must
+not be the guardian key-provisioner keys, which already use the YubiKey's only
+decryption slot for guardian shares.
+
+### Writing a backup
+
+For each archive the node:
+
+1. Draws a fresh random secp256k1 scalar `s`.
+2. Splits `s` into `n` Shamir shares with threshold `t`, reusing
+   `hashi_types::guardian::crypto::primitives::split_secret`. Share `i` goes to
+   the `i`th certificate in config order.
+3. Encrypts each share to its holder's certificate as an armored OpenPGP
+   message.
+4. Records a public commitment `G * share_i` for every share and `G * s` for the
+   secret.
+5. Derives the archive passphrase
+   `hex(BLAKE2b-256("hashi-threshold-backup-v1" || s))`.
+6. Writes the header, then encrypts the tar stream as a password-protected
+   (SKESK) armored OpenPGP message with that passphrase.
+7. Drops `s`, the shares, and the passphrase.
+
+### File format
+
+The file keeps the `hashi-backup-<timestamp>.tar.asc` name, so retention,
+cleanup, and S3 keys are unchanged. It is plain text:
+
+```text
+-----BEGIN HASHI THRESHOLD BACKUP HEADER-----
+{"version":1,"threshold":3,"secret_commitment":"…","shares":[{"id":1,"recipient":"<fingerprint>","commitment":"…","ciphertext":"-----BEGIN PGP MESSAGE-----\n…"}, …]}
+-----END HASHI THRESHOLD BACKUP HEADER-----
+-----BEGIN PGP MESSAGE-----
+… the archive, encrypted with the derived passphrase …
+-----END PGP MESSAGE-----
+```
+
+Restore detects the format from the first line. A single-certificate archive
+starts with `-----BEGIN PGP MESSAGE-----` and restores exactly as today.
+
+Because the archive itself is an ordinary password-encrypted OpenPGP message,
+an operator who has reconstructed the passphrase can still decrypt it with
+stock `gpg` as a last resort.
+
+### Restoring
+
+Restore takes three steps. Plaintext shares exist only on a holder's laptop and
+inside the restore process.
+
+1. **Request.** On the restore host:
+
+   ```bash
+   hashi backup share-request <archive> --session-dir /private/session
+   ```
+
+   This creates a one-time X25519 key in `--session-dir` (mode `0600`) and
+   writes a request file: the session public key, a digest of the archive
+   header, and each holder's encrypted share. The request contains nothing
+   secret, so it can travel over Slack or email.
+
+2. **Respond.** Each participating holder, on their own machine with their
+   YubiKey:
+
+   ```bash
+   hashi backup share-decrypt <request> --recipient <their fingerprint> --output response.json
+   ```
+
+   This decrypts their share with `gpg` (PIN and touch), checks it against the
+   share commitment, and re-encrypts it to the session key with HPKE. The header
+   digest is bound in as associated data. The response is safe to send back
+   over any channel.
+
+3. **Restore.** On the restore host:
+
+   ```bash
+   hashi backup restore <archive> --session-dir /private/session \
+     --share-response a.json --share-response b.json --share-response c.json \
+     --output-dir /private/restore
+   ```
+
+   This opens each response with the session key, checks every share against
+   its commitment, combines `t` shares, checks the result against the secret
+   commitment, derives the passphrase, and extracts the archive as today. S3
+   restore takes the same flags.
+
+### Security properties
+
+- **Fewer than `t` holders learn nothing.** This is standard Shamir over the
+  secp256k1 scalar field; the commitments `G * share_i` and `G * s` reveal no
+  scalar, and the passphrase is a hash of `s`.
+- **No plaintext shares in transit.** Shares travel PGP-encrypted to the holder
+  and HPKE-encrypted back to a one-time key. A response is useless without that
+  restore session's key.
+- **Bad shares are detected.** A wrong or swapped share fails its commitment
+  check before it is combined. A tampered header fails the secret commitment
+  check or decryption.
+- **Responses are bound to one request.** A response for another archive or
+  session fails HPKE decryption.
+- **The node still cannot decrypt.** `s` and the passphrase exist only in
+  memory while the archive is written.
+
+### Risks and trade-offs
+
+- **Restore needs `t` people.** That is slowest during a large outage, which is
+  when backups matter most. Keep `t` modest (for example 3 of 5) and spread
+  holders across time zones.
+- **`t` colluding holders can decrypt everything.** This is inherent; it
+  replaces "one key or one safe" with "`t` people".
+- **Holders must stay available** until the last archive encrypted to them
+  expires.
+- **The restore host is trusted.** It sees the passphrase and the plaintext
+  archive, the same as restoring with a single key.
+
+## Implementation plan
+
+1. `hashi-types`: password-based OpenPGP encrypt and decrypt helpers, and a
+   `threshold_backup` module with the header format, seal and open, holder
+   share decrypt, and HPKE share transport. Unit tests cover sealing and
+   restoring any `t` of `n`, rejecting `t - 1`, and detecting tampered shares
+   and headers.
+2. `hashi`: the `backup-threshold` config with validation; save writes threshold
+   archives when configured; restore detects them.
+3. CLI: `share-request`, `share-decrypt`, and restore with `--session-dir` and
+   `--share-response`.
+4. End-to-end tests in `crates/e2e-tests/src/backup_restore.rs`, using gpg
+   homedirs as holders.
+5. Operator documentation in `node-backup.mdx` and the runbook.
+
+## Open questions
+
+- Should startup require YubiKey attestation for holder certificates, reusing
+  `verify_yubikey_attestations`? This is stronger, but every operator would
+  need to provide attestation files.
+- Should a response be signed with the holder's YubiKey signing key, for an
+  audit trail of who took part in a restore? Commitments already ensure
+  correctness; a signature would add attribution.
+- Should `secret_sharing` move out of the `guardian` module now, or once a
+  second user appears?
