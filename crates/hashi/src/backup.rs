@@ -13,6 +13,8 @@ use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
+use hashi_types::pgp::armored_password_encrypt_writer;
+use hashi_types::threshold_backup::ThresholdRecipients;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -55,6 +57,40 @@ const _: () = assert!(
     "LAST_ARCHIVE_RETENTION must exceed BACKUP_RETENTION, or the newest archive would expire \
      while older ones outlive it"
 );
+
+/// Who can decrypt a backup.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackupRecipients {
+    /// Any holder of a secret key for this certificate.
+    Single(Box<PgpPublicCert>),
+    /// Any `threshold` of the listed holders together; see
+    /// `design/docs/threshold-backup.mdx`.
+    Threshold(ThresholdRecipients),
+}
+
+impl From<PgpPublicCert> for BackupRecipients {
+    fn from(cert: PgpPublicCert) -> Self {
+        Self::Single(Box::new(cert))
+    }
+}
+
+impl std::fmt::Display for BackupRecipients {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single(cert) => write!(f, "{cert}"),
+            Self::Threshold(recipients) => {
+                write!(f, "{}-of-[", recipients.threshold())?;
+                for (i, cert) in recipients.certs().iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{cert}")?;
+                }
+                f.write_str("]")
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupArchiveFormat {
@@ -204,7 +240,7 @@ pub(crate) async fn upload(
 /// Open `path` for writing with mode `0o600`, failing if anything already
 /// exists there. The `AlreadyExists` case is mapped to a clear "refusing to
 /// overwrite" error so callers don't have to repeat the same pattern.
-fn create_file_strict(path: &Path) -> Result<File> {
+pub(crate) fn create_file_strict(path: &Path) -> Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -308,7 +344,7 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
 pub fn encrypt_files_to_pgp_archive(
     manifest: &BackupManifest,
     db: &Database,
-    recipient: &PgpPublicCert,
+    recipients: &BackupRecipients,
     output_path: &Path,
 ) -> Result<()> {
     // Stage beside the destination so retention sees only fully finalized archives.
@@ -325,7 +361,17 @@ pub fn encrypt_files_to_pgp_archive(
                 parent.display()
             )
         })?;
-    let mut encrypted = armored_encrypt_writer(staging.as_file_mut(), recipient)?;
+    let mut encrypted = match recipients {
+        BackupRecipients::Single(cert) => armored_encrypt_writer(staging.as_file_mut(), cert)?,
+        BackupRecipients::Threshold(recipients) => {
+            // The secret and passphrase live only for the duration of this
+            // write; the header carries just the holder-encrypted shares.
+            let (header, passphrase) =
+                hashi_types::threshold_backup::seal(recipients, &mut rand::thread_rng())?;
+            header.write_to(staging.as_file_mut())?;
+            armored_password_encrypt_writer(staging.as_file_mut(), passphrase.as_str())?
+        }
+    };
     {
         let mut archive = tar::Builder::new(&mut encrypted);
         append_backup_manifest(&mut archive, manifest)?;
@@ -368,7 +414,7 @@ pub fn save(
     node_config_path: &Path,
     node_config: &crate::config::Config,
     db: &Database,
-    recipient: &PgpPublicCert,
+    recipients: &BackupRecipients,
     output_dir: &Path,
 ) -> Result<PathBuf> {
     let files = backup_file_paths(node_config_path, node_config)?;
@@ -393,12 +439,12 @@ pub fn save(
 
     info!(
         file_count = files.len(),
-        %recipient,
+        %recipients,
         "Backing up files + database",
     );
 
     let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path)?;
+    encrypt_files_to_pgp_archive(&manifest, db, recipients, &output_path)?;
 
     Ok(output_path)
 }
@@ -1088,7 +1134,7 @@ mod tests {
         let mut config = crate::config::Config::new_for_testing();
         config.db = Some(directory.path().join("db"));
         config.backup_dir = directory.path().join("backups");
-        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_pgp_cert = Some(mock_pgp_cert());
         if remote {
             config.backup_s3 = Some(crate::config::BackupS3Config {
                 bucket: "backup-bucket".to_owned(),
@@ -1879,7 +1925,7 @@ mod tests {
             archive_name: PathBuf::from("config.toml"),
         });
 
-        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert(), &output);
+        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert().into(), &output);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1901,7 +1947,12 @@ mod tests {
         let output = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
         fs::write(&output, b"existing recovery archive").unwrap();
         let recipient = mock_pgp_cert();
-        let collision = encrypt_files_to_pgp_archive(&db_only_manifest(), &db, &recipient, &output);
+        let collision = encrypt_files_to_pgp_archive(
+            &db_only_manifest(),
+            &db,
+            &recipient.clone().into(),
+            &output,
+        );
         assert!(collision.is_err());
         assert_eq!(fs::read(&output).unwrap(), b"existing recovery archive");
         assert_eq!(
@@ -1926,8 +1977,14 @@ mod tests {
         let recipient = mock_pgp_cert();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
-        let output_path =
-            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
+        let output_path = save(
+            &node_config_path,
+            &node_config,
+            &db,
+            &recipient.clone().into(),
+            out.path(),
+        )
+        .unwrap();
 
         assert!(output_path.is_file());
     }
@@ -1941,14 +1998,20 @@ mod tests {
         let recipient = PgpPublicCert::new(public_cert).unwrap();
         let mut node_config = crate::config::Config::new_for_testing();
         node_config.db = Some(db_path.clone());
-        node_config.backup_pgp_cert = recipient.clone();
+        node_config.backup_pgp_cert = Some(recipient.clone());
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
-        let output_path =
-            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
+        let output_path = save(
+            &node_config_path,
+            &node_config,
+            &db,
+            &recipient.clone().into(),
+            out.path(),
+        )
+        .unwrap();
 
         let homedir = temp_gnupg_home();
         test_utils::gpg_import_secret_key(homedir.path(), &secret_key);

@@ -142,7 +142,7 @@ mod tests {
         let mut config = HashiConfig::new_for_testing();
         config.db = Some(db_path.clone());
         config.backup_dir = archive_dir.clone();
-        config.backup_pgp_cert = PgpPublicCert::new(recipient)?;
+        config.backup_pgp_cert = Some(PgpPublicCert::new(recipient)?);
         config.backup_s3 = Some(s3.clone());
         config.sui_chain_id = Some("hashi-backup-e2e".into());
         config.hashi_ids = Some(HashiIds {
@@ -271,7 +271,7 @@ mod tests {
             let node = &mut test_networks.hashi_network_mut().nodes_mut()[0];
             node.shutdown().await;
             node.config_mut().backup_s3 = Some(s3.clone());
-            node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient.clone())?;
+            node.config_mut().backup_pgp_cert = Some(PgpPublicCert::new(recipient.clone())?);
             node.config().save(&node_config_path)?;
             node.config_path = Some(node_config_path.clone());
             node.start().await?;

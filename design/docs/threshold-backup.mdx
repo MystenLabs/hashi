@@ -161,7 +161,8 @@ inside the restore process.
    This opens each response with the session key, checks every share against
    its commitment, combines `t` shares, checks the result against the secret
    commitment, derives the passphrase, and extracts the archive as today. S3
-   restore takes the same flags.
+   restore takes the same flags, but `share-request` currently needs a local
+   copy of the archive.
 
 ### Security properties
 
@@ -188,10 +189,18 @@ inside the restore process.
   replaces "one key or one safe" with "`t` people".
 - **Holders must stay available** until the last archive encrypted to them
   expires.
+- **Holders can be tricked into answering a request.** Anyone with S3 read
+  access can build a request for a real backup with their own session key. A
+  holder cannot tell that request apart from a legitimate one by its contents.
+  `share-request` and `share-decrypt` both print the header digest and session
+  key; holders must confirm both with the restore operator over a separate,
+  authenticated channel (for example the incident ticket) before decrypting.
 - **The restore host is trusted.** It sees the passphrase and the plaintext
   archive, the same as restoring with a single key.
 
 ## Implementation plan
+
+Steps 1–3 are implemented on this branch.
 
 1. `hashi-types`: password-based OpenPGP encrypt and decrypt helpers, and a
    `threshold_backup` module with the header format, seal and open, holder
@@ -214,5 +223,6 @@ inside the restore process.
 - Should a response be signed with the holder's YubiKey signing key, for an
   audit trail of who took part in a restore? Commitments already ensure
   correctness; a signature would add attribution.
+- Should `share-request` read S3 URIs directly, as `restore` does?
 - Should `secret_sharing` move out of the `guardian` module now, or once a
   second user appears?

@@ -526,9 +526,51 @@ pub enum BackupCommands {
         #[clap(long, requires = "use_gpg_agent")]
         gpg_homedir: Option<std::path::PathBuf>,
 
+        /// Restore session directory created by `share-request` (threshold backups)
+        #[clap(long, requires = "share_response")]
+        session_dir: Option<std::path::PathBuf>,
+
+        /// Holder response from `share-decrypt`; repeat once per holder (threshold backups)
+        #[clap(long, requires = "session_dir")]
+        share_response: Vec<std::path::PathBuf>,
+
         /// Directory to extract the restored files into
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
+    },
+
+    /// Start restoring a threshold backup: create a one-time restore session
+    /// and a share request for the backup's holders.
+    ShareRequest {
+        /// Local threshold .tar.asc backup
+        backup_tarball: std::path::PathBuf,
+
+        /// Private directory for the session key; pass it to `restore --session-dir`
+        #[clap(long)]
+        session_dir: std::path::PathBuf,
+
+        /// Where to write the share request
+        #[clap(long)]
+        output: std::path::PathBuf,
+    },
+
+    /// Answer a share request as a holder: decrypt your share with gpg (your
+    /// YubiKey) and re-encrypt it to the restore session.
+    ShareDecrypt {
+        /// Share request from `share-request`
+        request: std::path::PathBuf,
+
+        /// Primary fingerprint of your backup holder certificate
+        #[clap(long)]
+        recipient: String,
+
+        /// GNUPGHOME to use for gpg
+        #[clap(long)]
+        gpg_homedir: Option<std::path::PathBuf>,
+
+        /// Where to write the share response
+        #[clap(long)]
+        output: std::path::PathBuf,
     },
 }
 
@@ -1284,6 +1326,8 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 backup_pgp_secret_key,
                 use_gpg_agent,
                 gpg_homedir,
+                session_dir,
+                share_response,
                 output_dir,
             } => {
                 let remote = commands::backup::s3_restore_source(
@@ -1296,18 +1340,24 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         commands::backup::RestoreDecryptor::Unencrypted
                     }
                     crate::backup::BackupArchiveFormat::Encrypted => {
-                        match (backup_pgp_secret_key, use_gpg_agent) {
-                            (Some(secret_key_path), false) => {
+                        match (backup_pgp_secret_key, use_gpg_agent, session_dir) {
+                            (Some(secret_key_path), false, None) => {
                                 commands::backup::RestoreDecryptor::LocalSecretKey {
                                     secret_key_path,
                                 }
                             }
-                            (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
+                            (None, true, None) => commands::backup::RestoreDecryptor::GpgAgent {
                                 homedir: gpg_homedir,
                             },
-                            (Some(_), true) | (None, false) => {
+                            (None, false, Some(session_dir)) => {
+                                commands::backup::RestoreDecryptor::Threshold {
+                                    session_dir,
+                                    responses: share_response,
+                                }
+                            }
+                            _ => {
                                 anyhow::bail!(
-                                    "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+                                    "Pass exactly one restore backend: --backup-pgp-secret-key, --use-gpg-agent, or --session-dir with --share-response"
                                 );
                             }
                         }
@@ -1325,6 +1375,26 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 } else {
                     commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
                 }
+            }
+            BackupCommands::ShareRequest {
+                backup_tarball,
+                session_dir,
+                output,
+            } => {
+                commands::backup::share_request(&backup_tarball, &session_dir, &output)?;
+            }
+            BackupCommands::ShareDecrypt {
+                request,
+                recipient,
+                gpg_homedir,
+                output,
+            } => {
+                commands::backup::share_decrypt(
+                    &request,
+                    &recipient,
+                    gpg_homedir.as_deref(),
+                    &output,
+                )?;
             }
         },
         CliCommand::Deposit { action } => {

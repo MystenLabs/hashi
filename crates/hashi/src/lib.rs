@@ -499,7 +499,7 @@ impl Hashi {
             config_path,
             &self.config,
             self.db.as_ref(),
-            &self.config.backup_pgp_cert,
+            &self.config.backup_recipients()?,
             &self.config.backup_dir,
         )?;
         self.metrics.backup_scheduled_local_successes.inc();
@@ -1756,7 +1756,7 @@ mod test {
         let backup_dir = tmpdir.path().join("backups");
         let mut config = Config::new_for_testing();
         config.db = Some(tmpdir.path().join("db"));
-        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_pgp_cert = Some(mock_pgp_cert());
         config.backup_dir = backup_dir.clone();
         let hashi = Hashi::new_with_registry(
             ServerVersion::new("unknown", "unknown"),
@@ -1784,7 +1784,7 @@ mod test {
         let config_path = tmpdir.path().join("config.toml");
         let mut config = Config::new_for_testing();
         config.db = Some(tmpdir.path().join("db"));
-        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_pgp_cert = Some(mock_pgp_cert());
         config.backup_dir = backup_dir.clone();
         config.save(&config_path).unwrap();
         let hashi = Hashi::new_with_registry(
@@ -1813,7 +1813,7 @@ mod test {
 
         let mut config = Config::new_for_testing();
         config.db = Some(db_path);
-        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_pgp_cert = Some(mock_pgp_cert());
         config.backup_dir = backup_dir.clone();
         config.save(&config_path).unwrap();
 
@@ -1858,7 +1858,7 @@ mod test {
         let backup_dir = tmpdir.path().join("backups");
         let mut config = Config::new_for_testing();
         config.db = Some(tmpdir.path().join("db"));
-        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_pgp_cert = Some(mock_pgp_cert());
         config.backup_dir = backup_dir.clone();
         config.save(&config_path).unwrap();
         let hashi = Hashi::new_with_registry(

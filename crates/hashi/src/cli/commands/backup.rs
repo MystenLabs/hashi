@@ -10,15 +10,24 @@ use anyhow::Context;
 use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::decrypt_armored_via_gpg;
 use hashi_types::pgp::decrypt_with_gpg;
+use hashi_types::pgp::decrypt_with_password;
 use hashi_types::pgp::decrypt_with_secret_key;
+use hashi_types::threshold_backup::RestoreSession;
+use hashi_types::threshold_backup::ShareRequest;
+use hashi_types::threshold_backup::ShareResponse;
+use hashi_types::threshold_backup::ThresholdHeader;
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::io::BufReader;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::backup;
+use crate::backup::BackupRecipients;
 use crate::backup_s3::BackupS3Client;
 use crate::backup_s3::parse_s3_uri;
 use crate::cli::print_info;
@@ -28,9 +37,22 @@ use crate::db::Database;
 
 pub enum RestoreDecryptor {
     Unencrypted,
-    LocalSecretKey { secret_key_path: PathBuf },
-    GpgAgent { homedir: Option<PathBuf> },
+    LocalSecretKey {
+        secret_key_path: PathBuf,
+    },
+    GpgAgent {
+        homedir: Option<PathBuf>,
+    },
+    /// Combine holder share responses for a threshold backup.
+    Threshold {
+        session_dir: PathBuf,
+        responses: Vec<PathBuf>,
+    },
 }
+
+/// File inside a restore session directory holding the session's X25519
+/// secret key, hex-encoded.
+const SESSION_KEY_FILE_NAME: &str = "session.key";
 
 /// Save an encrypted backup of the node config, referenced files, and database
 pub async fn save(
@@ -51,7 +73,7 @@ pub async fn save(
     if has_recipient_override
         && node_config.backup_s3.is_some()
         && !local_only
-        && !recipient.has_same_encryption_recipients(&node_config.backup_pgp_cert)
+        && !same_recipients(&recipient, &node_config.backup_recipients()?)
     {
         anyhow::bail!(
             "--backup-pgp-cert has different usable encryption recipients from the configured \
@@ -128,20 +150,178 @@ fn print_upload_receipt(uri: &str, receipt: &PutObjectOutput) {
 pub(crate) fn resolve_backup_recipient(
     node_config: &Config,
     backup_pgp_cert_override: Option<String>,
-) -> Result<PgpPublicCert> {
-    Ok(backup_pgp_cert_override
-        .map(|value| {
-            let path = Path::new(&value);
-            let cert = if path.is_file() {
-                fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
-            } else {
-                value
-            };
-            PgpPublicCert::new(cert)
+) -> Result<BackupRecipients> {
+    let Some(value) = backup_pgp_cert_override else {
+        return node_config.backup_recipients();
+    };
+    let path = Path::new(&value);
+    let cert = if path.is_file() {
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
+    } else {
+        value
+    };
+    Ok(PgpPublicCert::new(cert)?.into())
+}
+
+/// Whether two recipient sets can decrypt exactly the same archives.
+fn same_recipients(a: &BackupRecipients, b: &BackupRecipients) -> bool {
+    match (a, b) {
+        (BackupRecipients::Single(a), BackupRecipients::Single(b)) => {
+            a.has_same_encryption_recipients(b)
+        }
+        (BackupRecipients::Threshold(a), BackupRecipients::Threshold(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Start a threshold restore: create a one-time session key in `session_dir`
+/// and write the request that holders answer with `share-decrypt`.
+pub fn share_request(backup_tarball: &Path, session_dir: &Path, output: &Path) -> Result<()> {
+    let header = read_threshold_header(backup_tarball)?;
+
+    create_private_dir(session_dir)?;
+    let session = RestoreSession::random(&mut rand::thread_rng());
+    let key_path = session_dir.join(SESSION_KEY_FILE_NAME);
+    let mut key_file = backup::create_file_strict(&key_path)?;
+    io::Write::write_all(
+        &mut key_file,
+        hex::encode(session.secret_key_bytes()).as_bytes(),
+    )
+    .with_context(|| format!("Failed to write {}", key_path.display()))?;
+    key_file.sync_all()?;
+
+    let request = session.request(&header);
+    let mut out = backup::create_file_strict(output)?;
+    serde_json::to_writer_pretty(&mut out, &request).context("Failed to write share request")?;
+
+    print_success(&format!("Share request written to {}", output.display()));
+    print_info(&format!(
+        "Backup header digest: {}",
+        hex::encode(header.digest())
+    ));
+    print_info(&format!(
+        "Session public key: {}",
+        request.session_public_key
+    ));
+    print_info(&format!(
+        "Needs {} of {} holders:",
+        header.threshold,
+        header.shares.len()
+    ));
+    for entry in &header.shares {
+        print_info(&format!("  share {}: {}", entry.id, entry.recipient));
+    }
+    print_info(
+        "Send the request to holders, and give them the digest and session key over a separate channel so they can confirm it.",
+    );
+    Ok(())
+}
+
+/// Answer a share request as one holder: decrypt this holder's share with gpg
+/// (YubiKey PIN and touch) and re-encrypt it to the restore session.
+pub fn share_decrypt(
+    request_path: &Path,
+    recipient: &str,
+    gpg_homedir: Option<&Path>,
+    output: &Path,
+) -> Result<()> {
+    let request: ShareRequest = serde_json::from_slice(
+        &fs::read(request_path)
+            .with_context(|| format!("Failed to read {}", request_path.display()))?,
+    )
+    .context("Malformed share request")?;
+
+    print_info(&format!(
+        "Backup header digest: {}",
+        hex::encode(request.header.digest())
+    ));
+    print_info(&format!(
+        "Session public key: {}",
+        request.session_public_key
+    ));
+    print_info("Confirm both values with the restore operator before continuing.");
+
+    let response = request.respond(
+        recipient,
+        |ciphertext| decrypt_armored_via_gpg(ciphertext, gpg_homedir),
+        &mut rand::thread_rng(),
+    )?;
+    let mut out = backup::create_file_strict(output)?;
+    serde_json::to_writer_pretty(&mut out, &response).context("Failed to write share response")?;
+    print_success(&format!(
+        "Share {} response written to {}",
+        response.share_id,
+        output.display()
+    ));
+    Ok(())
+}
+
+fn read_threshold_header(backup_tarball: &Path) -> Result<ThresholdHeader> {
+    let file = File::open(backup_tarball)
+        .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
+    ThresholdHeader::read_from(&mut BufReader::new(file))
+        .with_context(|| format!("Failed to read {}", backup_tarball.display()))
+}
+
+fn create_private_dir(dir: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("Failed to create {}", dir.display()))
+}
+
+fn decrypt_threshold_archive(
+    backup_tarball: &Path,
+    session_dir: &Path,
+    response_paths: &[PathBuf],
+) -> Result<impl io::Read + use<>> {
+    let key_path = session_dir.join(SESSION_KEY_FILE_NAME);
+    let key_hex = fs::read_to_string(&key_path)
+        .with_context(|| format!("Failed to read restore session key {}", key_path.display()))?;
+    let session = RestoreSession::from_secret_key_bytes(
+        &hex::decode(key_hex.trim()).context("Malformed restore session key")?,
+    )?;
+    let responses = response_paths
+        .iter()
+        .map(|path| {
+            let bytes =
+                fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+            serde_json::from_slice::<ShareResponse>(&bytes)
+                .with_context(|| format!("Malformed share response {}", path.display()))
         })
-        .transpose()?
-        .unwrap_or_else(|| node_config.backup_pgp_cert.clone()))
+        .collect::<Result<Vec<_>>>()?;
+
+    let file = File::open(backup_tarball)
+        .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
+    let mut reader = BufReader::new(file);
+    let header = ThresholdHeader::read_from(&mut reader)
+        .with_context(|| format!("Failed to read {}", backup_tarball.display()))?;
+    let passphrase = session.open(&header, &responses)?;
+    decrypt_with_password(reader, passphrase.as_str())
+        .with_context(|| format!("Failed to decrypt {}", backup_tarball.display()))
+}
+
+/// Single-recipient backends cannot open threshold archives; say so instead
+/// of letting gpg or sequoia fail on the header.
+fn ensure_not_threshold_archive(backup_tarball: &Path) -> Result<()> {
+    let mut prefix = [0u8; 64];
+    let mut file = File::open(backup_tarball)
+        .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
+    let n = file.read(&mut prefix)?;
+    anyhow::ensure!(
+        !hashi_types::threshold_backup::is_threshold_archive(&prefix[..n]),
+        "{} is a threshold backup; restore it with `hashi backup share-request` and \
+         --session-dir/--share-response",
+        backup_tarball.display()
+    );
+    Ok(())
 }
 
 /// Identify remote input without requiring local paths to be UTF-8.
@@ -195,7 +375,9 @@ fn validate_remote_restore(
     anyhow::ensure!(
         matches!(
             decryptor,
-            RestoreDecryptor::LocalSecretKey { .. } | RestoreDecryptor::GpgAgent { .. }
+            RestoreDecryptor::LocalSecretKey { .. }
+                | RestoreDecryptor::GpgAgent { .. }
+                | RestoreDecryptor::Threshold { .. }
         ),
         "Restore backend does not match the backup archive format"
     );
@@ -304,12 +486,25 @@ pub fn restore(
                 format!("Failed to open backup tarball {}", backup_tarball.display())
             })?)
         }
-        RestoreDecryptor::LocalSecretKey { secret_key_path } => Box::new(
-            decrypt_with_local_secret_key(backup_tarball, &secret_key_path)?,
-        ),
+        RestoreDecryptor::LocalSecretKey { secret_key_path } => {
+            ensure_not_threshold_archive(backup_tarball)?;
+            Box::new(decrypt_with_local_secret_key(
+                backup_tarball,
+                &secret_key_path,
+            )?)
+        }
         RestoreDecryptor::GpgAgent { homedir } => {
+            ensure_not_threshold_archive(backup_tarball)?;
             Box::new(decrypt_with_gpg(backup_tarball, homedir.as_deref())?)
         }
+        RestoreDecryptor::Threshold {
+            session_dir,
+            responses,
+        } => Box::new(decrypt_threshold_archive(
+            backup_tarball,
+            &session_dir,
+            &responses,
+        )?),
     };
     let manifest_toml = {
         let mut archive = tar::Archive::new(&mut backup_stream);
@@ -456,6 +651,93 @@ mod tests {
             tarball,
             secret_key_file,
         }
+    }
+
+    fn decrypt_locally(secret_key: &str, armored: &str) -> Result<Vec<u8>> {
+        let mut plaintext = Vec::new();
+        hashi_types::pgp::decrypt_with_secret_key(
+            io::Cursor::new(armored.as_bytes().to_vec()),
+            secret_key.as_bytes(),
+        )?
+        .read_to_end(&mut plaintext)?;
+        Ok(plaintext)
+    }
+
+    #[tokio::test]
+    async fn threshold_backup_restores_with_two_of_three_holders() {
+        let fixture = TestFixture::new();
+        let holders: Vec<_> = (0..3).map(|_| mock_pgp_keypair()).collect();
+        let mut node_config = Config::load(&fixture.node_config_path).unwrap();
+        node_config.backup_pgp_cert = None;
+        node_config.backup_threshold = Some(crate::config::BackupThresholdConfig {
+            threshold: 2,
+            certs: holders
+                .iter()
+                .map(|(public, _)| PgpPublicCert::new(public.clone()).unwrap())
+                .collect(),
+        });
+        node_config.save(&fixture.node_config_path).unwrap();
+
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let tarball = save(&fixture.node_config_path, None, dir.path(), true)
+            .await
+            .unwrap();
+
+        // Single-recipient backends refuse threshold archives with a pointer
+        // to the right flow.
+        let (_, unrelated_secret) = mock_pgp_keypair();
+        let unrelated_key = dir.path().join("unrelated.asc");
+        fs::write(&unrelated_key, unrelated_secret).unwrap();
+        let err = restore(
+            &tarball,
+            RestoreDecryptor::LocalSecretKey {
+                secret_key_path: unrelated_key,
+            },
+            &dir.path().join("wrong-backend"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("threshold backup"), "{err:#}");
+
+        let session_dir = dir.path().join("session");
+        let request_path = dir.path().join("request.json");
+        share_request(&tarball, &session_dir, &request_path).unwrap();
+        let request: ShareRequest =
+            serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
+
+        let mut responses = Vec::new();
+        for (i, (public, secret)) in holders.iter().enumerate().skip(1) {
+            let fingerprint = PgpPublicCert::new(public.clone())
+                .unwrap()
+                .fingerprint()
+                .to_hex();
+            let response = request
+                .respond(
+                    &fingerprint,
+                    |c| decrypt_locally(secret, c),
+                    &mut rand::thread_rng(),
+                )
+                .unwrap();
+            let path = dir.path().join(format!("response-{i}.json"));
+            fs::write(&path, serde_json::to_vec(&response).unwrap()).unwrap();
+            responses.push(path);
+        }
+
+        let output_dir = dir.path().join("restore");
+        restore(
+            &tarball,
+            RestoreDecryptor::Threshold {
+                session_dir,
+                responses,
+            },
+            &output_dir,
+        )
+        .unwrap();
+        let extract_dir = output_dir.join(backup::extract_dir_name(&tarball).unwrap());
+        assert!(
+            extract_dir
+                .join(backup::BACKUP_MANIFEST_FILE_NAME)
+                .is_file()
+        );
     }
 
     fn local_secret_key_decryptor(backup: &SavedBackup) -> RestoreDecryptor {
@@ -959,7 +1241,7 @@ mod tests {
         let (public_cert, _) = mock_pgp_keypair();
 
         let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
-        node_config.backup_pgp_cert = PgpPublicCert::new(public_cert).unwrap();
+        node_config.backup_pgp_cert = Some(PgpPublicCert::new(public_cert).unwrap());
         node_config.save(&fixture.node_config_path).unwrap();
 
         let dir = tempfile::Builder::new().tempdir().unwrap();
@@ -990,7 +1272,10 @@ mod tests {
         node_config.save(&fixture.node_config_path).unwrap();
         let node_config = Config::load(&fixture.node_config_path).unwrap();
         let recipient = PgpPublicCert::new(public_cert.clone()).unwrap();
-        assert!(!recipient.has_same_encryption_recipients(&node_config.backup_pgp_cert));
+        assert!(
+            !recipient
+                .has_same_encryption_recipients(node_config.backup_pgp_cert.as_ref().unwrap())
+        );
 
         assert!(
             save(

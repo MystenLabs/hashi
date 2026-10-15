@@ -24,22 +24,41 @@ pub(crate) const DEFAULT_GRPC_PER_PEER_CONNECTION_LIMIT: usize = 4;
 /// horizons that lag the fee market by hours to days.
 const MAX_WITHDRAWAL_FEE_CONF_TARGET: u16 = 12;
 
-fn deserialize_backup_pgp_cert<'de, D>(
-    deserializer: D,
-) -> Result<hashi_types::pgp::PgpPublicCert, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-
+/// Accept a certificate file path or inline armored text.
+fn read_backup_pgp_cert(value: String) -> anyhow::Result<hashi_types::pgp::PgpPublicCert> {
     let path = Path::new(&value);
     let armored = if path.is_file() {
-        std::fs::read_to_string(path).map_err(serde::de::Error::custom)?
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read OpenPGP certificate {}", path.display()))?
     } else {
         value
     };
 
-    hashi_types::pgp::PgpPublicCert::new(armored).map_err(serde::de::Error::custom)
+    hashi_types::pgp::PgpPublicCert::new(armored)
+}
+
+fn deserialize_backup_pgp_cert<'de, D>(
+    deserializer: D,
+) -> Result<Option<hashi_types::pgp::PgpPublicCert>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    read_backup_pgp_cert(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_backup_pgp_certs<'de, D>(
+    deserializer: D,
+) -> Result<Vec<hashi_types::pgp::PgpPublicCert>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Vec<String> as serde::Deserialize>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| read_backup_pgp_cert(value).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 #[derive(Clone, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -101,8 +120,19 @@ pub struct Config {
     pub db: Option<PathBuf>,
 
     /// Armored OpenPGP certificate or certificate file path used for node backups.
-    #[serde(deserialize_with = "deserialize_backup_pgp_cert")]
-    pub backup_pgp_cert: hashi_types::pgp::PgpPublicCert,
+    /// Set exactly one of this or `backup-threshold`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_backup_pgp_cert"
+    )]
+    pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
+
+    /// Encrypt backups so that `threshold` of the listed holder certificates
+    /// must cooperate to decrypt them. Set exactly one of this or
+    /// `backup-pgp-cert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_threshold: Option<BackupThresholdConfig>,
 
     /// Directory to write automatic encrypted backups into.
     pub backup_dir: PathBuf,
@@ -359,6 +389,17 @@ impl std::fmt::Debug for Config {
 /// S3 destination settings. Credentials come from the AWS provider chain.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BackupThresholdConfig {
+    /// Number of holders that must cooperate to decrypt a backup.
+    pub threshold: usize,
+    /// Holder certificates, as file paths or inline armored text. Share `i`
+    /// is encrypted to the `i`th certificate.
+    #[serde(deserialize_with = "deserialize_backup_pgp_certs")]
+    pub certs: Vec<hashi_types::pgp::PgpPublicCert>,
+}
+
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct BackupS3Config {
     pub bucket: String,
     pub region: String,
@@ -388,8 +429,30 @@ impl Config {
                 .is_none_or(|target| (1..=MAX_WITHDRAWAL_FEE_CONF_TARGET).contains(&target)),
             "withdrawal_fee_conf_target must be between 1 and {MAX_WITHDRAWAL_FEE_CONF_TARGET} blocks"
         );
+        config.backup_recipients()?;
         config.validate_backup_s3()?;
         Ok(config)
+    }
+
+    /// The configured backup encryption: exactly one of `backup-pgp-cert` or
+    /// `backup-threshold`.
+    pub fn backup_recipients(&self) -> anyhow::Result<crate::backup::BackupRecipients> {
+        match (&self.backup_pgp_cert, &self.backup_threshold) {
+            (Some(cert), None) => Ok(crate::backup::BackupRecipients::Single(Box::new(
+                cert.clone(),
+            ))),
+            (None, Some(threshold)) => Ok(crate::backup::BackupRecipients::Threshold(
+                hashi_types::threshold_backup::ThresholdRecipients::new(
+                    threshold.threshold,
+                    threshold.certs.clone(),
+                )
+                .context("invalid backup-threshold")?,
+            )),
+            (Some(_), Some(_)) => {
+                anyhow::bail!("set only one of backup-pgp-cert and backup-threshold")
+            }
+            (None, None) => anyhow::bail!("set backup-pgp-cert or backup-threshold"),
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), anyhow::Error> {
@@ -675,7 +738,8 @@ impl Config {
             bitcoin_start_height: None,
             bitcoin_trusted_peers: None,
             db: None,
-            backup_pgp_cert: hashi_types::pgp::test_utils::mock_pgp_cert(),
+            backup_pgp_cert: Some(hashi_types::pgp::test_utils::mock_pgp_cert()),
+            backup_threshold: None,
             backup_dir: std::env::temp_dir().join(format!(
                 "hashi-test-backups-{:032x}",
                 rand::random::<u128>()
@@ -923,7 +987,10 @@ mod tests {
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(config.backup_pgp_cert.armored(), public_cert.as_str());
+        assert_eq!(
+            config.backup_pgp_cert.as_ref().unwrap().armored(),
+            public_cert.as_str()
+        );
     }
 
     #[test]
