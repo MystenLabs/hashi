@@ -64,6 +64,15 @@ group_by_four() {
   printf '%s' "$grouped$value"
 }
 
+# Prints one SHA-256 digest over every file under a directory. publish-kp-config.sh refuses to
+# publish unless its copy of this function is the same.
+config_digest() {
+  local manifest digest
+  manifest="$(cd "$1" && find . -type f -exec shasum -a 256 {} + | sort -k 2)" || return 1
+  digest="$(printf '%s\n' "$manifest" | shasum -a 256)" || return 1
+  printf '%s' "${digest:0:64}"
+}
+
 guardian_init() {
   cargo run --release --locked --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p hashi-guardian-init -- "$@"
 }
@@ -125,8 +134,9 @@ WORK_DIR="$(mktemp -d)"
 
 say "Guardian configuration download"
 printf '%s\n' \
-  "This script downloads the configuration the guardian operator published," \
-  "verifies every key provisioner certificate in it, and prepares it for the connected YubiKey." \
+  "This script downloads the configuration the guardian operator published, shows its digest to" \
+  "compare with the one the operator posted, verifies every key provisioner certificate in it, and" \
+  "prepares it for the connected YubiKey." \
   "It uses only the bucket and access key the operator shares, never other AWS configuration on this Mac."
 
 # A long-running scdaemon can miss a replugged YubiKey and holds the card exclusively,
@@ -227,18 +237,33 @@ while IFS= read -r line; do
 done < "$PUBLISHED_CONFIG"
 [[ -n "$HASHI_COMMIT" ]] \
   || die "The published configuration names no guardian commit. Ask the operator to publish it again."
-DIGEST="$(shasum -a 256 "$PUBLISHED_CONFIG")"
-DIGEST="${DIGEST:0:16}"
-printf 'Guardian commit:      %s\nConfiguration digest: %s\n' "$HASHI_COMMIT" "$(group_by_four "$DIGEST")"
 
 if ! checkout_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"; then
   die "Could not read the commit of $REPO_ROOT."
 fi
+# A checkout at another commit can compute the digest differently. Until the digest is confirmed, the
+# configuration's commit can only stop this script, never name the commit to check out.
 if [[ "$checkout_commit" != "$HASHI_COMMIT" ]]; then
-  die "This checkout is at $checkout_commit, but the guardian runs $HASHI_COMMIT. Update it, then run this script again:
+  die "This checkout is at $checkout_commit, not at the commit the downloaded configuration is for. Check out the commit the operator posted, then run this script again:
   git -C $REPO_ROOT fetch origin
-  git -C $REPO_ROOT checkout $HASHI_COMMIT"
+  git -C $REPO_ROOT checkout <commit>
+If this checkout is already at the posted commit, tell the operator."
 fi
+
+# The download names the guardian build to trust and the certificates the key is shared between, so
+# this script acts on nothing in it before its digest is confirmed as the operator's.
+say "Compare with the operator's post"
+DIGEST="$(config_digest "$DOWNLOAD_DIR")" || die "Could not read the downloaded configuration."
+printf 'Guardian commit:      %s\nConfiguration digest: %s\n                      %s\n\n' \
+  "$HASHI_COMMIT" "$(group_by_four "${DIGEST:0:32}")" "$(group_by_four "${DIGEST:32}")"
+if ! IFS= read -r -p "Is every group of the digest the same as in the operator's post? Type y/yes if it is: " \
+  digest_confirmation; then
+  die "No input received. Run this script from an interactive terminal."
+fi
+case "$digest_confirmation" in
+  y | yes) ;;
+  *) die "Not confirmed, so nothing from the download was used. If the digest differs from the one the operator posted, tell the operator: the bucket holds another configuration." ;;
+esac
 
 say "Build the guardian tools"
 printf 'The first build can take several minutes.\n'
@@ -286,13 +311,11 @@ CONFIG_FILE="$CONFIG_DIR/guardian-init.yaml"
 ) || die "Could not write $CONFIG_FILE."
 
 say "Download complete"
-printf 'Configuration:        %s\n' "$CONFIG_FILE"
-printf 'Your certificate:     certs/%s\n' "$MY_CERT"
-printf 'Key provisioners:     %d\n' "$cert_count"
-printf 'Configuration digest: %s\n' "$(group_by_four "$DIGEST")"
+printf 'Configuration:    %s\n' "$CONFIG_FILE"
+printf 'Your certificate: certs/%s\n' "$MY_CERT"
+printf 'Key provisioners: %d\n' "$cert_count"
 printf '%s\n' \
   "" \
-  "Compare the configuration digest with the one the guardian operator posted. Stop if they differ." \
   "The configuration holds the access key, so do not share it." \
   "When the operator asks for a step, run it from the configuration directory, as described in" \
   "key-provisioner/provision.md:"

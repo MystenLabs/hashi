@@ -10,6 +10,8 @@ export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
 
 REGION=us-west-2
 IAM_PATH=/hashi-kp-pubkeys/
+# publish-kp-config.sh puts the guardian configuration here, where the upload key must never write.
+CONFIG_PREFIX=_config
 SELF_TEST_FILE=""
 
 say() {
@@ -104,7 +106,7 @@ say "Key provisioner upload bucket setup"
 printf '%s\n' \
   "This script creates, in $REGION:" \
   "  S3 bucket s3://$BUCKET, versioned, with public access blocked" \
-  "  IAM user $IAM_PATH$IAM_USER, allowed only s3:PutObject into that bucket" \
+  "  IAM user $IAM_PATH$IAM_USER, allowed only s3:PutObject into that bucket, outside $CONFIG_PREFIX/" \
   "  one access key for that user, tested with a real upload" \
   "Key provisioners enter the bucket and access key into key-provisioner/scripts/upload-pubkey.sh."
 
@@ -144,7 +146,9 @@ run_or_die "Could not create IAM user $IAM_USER. Delete the empty bucket with: a
   aws iam create-user --user-name "$IAM_USER" --path "$IAM_PATH" > /dev/null
 run_or_die "Could not add the upload policy to $IAM_USER. Remove the user with $REVOKE_COMMAND, then delete the empty bucket with: aws s3 rb s3://$BUCKET" \
   aws iam put-user-policy --user-name "$IAM_USER" --policy-name put-kp-pubkeys \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"}]}"
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[\
+{\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/*\"},\
+{\"Effect\":\"Deny\",\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::$BUCKET/$CONFIG_PREFIX/*\"}]}"
 if ! access_key="$(aws iam create-access-key --user-name "$IAM_USER" \
   --query 'AccessKey.[AccessKeyId, SecretAccessKey]' --output text)"; then
   die "Could not create an access key for $IAM_USER. Remove the user with $REVOKE_COMMAND, then delete the empty bucket with: aws s3 rb s3://$BUCKET"

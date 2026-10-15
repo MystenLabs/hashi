@@ -123,9 +123,9 @@ Then publish it, naming the guardian's log bucket:
 
 The script verifies every certificate, refuses a configuration that holds an
 AWS access key, and prints the guardian commit and a configuration digest. It
-also lets the KPs' access key read `_config/` and the guardian's log bucket,
-and stops it writing to `_config/`: the configuration names the guardian build
-every KP will trust.
+also lets the KPs' access key read `_config/` and the guardian's log bucket.
+That key cannot write to `_config/`: the configuration names the guardian
+build every KP will trust.
 
 Post the commit and the digest. Each KP compares the digest with the one
 `download-config.sh` prints. Publish again after any change to the directory;
