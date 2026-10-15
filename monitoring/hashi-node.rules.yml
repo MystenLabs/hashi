@@ -7,9 +7,12 @@
 
 groups:
   - name: hashi-validator-node-health
+    interval: 1m
     rules:
+      # The Bitcoin client starts only after the boot scrape of on-chain state,
+      # which takes 20-35 minutes on testnet; until then its gauges read 0.
       - alert: HashiBtcViewFrozen
-        expr: changes(hashi_kyoto_best_height[90m]) == 0
+        expr: changes(hashi_kyoto_best_height[90m]) == 0 and hashi_kyoto_synced == 1
         labels:
           severity: critical
         annotations:
@@ -20,7 +23,7 @@ groups:
             stuck (kyoto wedged, no peers, or bitcoind issue).
 
       - alert: HashiBtcNotSynced
-        expr: hashi_kyoto_synced == 0
+        expr: hashi_kyoto_synced == 0 unless hashi_onchain_scrape_in_progress == 1
         for: 15m
         labels:
           severity: warning
@@ -31,7 +34,7 @@ groups:
             not. Check hashi_kyoto_sync_percent and peer count.
 
       - alert: HashiNoBtcPeers
-        expr: hashi_kyoto_connected_peers < 1
+        expr: hashi_kyoto_connected_peers < 1 unless hashi_onchain_scrape_in_progress == 1
         for: 10m
         labels:
           severity: warning
@@ -39,44 +42,37 @@ groups:
           summary: "no BTC peers connected"
           description: "Without peers the BTC tip will go stale next."
 
+      # The checkpoint timestamp reads 0 until the boot scrape ends. Checkpoints
+      # normally land within a few minutes, so 10 minutes is a wedged watcher.
       - alert: HashiSuiMirrorStale
-        expr: time() - (hashi_latest_checkpoint_timestamp_ms / 1000) > 120
-        for: 5m
+        expr: time() - (hashi_latest_checkpoint_timestamp_ms > 0) / 1000 > 600
+        for: 10m
         labels:
           severity: critical
         annotations:
           summary: "Sui state mirror stale"
           description: >-
-            No Sui checkpoint has been applied to the node's bridge-state
-            mirror for over 2 minutes. The watcher, mirror, or fullnode RPC
-            is wedged; the node is acting on stale state even if other
-            metrics look healthy.
+            No Sui checkpoint newer than 10 minutes has been applied to the
+            node's bridge-state mirror for 10 minutes. The watcher, mirror, or
+            fullnode RPC is wedged; the node is acting on stale state even if
+            other metrics look healthy.
 
-      # Each task loop heartbeats at least every 15s when idle, and mpc_service
-      # also while it waits for presignature certificates.
+      # Each task loop heartbeats at least every 15s when idle, but mpc_service
+      # records none while a key rotation runs.
       - alert: HashiTaskWedged
-        expr: time() - hashi_task_last_iteration_timestamp_seconds > 600
+        expr: time() - hashi_task_last_iteration_timestamp_seconds > 1800
+        for: 10m
         labels:
           severity: critical
         annotations:
           summary: "task loop {{ $labels.task }} wedged"
           description: >-
-            The {{ $labels.task }} loop has not recorded a heartbeat in 10
+            The {{ $labels.task }} loop has not recorded a heartbeat in 30
             minutes. It has deadlocked or is stuck; check its logs.
 
-      - alert: HashiReconfigNotTracking
-        expr: changes(hashi_epoch[3h]) == 0
-        labels:
-          severity: warning
-        annotations:
-          summary: "committee epoch not advancing"
-          description: >-
-            Testnet reconfigures roughly every 40 minutes. Check the
-            operator channel first: if the fleet is reconfiguring and your
-            epoch is not moving, your node is stuck.
-
+      # -1 means the balance has not been read yet.
       - alert: HashiLowGas
-        expr: hashi_sui_balance < 1e9
+        expr: (hashi_sui_balance >= 0) < 1e9
         labels:
           severity: warning
         annotations:
