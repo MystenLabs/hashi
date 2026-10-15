@@ -133,26 +133,28 @@ impl Roster {
         if !root.join("roster.txt").is_file() {
             bail!("No verified roster in {dir}. Run download-kp-pubkeys.sh first.");
         }
-        let mut certs = Vec::new();
-        for id in sorted_entries(root)? {
-            let id_dir = root.join(&id);
-            if !id_dir.is_dir() {
-                continue;
-            }
-            for name in sorted_entries(&id_dir)? {
-                let Some(stem) = name
-                    .strip_suffix(".asc")
-                    .filter(|_| name.ends_with("-kp-pubkey.asc"))
-                else {
-                    continue;
-                };
-                let mut files = vec![(name.clone(), read(&id_dir.join(&name))?)];
-                for suffix in ATTESTATION_SUFFIXES {
-                    let sibling = format!("{stem}.{suffix}");
-                    files.push((sibling.clone(), read(&id_dir.join(&sibling))?));
+        let mut found = Vec::new();
+        for id in entries(root)? {
+            if root.join(&id).is_dir() {
+                for name in entries(&root.join(&id))? {
+                    if name.ends_with("-kp-pubkey.asc") {
+                        found.push((id.clone(), name));
+                    }
                 }
-                certs.push(Cert { name, files });
             }
+        }
+        // In the order of bash's `*/*-kp-pubkey.asc`, which sorts whole paths: `a-b/` comes before `a/`.
+        found.sort_by_key(|(id, name)| format!("{id}/{name}"));
+        let mut certs = Vec::new();
+        for (id, name) in found {
+            let dir = root.join(&id);
+            let stem = name.trim_end_matches(".asc");
+            let mut files = vec![(name.clone(), read(&dir.join(&name))?)];
+            for suffix in ATTESTATION_SUFFIXES {
+                let sibling = format!("{stem}.{suffix}");
+                files.push((sibling.clone(), read(&dir.join(&sibling))?));
+            }
+            certs.push(Cert { name, files });
         }
         if certs.is_empty() {
             bail!("No certificates in {dir}.");
@@ -173,8 +175,8 @@ impl Roster {
     }
 }
 
-/// Non-hidden entries of a directory in byte order, as bash's globs list them under `LC_ALL=C`.
-fn sorted_entries(dir: &Path) -> Result<Vec<String>> {
+/// Non-hidden entries of a directory, which bash's globs match.
+fn entries(dir: &Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("Could not read {}.", dir.display()))?
@@ -187,7 +189,6 @@ fn sorted_entries(dir: &Path) -> Result<Vec<String>> {
             names.push(name.to_owned());
         }
     }
-    names.sort();
     Ok(names)
 }
 
@@ -596,6 +597,16 @@ pub mod tests {
         assert_eq!(
             Roster::load(&dir, 2).unwrap().names(),
             ["alice-kp-pubkey.asc", "bob-kp-pubkey.asc"]
+        );
+        let prefixes = roster_dir(&scratch.path().join("p"), &["a", "a-b", "a.c", "a_d"], "v1");
+        assert_eq!(
+            Roster::load(&prefixes, 2).unwrap().names(),
+            [
+                "a-b-kp-pubkey.asc",
+                "a.c-kp-pubkey.asc",
+                "a-kp-pubkey.asc",
+                "a_d-kp-pubkey.asc"
+            ]
         );
         std::fs::remove_file(
             scratch
