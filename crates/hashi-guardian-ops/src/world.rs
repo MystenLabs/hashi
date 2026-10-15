@@ -74,6 +74,8 @@ pub struct State {
     pub counter: u32,
     /// What each SSM command printed, and whether it succeeded, by command ID.
     pub commands: BTreeMap<String, (String, bool)>,
+    /// The KP bucket's objects, by key.
+    pub kp_uploads: BTreeMap<String, Vec<u8>>,
 }
 
 impl State {
@@ -316,6 +318,7 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         extra_change: None,
         counter: 0,
         commands: BTreeMap::new(),
+        kp_uploads: BTreeMap::new(),
     }))
 }
 
@@ -423,6 +426,15 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                 ok(format!("{desired}\t{running}\t{deployments}\ttaskdef-1\n"))
             }
             ["aws", "ecs", "describe-task-definition", ..] => ok(format!("repo:{}\n", s.running_tag)),
+            ["aws", "s3", "cp", "--recursive", .., source, dest] => {
+                let prefix = source.strip_prefix("s3://mysten-hashi-kp-pubkeys-testnet/")?;
+                for (key, bytes) in &s.kp_uploads {
+                    if let Some(name) = key.strip_prefix(prefix) {
+                        std::fs::write(std::path::Path::new(dest).join(name), bytes).ok()?;
+                    }
+                }
+                ok(String::new())
+            }
             ["aws", "s3", "cp", .., source, "-"] => {
                 let session = source.split("/init/").nth(1)?.split('/').next()?.to_owned();
                 match s.init_records.get(&session) {

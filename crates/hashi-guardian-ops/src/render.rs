@@ -406,7 +406,7 @@ impl SlotRender {
     }
 }
 
-fn threshold(ctx: &Ctx, key: &str) -> Result<u32> {
+pub(crate) fn threshold(ctx: &Ctx, key: &str) -> Result<u32> {
     let value = ctx.env.require(key)?;
     value
         .parse()

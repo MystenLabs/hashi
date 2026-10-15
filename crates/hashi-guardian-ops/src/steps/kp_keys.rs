@@ -27,6 +27,7 @@ use crate::kp_bucket::CONFIG_PREFIX;
 use crate::kp_bucket::IAM_PATH;
 use crate::kp_bucket::KpBucket;
 use crate::kp_bucket::REGION;
+use crate::kp_bucket::ROTATION_PREFIX;
 use crate::kp_bucket::format_fingerprint;
 use crate::kp_bucket::group_by_four;
 use crate::kp_bucket::identity;
@@ -397,7 +398,10 @@ impl Uploads {
         let mut uploads = Self::default();
         let mut seen = BTreeSet::new();
         for version in versions {
-            if version.key.starts_with(&format!("{CONFIG_PREFIX}/")) {
+            if [CONFIG_PREFIX, ROTATION_PREFIX]
+                .iter()
+                .any(|prefix| version.key.starts_with(&format!("{prefix}/")))
+            {
                 continue;
             }
             match kp_file_owner(&version.key) {
@@ -729,6 +733,7 @@ mod tests {
             version("alice/alice-kp-pubkey.asc", "1", false),
             version("alice/alice-kp-fingerprint.txt", "1", true),
             version("_config/guardian-init.yaml", "1", true),
+            version("_rotate-kp-set/309a48769f19b17a/0D8E.rotation", "1", true),
             version("bob/notes.txt", "1", true),
             version("bob/alice-kp-pubkey.asc", "1", true),
             version("stray.txt", "1", true),

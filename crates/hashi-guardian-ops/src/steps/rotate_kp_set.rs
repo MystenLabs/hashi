@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Re-dealing the guardian's key to a new set of key provisioners on a standby: `rotate-kp-set init`, `submit` the
-//! signers' files, or `wait` for the new set to confirm.
+//! signers' submissions, or `wait` for the new set to confirm.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,11 +15,19 @@ use crate::Ctx;
 use crate::ask::NOTHING_CHANGED;
 use crate::ask::confirm;
 use crate::commit::Tree;
+use crate::exec::Cmd;
+use crate::exec::read;
 use crate::guardian::require_reached;
+use crate::kp_bucket::KpBucket;
+use crate::kp_bucket::REGION;
+use crate::kp_bucket::ROTATION_PREFIX;
 use crate::next;
 use crate::render::require_fresh;
+use crate::render::threshold;
+use crate::say;
 use crate::stack::Role;
 use crate::stack::Slot;
+use crate::stack::SlotView;
 use crate::steps::rotate::require_monitor_allows;
 use crate::steps::slot;
 use crate::warn;
@@ -70,12 +78,10 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
     require_monitor_allows(&stack, &view)?;
     let mut submissions = Vec::new();
     match &action {
+        Action::Submit(files) if files.is_empty() => {
+            submissions = uploaded_submissions(ctx, &view, &reached.signing_key[..16])?;
+        }
         Action::Submit(files) => {
-            if files.is_empty() {
-                bail!(
-                    "Name the files the key provisioners sent: rotate-kp-set {slot} submit <file>..."
-                );
-            }
             for file in files {
                 if !file.is_file() {
                     bail!("No submission file at {}.", file.display());
@@ -106,9 +112,9 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
         Action::Wait => {}
     }
     next(&match action {
-        Action::Init => {
-            format!("once the signers have sent their files, rotate-kp-set {slot} submit <file>...")
-        }
+        Action::Init => format!(
+            "once the signers have run key-provisioner rotate-kp-set, rotate-kp-set {slot} submit, which collects what they uploaded to the KP bucket"
+        ),
         // The re-deal leaves the slot's own files as they are, but a render with NEW_KP_* set would point at the
         // signers' publication, whose old roster the new set can't provision with.
         Action::Submit(_) | Action::Wait => format!(
@@ -131,6 +137,65 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
     }
     std::io::stdout().flush()?;
     Err(anyhow::Error::new(ctx.exec.exec(&cmd)).context("Could not run hashi-guardian-init."))
+}
+
+/// Downloads the submissions the signers uploaded for `session`, in place of an earlier download, and stops unless
+/// they reach the dealt set's threshold.
+fn uploaded_submissions(ctx: &Ctx, view: &SlotView, session: &str) -> Result<Vec<PathBuf>> {
+    let kp = KpBucket::from_env(ctx)?;
+    let source = format!("s3://{}/{ROTATION_PREFIX}/{session}/", kp.bucket);
+    let dir = view
+        .dir
+        .join("rotate-kp-set")
+        .join("submissions")
+        .join(session);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    say("Collect the signers' submissions");
+    read(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["s3", "cp", "--recursive", "--only-show-errors"])
+            .args(["--region", REGION])
+            .arg(&source)
+            .arg(format!("{}/", dir.display())),
+    )
+    .with_context(|| format!("Could not download the submissions in {source}."))?;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "rotation")
+        {
+            files.push(std::fs::canonicalize(&path)?);
+        }
+    }
+    files.sort();
+    let signers: Vec<String> = files
+        .iter()
+        .filter_map(|file| file.file_stem())
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .collect();
+    let threshold = threshold(ctx, "KP_THRESHOLD")?;
+    if signers.len() < threshold as usize {
+        bail!(
+            "Found {} of the {threshold} submissions the current set's threshold needs in {source}{}. Run this again once more key provisioners have run key-provisioner rotate-kp-set.",
+            signers.len(),
+            if signers.is_empty() {
+                String::new()
+            } else {
+                format!(", from {}", signers.join(", "))
+            }
+        );
+    }
+    println!("Submissions in {source}, by signer:");
+    for signer in &signers {
+        println!("  {signer}");
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -330,14 +395,75 @@ mod tests {
         let last = run.exec.log.borrow().last().unwrap().clone();
         assert_eq!(last[6], "--submission");
         assert!(std::path::Path::new(&last[7]).is_absolute());
+    }
 
+    #[test]
+    fn submits_what_the_signers_uploaded_for_the_session() {
+        let run = Run::new();
+        let session = {
+            let state = run.state.borrow();
+            state.hosts[&state.deployed["b"]].session.key[..16].to_owned()
+        };
+        let source = format!("s3://mysten-hashi-kp-pubkeys-testnet/_rotate-kp-set/{session}/");
+        let upload = |key: String| {
+            run.state
+                .borrow_mut()
+                .kp_uploads
+                .insert(key, b"signed".to_vec());
+        };
+        upload(format!("_rotate-kp-set/{session}/AAAA.rotation"));
+        upload("_rotate-kp-set/ffffffffffffffff/CCCC.rotation".to_owned());
         let (result, _) = run.step(&[], |ctx| {
             rotate_kp_set(ctx, Some(Slot::B), Action::Submit(vec![]))
         });
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Name the files the key provisioners sent: rotate-kp-set b submit <file>..."
+            format!(
+                "Found 1 of the 2 submissions the current set's threshold needs in {source}, from AAAA. Run this again once more key provisioners have run key-provisioner rotate-kp-set."
+            )
         );
+        assert!(
+            !run.exec
+                .log
+                .borrow()
+                .iter()
+                .any(|words| words[0] == "/x/hashi-guardian-init")
+        );
+
+        upload(format!("_rotate-kp-set/{session}/BBBB.rotation"));
+        let (result, _) = run.step(&[], |ctx| {
+            rotate_kp_set(ctx, Some(Slot::B), Action::Submit(vec![]))
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Could not run hashi-guardian-init."
+        );
+        let last = run.exec.log.borrow().last().unwrap().clone();
+        assert_eq!(
+            last[..6],
+            [
+                "/x/hashi-guardian-init",
+                "operator",
+                "rotate-kp-set",
+                "submit",
+                "--config",
+                "operator.yaml"
+            ]
+        );
+        let files: Vec<&str> = last[6..]
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "--submission");
+                pair[1].as_str()
+            })
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with(&format!(
+            "rotate-kp-set/submissions/{session}/AAAA.rotation"
+        )));
+        assert!(files[1].ends_with(&format!(
+            "rotate-kp-set/submissions/{session}/BBBB.rotation"
+        )));
     }
 
     #[test]
