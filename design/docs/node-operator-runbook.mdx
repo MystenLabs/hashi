@@ -589,7 +589,7 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
 # grpc-max-decoding-message-size = 33554432
 
 # Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
@@ -721,7 +721,7 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
 # grpc-max-decoding-message-size = 33554432
 
 # Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)

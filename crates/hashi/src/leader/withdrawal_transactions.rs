@@ -1638,6 +1638,24 @@ impl MpcInputSignaturesMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc::route_limits::BRIDGE_REQUEST_LIMIT;
+    use crate::utxo_pool::CoinSelectionParams;
+    use fastcrypto::groups::secp256k1::schnorr::SIGNATURE_SIZE_IN_BYTES;
+    use prost::Message as _;
+
+    #[test]
+    fn largest_signing_request_fits_in_half_the_bridge_limit() {
+        let signatures =
+            vec![vec![0; SIGNATURE_SIZE_IN_BYTES]; CoinSelectionParams::DEFAULT_MAX_INPUTS];
+        let len = WithdrawalTxSigning {
+            withdrawal_id: Address::new([0; 32]),
+            signatures: signatures.clone(),
+            guardian_signatures: signatures,
+        }
+        .to_proto(Some(u64::MAX), u64::MAX)
+        .encoded_len();
+        assert!(2 * len <= BRIDGE_REQUEST_LIMIT, "{len} bytes");
+    }
 
     #[test]
     fn stale_presig_reallocation_requires_pending_inputs() {

@@ -139,7 +139,8 @@ pub struct Config {
     ///
     /// Defaults to 32 MiB if not specified. Tonic's built-in default is 4 MiB,
     /// which is too small to scrape a large on-chain state or receive large MPC
-    /// round messages.
+    /// round messages. BridgeService requests are limited to 128 KiB, or to
+    /// this if lower.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
 
