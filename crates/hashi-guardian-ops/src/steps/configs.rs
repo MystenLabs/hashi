@@ -81,6 +81,9 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
     let settings = &render.settings;
     println!("Guardian commit:  {}", settings.commit);
     println!("PCR0:             {}", settings.pcr0);
+    for build in &settings.prev_builds {
+        println!("Earlier build:    {}, PCR0 {}", build.commit, build.pcr0);
+    }
     println!("Log bucket:       s3://{}", settings.bucket);
     println!("Bitcoin network:  {}", settings.bitcoin_network);
     println!("Retention class:  {}", settings.retention_environment);

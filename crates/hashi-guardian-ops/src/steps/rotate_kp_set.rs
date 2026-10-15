@@ -20,6 +20,7 @@ use crate::next;
 use crate::render::require_fresh;
 use crate::stack::Role;
 use crate::stack::Slot;
+use crate::steps::rotate::require_monitor_allows;
 use crate::steps::slot;
 use crate::warn;
 
@@ -66,6 +67,7 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
     let guardian_init = tree.guardian_init(ctx)?;
     require_fresh(ctx, &stack, &view)?;
     let reached = require_reached(ctx, &stack, &view, &tree)?;
+    require_monitor_allows(&stack, &view)?;
     let mut submissions = Vec::new();
     match &action {
         Action::Submit(files) => {
@@ -261,6 +263,55 @@ mod tests {
                     .join(".hashi/guardian/testnet/b/rotate-kp-set")
                     .as_path()
             )
+        );
+    }
+
+    #[test]
+    fn re_deals_only_once_hashi_monitor_allowlists_the_build() {
+        let run = Run::new();
+        let dir = run.repo.path().join("pulumi/services/hashi-monitor");
+        std::fs::create_dir_all(&dir).unwrap();
+        let monitor = dir.join("Pulumi.testnet.yaml");
+        std::fs::write(&monitor, "prev_builds: []\n").unwrap();
+        let ran = run.exec.log.borrow().len();
+        let (result, prompts) = run.step(&["yes"], |ctx| {
+            rotate_kp_set(ctx, Some(Slot::B), Action::Init)
+        });
+        assert!(result.unwrap_err().to_string().starts_with(&format!(
+            "hashi-monitor does not allowlist {}. Add it",
+            world::COMMIT
+        )));
+        assert!(prompts.is_empty());
+        assert!(
+            !run.exec.log.borrow()[ran..]
+                .iter()
+                .any(|words| words[0] == "/x/hashi-guardian-init")
+        );
+
+        std::fs::write(
+            &monitor,
+            format!(
+                "current_build:\n  git_revision: \"{}\"\n  pcr0: \"{}\"\n",
+                world::COMMIT,
+                "0c".repeat(48)
+            ),
+        )
+        .unwrap();
+        let (result, _) = run.step(&["yes"], |ctx| {
+            rotate_kp_set(ctx, Some(Slot::B), Action::Init)
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Could not run hashi-guardian-init."
+        );
+        assert_eq!(
+            run.exec.log.borrow().last().unwrap()[..4],
+            [
+                "/x/hashi-guardian-init",
+                "operator",
+                "rotate-kp-set",
+                "init"
+            ]
         );
     }
 

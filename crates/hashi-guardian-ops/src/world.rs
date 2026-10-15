@@ -18,6 +18,8 @@ use crate::exec::fake::Fake;
 use crate::stack::Slot;
 
 pub const COMMIT: &str = crate::stack::tests::COMMIT;
+/// A later build, for a rotation onto another commit.
+pub const NEXT: &str = "c47991e310000000000000000000000000000000";
 pub const BTC: &str = "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
 pub const URN_PREFIX: &str = "urn:pulumi:testnet::hashi-guardian-enclave::aws:ec2/instance:Instance::hashi-guardian-enclave-";
 const TASK: &str =
@@ -34,6 +36,8 @@ pub struct Session {
 
 pub struct Host {
     pub ip: String,
+    /// The commit its guardian is built from.
+    pub commit: String,
     /// Whether the guardian's unit is enabled or active.
     pub running: bool,
     /// Whether an enclave runs, which a failed terminate leaves after the unit stops.
@@ -53,8 +57,12 @@ pub struct State {
     pub running_tag: String,
     pub configured_tag: String,
     pub service_counts: (u64, u64, u64),
-    /// Init records by session, holding each session's configuration hash.
-    pub init_records: BTreeMap<String, String>,
+    /// Each session's operator-init record, by session.
+    pub init_records: BTreeMap<String, Value>,
+    /// The commits this checkout has.
+    pub local_commits: Vec<String>,
+    /// What `git diff` lists between any two commits under the guardian's protos and log types.
+    pub format_changes: Vec<String>,
     pub sui_epoch: u64,
     /// When the epoch began and when the one before it began, as seconds before now.
     pub epoch_age: (i64, i64),
@@ -74,6 +82,17 @@ impl State {
             Some(value) => value == "true",
             None => slot == Slot::A,
         }
+    }
+
+    /// The commit and PCR0 the stack configures for a slot.
+    fn build(&self, slot: Slot) -> (String, String) {
+        let key = |name: &str| {
+            self.config
+                .get(&format!("{name}{}", slot.suffix()))
+                .cloned()
+                .unwrap_or_default()
+        };
+        (key("hashi-commit"), key("eif-pcr0"))
     }
 
     fn configured_active(&self) -> Slot {
@@ -166,10 +185,12 @@ impl State {
                     let id = format!("i-0{slot}{:03}", self.counter);
                     let session = self.new_session();
                     let ip = format!("192.0.2.{}", self.counter);
+                    let commit = self.build(if slot == "b" { Slot::B } else { Slot::A }).0;
                     self.hosts.insert(
                         id.clone(),
                         Host {
                             ip,
+                            commit,
                             running: true,
                             enclave: true,
                             session,
@@ -258,7 +279,10 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         epoch: Some(1253),
     };
     let mut init_records = BTreeMap::new();
-    init_records.insert("aa".repeat(8), "cf".repeat(32));
+    init_records.insert(
+        "aa".repeat(8),
+        init_record(&"cf".repeat(32), &[(COMMIT.to_owned(), "0c".repeat(48))]),
+    );
     Rc::new(RefCell::new(State {
         config,
         deployed: [("a".to_owned(), "i-0aaa".to_owned())]
@@ -269,6 +293,7 @@ pub fn serving_world() -> Rc<RefCell<State>> {
             "i-0aaa".to_owned(),
             Host {
                 ip: "192.0.2.10".to_owned(),
+                commit: COMMIT.to_owned(),
                 running: true,
                 enclave: true,
                 session: serving,
@@ -282,6 +307,8 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         configured_tag: "v1".to_owned(),
         service_counts: (1, 1, 1),
         init_records,
+        local_commits: vec![COMMIT.to_owned(), NEXT.to_owned()],
+        format_changes: Vec::new(),
         sui_epoch: 1253,
         epoch_age: (3 * 3600, 27 * 3600),
         activate_false_failure: false,
@@ -375,7 +402,7 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                     ok(json!({
                         "signingPubKey": session.key,
                         "btcPubkey": session.btc,
-                        "gitRevision": COMMIT,
+                        "gitRevision": host.commit,
                         "committeeEpoch": session.epoch.map(|epoch| epoch.to_string()),
                     })
                     .to_string())
@@ -399,10 +426,18 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
             ["aws", "s3", "cp", .., source, "-"] => {
                 let session = source.split("/init/").nth(1)?.split('/').next()?.to_owned();
                 match s.init_records.get(&session) {
-                    Some(hash) => ok(json!({ "message": { "Init": { "OIGuardianInfo": { "mode": { "Withdraw": { "config_hash": hash } } } } } }).to_string()),
+                    Some(record) => ok(json!({ "message": { "Init": { "OIGuardianInfo": record } } }).to_string()),
                     None => fail(),
                 }
             }
+            ["git", "-C", _, "rev-parse", "--verify", "--quiet", rev] => {
+                let rev = rev.strip_suffix("^{commit}")?;
+                match s.local_commits.iter().find(|commit| !rev.is_empty() && commit.starts_with(rev)) {
+                    Some(commit) => ok(format!("{commit}\n")),
+                    None => fail(),
+                }
+            }
+            ["git", "-C", _, "diff", "--name-only", _, _, "--", ..] => ok(s.format_changes.join("\n")),
             ["aws", "ssm", "send-command", .., "--parameters", parameters] => {
                 let instance = w[w.iter().position(|word| *word == "--instance-ids")? + 1];
                 let script = parameters.to_owned();
@@ -455,16 +490,46 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
     })
 }
 
-/// Has the key provisioners provision `slot`'s guardian with the serving guardian's key and configuration.
+/// Has the key provisioners provision `slot`'s guardian with the serving guardian's key and configuration. On another
+/// build, that configuration also allowlists the serving one, so its hash differs.
 pub fn provision(state: &Rc<RefCell<State>>, slot: Slot) {
     let mut s = state.borrow_mut();
+    let own = s.build(slot);
+    let other = s.build(slot.other());
+    let (hash, builds) = if own == other {
+        ("cf".repeat(32), vec![own])
+    } else {
+        ("c2".repeat(32), vec![own, other])
+    };
     let id = s.deployed[&slot.to_string()].clone();
     let host = s.hosts.get_mut(&id).unwrap();
     host.session.btc = Some(BTC.to_owned());
-    host.session.config_hash = Some("cf".repeat(32));
+    host.session.config_hash = Some(hash.clone());
     host.session.lifecycle = "withdraw/PROVISIONER_INITIALIZED".to_owned();
     let session = host.session.key[..16].to_owned();
-    s.init_records.insert(session, "cf".repeat(32));
+    s.init_records.insert(session, init_record(&hash, &builds));
+}
+
+/// A withdraw session's operator-init record, allowlisting `builds` with the first as its own.
+fn init_record(config_hash: &str, builds: &[(String, String)]) -> Value {
+    let build = |(commit, pcr0): &(String, String)| json!({ "git_revision": commit, "pcr0": pcr0 });
+    json!({
+        "deployment": {
+            "bucket_info": { "name": "guardian-bucket", "region": "us-west-2" },
+            "retention_environment": "testnet",
+            "bitcoin_network": "signet",
+            "pcr_allowlist": {
+                "current_build": build(&builds[0]),
+                "prev_builds": builds[1..].iter().map(build).collect::<Vec<_>>(),
+            },
+        },
+        "mode": {
+            "Withdraw": {
+                "config_hash": config_hash,
+                "limiter_config": { "refill_rate": 11574, "max_bucket_capacity": 1000000000 },
+            },
+        },
+    })
 }
 
 /// The env file a rotation runs with, with its roster and the two stacks' Pulumi programs under `repo`.

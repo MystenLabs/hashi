@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::Ctx;
 use crate::ask::NOTHING_CHANGED;
 use crate::ask::confirm;
+use crate::commit::resolve;
 use crate::exec::Cmd;
 use crate::exec::read;
 use crate::guardian::proxy_health;
@@ -63,17 +64,8 @@ pub fn update_proxy(ctx: &Ctx, stack: &Stack, tree: &crate::commit::Tree) -> Res
         bail!("No guardian proxy Pulumi program at {dir}.");
     }
     require_pulumi_version(ctx, &dir, stack)?;
-    let config = |key: &str| {
-        read(
-            ctx.exec,
-            &pulumi(&dir).args(["config", "get", key, "--stack", &stack.name]),
-        )
-        .map(|value| value.trim().to_owned())
-    };
-    let configured = config("hashi-guardian-proxy:proxy-image-tag")
-        .with_context(|| format!("Stack {} in {dir} has no proxy-image-tag.", stack.name))?;
-    let region = config("hashi-guardian-proxy:aws-region")
-        .with_context(|| format!("Stack {} in {dir} has no aws-region.", stack.name))?;
+    let configured = config(ctx, &dir, stack, "proxy-image-tag")?;
+    let region = config(ctx, &dir, stack, "aws-region")?;
     // The plan below comes from Pulumi's state, not a refresh, since a refresh would also act on drift elsewhere in
     // the stack, such as DNS records someone else manages. So read the service from ECS, which also rolls a failed
     // deployment back by itself.
@@ -162,6 +154,35 @@ pub fn update_proxy(ctx: &Ctx, stack: &Stack, tree: &crate::commit::Tree) -> Res
     proxy_health(ctx)
         .with_context(|| format!("The proxy updated but {url}/health does not answer."))?;
     Ok(())
+}
+
+/// The commit the proxy stack's image is built from: its tag is the commit, then any features.
+pub fn image_commit(ctx: &Ctx, stack: &Stack) -> Result<String> {
+    let dir = proxy_dir(stack);
+    if !Path::new(&dir).is_dir() {
+        bail!("No guardian proxy Pulumi program at {dir}.");
+    }
+    let tag = config(ctx, &dir, stack, "proxy-image-tag")?;
+    resolve(ctx, tag.split('-').next().unwrap_or_default())?.ok_or_else(|| {
+        anyhow!(
+            "The proxy's image tag {tag} names no commit this checkout has, so nothing can check that the proxy decodes the standby's build. Fetch it first."
+        )
+    })
+}
+
+fn config(ctx: &Ctx, dir: &str, stack: &Stack, key: &str) -> Result<String> {
+    read(
+        ctx.exec,
+        &pulumi(dir).args([
+            "config",
+            "get",
+            &format!("hashi-guardian-proxy:{key}"),
+            "--stack",
+            &stack.name,
+        ]),
+    )
+    .map(|value| value.trim().to_owned())
+    .with_context(|| format!("Stack {} in {dir} has no {key}.", stack.name))
 }
 
 /// Following the guardian slots changes only the task's guardian URLs, which replaces its definition and points the

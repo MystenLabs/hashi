@@ -5,7 +5,8 @@
 //! the certificates they list. Both name everything the operator and the key provisioners must agree on, with the
 //! endpoint each reaches the guardian by.
 //!
-//! The layout is guardian.sh's, byte for byte, so files rendered by either stay fresh for the other.
+//! The layout is guardian.sh's, byte for byte, so files rendered by either stay fresh for the other. guardian.sh lists
+//! no earlier build, so only this tool renders a rotation onto another build.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -19,6 +20,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 
 use crate::Ctx;
+use crate::commit::require_same_formats;
 use crate::stack::SlotView;
 use crate::stack::Stack;
 use crate::stack::is_hex;
@@ -39,6 +41,7 @@ pub struct Settings {
     pub bitcoin_network: String,
     pub commit: String,
     pub pcr0: String,
+    pub prev_builds: Vec<Build>,
     pub sui_rpc: String,
     pub package_id: String,
     pub object_id: String,
@@ -72,20 +75,7 @@ impl Settings {
         };
         let refill_rate = sats("refill-rate-sats-per-sec")?;
         let max_bucket_capacity = sats("max-bucket-capacity-sats")?;
-        // Every reader must allowlist each build that wrote the log, and this configuration lists one.
-        let other = view.slot.other();
-        if stack.slots()?.contains(&other) {
-            let suffix = other.suffix();
-            if stack.config(&format!("hashi-commit{suffix}")) != Some(&view.commit)
-                || stack.config(&format!("eif-pcr0{suffix}")) != Some(pcr0)
-            {
-                bail!(
-                    "Slots a and b of stack {} have different builds. Both write one log bucket, so give slot {} the same hashi-commit and eif-pcr0 as slot {other}.",
-                    stack.name,
-                    view.slot
-                );
-            }
-        }
+        let prev_builds = prev_builds(ctx, stack, view, pcr0)?;
         // The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
         let access_key = stack
             .output_value(ctx, "s3_access_key_id", false)
@@ -103,6 +93,7 @@ impl Settings {
             bitcoin_network: env.require("BITCOIN_NETWORK")?.to_owned(),
             commit: view.commit.clone(),
             pcr0: pcr0.to_owned(),
+            prev_builds,
             sui_rpc: env.require("SUI_RPC")?.to_owned(),
             package_id: env.require("HASHI_PACKAGE_ID")?.to_owned(),
             object_id: env.require("HASHI_OBJECT_ID")?.to_owned(),
@@ -112,6 +103,57 @@ impl Settings {
             secret_key,
         })
     }
+}
+
+/// A build the configurations allowlist besides the slot's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Build {
+    pub commit: String,
+    pub pcr0: String,
+}
+
+/// The other slot's build, unless it is the slot's own. Every reader must allowlist each build that wrote the log, so it
+/// counts for as long as the stack keeps its keys, after that slot's teardown too.
+pub fn prev_builds(ctx: &Ctx, stack: &Stack, view: &SlotView, pcr0: &str) -> Result<Vec<Build>> {
+    let other = view.slot.other();
+    let suffix = other.suffix();
+    let Some(commit) = stack.config(&format!("hashi-commit{suffix}")) else {
+        return Ok(Vec::new());
+    };
+    let other_pcr0 = stack.config(&format!("eif-pcr0{suffix}")).unwrap_or("");
+    let shown = if other_pcr0.is_empty() {
+        "unset"
+    } else {
+        other_pcr0
+    };
+    if commit == view.commit {
+        if other_pcr0 != pcr0 {
+            bail!(
+                "Slots a and b of stack {} both build {commit}, but eif-pcr0{suffix} is {shown} and {} is {pcr0}. One commit has one measurement: give both the same.",
+                stack.name,
+                view.pcr0_key
+            );
+        }
+        return Ok(Vec::new());
+    }
+    if !is_hex(commit, 40) {
+        bail!(
+            "Stack {}'s hashi-commit{suffix} is not a full commit: {commit}",
+            stack.name
+        );
+    }
+    if !is_hex(other_pcr0, 96) {
+        bail!(
+            "Stack {}'s eif-pcr0{suffix} is not a PCR0 measurement: {shown}. Slot {}'s configurations list slot {other}'s build {commit}, which needs its measurement.",
+            stack.name,
+            view.slot
+        );
+    }
+    require_same_formats(ctx, &view.commit, commit, &format!("slot {other}'s build"))?;
+    Ok(vec![Build {
+        commit: commit.to_owned(),
+        pcr0: other_pcr0.to_owned(),
+    }])
 }
 
 /// A verified roster, as `download-kp-pubkeys.sh` wrote it: one directory per key provisioner.
@@ -416,14 +458,24 @@ fn config(settings: &Settings, endpoint: &str, roster: &Roster, new: Option<&Ros
         "    current_build:".to_owned(),
         format!("      git_revision: {}", quote(&s.commit)),
         format!("      pcr0: {}", quote(&s.pcr0)),
-        "    prev_builds: []".to_owned(),
+    ];
+    if s.prev_builds.is_empty() {
+        lines.push("    prev_builds: []".to_owned());
+    } else {
+        lines.push("    prev_builds:".to_owned());
+        for build in &s.prev_builds {
+            lines.push(format!("      - git_revision: {}", quote(&build.commit)));
+            lines.push(format!("        pcr0: {}", quote(&build.pcr0)));
+        }
+    }
+    lines.extend([
         String::new(),
         "hashi:".to_owned(),
         format!("  sui_rpc: {}", quote(&s.sui_rpc)),
         format!("  package_id: {}", quote(&s.package_id)),
         format!("  hashi_object_id: {}", quote(&s.object_id)),
         String::new(),
-    ];
+    ]);
     lines.extend(roster_lines("kp_roster", roster));
     if let Some(new) = new {
         lines.push(String::new());
@@ -461,7 +513,12 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 pub mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
+    use crate::stack::Slot;
+    use crate::world;
 
     pub fn settings() -> Settings {
         Settings {
@@ -473,6 +530,7 @@ pub mod tests {
             bitcoin_network: "signet".to_owned(),
             commit: "0873917ea0000000000000000000000000000000".to_owned(),
             pcr0: "0c".repeat(48),
+            prev_builds: Vec::new(),
             sui_rpc: "https://fullnode.testnet.sui.io:443".to_owned(),
             package_id: format!("0x{}1", "0".repeat(63)),
             object_id: format!("0x{}2", "0".repeat(63)),
@@ -540,6 +598,115 @@ pub mod tests {
         let rendered = Rendered::new(&settings(), &dealt, None).unwrap();
         let operator = String::from_utf8(rendered.file("operator.yaml").unwrap().to_vec()).unwrap();
         assert!(operator.ends_with(&golden("credentials.yaml")));
+    }
+
+    #[test]
+    fn lists_earlier_builds_under_the_current_one() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dealt = Roster::load(
+            &roster_dir(&scratch.path().join("dealt"), &["alice", "bob"], "v1"),
+            2,
+        )
+        .unwrap();
+        let mut s = settings();
+        s.prev_builds = vec![Build {
+            commit: "1".repeat(40),
+            pcr0: "0d".repeat(48),
+        }];
+        let text = config(&s, &s.proxy_url, &dealt, None);
+        assert!(text.contains(&format!(
+            "      pcr0: \"{}\"\n    prev_builds:\n      - git_revision: \"{}\"\n        pcr0: \"{}\"\n\nhashi:\n",
+            "0c".repeat(48),
+            "1".repeat(40),
+            "0d".repeat(48)
+        )));
+    }
+
+    /// Slot `slot`'s settings, read from `state`'s stack.
+    fn read_settings(state: &Rc<RefCell<world::State>>, slot: Slot) -> Result<Settings> {
+        let repo = tempfile::tempdir().unwrap();
+        let exec = world::exec(state);
+        let env = world::env(repo.path());
+        let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let ctx = Ctx::for_test(repo.path(), &exec, &pairs);
+        let stack = Stack::load(&ctx)?;
+        let view = stack.slot(&ctx, slot)?;
+        Settings::read(&ctx, &stack, &view)
+    }
+
+    fn set_config(state: &Rc<RefCell<world::State>>, key: &str, value: &str) {
+        state
+            .borrow_mut()
+            .config
+            .insert(key.to_owned(), value.to_owned());
+    }
+
+    #[test]
+    fn allowlists_the_other_slots_build_while_its_keys_stay() {
+        let state = world::serving_world();
+        assert!(
+            read_settings(&state, Slot::B)
+                .unwrap()
+                .prev_builds
+                .is_empty()
+        );
+        let set = |key: &str, value: &str| set_config(&state, key, value);
+        set("hashi-commit-b", world::NEXT);
+        set("eif-pcr0-b", &"0d".repeat(48));
+        let served = Build {
+            commit: world::COMMIT.to_owned(),
+            pcr0: "0c".repeat(48),
+        };
+        assert_eq!(
+            read_settings(&state, Slot::B).unwrap().prev_builds,
+            [served]
+        );
+        // A retired slot's build wrote the log too.
+        set("slot-b-enabled", "false");
+        assert_eq!(
+            read_settings(&state, Slot::A).unwrap().prev_builds,
+            [Build {
+                commit: world::NEXT.to_owned(),
+                pcr0: "0d".repeat(48),
+            }]
+        );
+    }
+
+    #[test]
+    fn refuses_another_build_it_cannot_allowlist() {
+        let state = world::serving_world();
+        let set = |key: &str, value: &str| set_config(&state, key, value);
+        set("hashi-commit-b", world::NEXT);
+        set("eif-pcr0-b", &"0d".repeat(48));
+        set("eif-pcr0", "");
+        let error = |slot| read_settings(&state, slot).err().unwrap().to_string();
+        assert!(error(Slot::B).starts_with(
+            "Stack mysten/testnet's eif-pcr0 is not a PCR0 measurement: unset. Slot b's configurations list slot a's build"
+        ));
+        set("eif-pcr0", "0c");
+        assert!(
+            error(Slot::B)
+                .starts_with("Stack mysten/testnet's eif-pcr0 is not a PCR0 measurement: 0c.")
+        );
+        set("eif-pcr0", &"0c".repeat(48));
+        state.borrow_mut().format_changes =
+            vec!["crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto".to_owned()];
+        assert_eq!(
+            error(Slot::B),
+            format!(
+                "{} changes the guardian's protos or log records from slot a's build, {}: crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto. A rotation cannot move the key across that without a compatibility review.",
+                world::NEXT,
+                world::COMMIT
+            )
+        );
+        state.borrow_mut().format_changes.clear();
+        state
+            .borrow_mut()
+            .local_commits
+            .retain(|commit| commit != world::COMMIT);
+        assert!(
+            error(Slot::B).starts_with(&format!("This checkout does not have {}", world::COMMIT))
+        );
     }
 
     #[test]
