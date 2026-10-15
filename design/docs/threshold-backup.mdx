@@ -9,12 +9,11 @@ keywords:
   - Shamir
   - YubiKey
   - OpenPGP
-draft: true
 ---
 
 # Threshold node backups
 
-Status: **draft**. Implementation in progress on `naulty/threshold-backup`.
+Status: **in review** ([#1453](https://github.com/MystenLabs/hashi/pull/1453)).
 
 ## Motivation
 
@@ -200,7 +199,7 @@ inside the restore process.
 
 ## Implementation plan
 
-Steps 1–3 are implemented on this branch.
+Steps 1–3 and 5 are implemented on this branch.
 
 1. `hashi-types`: password-based OpenPGP encrypt and decrypt helpers, and a
    `threshold_backup` module with the header format, seal and open, holder

@@ -9,6 +9,7 @@ keywords:
   - PGP
   - YubiKey
   - encryption
+  - threshold
 goal:
   description: >-
     Reader can create PGP backup keys (including YubiKey), configure automatic
@@ -245,15 +246,80 @@ files.
 
 6. Save the revocation, public key, and private key files in a secure location.
 
+### Option 3: Threshold backups across several YubiKey holders
+
+Options 1 and 2 let one key decrypt every backup, so that key is both a single
+point of failure (lose it and the backups are unreadable) and a single point of
+compromise. A threshold backup removes both: each backup can be decrypted only
+when any `t` of `n` holders cooperate, and fewer than `t` learn nothing.
+
+For each backup, the node draws a fresh secret, splits it into `n` shares,
+encrypts one share to each holder's certificate, and encrypts the archive with a
+passphrase derived from the secret. The node keeps none of this, so it can never
+decrypt its own backups. Restoring takes `t` holders, each decrypting their own
+share on their own YubiKey; see
+[Restoring a threshold backup](#restoring-a-threshold-backup). The full design is
+in [Threshold Node Backups](threshold-backup.mdx).
+
+To set it up:
+
+1. Choose `n` holders and a threshold `t` of at least 2, for example 3 of 5.
+   Restoring needs `t` of them at the same time, so spread holders across teams
+   and time zones, and keep `t` low enough to reach quickly in an outage. Up to
+   `n - t` holders can be lost without losing backups.
+2. Each holder sets up their own new YubiKey with
+   [Option 1](#option-1-create-a-private-key-on-a-yubikey-recommended), using a
+   role user ID such as `Hashi backup holder 1 <hashi-backup-holder-1@example.com>`.
+   Do not reuse a YubiKey that already holds a key for another purpose (such as
+   guardian key provisioning): its decryption slot is already in use.
+3. Each holder keeps their YubiKey and PINs themselves. Do not collect every
+   holder's PINs in one place; anyone with those PINs and `t` YubiKeys could
+   decrypt every backup.
+4. Each holder sends the operator their public key file and its primary
+   fingerprint (`gpg --show-keys --with-colons <file> | grep '^fpr' | head -1`).
+   The operator lists the certificates in the node config, as shown below.
+
+One holder set can cover several nodes, since no single holder can decrypt
+anything alone.
+
 ## Configuring hashi
 
-Every node config must provide `backup-pgp-cert` (a certificate file path or inline
-armored text) and `backup-dir`:
+Every node config must provide `backup-dir` and exactly one of `backup-pgp-cert` or
+`[backup-threshold]`.
+
+For a single key (Options 1 and 2), set `backup-pgp-cert` to a certificate file
+path or inline armored text:
 
 ```toml
 backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 backup-dir = "/var/lib/hashi/backups"
 ```
+
+For a threshold backup (Option 3), list each holder's certificate, as a file path
+or inline armored text, and the number of holders needed to restore:
+
+```toml
+backup-dir = "/var/lib/hashi/backups"
+
+[backup-threshold]
+threshold = 3
+certs = [
+  "/etc/hashi/backup-holders/holder-1.asc",
+  "/etc/hashi/backup-holders/holder-2.asc",
+  "/etc/hashi/backup-holders/holder-3.asc",
+  "/etc/hashi/backup-holders/holder-4.asc",
+  "/etc/hashi/backup-holders/holder-5.asc",
+]
+```
+
+The node refuses to start unless `threshold` is at least 2 and no more than the
+number of certificates, every certificate has a usable encryption key, and no
+certificate or encryption key appears twice.
+
+Changing the holders or the threshold affects new backups only. Backups already
+written still need their original holders until they expire, so keep a departing
+holder available until then, or accept that those backups need the remaining
+holders. If a holder's YubiKey may be compromised, remove them right away.
 
 Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
@@ -290,6 +356,68 @@ Operators must remove these plaintext copies when no longer needed.
 choose. It installs nothing. The full procedure, from choosing a backup to
 restarting the node, is in the
 [operator runbook](node-operator-runbook.mdx#102-restoring-a-node).
+
+### Restoring a threshold backup
+
+A threshold backup is restored in three steps. Plaintext shares never leave a
+holder's machine or the restore process, and every file that moves between
+people is safe to send over chat or email.
+
+1. **The restore operator creates a request.** On the restore host, with a local
+   copy of the archive:
+
+   ```bash
+   umask 077
+   hashi backup share-request /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+     --session-dir /var/lib/hashi/restore-session \
+     --output share-request.json
+   ```
+
+   This creates a one-time session key in `--session-dir`, writes the request,
+   and prints the backup's **header digest**, the **session public key**, and the
+   fingerprint each share is encrypted to. Post the request, digest, and session
+   key in the incident ticket.
+
+2. **Each holder answers it.** At least `threshold` holders, each on their own
+   machine with their YubiKey plugged in:
+
+   ```bash
+   hashi backup share-decrypt share-request.json \
+     --recipient <your-primary-fingerprint> \
+     --output share-response-<name>.json
+   ```
+
+   The command prints the header digest and session key first. **Check that both
+   match what the restore operator posted in the ticket before you continue.**
+   Anyone with read access to the backups can build a real-looking request for a
+   real backup, and the request itself cannot prove who made it. Then enter your
+   User PIN and touch the YubiKey. The command checks your share against the
+   backup and encrypts it to the restore session; send the response file back.
+   Use `--gpg-homedir` if your key is not in the default GnuPG home.
+
+3. **The restore operator restores.** With at least `threshold` responses:
+
+   ```bash
+   hashi backup restore /var/lib/hashi/backups/hashi-backup-<timestamp>.tar.asc \
+     --session-dir /var/lib/hashi/restore-session \
+     --share-response share-response-alice.json \
+     --share-response share-response-bob.json \
+     --share-response share-response-carol.json \
+     --output-dir /var/lib/hashi/restore
+   ```
+
+   Restore rejects responses made for another backup or another session, and any
+   share that does not match the backup. When it finishes, delete the session
+   directory.
+
+`share-request` needs a local copy of the archive. For a backup in S3, download
+the exact object version first, for example
+`aws s3api get-object --bucket <bucket> --key <key> --version-id <version-id> hashi-backup-<timestamp>.tar.asc`,
+then create the request from that copy and restore from the same copy.
+
+If someone sends you a share request you did not expect, do not answer it.
+Report it to your security team: it means someone may have access to your
+backups.
 
 ## Cloud backup
 
@@ -350,7 +478,7 @@ hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
 
 This saves locally, then uploads if configured. Add `--local-only` to skip S3.
 Upload failure returns a nonzero exit status while preserving the local archive.
-With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate. A `--backup-pgp-cert` override on a node configured with `[backup-threshold]` always requires `--local-only`.
 
 ### Restore and infrastructure limits
 
@@ -368,7 +496,8 @@ literal object keys, not URL-decoded paths. Recovery credentials need
 inspecting version history also requires `s3:ListBucketVersions`.
 
 S3 restore accepts only encrypted `.tar.asc` archives. Choose
-`--backup-pgp-secret-key` or `--use-gpg-agent` (with optional `--gpg-homedir`).
+`--backup-pgp-secret-key`, `--use-gpg-agent` (with optional `--gpg-homedir`), or,
+for threshold backups, `--session-dir` with `--share-response`.
 Local restores also accept plaintext `.tar` archives, which need neither decryptor.
 `--region` is required for S3; it and `--version-id` are invalid for local restores.
 
