@@ -304,8 +304,8 @@ with write access restricted to the node's user.
 Automatic backup maintenance deletes archives older than 14 days by filename
 timestamp, but preserves the newest current-epoch MPC recovery archive until a
 newer one is successfully saved or its epoch ends. Ordinary backups cannot replace
-that recovery copy. The newest ordinary archive is kept while saves are attempted,
-or up to 30 days otherwise.
+that recovery copy. The newest archive of any kind is kept while saves are attempted,
+or up to 30 days otherwise; older unprotected archives expire after 14 days.
 A powered-off node sweeps nothing; remove decommissioned hosts' archives yourself.
 
 Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`

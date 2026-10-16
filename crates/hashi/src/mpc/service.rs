@@ -223,11 +223,6 @@ impl MpcService {
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
         let pending = self.get_pending_epoch_change();
-        // Pending rotation reconstructs the active epoch's output with the right
-        // predecessor context and seeds its backup before continuing the protocol.
-        if pending.is_none() {
-            self.seed_recovery_backup().await;
-        }
         if let Some(epoch) = pending {
             self.drive_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
@@ -425,38 +420,6 @@ impl MpcService {
         };
         self.backup_handle
             .maintain_backups_after_epoch_change(target_epoch, action);
-    }
-
-    async fn seed_recovery_backup(&self) {
-        if !self.inner.is_in_current_committee() || self.is_awaiting_genesis() {
-            return;
-        }
-        let epoch = self.inner.onchain_state().epoch();
-        {
-            let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
-            if *recovery_backup_epoch == Some(epoch) {
-                return;
-            }
-            match self.capture_recovery_backup(epoch) {
-                Ok(Some(recovery)) => {
-                    self.backup_handle.maintain_backups_after_epoch_change(
-                        epoch,
-                        crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
-                    );
-                    *recovery_backup_epoch = Some(epoch);
-                    return;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    warn!("Unable to capture current MPC recovery backup: {error:#}");
-                    return;
-                }
-            }
-        }
-        match self.recover_mpc_state().await {
-            Ok((epoch, _)) => self.backup_recovered_epoch(epoch),
-            Err(error) => warn!("Unable to seed current MPC recovery backup: {error:#}"),
-        }
     }
 
     fn capture_recovery_backup(

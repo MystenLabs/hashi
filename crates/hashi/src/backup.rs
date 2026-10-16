@@ -891,17 +891,8 @@ pub(crate) fn cleanup_old_backups(
         newest_archive = Some(
             newest_archive.map_or(created_at, |latest: jiff::Timestamp| latest.max(created_at)),
         );
-        if let BackupKind::Mpc(epoch) = kind
-            && Some(epoch) != current_epoch
-        {
-            // Historical recovery material has no last-archive exception.
-            if created_at < cutoff {
-                remove_expired_backup(&mut stats, &path);
-            }
-            continue;
-        }
         let candidate = (created_at, path);
-        let newest = if matches!(kind, BackupKind::Mpc(_)) {
+        let newest = if matches!(kind, BackupKind::Mpc(epoch) if Some(epoch) == current_epoch) {
             &mut newest_mpc
         } else {
             &mut newest
@@ -919,8 +910,8 @@ pub(crate) fn cleanup_old_backups(
         }
         remove_expired_backup(&mut stats, &path);
     }
-    // Ordinary or pending-epoch archives cannot displace the last current-epoch
-    // MPC archive. Historical MPC archives always follow normal retention.
+    // Protect the newest current-epoch MPC archive independently. All other
+    // archives share the global newest-archive floor, regardless of their kind.
     if let Some((created_at, path)) = newest.as_ref()
         && newest_archive.is_some_and(|latest| latest > *created_at)
         && *created_at < cutoff
@@ -1892,7 +1883,38 @@ mod tests {
     }
 
     #[test]
-    fn retention_expires_historical_mpc_even_when_it_is_the_only_archive() {
+    fn retention_keeps_newest_historical_mpc_until_the_last_archive_floor() {
+        for current_epoch in [Some(43), None] {
+            for save_may_follow in [false, true] {
+                for (now, within_floor) in [
+                    ("2026-01-16T00:00:00Z", true),
+                    ("2026-01-31T00:00:00Z", true),
+                    ("2026-01-31T00:00:01Z", false),
+                ] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let hash = backup_recipient_hash(&mock_pgp_cert());
+                    let archive = directory.path().join(format!(
+                        "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+                    ));
+                    fs::write(&archive, b"historical recovery").unwrap();
+                    let stats = cleanup_old_backups(
+                        directory.path(),
+                        now.parse().unwrap(),
+                        save_may_follow,
+                        current_epoch,
+                    )
+                    .unwrap();
+                    let retained = save_may_follow || within_floor;
+                    assert_eq!(archive.exists(), retained);
+                    assert_eq!(stats.removed, usize::from(!retained));
+                    assert_eq!(stats.failed, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retention_expires_older_historical_mpc_only_after_fourteen_days() {
         for current_epoch in [Some(43), None] {
             for save_may_follow in [false, true] {
                 let directory = tempfile::tempdir().unwrap();
@@ -1900,16 +1922,62 @@ mod tests {
                 let archive = directory.path().join(format!(
                     "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
                 ));
+                let newer = directory
+                    .path()
+                    .join("hashi-backup-epoch-43-20260102T000000Z.tar.asc");
                 fs::write(&archive, b"historical recovery").unwrap();
+                fs::write(&newer, b"newer archive").unwrap();
                 cleanup_old_backups(
                     directory.path(),
-                    "2026-01-16T00:00:00Z".parse().unwrap(),
+                    "2026-01-15T00:00:00Z".parse().unwrap(),
+                    save_may_follow,
+                    current_epoch,
+                )
+                .unwrap();
+                assert!(archive.exists());
+                let stats = cleanup_old_backups(
+                    directory.path(),
+                    "2026-01-15T00:00:01Z".parse().unwrap(),
                     save_may_follow,
                     current_epoch,
                 )
                 .unwrap();
                 assert!(!archive.exists());
+                assert!(newer.exists());
+                assert_eq!(stats.removed, 1);
+                assert_eq!(stats.failed, 0);
             }
+        }
+    }
+
+    #[test]
+    fn retention_preserves_newest_historical_mpc_when_saves_fail() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let root = &service.inner.config.backup_dir;
+        fs::create_dir(root).unwrap();
+        let recipient = &service.inner.config.backup_pgp_cert;
+        let hash = backup_recipient_hash(recipient);
+        let archive = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20000101T000000Z.tar.asc"
+        ));
+        fs::write(&archive, b"historical recovery").unwrap();
+        let config_path = service.inner.config_path.as_ref().unwrap();
+        fs::remove_file(config_path).unwrap();
+        for _ in 0..2 {
+            cleanup_old_backups(root, jiff::Timestamp::now(), true, Some(43)).unwrap();
+            assert!(
+                save(
+                    config_path,
+                    &service.inner.config,
+                    service.inner.db.as_ref(),
+                    recipient,
+                    root,
+                    Some(43),
+                    None,
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&archive).unwrap(), b"historical recovery");
         }
     }
 
