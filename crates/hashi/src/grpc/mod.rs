@@ -26,6 +26,7 @@ pub(crate) mod route_limits;
 pub use client::BoxedChannel;
 pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
+pub(crate) use client::SIGNATURE_REPLY_LIMIT;
 pub(crate) use peer_limit::guard_blocking_mpc_work;
 
 pub mod bridge_service;

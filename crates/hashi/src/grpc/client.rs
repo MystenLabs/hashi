@@ -39,6 +39,9 @@ const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 /// read by metrics middleware to label per-protocol traffic.
 pub const MPC_PROTOCOL_METADATA_KEY: &str = "x-hashi-mpc-protocol";
 
+/// Decode limit for an MPC reply carrying one BLS signature.
+pub(crate) const SIGNATURE_REPLY_LIMIT: usize = 4 * 1024;
+
 #[derive(Clone)]
 pub struct Client {
     uri: http::Uri,
@@ -173,6 +176,8 @@ impl Client {
     pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Option<Vec<u8>>> {
         let request = GetReconfigCompletionSignatureRequest { epoch: Some(epoch) };
         let response = self
+            .clone()
+            .tighten_max_decoding_message_size(SIGNATURE_REPLY_LIMIT)
             .mpc_service_client()
             .get_reconfig_completion_signature(request)
             .await?;
@@ -189,6 +194,8 @@ impl Client {
             batch_index: Some(batch_index),
         };
         let response = self
+            .clone()
+            .tighten_max_decoding_message_size(SIGNATURE_REPLY_LIMIT)
             .mpc_service_client()
             .get_presig_dealer_set_signature(request)
             .await?;
