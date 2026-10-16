@@ -1,11 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Collecting the key provisioners' public keys from their upload bucket: `download-kp-pubkeys`.
+//! The key provisioners' upload bucket: `create-kp-upload-bucket`, collecting their public keys with
+//! `download-kp-pubkeys`, and `revoke-kp-upload-key` once they no longer need it.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -13,20 +16,348 @@ use anyhow::bail;
 use serde::Deserialize;
 
 use crate::Ctx;
+use crate::ask::Unchanged;
+use crate::ask::confirm;
 use crate::commit::GuardianInit;
 use crate::commit::Tree;
 use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
 use crate::kp_bucket::CONFIG_PREFIX;
+use crate::kp_bucket::IAM_PATH;
 use crate::kp_bucket::KpBucket;
+use crate::kp_bucket::REGION;
 use crate::kp_bucket::ROTATION_PREFIX;
 use crate::kp_bucket::format_fingerprint;
+use crate::kp_bucket::group_by_four;
 use crate::kp_bucket::identity;
+use crate::kp_bucket::upload_policy;
 use crate::say;
 use crate::stack::Stack;
 
 const ROSTER: &str = "roster.txt";
+const REVOKE: &str = "the revoke-kp-upload-key step";
+
+/// Creates the upload bucket and an access key that can only upload into it, and tests the key with a real upload.
+pub fn create_kp_upload_bucket(ctx: &Ctx) -> Result<()> {
+    let kp = KpBucket::from_env(ctx)?;
+    if !ctx.ask.interactive() {
+        bail!("This setup is interactive and must run in a terminal.");
+    }
+    let (bucket, user) = (&kp.bucket, &kp.iam_user);
+    say("Key provisioner upload bucket setup");
+    println!("This step creates, in {REGION}:");
+    println!("  S3 bucket s3://{bucket}, versioned, with public access blocked");
+    println!(
+        "  IAM user {IAM_PATH}{user}, allowed only s3:PutObject into that bucket, outside {CONFIG_PREFIX}/"
+    );
+    println!("  one access key for that user, tested with a real upload");
+    println!(
+        "Key provisioners enter the bucket and access key into key-provisioner/scripts/upload-pubkey.sh."
+    );
+
+    say("Check the AWS account");
+    let (account, arn) = identity(ctx)?;
+    println!("AWS account:  {account}\nAWS identity: {arn}");
+    let existing = ctx.exec.output(
+        &Cmd::new("aws")
+            .args(["iam", "get-user", "--user-name", user])
+            .capture_stderr(),
+    )?;
+    if existing.success {
+        bail!("IAM user {user} already exists. Choose another name, or revoke it with {REVOKE}.");
+    }
+    if !existing.stderr.contains("(NoSuchEntity)") {
+        bail!(
+            "Could not check IAM user {user}: {}",
+            existing.stderr.trim()
+        );
+    }
+    confirm(
+        ctx.ask,
+        &format!("Create these resources in AWS account {account}?"),
+        &Unchanged {
+            no_input: "No input received; nothing was created.",
+            declined: "Creation not confirmed; nothing was created.",
+        },
+    )?;
+
+    say("Create the bucket");
+    let aws = |args: &[&str]| Cmd::new("aws").args(args);
+    let delete_bucket = format!("Delete the empty bucket with: aws s3 rb s3://{bucket}");
+    read(
+        ctx.exec,
+        &aws(&[
+            "s3api",
+            "create-bucket",
+            "--bucket",
+            bucket,
+            "--region",
+            REGION,
+        ])
+        .arg("--create-bucket-configuration")
+        .arg(format!("LocationConstraint={REGION}")),
+    )
+    .with_context(|| format!("Could not create s3://{bucket}. Nothing was created."))?;
+    read(
+        ctx.exec,
+        &aws(&["s3api", "put-public-access-block", "--bucket", bucket])
+            .args(["--expected-bucket-owner", &account])
+            .args(["--public-access-block-configuration", "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"]),
+    )
+    .with_context(|| format!("Could not block public access to s3://{bucket}. {delete_bucket}"))?;
+    read(
+        ctx.exec,
+        &aws(&["s3api", "put-bucket-versioning", "--bucket", bucket])
+            .args(["--expected-bucket-owner", &account])
+            .args(["--versioning-configuration", "Status=Enabled"]),
+    )
+    .with_context(|| format!("Could not enable versioning on s3://{bucket}. {delete_bucket}"))?;
+    println!("Created s3://{bucket}.");
+
+    say("Create the upload user and access key");
+    let remove_user = format!(
+        "Remove the user with {REVOKE}, then delete the empty bucket with: aws s3 rb s3://{bucket}"
+    );
+    read(
+        ctx.exec,
+        &aws(&[
+            "iam",
+            "create-user",
+            "--user-name",
+            user,
+            "--path",
+            IAM_PATH,
+        ]),
+    )
+    .with_context(|| format!("Could not create IAM user {user}. {delete_bucket}"))?;
+    read(
+        ctx.exec,
+        &aws(&["iam", "put-user-policy", "--user-name", user])
+            .args(["--policy-name", "put-kp-pubkeys", "--policy-document"])
+            .arg(upload_policy(bucket)),
+    )
+    .with_context(|| format!("Could not add the upload policy to {user}. {remove_user}"))?;
+    let key = read(
+        ctx.exec,
+        &aws(&["iam", "create-access-key", "--user-name", user]).args([
+            "--query",
+            "AccessKey.[AccessKeyId, SecretAccessKey]",
+            "--output",
+            "text",
+        ]),
+    )
+    .with_context(|| format!("Could not create an access key for {user}. {remove_user}"))?;
+    let mut fields = key.split_whitespace();
+    let (Some(access_key_id), Some(secret_access_key)) = (fields.next(), fields.next()) else {
+        bail!("AWS returned no access key for {user}. {remove_user}");
+    };
+    println!("Created IAM user {IAM_PATH}{user} and its access key.");
+
+    // New IAM keys and policies take a few seconds to reach S3, so retry only those errors.
+    say("Test the upload key");
+    println!(
+        "Uploading a test object exactly as upload-pubkey.sh does. This can take up to 2 minutes."
+    );
+    let body = tempfile::NamedTempFile::new()?;
+    std::fs::write(body.path(), "self-test\n")?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let version_id = loop {
+        let output = ctx.exec.output(&upload_test(
+            bucket,
+            access_key_id,
+            secret_access_key,
+            body.path(),
+        ))?;
+        if output.success {
+            break output.stdout.trim().to_owned();
+        }
+        if !propagating(&output.stderr) || Instant::now() >= deadline {
+            eprintln!("{}", output.stderr.trim());
+            bail!(
+                "The new access key could not upload. Remove the user with {REVOKE}, then delete the bucket with: aws s3 rb s3://{bucket}"
+            );
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    };
+    read(
+        ctx.exec,
+        &aws(&["s3api", "delete-object", "--bucket", bucket])
+            .args(["--expected-bucket-owner", &account, "--key", "self-test"])
+            .args(["--version-id", &version_id]),
+    )
+    .with_context(|| {
+        format!("Could not delete version {version_id} of the test object. Delete it before key provisioners upload: aws s3api delete-object --bucket {bucket} --key self-test --version-id {version_id}")
+    })?;
+    println!("The access key can upload.");
+
+    say("Setup complete");
+    println!("Share these values in a code block over a private channel. Spaces are optional.\n");
+    println!("  Bucket:            {bucket}");
+    println!("  Access key ID:     {}", group_by_four(access_key_id));
+    println!("  Secret access key: {}", group_by_four(secret_access_key));
+    println!(
+        "\nUpload bucket created successfully! Once the key provisioners no longer need the key, revoke it with {REVOKE}."
+    );
+    Ok(())
+}
+
+/// An upload with only the new key, never the operator's own AWS configuration, exactly as `upload-pubkey.sh` does.
+fn upload_test(
+    bucket: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    body: &std::path::Path,
+) -> Cmd {
+    [
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+    ]
+    .into_iter()
+    .fold(Cmd::new("aws"), Cmd::env_remove)
+    .env("AWS_CONFIG_FILE", "/dev/null")
+    .env("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+    .env("AWS_ACCESS_KEY_ID", access_key_id)
+    .env("AWS_SECRET_ACCESS_KEY", secret_access_key)
+    .args([
+        "s3api",
+        "put-object",
+        "--region",
+        REGION,
+        "--bucket",
+        bucket,
+    ])
+    .args(["--key", "self-test", "--body"])
+    .arg(body)
+    .args(["--query", "VersionId", "--output", "text"])
+    .capture_stderr()
+}
+
+/// Whether an upload failed only because a new key or policy hasn't reached S3 yet.
+fn propagating(stderr: &str) -> bool {
+    stderr.contains("(InvalidAccessKeyId)") || stderr.contains("(AccessDenied)")
+}
+
+/// Deletes the upload user and its keys, so key provisioners can no longer upload, download the configuration or
+/// read the guardian's log bucket. The bucket and its files stay.
+pub fn revoke_kp_upload_key(ctx: &Ctx) -> Result<()> {
+    let kp = KpBucket::from_env(ctx)?;
+    if !ctx.ask.interactive() {
+        bail!("This step is interactive and must run in a terminal.");
+    }
+    let (bucket, user) = (&kp.bucket, &kp.iam_user);
+    say("Key provisioner upload key revocation");
+    println!("This step deletes IAM user {IAM_PATH}{user} and its access keys,");
+    println!("so key provisioners can no longer upload to s3://{bucket}, download the guardian");
+    println!("configuration from it, or read the guardian's log bucket.");
+    println!("The bucket and its files are kept.");
+
+    say("Check the AWS account");
+    let (account, arn) = identity(ctx)?;
+    println!("AWS account:  {account}\nAWS identity: {arn}");
+    let aws = |args: &[&str]| Cmd::new("aws").args(args);
+    let path = ctx.exec.output(
+        &aws(&["iam", "get-user", "--user-name", user])
+            .args(["--query", "User.Path", "--output", "text"])
+            .capture_stderr(),
+    )?;
+    if !path.success {
+        if path.stderr.contains("(NoSuchEntity)") {
+            println!("\nIAM user {user} does not exist; nothing to revoke.");
+            return Ok(());
+        }
+        bail!("Could not read IAM user {user}: {}", path.stderr.trim());
+    }
+    // The fixed path marks users this tooling created; never delete anything else.
+    let path = path.stdout.trim();
+    if path != IAM_PATH {
+        bail!("IAM user {user} has path {path}, not {IAM_PATH}; refusing to delete it.");
+    }
+    let attached = read(
+        ctx.exec,
+        &aws(&["iam", "list-attached-user-policies", "--user-name", user]).args([
+            "--query",
+            "AttachedPolicies[].PolicyArn",
+            "--output",
+            "text",
+        ]),
+    )
+    .with_context(|| format!("Could not list the policies attached to {user}."))?;
+    if !attached.trim().is_empty() {
+        bail!(
+            "IAM user {user} has attached policies ({}), which this tooling never adds; refusing to delete it.",
+            attached.trim()
+        );
+    }
+    confirm(
+        ctx.ask,
+        &format!("Delete IAM user {user} in AWS account {account}?"),
+        &Unchanged {
+            no_input: "No input received; nothing was deleted.",
+            declined: "Revocation not confirmed; nothing was deleted.",
+        },
+    )?;
+
+    say("Delete the upload key and user");
+    let keys = read(
+        ctx.exec,
+        &aws(&["iam", "list-access-keys", "--user-name", user]).args([
+            "--query",
+            "AccessKeyMetadata[].AccessKeyId",
+            "--output",
+            "text",
+        ]),
+    )
+    .with_context(|| format!("Could not list the access keys of {user}."))?;
+    for key in keys.split_whitespace() {
+        read(
+            ctx.exec,
+            &aws(&[
+                "iam",
+                "delete-access-key",
+                "--user-name",
+                user,
+                "--access-key-id",
+                key,
+            ]),
+        )
+        .with_context(|| format!("Could not delete access key {key}."))?;
+        println!("Deleted access key {key}");
+    }
+    let policies = read(
+        ctx.exec,
+        &aws(&["iam", "list-user-policies", "--user-name", user]).args([
+            "--query",
+            "PolicyNames",
+            "--output",
+            "text",
+        ]),
+    )
+    .with_context(|| format!("Could not list the inline policies of {user}."))?;
+    for policy in policies.split_whitespace() {
+        read(
+            ctx.exec,
+            &aws(&[
+                "iam",
+                "delete-user-policy",
+                "--user-name",
+                user,
+                "--policy-name",
+                policy,
+            ]),
+        )
+        .with_context(|| format!("Could not delete inline policy {policy}."))?;
+    }
+    read(ctx.exec, &aws(&["iam", "delete-user", "--user-name", user]))
+        .with_context(|| format!("Could not delete IAM user {user}."))?;
+    println!("Deleted IAM user {IAM_PATH}{user}");
+
+    say("Revocation complete");
+    println!("Upload key revoked successfully! The uploaded files remain in s3://{bucket}.");
+    Ok(())
+}
 
 const KP_FILE_SUFFIXES: [&str; 5] = [
     "kp-pubkey.asc",
@@ -577,5 +908,151 @@ mod tests {
         assert_eq!(kp_file_owner("zhou/luke-kp-pubkey.asc"), None);
         assert_eq!(kp_file_owner("_x/_x-kp-pubkey.asc"), None);
         assert_eq!(kp_file_owner("zhou-kp-pubkey.asc"), None);
+    }
+
+    fn texts(values: &[std::ffi::OsString]) -> Vec<String> {
+        values
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn tests_the_new_key_with_nothing_but_it() {
+        let cmd = upload_test(
+            "bucket",
+            "test-id",
+            "test-secret",
+            std::path::Path::new("/x"),
+        );
+        let removed = texts(cmd.removed_env());
+        for name in [
+            "AWS_PROFILE",
+            "AWS_DEFAULT_PROFILE",
+            "AWS_SESSION_TOKEN",
+            "AWS_SECURITY_TOKEN",
+        ] {
+            assert!(removed.contains(&name.to_owned()), "{name}");
+        }
+        let set: Vec<(String, String)> = cmd
+            .set_env()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        for (name, value) in [
+            ("AWS_CONFIG_FILE", "/dev/null"),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/dev/null"),
+            ("AWS_ACCESS_KEY_ID", "test-id"),
+            ("AWS_SECRET_ACCESS_KEY", "test-secret"),
+        ] {
+            assert!(set.contains(&(name.to_owned(), value.to_owned())), "{name}");
+        }
+        assert!(propagating(
+            "An error occurred (AccessDenied) when calling the PutObject operation"
+        ));
+        assert!(propagating("An error occurred (InvalidAccessKeyId)"));
+        assert!(!propagating("An error occurred (NoSuchBucket)"));
+    }
+
+    /// An IAM user with this path and these attached policies, and an operator who answers `answers`.
+    fn revoke(
+        path_reply: crate::exec::Output,
+        attached: &'static str,
+        answers: &[&str],
+    ) -> (Result<()>, crate::exec::fake::Fake) {
+        let path_reply = std::cell::RefCell::new(Some(path_reply));
+        let exec = crate::exec::fake::Fake::with_stderr(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            let ok = |stdout: &str| {
+                Some(crate::exec::Output {
+                    success: true,
+                    stdout: stdout.to_owned(),
+                    stderr: String::new(),
+                })
+            };
+            match &w[1..3] {
+                ["sts", "get-caller-identity"] => {
+                    ok("123456789012\tarn:aws:iam::123456789012:user/op\n")
+                }
+                ["iam", "get-user"] => path_reply.borrow_mut().take(),
+                ["iam", "list-attached-user-policies"] => ok(attached),
+                ["iam", "list-access-keys"] => ok("KEY1\tKEY2\n"),
+                ["iam", "list-user-policies"] => ok("put-kp-pubkeys\tread-guardian-config\n"),
+                [
+                    "iam",
+                    "delete-access-key" | "delete-user-policy" | "delete-user",
+                ] => ok(""),
+                _ => None,
+            }
+        });
+        let repo = tempfile::tempdir().unwrap();
+        let ask = crate::ask::scripted::Scripted::new(answers);
+        let result = revoke_kp_upload_key(
+            &Ctx::for_test(repo.path(), &exec, &[("KP_NAME", "testnet")]).with_ask(&ask),
+        );
+        (result, exec)
+    }
+
+    fn reply(success: bool, stdout: &str, stderr: &str) -> crate::exec::Output {
+        crate::exec::Output {
+            success,
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+        }
+    }
+
+    #[test]
+    fn revokes_only_what_this_tooling_created() {
+        let (result, exec) = revoke(
+            reply(false, "", "An error occurred (NoSuchEntity)"),
+            "",
+            &[],
+        );
+        result.unwrap();
+        assert!(!exec.ran(&["aws", "iam", "delete-user"]));
+
+        let (result, _) = revoke(reply(true, "/other/\n", ""), "", &["yes"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "IAM user hashi-kp-pubkeys-testnet-upload has path /other/, not /hashi-kp-pubkeys/; refusing to delete it."
+        );
+        let (result, _) = revoke(reply(true, "/hashi-kp-pubkeys/\n", ""), "arn:x\n", &["yes"]);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("which this tooling never adds")
+        );
+
+        let (result, exec) = revoke(reply(true, "/hashi-kp-pubkeys/\n", ""), "", &["no"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Revocation not confirmed; nothing was deleted."
+        );
+        assert!(!exec.ran(&["aws", "iam", "delete-access-key"]));
+
+        let (result, exec) = revoke(reply(true, "/hashi-kp-pubkeys/\n", ""), "", &["yes"]);
+        result.unwrap();
+        let log = exec.log.borrow();
+        let deletes: Vec<&str> = log
+            .iter()
+            .filter(|words| words[2].starts_with("delete-"))
+            .map(|words| words[2].as_str())
+            .collect();
+        assert_eq!(
+            deletes,
+            [
+                "delete-access-key",
+                "delete-access-key",
+                "delete-user-policy",
+                "delete-user-policy",
+                "delete-user"
+            ]
+        );
     }
 }

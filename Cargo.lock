@@ -3129,6 +3129,7 @@ dependencies = [
  "clap",
  "hex",
  "jiff",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

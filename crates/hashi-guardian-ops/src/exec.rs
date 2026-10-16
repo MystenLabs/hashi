@@ -35,6 +35,7 @@ pub struct Cmd {
     program: OsString,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
+    env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
     capture_stderr: bool,
 }
@@ -45,9 +46,17 @@ impl Cmd {
             program: program.as_ref().to_owned(),
             args: Vec::new(),
             cwd: None,
+            env: Vec::new(),
             env_remove: Vec::new(),
             capture_stderr: false,
         }
+    }
+
+    /// Sets `name` in the command's environment.
+    pub fn env(mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((name.as_ref().to_owned(), value.as_ref().to_owned()));
+        self
     }
 
     /// Captures stderr too, apart from stdout, for a step that reports it itself.
@@ -64,6 +73,10 @@ impl Cmd {
 
     pub fn removed_env(&self) -> &[OsString] {
         &self.env_remove
+    }
+
+    pub fn set_env(&self) -> &[(OsString, OsString)] {
+        &self.env
     }
 
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
@@ -104,6 +117,9 @@ impl Cmd {
         }
         for name in &self.env_remove {
             command.env_remove(name);
+        }
+        for (name, value) in &self.env {
+            command.env(name, value);
         }
         command
     }

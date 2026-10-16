@@ -13,15 +13,18 @@ use crate::Ctx;
 use crate::exec::Cmd;
 use crate::exec::read;
 
+pub const REGION: &str = "us-west-2";
 /// Uploads go under a user ID, which never starts with an underscore.
 pub const CONFIG_PREFIX: &str = "_config";
 /// `key-provisioner rotate-kp-set` uploads under this, then the session it signs for, in builds with hashi #1464.
 pub const ROTATION_PREFIX: &str = "_rotate-kp-set";
+pub const IAM_PATH: &str = "/hashi-kp-pubkeys/";
 
-/// The bucket a key provisioner collection's name implies.
+/// The bucket and upload user a key provisioner collection's name implies.
 pub struct KpBucket {
     pub name: String,
     pub bucket: String,
+    pub iam_user: String,
 }
 
 impl KpBucket {
@@ -41,6 +44,7 @@ impl KpBucket {
         Ok(Self {
             name: name.to_owned(),
             bucket: format!("mysten-hashi-kp-pubkeys-{name}"),
+            iam_user: format!("hashi-kp-pubkeys-{name}-upload"),
         })
     }
 
@@ -82,14 +86,44 @@ pub fn format_fingerprint(fingerprint: &str) -> String {
     format!("{}  {}", first.join(" "), second.join(" "))
 }
 
+/// A digest in groups of four, for a person to compare group by group.
+pub fn group_by_four(value: &str) -> String {
+    (0..value.len())
+        .step_by(4)
+        .map(|start| &value[start..(start + 4).min(value.len())])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What the upload key may do: upload into the bucket, outside `_config/`.
+pub fn upload_policy(bucket: &str) -> String {
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": "s3:PutObject",
+                "Resource": format!("arn:aws:s3:::{bucket}/*"),
+            },
+            {
+                "Effect": "Deny",
+                "Action": "s3:PutObject",
+                "Resource": format!("arn:aws:s3:::{bucket}/{CONFIG_PREFIX}/*"),
+            },
+        ],
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn names_the_bucket() {
+    fn names_the_bucket_and_user() {
         let kp = KpBucket::new("testnet").unwrap();
         assert_eq!(kp.bucket, "mysten-hashi-kp-pubkeys-testnet");
+        assert_eq!(kp.iam_user, "hashi-kp-pubkeys-testnet-upload");
         for bad in ["", "-x", "x-", "Testnet", "a_b", &"a".repeat(40)] {
             assert!(KpBucket::new(bad).is_err(), "{bad}");
         }
@@ -101,5 +135,6 @@ mod tests {
             format_fingerprint("0123456789ABCDEF0123456789ABCDEF01234567"),
             "0123 4567 89AB CDEF 0123  4567 89AB CDEF 0123 4567"
         );
+        assert_eq!(group_by_four("0123456789abcdef"), "0123 4567 89ab cdef");
     }
 }
