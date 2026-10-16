@@ -31,6 +31,9 @@ pub mod findings;
 /// Prometheus metrics for continuous audits.
 pub mod metrics;
 
+/// The snapshot a continuous audit resumes from after a restart.
+pub mod store;
+
 /// Fixtures shared by the test modules.
 #[cfg(test)]
 pub(crate) mod test_utils;

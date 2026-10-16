@@ -15,6 +15,8 @@ hashi-types = { path = "../hashi-types" }
 hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
 minreq = { workspace = true, features = ["json-using-serde"] }
+# 0.13 adds a third rand and getrandom, and 0.14 a second reqwest.
+object_store = { version = "0.12.5", default-features = false, features = ["gcp"] }
 prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -7,8 +7,8 @@
 //! 1. `batch` loads the config file and audits one guardian time range. It
 //!    exits with an error if the audit produced findings.
 //! 2. `continuous` loads the config file, binds the metrics port, and
-//!    monitors from the start time on, or from the default start that
-//!    covers an outage of up to a week.
+//!    monitors from the start time on: where its snapshot says the last run
+//!    stopped, or the default start that covers an outage of up to a week.
 //!
 //! Assumptions:
 //! - Timestamps on the command line are whole-second UTC RFC 3339.
@@ -22,8 +22,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
-use hashi_monitor::audit::continuous::ContinuousAuditWindow;
 use hashi_monitor::metrics::MonitorMetrics;
+use hashi_monitor::store::SnapshotStore;
 use hashi_monitor::time::parse_utc_timestamp;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -58,10 +58,17 @@ enum Command {
         config: PathBuf,
 
         /// Start of guardian audit period as UTC, for example 2026-08-04T19:00:00Z.
-        /// Defaults to far enough back to audit a monitor outage of up to a week; a
-        /// restart reports findings from that period again.
+        /// With a snapshot of this deployment, the audit resumes from the snapshot
+        /// unless this is earlier. Without one, this defaults to far enough back to
+        /// audit a monitor outage of up to a week; a restart reports findings from
+        /// that period again.
         #[arg(long, value_parser = parse_utc_timestamp)]
         start: Option<u64>,
+
+        /// GCS bucket that keeps the monitor's snapshot, so a restart resumes where
+        /// the last run stopped. Without it, nothing survives a restart.
+        #[arg(long)]
+        snapshot_bucket: Option<String>,
 
         /// Address serving Prometheus metrics at `/metrics`.
         #[arg(long, default_value = "0.0.0.0:9184")]
@@ -92,12 +99,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Continuous {
             config,
             start,
+            snapshot_bucket,
             metrics_listen_addr,
         } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let start = start.unwrap_or_else(|| {
-                ContinuousAuditWindow::default_start(&cfg.timing, now_timestamp_secs())
-            });
+            let store = snapshot_bucket
+                .as_deref()
+                .map(SnapshotStore::gcs)
+                .transpose()?;
             let metrics = Arc::new(MonitorMetrics::new());
             // Alerting reads this port, so a monitor that cannot serve it is
             // unobservable. Bind before auditing anything and fail if it can't.
@@ -113,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
             let mut auditor =
-                hashi_monitor::audit::ContinuousAuditor::new(&cfg, start, metrics).await?;
+                hashi_monitor::audit::ContinuousAuditor::new(&cfg, start, metrics, store).await?;
             auditor.run().await?;
         }
     }
