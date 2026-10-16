@@ -301,11 +301,11 @@ backup-dir = "/var/lib/hashi/backups"
 Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
 
-On epoch housekeeping, before the save, cleanup deletes archives older than 14 days by
-filename timestamp. The newest is kept while the node is still attempting saves; a node
-with no role attempts none, so its last archive expires at 30 days. A powered-off node
-sweeps nothing, so delete a decommissioned host's archives yourself, and copy them
-elsewhere before restarting a long-offline node.
+Automatic backup maintenance deletes archives older than 14 days by filename
+timestamp, but preserves the newest MPC recovery archive until a newer one is
+successfully saved. Ordinary backups cannot replace that recovery copy. The newest
+ordinary archive is kept while saves are attempted, or up to 30 days otherwise.
+A powered-off node sweeps nothing; remove decommissioned hosts' archives yourself.
 
 Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`
 counts; expiring the newest archive also warns. Unrelated files are preserved, entry errors
@@ -333,6 +333,13 @@ Use a **14-day retention target**, measured from the archive's original creation
 for every backup copy: local archives (including the newest), off-machine copies,
 and all S3 object versions. Copying or re-uploading must not reset this target;
 S3's versioning and deletion timing are described [below](#cloud-backup).
+
+Active nodes check daily and refresh their current-epoch MPC recovery backup once
+it is 3 days old, even during stalled reconfiguration. This intentionally preserves
+recovery of the active shares; it does not extend retention for historical epochs.
+If refresh is failing, preserve the last usable recovery copy and follow the
+incident guidance below rather than deleting it to meet the target.
+
 Old shares can still reconstruct the active MPC key after resharing. Keeping
 backups indefinitely gives an attacker more time to collect enough decryptable
 backups from the same epoch to recover that key. Expiry limits this opportunity

@@ -70,6 +70,7 @@ pub struct Hashi {
     mpc_manager_install: Mutex<()>,
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
+    backup_handle: OnceLock<backup::BackupHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     trm_client: Option<trm::TrmClient>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
@@ -115,6 +116,7 @@ impl Hashi {
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
+            backup_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             trm_client,
             guardian_client: OnceLock::new(),
@@ -158,6 +160,7 @@ impl Hashi {
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
+            backup_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             trm_client,
             guardian_client: OnceLock::new(),
@@ -268,6 +271,14 @@ impl Hashi {
     /// Test-only
     pub fn clear_signing_manager_for_test(&self) {
         *self.signing_manager.write().unwrap() = None;
+    }
+
+    /// Test-only: wake the independent backup worker using its periodic refresh path.
+    pub fn refresh_mpc_recovery_for_test(&self) {
+        self.backup_handle
+            .get()
+            .expect("BackupHandle not initialized")
+            .refresh_mpc_recovery_for_test();
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
@@ -548,6 +559,17 @@ impl Hashi {
             recovery,
         )?;
         self.metrics.backup_scheduled_local_successes.inc();
+        // Only a successfully published replacement can make the prior MPC
+        // archive eligible for expiry. The pre-save sweep protects that copy.
+        if recovery.is_some()
+            && let Err(error) = crate::backup::cleanup_old_backups(
+                &self.config.backup_dir,
+                jiff::Timestamp::now(),
+                false,
+            )
+        {
+            tracing::warn!("Cleanup after publishing MPC recovery backup failed: {error:#}");
+        }
         tracing::info!(
             epoch,
             output = %output_path.display(),
@@ -1046,6 +1068,9 @@ impl Hashi {
         }
 
         let (backup_service, backup_handle) = backup::BackupService::new(self.clone());
+        self.backup_handle
+            .set(backup_handle.clone())
+            .expect("BackupHandle already set");
         let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone(), backup_handle);
         self.mpc_handle
             .set(mpc_handle)

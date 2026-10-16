@@ -153,7 +153,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_automatic_recovery_backup_on_startup_and_rotation() -> Result<()> {
         crate::test_helpers::init_test_logging();
-        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_batch_size_per_weight(1)
+            .build()
+            .await?;
         for node in networks.hashi_network().nodes() {
             node.wait_for_mpc_key(DKG_TIMEOUT).await?;
         }
@@ -246,8 +250,8 @@ mod tests {
         // Inspect the actual encrypted archives through the normal restore command,
         // not an in-memory record or a synthetic MPC fixture.
         for (archive, expected_epoch) in [
-            (startup_archive, initial_epoch),
-            (rotation_archive, initial_epoch + 1),
+            (&startup_archive, initial_epoch),
+            (&rotation_archive, initial_epoch + 1),
         ] {
             assert!(
                 archive
@@ -259,13 +263,13 @@ mod tests {
             );
             let restored = tempfile::tempdir()?;
             commands::backup::restore(
-                &archive,
+                archive,
                 RestoreDecryptor::LocalSecretKey {
                     secret_key_path: secret_key_path.clone(),
                 },
                 restored.path(),
             )?;
-            let root = restored.path().join(extract_dir_name(&archive)?);
+            let root = restored.path().join(extract_dir_name(archive)?);
             let record: MpcRecoveryRecord =
                 bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
             record.validate()?;
@@ -283,6 +287,122 @@ mod tests {
             assert!(!record.commitments.is_empty());
         }
         assert_nodes_agree_on_mpc_key(networks.hashi_network().nodes());
+
+        // Reaching the new on-chain epoch precedes signing preparation. Keep
+        // every peer online until the initial presignatures are installed,
+        // otherwise the survivor cannot advance to the next reconfiguration.
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if networks.hashi_network().nodes().iter().all(|node| {
+                    node.hashi()
+                        .signing_manager_for(initial_epoch + 1)
+                        .is_some()
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Rotated nodes did not finish signing preparation before isolation")?;
+
+        // Keep one real node running while the next reconfiguration cannot reach
+        // quorum. The backup worker must not depend on MPC making progress.
+        for node in networks.hashi_network_mut().nodes_mut().iter_mut().skip(1) {
+            node.shutdown().await;
+        }
+        networks.sui_network.force_close_epoch().await?;
+        let node = &networks.hashi_network().nodes()[0];
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if node.hashi().onchain_state().pending_epoch_change() == Some(initial_epoch + 2) {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Isolated node did not observe the pending reconfiguration")?;
+        assert_eq!(node.current_epoch(), Some(initial_epoch + 1));
+
+        // Age genuine encrypted archives through their durable timestamp, without
+        // sleeping for days or injecting synthetic recovery material.
+        let mut expired_archives = Vec::new();
+        for archive in [&startup_archive, &rotation_archive] {
+            let name = archive.file_name().unwrap().to_str().unwrap();
+            let (prefix, _) = name.rsplit_once('-').unwrap();
+            let expired = archive.with_file_name(format!("{prefix}-20000101T000000Z.tar.asc"));
+            std::fs::rename(archive, &expired)?;
+            expired_archives.push(expired);
+        }
+
+        let node = &mut networks.hashi_network_mut().nodes_mut()[0];
+        for restart in [false, true] {
+            if restart {
+                // Boot while reconfiguration is still blocked. Startup must seed
+                // the worker with current recovery material before driving MPC.
+                node.shutdown().await;
+                for archive in scheduled_archives(node.config())?
+                    .into_iter()
+                    .filter(|path| !expired_archives.contains(path))
+                {
+                    let name = archive.file_name().unwrap().to_str().unwrap();
+                    let (prefix, _) = name.rsplit_once('-').unwrap();
+                    let expired =
+                        archive.with_file_name(format!("{prefix}-20000101T000000Z.tar.asc"));
+                    std::fs::rename(archive, &expired)?;
+                }
+                node.start().await?;
+                wait_for_local_backup(node, 1.0).await?;
+            } else {
+                // Wake the same serialized refresh path used by the daily timer.
+                // Paused-clock worker tests cover scheduling; this exercises a
+                // running node stalled in a real reconfiguration.
+                node.hashi().refresh_mpc_recovery_for_test();
+                wait_for_local_backup(node, 2.0).await?;
+            }
+            assert_eq!(node.current_epoch(), Some(initial_epoch + 1));
+            assert_eq!(
+                node.hashi().onchain_state().pending_epoch_change(),
+                Some(initial_epoch + 2),
+            );
+            let fresh_archives: Vec<_> = scheduled_archives(node.config())?
+                .into_iter()
+                .filter(|path| !expired_archives.contains(path))
+                .collect();
+            assert_eq!(
+                fresh_archives.len(),
+                1,
+                "Refresh must renew only the active epoch, not historical or pending epochs",
+            );
+            let refreshed_archive = &fresh_archives[0];
+            assert!(
+                refreshed_archive
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("hashi-backup-epoch-{}-mpc-", initial_epoch + 1)),
+            );
+            let restored = tempfile::tempdir()?;
+            commands::backup::restore(
+                refreshed_archive,
+                RestoreDecryptor::LocalSecretKey {
+                    secret_key_path: secret_key_path.clone(),
+                },
+                restored.path(),
+            )?;
+            let root = restored.path().join(extract_dir_name(refreshed_archive)?);
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
+            record.validate()?;
+            let MpcRecoveryRecord::V1(record) = record;
+            assert_eq!(record.epoch, initial_epoch + 1);
+            assert_eq!(record.public_key, public_key);
+            assert_eq!(record.validator_address, node.config().validator_address()?);
+        }
         Ok(())
     }
 

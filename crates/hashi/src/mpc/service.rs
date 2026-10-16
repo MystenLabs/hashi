@@ -129,8 +129,6 @@ pub struct MpcService {
     /// after a failed one, keyed by epoch; see `restore_current_manager`.
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
-    // Process-local capture deduplication, not confirmation of archive/upload success.
-    last_recovery_backup_epoch: Mutex<Option<u64>>,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
     presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
@@ -197,7 +195,6 @@ impl MpcService {
             next_batch_repair: Mutex::new(None),
             next_manager_restore: Mutex::new(None),
             backup_handle,
-            last_recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
             presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
@@ -223,6 +220,8 @@ impl MpcService {
         self.run_major_compaction(self.inner.onchain_state().epoch())
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
+        // Seed before reconfiguration replaces the current manager and may block.
+        self.seed_recovery_backup().await;
         if let Some(epoch) = pending {
             self.drive_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
@@ -418,14 +417,28 @@ impl MpcService {
             .maintain_backups_after_epoch_change(target_epoch, action);
     }
 
+    async fn seed_recovery_backup(&self) {
+        if !self.inner.is_in_current_committee() || self.is_awaiting_genesis() {
+            return;
+        }
+        let epoch = self.inner.onchain_state().epoch();
+        match self.capture_recovery_backup(epoch) {
+            Ok(Some(recovery)) => self.backup_handle.maintain_backups_after_epoch_change(
+                epoch,
+                crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+            ),
+            Ok(None) => match self.recover_mpc_state().await {
+                Ok((epoch, _)) => self.backup_recovered_epoch(epoch),
+                Err(error) => warn!("Unable to seed current MPC recovery backup: {error:#}"),
+            },
+            Err(error) => warn!("Unable to capture current MPC recovery backup: {error:#}"),
+        }
+    }
+
     fn capture_recovery_backup(
         &self,
         epoch: u64,
     ) -> anyhow::Result<Option<crate::backup::MpcRecoveryRecord>> {
-        let mut last_epoch = self.last_recovery_backup_epoch.lock().unwrap();
-        if last_epoch.is_some_and(|last| last >= epoch) {
-            return Ok(None);
-        }
         let Some(manager) = self.inner.mpc_manager() else {
             return Ok(None);
         };
@@ -433,11 +446,7 @@ impl MpcService {
         let Some(output) = manager.recovery_output_for_epoch(epoch) else {
             return Ok(None);
         };
-        let recovery = self.inner.capture_mpc_recovery(epoch, output)?;
-        if recovery.is_some() {
-            *last_epoch = Some(epoch);
-        }
-        Ok(recovery)
+        self.inner.capture_mpc_recovery(epoch, output)
     }
 
     fn backup_recovered_epoch(&self, epoch: u64) {
