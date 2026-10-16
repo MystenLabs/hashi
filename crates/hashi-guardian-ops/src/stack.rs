@@ -1,0 +1,485 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The guardian enclave's Pulumi stack, read fresh by every step so none acts on a remembered value. The stack has
+//! two slots, a and b; its outputs follow the active one and name the other as the standby.
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::fmt;
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::Ctx;
+use crate::exec::Cmd;
+use crate::exec::read;
+use crate::exec::read_json;
+
+const PROJECT: &str = "hashi-guardian-enclave";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    A,
+    B,
+}
+
+impl Slot {
+    pub const ALL: [Self; 2] = [Self::A, Self::B];
+
+    /// The suffix of this slot's own configuration keys, such as `hashi-commit-b`.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::A => "",
+            Self::B => "-b",
+        }
+    }
+}
+
+impl fmt::Display for Slot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::A => "a",
+            Self::B => "b",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Active,
+    Standby,
+    Absent,
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Active => "active",
+            Self::Standby => "standby",
+            Self::Absent => "absent",
+        })
+    }
+}
+
+/// One snapshot of the stack's configuration and outputs, so a step sees both as they were at one moment.
+pub struct Stack {
+    pub name: String,
+    pub dir: String,
+    config: BTreeMap<String, String>,
+    outputs: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct ConfigEntry {
+    value: Option<Value>,
+}
+
+impl Stack {
+    pub fn load(ctx: &Ctx) -> Result<Self> {
+        let dir = ctx.env.require("GUARDIAN_PULUMI_DIR")?;
+        let name = ctx.env.require("GUARDIAN_STACK")?;
+        let config: BTreeMap<String, ConfigEntry> = read_json(
+            ctx.exec,
+            &pulumi(dir).args(["config", "--stack", name, "--json"]),
+        )
+        .with_context(|| format!("Could not read the configuration of stack {name} in {dir}."))?;
+        let outputs: BTreeMap<String, Value> = read_json(
+            ctx.exec,
+            &pulumi(dir).args(["stack", "output", "--json", "--stack", name]),
+        )
+        .with_context(|| format!("Could not read the outputs of stack {name} in {dir}."))?;
+        Ok(Self {
+            name: name.to_owned(),
+            dir: dir.to_owned(),
+            config: config
+                .into_iter()
+                .filter_map(|(key, entry)| Some((key, scalar(entry.value?))))
+                .collect(),
+            outputs: outputs
+                .into_iter()
+                .map(|(key, value)| (key, scalar(value)))
+                .collect(),
+        })
+    }
+
+    /// A configuration value, or `None` when the key is unset.
+    pub fn config(&self, key: &str) -> Option<&str> {
+        self.config
+            .get(&format!("{PROJECT}:{key}"))
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn output(&self, key: &str) -> Option<&str> {
+        self.outputs
+            .get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// As the enclave program reads it: slot a is on unless disabled, slot b is off unless enabled.
+    pub fn slot_enabled(&self, slot: Slot) -> Result<bool> {
+        match self.config(&format!("slot-{slot}-enabled")) {
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            None => Ok(slot == Slot::A),
+            Some(other) => bail!(
+                "Stack {} sets slot-{slot}-enabled to {other}, not true or false.",
+                self.name
+            ),
+        }
+    }
+
+    /// The slot the outputs follow.
+    pub fn active(&self) -> Result<Slot> {
+        match self.output("active_slot") {
+            None | Some("a") => Ok(Slot::A),
+            Some("b") => Ok(Slot::B),
+            Some(other) => bail!(
+                "Stack {}'s active_slot output is {other}, not a or b.",
+                self.name
+            ),
+        }
+    }
+
+    pub fn role(&self, slot: Slot) -> Result<Role> {
+        Ok(if self.output("enclave_instance_id").is_none() {
+            Role::Absent
+        } else if slot == self.active()? {
+            Role::Active
+        } else if self.output("standby_instance_id").is_some() {
+            Role::Standby
+        } else {
+            Role::Absent
+        })
+    }
+
+    /// The slots the stack configures or still runs.
+    pub fn slots(&self) -> Result<Vec<Slot>> {
+        let mut slots = Vec::new();
+        for slot in Slot::ALL {
+            if self.slot_enabled(slot)? || self.role(slot)? != Role::Absent {
+                slots.push(slot);
+            }
+        }
+        Ok(slots)
+    }
+
+    pub fn instance(&self, slot: Slot) -> Result<Option<&str>> {
+        Ok(match self.role(slot)? {
+            Role::Active => self.output("enclave_instance_id"),
+            Role::Standby => self.output("standby_instance_id"),
+            Role::Absent => None,
+        })
+    }
+
+    /// The `rotation:*` tags sui-operations' rotation scripts keep on the stack.
+    pub fn rotation_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
+        let tags: BTreeMap<String, Value> = read_json(
+            ctx.exec,
+            &pulumi(&self.dir).args(["stack", "tag", "ls", "--stack", &self.name, "--json"]),
+        )
+        .with_context(|| format!("Could not list the tags of stack {}.", self.name))?;
+        Ok(tags
+            .into_keys()
+            .filter(|key| key.starts_with("rotation:"))
+            .collect())
+    }
+
+    /// The Pulumi CLI version that last wrote the stack's state, empty when the state doesn't say.
+    pub fn written_by(&self, ctx: &Ctx) -> Result<String> {
+        Ok(export(ctx, &self.dir, &self.name)?
+            .deployment
+            .manifest
+            .version)
+    }
+
+    /// The Pulumi CLI version sui-operations' guardian workflows install, read from the checkout that holds the
+    /// stack's program.
+    pub fn pinned_pulumi_version(&self) -> Result<String> {
+        let dir = std::fs::canonicalize(&self.dir).with_context(|| {
+            format!(
+                "Could not find stack {}'s program at {}.",
+                self.name, self.dir
+            )
+        })?;
+        let Some(workflows) = dir
+            .ancestors()
+            .map(|dir| dir.join(".github/workflows"))
+            .find(|dir| dir.is_dir())
+        else {
+            bail!("{} is not in a sui-operations checkout.", self.dir);
+        };
+        let mut versions = BTreeSet::new();
+        for entry in std::fs::read_dir(&workflows)
+            .with_context(|| format!("Could not list {}.", workflows.display()))?
+        {
+            let path = entry?.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if !(name.starts_with("hashi-guardian-") && name.ends_with(".yaml")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("Could not read {}.", path.display()))?;
+            for line in text.lines().filter(|line| line.contains("get.pulumi.com")) {
+                let Some(version) = line
+                    .split_once("--version")
+                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                else {
+                    bail!(
+                        "{} installs Pulumi without naming its version.",
+                        path.display()
+                    );
+                };
+                versions.insert(version.trim_start_matches('v').to_owned());
+            }
+        }
+        let mut versions = versions.into_iter();
+        match (versions.next(), versions.next()) {
+            (Some(version), None) => Ok(format!("v{version}")),
+            (None, _) => bail!(
+                "No hashi-guardian workflow in {} names the Pulumi version it installs.",
+                workflows.display()
+            ),
+            (Some(_), Some(_)) => bail!(
+                "The hashi-guardian workflows in {} install different Pulumi versions.",
+                workflows.display()
+            ),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Export {
+    pub deployment: Deployment,
+}
+
+#[derive(Deserialize)]
+pub struct Deployment {
+    pub manifest: Manifest,
+}
+
+#[derive(Deserialize)]
+pub struct Manifest {
+    #[serde(default)]
+    pub version: String,
+}
+
+/// A stack's state, as `pulumi stack export` prints it.
+pub fn export(ctx: &Ctx, dir: &str, stack: &str) -> Result<Export> {
+    read_json(
+        ctx.exec,
+        &pulumi(dir).args(["stack", "export", "--stack", stack]),
+    )
+    .with_context(|| format!("Could not read stack {stack} in {dir}."))
+}
+
+/// The version of the Pulumi CLI on PATH, as `v<version>` like [`Stack::pinned_pulumi_version`].
+pub fn pulumi_version(ctx: &Ctx) -> Result<String> {
+    let version = read(ctx.exec, &Cmd::new("pulumi").arg("version"))
+        .context("Could not read the Pulumi CLI's version.")?;
+    Ok(format!("v{}", version.trim().trim_start_matches('v')))
+}
+
+pub fn pulumi(dir: &str) -> Cmd {
+    Cmd::new("pulumi").arg("-C").arg(dir)
+}
+
+fn scalar(value: Value) -> String {
+    match value {
+        Value::String(text) => text,
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::exec::fake::Fake;
+
+    pub const COMMIT: &str = "0873917ea0000000000000000000000000000000";
+
+    /// A world whose pulumi answers with this configuration and these outputs.
+    pub fn stack_world(config: Value, outputs: Value) -> Fake {
+        Fake::new(move |words| {
+            let rest: Vec<&str> = words.iter().skip(3).map(String::as_str).collect();
+            match rest.as_slice() {
+                ["config", "--stack", _, "--json"] => {
+                    let entries: serde_json::Map<String, Value> = config
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                format!("{PROJECT}:{key}"),
+                                serde_json::json!({ "value": value, "secret": false }),
+                            )
+                        })
+                        .collect();
+                    Some((true, Value::Object(entries).to_string()))
+                }
+                ["stack", "output", "--json", "--stack", _] => Some((true, outputs.to_string())),
+                _ => None,
+            }
+        })
+    }
+
+    pub fn one_slot() -> Fake {
+        stack_world(
+            serde_json::json!({ "hashi-commit": COMMIT, "eif-pcr0": "0c".repeat(48) }),
+            serde_json::json!({
+                "active_slot": "a",
+                "enclave_instance_id": "i-0aaa",
+                "standby_instance_id": "",
+                "s3_bucket_name": "guardian-bucket",
+                "s3_bucket_region": "us-west-2",
+            }),
+        )
+    }
+
+    pub fn two_slots() -> Fake {
+        stack_world(
+            serde_json::json!({
+                "hashi-commit": COMMIT,
+                "hashi-commit-b": COMMIT,
+                "slot-b-enabled": "true",
+            }),
+            serde_json::json!({
+                "active_slot": "a",
+                "enclave_instance_id": "i-0aaa",
+                "standby_instance_id": "i-0bbb",
+                "s3_bucket_name": "guardian-bucket",
+                "s3_bucket_region": "us-west-2",
+            }),
+        )
+    }
+
+    /// A sui-operations checkout under `root`, holding the enclave stack's program and a guardian workflow that
+    /// installs the Pulumi the test worlds report. Returns the program's directory.
+    pub fn sui_operations(root: &std::path::Path) -> String {
+        let enclave = root.join("pulumi/services/hashi-guardian-enclave");
+        std::fs::create_dir_all(&enclave).unwrap();
+        let workflows = root.join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("hashi-guardian-proxy-deploy.yaml"),
+            "      - run: curl -fsSL https://get.pulumi.com | sh -s -- --version 3.148.0\n",
+        )
+        .unwrap();
+        enclave.display().to_string()
+    }
+
+    /// [`stack_env`], with the enclave stack's program at `dir`.
+    pub fn stack_env_at(dir: &str) -> Vec<(&'static str, &str)> {
+        stack_env()
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    if key == "GUARDIAN_PULUMI_DIR" {
+                        dir
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn stack_env() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("GUARDIAN_PULUMI_DIR", "/ops/hashi-guardian-enclave"),
+            ("GUARDIAN_STACK", "mysten/testnet"),
+            (
+                "GUARDIAN_PROXY_URL",
+                "https://guardian.testnet.hashi.sui.io",
+            ),
+        ]
+    }
+
+    #[test]
+    fn reads_a_one_slot_stack() {
+        let exec = one_slot();
+        let repo = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
+        let stack = Stack::load(&ctx).unwrap();
+        assert_eq!(stack.slots().unwrap(), [Slot::A]);
+        assert_eq!(stack.role(Slot::A).unwrap(), Role::Active);
+        assert_eq!(stack.instance(Slot::A).unwrap(), Some("i-0aaa"));
+        assert_eq!(stack.role(Slot::B).unwrap(), Role::Absent);
+    }
+
+    #[test]
+    fn reads_both_slots_of_a_two_slot_stack() {
+        let exec = two_slots();
+        let repo = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
+        let stack = Stack::load(&ctx).unwrap();
+        assert_eq!(stack.slots().unwrap(), [Slot::A, Slot::B]);
+        assert_eq!(stack.role(Slot::B).unwrap(), Role::Standby);
+        assert_eq!(stack.instance(Slot::B).unwrap(), Some("i-0bbb"));
+    }
+
+    #[test]
+    fn refuses_what_the_enclave_program_would_not_read() {
+        let repo = tempfile::tempdir().unwrap();
+        let exec = stack_world(
+            serde_json::json!({ "slot-b-enabled": "yes" }),
+            serde_json::json!({ "active_slot": "c" }),
+        );
+        let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
+        let stack = Stack::load(&ctx).unwrap();
+        assert_eq!(
+            stack.slot_enabled(Slot::B).unwrap_err().to_string(),
+            "Stack mysten/testnet sets slot-b-enabled to yes, not true or false."
+        );
+        assert_eq!(
+            stack.active().unwrap_err().to_string(),
+            "Stack mysten/testnet's active_slot output is c, not a or b."
+        );
+    }
+
+    #[test]
+    fn reads_the_pulumi_version_sui_operations_installs() {
+        let root = tempfile::tempdir().unwrap();
+        let exec = one_slot();
+        let dir = sui_operations(root.path());
+        let ctx = Ctx::for_test(root.path(), &exec, &stack_env_at(&dir));
+        let stack = Stack::load(&ctx).unwrap();
+        assert_eq!(stack.pinned_pulumi_version().unwrap(), "v3.148.0");
+
+        let rotate = root
+            .path()
+            .join(".github/workflows/hashi-guardian-rotate.yaml");
+        std::fs::write(
+            &rotate,
+            "run: curl -fsSL https://get.pulumi.com | sh -s -- --version 3.234.0\n",
+        )
+        .unwrap();
+        assert!(
+            stack
+                .pinned_pulumi_version()
+                .unwrap_err()
+                .to_string()
+                .ends_with("install different Pulumi versions.")
+        );
+        std::fs::write(&rotate, "run: curl -fsSL https://get.pulumi.com | sh\n").unwrap();
+        assert!(
+            stack
+                .pinned_pulumi_version()
+                .unwrap_err()
+                .to_string()
+                .ends_with(
+                    "hashi-guardian-rotate.yaml installs Pulumi without naming its version."
+                )
+        );
+    }
+}

@@ -3121,6 +3121,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-guardian-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hashi-guardian-proxy"
 version = "0.1.0"
 dependencies = [
