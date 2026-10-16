@@ -34,6 +34,7 @@ use crate::kp_bucket::identity;
 use crate::kp_bucket::upload_policy;
 use crate::say;
 use crate::stack::Stack;
+use crate::warn;
 
 const ROSTER: &str = "roster.txt";
 const REVOKE: &str = "the revoke-kp-upload-key step";
@@ -65,13 +66,30 @@ pub fn create_kp_upload_bucket(ctx: &Ctx) -> Result<()> {
             .capture_stderr(),
     )?;
     if existing.success {
-        bail!("IAM user {user} already exists. Choose another name, or revoke it with {REVOKE}.");
+        bail!(
+            "IAM user {user} already exists. Choose another KP_NAME, or revoke it with {REVOKE} and delete its bucket if it holds nothing: aws s3 rb s3://{bucket}"
+        );
     }
     if !existing.stderr.contains("(NoSuchEntity)") {
         bail!(
             "Could not check IAM user {user}: {}",
             existing.stderr.trim()
         );
+    }
+    // A run that failed after creating the bucket leaves it behind, and the next one could only fail on it.
+    let found = ctx.exec.output(
+        &Cmd::new("aws")
+            .args(["s3api", "head-bucket", "--bucket", bucket])
+            .args(["--expected-bucket-owner", &account])
+            .capture_stderr(),
+    )?;
+    if found.success {
+        bail!(
+            "s3://{bucket} already exists. Choose another KP_NAME, or delete the bucket if it holds nothing: aws s3 rb s3://{bucket}"
+        );
+    }
+    if !found.stderr.contains("(404)") {
+        bail!("Could not check s3://{bucket}: {}", found.stderr.trim());
     }
     confirm(
         ctx.ask,
@@ -154,43 +172,29 @@ pub fn create_kp_upload_bucket(ctx: &Ctx) -> Result<()> {
     };
     println!("Created IAM user {IAM_PATH}{user} and its access key.");
 
-    // New IAM keys and policies take a few seconds to reach S3, so retry only those errors.
+    // New IAM keys and policies take a few seconds to reach S3, so retry only the errors that produces.
     say("Test the upload key");
     println!(
-        "Uploading a test object exactly as upload-pubkey.sh does. This can take up to 2 minutes."
+        "Uploading an empty test object exactly as upload-pubkey.sh does. This can take up to 2 minutes."
     );
-    let body = tempfile::NamedTempFile::new()?;
-    std::fs::write(body.path(), "self-test\n")?;
     let deadline = Instant::now() + Duration::from_secs(120);
     let version_id = loop {
-        let output = ctx.exec.output(&upload_test(
-            bucket,
-            access_key_id,
-            secret_access_key,
-            body.path(),
-        ))?;
+        let output = ctx
+            .exec
+            .output(&upload_test(bucket, access_key_id, secret_access_key))
+            .with_context(|| format!("Could not run the test upload. {remove_user}"))?;
         if output.success {
             break output.stdout.trim().to_owned();
         }
         if !propagating(&output.stderr) || Instant::now() >= deadline {
             eprintln!("{}", output.stderr.trim());
-            bail!(
-                "The new access key could not upload. Remove the user with {REVOKE}, then delete the bucket with: aws s3 rb s3://{bucket}"
-            );
+            bail!("The new access key could not upload. {remove_user}");
         }
         std::thread::sleep(Duration::from_secs(5));
     };
-    read(
-        ctx.exec,
-        &aws(&["s3api", "delete-object", "--bucket", bucket])
-            .args(["--expected-bucket-owner", &account, "--key", "self-test"])
-            .args(["--version-id", &version_id]),
-    )
-    .with_context(|| {
-        format!("Could not delete version {version_id} of the test object. Delete it before key provisioners upload: aws s3api delete-object --bucket {bucket} --key self-test --version-id {version_id}")
-    })?;
     println!("The access key can upload.");
 
+    // The key works, so it is shown before anything else can fail.
     say("Setup complete");
     println!("Share these values in a code block over a private channel. Spaces are optional.\n");
     println!("  Bucket:            {bucket}");
@@ -199,16 +203,32 @@ pub fn create_kp_upload_bucket(ctx: &Ctx) -> Result<()> {
     println!(
         "\nUpload bucket created successfully! Once the key provisioners no longer need the key, revoke it with {REVOKE}."
     );
+
+    // download-kp-pubkeys refuses a bucket holding anything but uploads, so a test object left behind is caught there.
+    say("Delete the test object");
+    if version_id.is_empty() || version_id == "None" {
+        warn(&format!(
+            "The test upload got no version ID, so versioning of s3://{bucket} has not taken effect yet; AWS asks for up to 15 minutes. Delete the test object with: aws s3 rm s3://{bucket}/self-test. Then wait that long before key provisioners upload."
+        ));
+        return Ok(());
+    }
+    let deleted = read(
+        ctx.exec,
+        &aws(&["s3api", "delete-object", "--bucket", bucket])
+            .args(["--expected-bucket-owner", &account, "--key", "self-test"])
+            .args(["--version-id", &version_id]),
+    );
+    match deleted {
+        Ok(_) => println!("Deleted the test object."),
+        Err(error) => warn(&format!(
+            "Could not delete version {version_id} of the test object: {error:#}. Delete it before key provisioners upload: aws s3api delete-object --bucket {bucket} --key self-test --version-id {version_id}"
+        )),
+    }
     Ok(())
 }
 
 /// An upload with only the new key, never the operator's own AWS configuration, exactly as `upload-pubkey.sh` does.
-fn upload_test(
-    bucket: &str,
-    access_key_id: &str,
-    secret_access_key: &str,
-    body: &std::path::Path,
-) -> Cmd {
+fn upload_test(bucket: &str, access_key_id: &str, secret_access_key: &str) -> Cmd {
     [
         "AWS_PROFILE",
         "AWS_DEFAULT_PROFILE",
@@ -229,13 +249,12 @@ fn upload_test(
         "--bucket",
         bucket,
     ])
-    .args(["--key", "self-test", "--body"])
-    .arg(body)
+    .args(["--key", "self-test"])
     .args(["--query", "VersionId", "--output", "text"])
     .capture_stderr()
 }
 
-/// Whether an upload failed only because a new key or policy hasn't reached S3 yet.
+/// Whether an upload failed as it does while a new key or policy is still reaching S3.
 fn propagating(stderr: &str) -> bool {
     stderr.contains("(InvalidAccessKeyId)") || stderr.contains("(AccessDenied)")
 }
@@ -917,14 +936,152 @@ mod tests {
             .collect()
     }
 
+    /// AWS answering a first setup, where `bucket_exists` and the test upload's and cleanup's results vary.
+    fn create(
+        bucket_exists: bool,
+        upload: crate::exec::Output,
+        cleanup_works: bool,
+        answers: &[&str],
+    ) -> (Result<()>, crate::exec::fake::Fake) {
+        let exec = crate::exec::fake::Fake::with_stderr(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            let ok = |stdout: &str| Some(reply(true, stdout, ""));
+            match &w[1..3] {
+                ["sts", "get-caller-identity"] => {
+                    ok("123456789012\tarn:aws:iam::123456789012:user/op\n")
+                }
+                ["iam", "get-user"] => Some(reply(false, "", "An error occurred (NoSuchEntity)")),
+                ["s3api", "head-bucket"] if bucket_exists => ok("{}"),
+                ["s3api", "head-bucket"] => Some(reply(
+                    false,
+                    "",
+                    "An error occurred (404) when calling the HeadBucket operation: Not Found",
+                )),
+                [
+                    "s3api",
+                    "create-bucket" | "put-public-access-block" | "put-bucket-versioning",
+                ]
+                | ["iam", "create-user" | "put-user-policy"] => ok("{}"),
+                ["iam", "create-access-key"] => ok("AKIDTEST\ttest-secret\n"),
+                ["s3api", "put-object"] => {
+                    Some(reply(upload.success, &upload.stdout, &upload.stderr))
+                }
+                ["s3api", "delete-object"] => Some(reply(cleanup_works, "{}", "")),
+                _ => None,
+            }
+        });
+        let repo = tempfile::tempdir().unwrap();
+        let ask = crate::ask::scripted::Scripted::new(answers);
+        let result = create_kp_upload_bucket(
+            &Ctx::for_test(repo.path(), &exec, &[("KP_NAME", "testnet")]).with_ask(&ask),
+        );
+        (result, exec)
+    }
+
+    #[test]
+    fn creates_an_upload_only_key_and_keeps_it_when_cleanup_fails() {
+        let (result, exec) = create(false, reply(true, "v1\n", ""), true, &["yes"]);
+        result.unwrap();
+        let log = exec.log.borrow();
+        let calls: Vec<&str> = log.iter().map(|words| words[2].as_str()).collect();
+        assert_eq!(
+            calls,
+            [
+                "get-caller-identity",
+                "get-user",
+                "head-bucket",
+                "create-bucket",
+                "put-public-access-block",
+                "put-bucket-versioning",
+                "create-user",
+                "put-user-policy",
+                "create-access-key",
+                "put-object",
+                "delete-object"
+            ]
+        );
+        // The secret reaches the upload only through its environment.
+        assert!(
+            log.iter()
+                .flatten()
+                .all(|word| !word.contains("test-secret"))
+        );
+        drop(log);
+
+        // The key works, so a failed cleanup only warns: download-kp-pubkeys refuses the object it leaves.
+        let (result, _) = create(false, reply(true, "v1\n", ""), false, &["yes"]);
+        result.unwrap();
+        let (result, exec) = create(false, reply(true, "None\n", ""), true, &["yes"]);
+        result.unwrap();
+        assert!(!exec.ran(&["aws", "s3api", "delete-object"]));
+    }
+
+    #[test]
+    fn creates_nothing_it_was_not_asked_to() {
+        let (result, exec) = create(true, reply(true, "v1\n", ""), true, &["yes"]);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("s3://mysten-hashi-kp-pubkeys-testnet already exists.")
+        );
+        assert!(!exec.ran(&["aws", "s3api", "create-bucket"]));
+        let (result, exec) = create(false, reply(true, "v1\n", ""), true, &["no"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Creation not confirmed; nothing was created."
+        );
+        assert!(!exec.ran(&["aws", "s3api", "create-bucket"]));
+        // Only the errors key propagation produces are retried.
+        let (result, exec) = create(
+            false,
+            reply(false, "", "An error occurred (NoSuchBucket)"),
+            true,
+            &["yes"],
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("The new access key could not upload.")
+        );
+        assert_eq!(
+            exec.log
+                .borrow()
+                .iter()
+                .filter(|words| words[2] == "put-object")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn allows_the_upload_key_nothing_but_uploads_outside_config() {
+        let policy: serde_json::Value =
+            serde_json::from_str(&upload_policy("mysten-hashi-kp-pubkeys-testnet")).unwrap();
+        assert_eq!(
+            policy,
+            serde_json::json!({
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": "s3:PutObject",
+                        "Resource": "arn:aws:s3:::mysten-hashi-kp-pubkeys-testnet/*",
+                    },
+                    {
+                        "Effect": "Deny",
+                        "Action": "s3:PutObject",
+                        "Resource": "arn:aws:s3:::mysten-hashi-kp-pubkeys-testnet/_config/*",
+                    },
+                ],
+            })
+        );
+    }
+
     #[test]
     fn tests_the_new_key_with_nothing_but_it() {
-        let cmd = upload_test(
-            "bucket",
-            "test-id",
-            "test-secret",
-            std::path::Path::new("/x"),
-        );
+        let cmd = upload_test("bucket", "test-id", "test-secret");
         let removed = texts(cmd.removed_env());
         for name in [
             "AWS_PROFILE",

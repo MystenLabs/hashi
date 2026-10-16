@@ -12,4 +12,6 @@ jiff.workspace = true
 libc = "0.2.184"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true

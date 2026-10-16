@@ -86,7 +86,7 @@ pub fn format_fingerprint(fingerprint: &str) -> String {
     format!("{}  {}", first.join(" "), second.join(" "))
 }
 
-/// A digest in groups of four, for a person to compare group by group.
+/// A value in groups of four, for a person to compare group by group.
 pub fn group_by_four(value: &str) -> String {
     (0..value.len())
         .step_by(4)

@@ -30,14 +30,29 @@ pub const REQUIRED: [(&str, &str); 7] = [
     ("tar", "standard system utilities"),
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Cmd {
     program: OsString,
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
+    /// Secrets go here, never in `args`, so they stay out of `words()` and of every message.
     env: Vec<(OsString, OsString)>,
     env_remove: Vec<OsString>,
     capture_stderr: bool,
+}
+
+impl std::fmt::Debug for Cmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cmd")
+            .field("words", &self.words())
+            .field("cwd", &self.cwd)
+            .field(
+                "env",
+                &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
+            .field("env_remove", &self.env_remove)
+            .finish()
+    }
 }
 
 impl Cmd {
@@ -75,6 +90,7 @@ impl Cmd {
         &self.env_remove
     }
 
+    #[cfg(test)]
     pub fn set_env(&self) -> &[(OsString, OsString)] {
         &self.env
     }
