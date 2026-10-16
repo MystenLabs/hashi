@@ -9,18 +9,23 @@
 use anyhow::Context;
 use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
+use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::armored_encrypt_writer;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::backup;
 use crate::backup_s3::BackupS3Client;
 use crate::backup_s3::parse_s3_uri;
+use crate::cli::client::HashiClient;
+use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::config::Config;
@@ -33,6 +38,233 @@ pub enum RestoreDecryptor {
     Unencrypted,
     LocalSecretKey { secret_key_path: PathBuf },
     GpgAgent { homedir: Option<PathBuf> },
+}
+
+pub fn select_restore_decryptor(
+    archive: &Path,
+    secret_key_path: Option<&Path>,
+    use_gpg_agent: bool,
+    homedir: Option<&Path>,
+) -> Result<RestoreDecryptor> {
+    match backup::archive_format(archive)? {
+        backup::BackupArchiveFormat::Unencrypted => Ok(RestoreDecryptor::Unencrypted),
+        backup::BackupArchiveFormat::Encrypted => {
+            select_encrypted_decryptor(secret_key_path, use_gpg_agent, homedir)
+        }
+    }
+}
+
+fn select_encrypted_decryptor(
+    secret_key_path: Option<&Path>,
+    use_gpg_agent: bool,
+    homedir: Option<&Path>,
+) -> Result<RestoreDecryptor> {
+    match (secret_key_path, use_gpg_agent) {
+        (Some(path), false) => Ok(RestoreDecryptor::LocalSecretKey {
+            secret_key_path: path.to_owned(),
+        }),
+        (None, true) => Ok(RestoreDecryptor::GpgAgent {
+            homedir: homedir.map(Path::to_owned),
+        }),
+        _ => anyhow::bail!(
+            "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+        ),
+    }
+}
+
+fn open_backup_stream(archive: &Path, decryptor: &RestoreDecryptor) -> Result<Box<dyn io::Read>> {
+    match decryptor {
+        RestoreDecryptor::Unencrypted => {
+            Ok(Box::new(File::open(archive).with_context(|| {
+                format!("Failed to open backup tarball {}", archive.display())
+            })?))
+        }
+        RestoreDecryptor::LocalSecretKey { secret_key_path } => Ok(Box::new(
+            decrypt_with_local_secret_key(archive, secret_key_path)?,
+        )),
+        RestoreDecryptor::GpgAgent { homedir } => {
+            Ok(Box::new(decrypt_with_gpg(archive, homedir.as_deref())?))
+        }
+    }
+}
+
+/// Write raw BCS for the independently trusted public-key export.
+fn write_private_bcs<T: serde::Serialize>(output: &Path, value: &T) -> Result<()> {
+    publish_private_output(output, |staged| {
+        bcs::serialize_into(staged, value)
+            .map_err(|_| anyhow::anyhow!("Failed to serialize BCS output"))
+    })
+}
+
+/// Stream BCS directly into encryption; only ciphertext reaches the staging file.
+fn write_encrypted_bcs<T: serde::Serialize>(
+    output: &Path,
+    value: &T,
+    recipient: &PgpPublicCert,
+) -> Result<()> {
+    publish_private_output(output, |staged| {
+        let mut encrypted_writer = armored_encrypt_writer(staged, recipient)?;
+        bcs::serialize_into(&mut encrypted_writer, value)
+            .map_err(|_| anyhow::anyhow!("Failed to serialize BCS output"))?;
+        encrypted_writer
+            .finalize()
+            .context("Failed to finalize encrypted output")?;
+        Ok(())
+    })
+}
+
+/// Publish complete output only, using a private sibling file and no-clobber persistence.
+fn publish_private_output(
+    output: &Path,
+    write_output: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
+    match fs::symlink_metadata(output) {
+        Ok(_) => anyhow::bail!(
+            "Refusing to overwrite existing output: {}",
+            output.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Failed to inspect output destination"),
+    }
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".hashi-key-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o600));
+    }
+    let mut staged = builder
+        .tempfile_in(parent)
+        .context("Failed to create private output staging file")?;
+    write_output(staged.as_file_mut())?;
+    staged.flush().context("Failed to flush staged output")?;
+    staged
+        .as_file()
+        .sync_all()
+        .context("Failed to sync staged output")?;
+    staged
+        .persist_noclobber(output)
+        .map_err(|error| error.error)
+        .context("Failed to publish output without overwriting")?;
+    // Publication has succeeded; directory syncing is best-effort, as for backups.
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(
+            directory = %parent.display(),
+            "Key output published, but syncing its directory failed: {error}"
+        );
+    }
+    Ok(())
+}
+
+pub async fn export_mpc_public_key(config: &CliConfig, output: &Path) -> Result<()> {
+    let client = HashiClient::new(config).await?;
+    let public_key = client.onchain_state().onchain_verifying_key_g()?;
+    write_private_bcs(output, &public_key)?;
+    print_success(&format!("MPC public key exported: {}", output.display()));
+    Ok(())
+}
+
+/// Export only the recovery record, encrypted directly to the coordinator.
+pub fn export_mpc_recovery_record(
+    archive: &Path,
+    decryptor: RestoreDecryptor,
+    output: &Path,
+    output_recipient: &PgpPublicCert,
+) -> Result<()> {
+    anyhow::ensure!(
+        !archive
+            .to_str()
+            .is_some_and(|path| path.starts_with("s3://")),
+        "MPC recovery accepts local inputs only; restore S3 backups locally first"
+    );
+    let record = backup::read_mpc_recovery_record(open_backup_stream(archive, &decryptor)?)?;
+    write_encrypted_bcs(output, &record, output_recipient)?;
+    print_success(&format!(
+        "MPC recovery record exported: {} (recipient fingerprint: {})",
+        output.display(),
+        output_recipient.fingerprint().to_hex()
+    ));
+    Ok(())
+}
+
+/// Recover locally without consulting CLI network configuration or constructing a client.
+pub fn recover_mpc_key(
+    inputs: &[PathBuf],
+    mpc_public_key: &Path,
+    output: &Path,
+    output_recipient: &PgpPublicCert,
+    secret_key_path: Option<&Path>,
+    use_gpg_agent: bool,
+    homedir: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!(!inputs.is_empty(), "No MPC recovery inputs provided");
+    anyhow::ensure!(
+        !(secret_key_path.is_some() && use_gpg_agent),
+        "Pass at most one decryption backend: --backup-pgp-secret-key or --use-gpg-agent"
+    );
+    anyhow::ensure!(
+        homedir.is_none() || use_gpg_agent,
+        "--gpg-homedir requires --use-gpg-agent"
+    );
+    let public_key: G = bcs::from_bytes(
+        &fs::read(mpc_public_key).context("Failed to read trusted MPC public key")?,
+    )
+    .map_err(|_| anyhow::anyhow!("Invalid trusted MPC public-key BCS"))?;
+    let mut records = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        anyhow::ensure!(
+            !input.to_str().is_some_and(|path| path.starts_with("s3://")),
+            "MPC recovery accepts local inputs only; restore S3 backups locally first"
+        );
+        let record = (|| -> Result<backup::MpcRecoveryRecord> {
+            let encrypted_record = input
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().ends_with(b".bcs.asc"));
+            if encrypted_record
+                || input
+                    .extension()
+                    .is_some_and(|extension| extension == "bcs")
+            {
+                let decryptor = if encrypted_record {
+                    select_encrypted_decryptor(secret_key_path, use_gpg_agent, homedir)?
+                } else {
+                    RestoreDecryptor::Unencrypted
+                };
+                let mut bytes = Vec::new();
+                // Authenticate the complete message (including gpg's exit status)
+                // before decoding or using any private recovery material.
+                open_backup_stream(input, &decryptor)?
+                    .read_to_end(&mut bytes)
+                    .context("Failed to read complete MPC recovery record")?;
+                let record: backup::MpcRecoveryRecord = bcs::from_bytes(&bytes)
+                    .map_err(|_| anyhow::anyhow!("Invalid MPC recovery-record BCS"))?;
+                record.validate()?;
+                Ok(record)
+            } else {
+                let decryptor =
+                    select_restore_decryptor(input, secret_key_path, use_gpg_agent, homedir)?;
+                backup::read_mpc_recovery_record(open_backup_stream(input, &decryptor)?)
+            }
+        })()
+        .with_context(|| format!("Failed to load MPC recovery input {}", input.display()))?;
+        records.push(record);
+    }
+    let private_key = backup::reconstruct_root_scalar(&records, &public_key)?;
+    let backup::MpcRecoveryRecord::V1(first) = &records[0];
+    let recovered = backup::RecoveredMpcKey::V1(backup::RecoveredMpcKeyV1 {
+        chain_id: first.chain_id.clone(),
+        hashi_object_id: first.hashi_object_id,
+        epoch: first.epoch,
+        public_key,
+        private_key,
+    });
+    write_encrypted_bcs(output, &recovered, output_recipient)?;
+    print_success(&format!("MPC root key recovered: {}", output.display()));
+    Ok(())
 }
 
 /// Save an encrypted backup of the node config, referenced files, and database
@@ -101,7 +333,15 @@ pub async fn save(
         }
     })?;
 
-    let output_path = backup::save(node_config_path, &node_config, &db, &recipient, output_dir)?;
+    let output_path = backup::save(
+        node_config_path,
+        &node_config,
+        &db,
+        &recipient,
+        output_dir,
+        None,
+        None,
+    )?;
     // Release the database lock before potentially slow remote I/O.
     drop(db);
 
@@ -133,18 +373,21 @@ pub(crate) fn resolve_backup_recipient(
     backup_pgp_cert_override: Option<String>,
 ) -> Result<PgpPublicCert> {
     Ok(backup_pgp_cert_override
-        .map(|value| {
-            let path = Path::new(&value);
-            let cert = if path.is_file() {
-                fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
-            } else {
-                value
-            };
-            PgpPublicCert::new(cert)
-        })
+        .map(resolve_pgp_recipient)
         .transpose()?
         .unwrap_or_else(|| node_config.backup_pgp_cert.clone()))
+}
+
+/// Resolve a public recipient from either a certificate file or inline armor.
+pub(crate) fn resolve_pgp_recipient(value: String) -> Result<PgpPublicCert> {
+    let path = Path::new(&value);
+    let cert = if path.is_file() {
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
+    } else {
+        value
+    };
+    PgpPublicCert::new(cert)
 }
 
 /// Identify remote input without requiring local paths to be UTF-8.
@@ -299,21 +542,8 @@ pub fn restore(
             )
         })?;
 
-    // Encrypted backups yield the decompressed tar after OpenPGP decryption.
-    // Unencrypted backups are already raw tar archives.
-    let mut backup_stream: Box<dyn io::Read> = match decryptor {
-        RestoreDecryptor::Unencrypted => {
-            Box::new(File::open(backup_tarball).with_context(|| {
-                format!("Failed to open backup tarball {}", backup_tarball.display())
-            })?)
-        }
-        RestoreDecryptor::LocalSecretKey { secret_key_path } => Box::new(
-            decrypt_with_local_secret_key(backup_tarball, &secret_key_path)?,
-        ),
-        RestoreDecryptor::GpgAgent { homedir } => {
-            Box::new(decrypt_with_gpg(backup_tarball, homedir.as_deref())?)
-        }
-    };
+    // Both restore and recovery use the same decryption stream implementation.
+    let mut backup_stream = open_backup_stream(backup_tarball, &decryptor)?;
     let manifest_toml = {
         let mut archive = tar::Archive::new(&mut backup_stream);
         let mut entries = archive.entries()?;
@@ -389,6 +619,128 @@ mod tests {
     const CLI_CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
     const KEYPAIR_CONTENTS: &[u8] = b"test-ed25519-keypair-bytes";
     const BTC_KEY_CONTENTS: &[u8] = b"test-bitcoin-wif-bytes";
+
+    #[test]
+    fn private_bcs_output_never_overwrites() {
+        let directory = TempDir::new().unwrap();
+        let output = directory.path().join("key.bcs");
+        write_private_bcs(&output, &42u64).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), bcs::to_bytes(&42u64).unwrap());
+        assert!(write_private_bcs(&output, &7u64).is_err());
+        assert_eq!(fs::read(&output).unwrap(), bcs::to_bytes(&42u64).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = directory.path().join("dangling.bcs");
+            std::os::unix::fs::symlink(directory.path().join("missing"), &link).unwrap();
+            assert!(write_private_bcs(&link, &7u64).is_err());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[test]
+    fn encrypted_bcs_roundtrip_never_overwrites() {
+        use std::io::Read as _;
+
+        let directory = TempDir::new().unwrap();
+        let output = directory.path().join("root.bcs.asc");
+        let (public_cert, secret_key) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        write_encrypted_bcs(&output, &42u64, &recipient).unwrap();
+        let ciphertext = fs::read(&output).unwrap();
+        assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        let mut plaintext = Vec::new();
+        decrypt_with_secret_key(File::open(&output).unwrap(), secret_key.as_bytes())
+            .unwrap()
+            .read_to_end(&mut plaintext)
+            .unwrap();
+        assert_eq!(bcs::from_bytes::<u64>(&plaintext).unwrap(), 42);
+        assert!(write_encrypted_bcs(&output, &7u64, &recipient).is_err());
+        assert_eq!(fs::read(&output).unwrap(), ciphertext);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = directory.path().join("dangling.bcs.asc");
+            std::os::unix::fs::symlink(directory.path().join("missing"), &link).unwrap();
+            assert!(write_encrypted_bcs(&link, &7u64, &recipient).is_err());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_serialization_leaves_no_output_or_staging_file() {
+        struct FailingOutput;
+        impl serde::Serialize for FailingOutput {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeTuple as _;
+
+                let mut tuple = serializer.serialize_tuple(2)?;
+                tuple.serialize_element(&42u64)?;
+                Err(serde::ser::Error::custom(
+                    "deliberate serialization failure",
+                ))
+            }
+        }
+        let directory = TempDir::new().unwrap();
+        let output = directory.path().join("key.bcs");
+        assert!(write_private_bcs(&output, &FailingOutput).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+        let (public_cert, _) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        let encrypted_output = directory.path().join("root.bcs.asc");
+        assert!(write_encrypted_bcs(&encrypted_output, &FailingOutput, &recipient).is_err());
+        assert!(!encrypted_output.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_recovery_leaves_no_output() {
+        use fastcrypto::groups::GroupElement;
+        let directory = TempDir::new().unwrap();
+        let public_key = directory.path().join("public-key.bcs");
+        write_private_bcs(&public_key, &G::generator()).unwrap();
+        let record = directory.path().join("record.bcs");
+        fs::write(&record, b"invalid recovery record").unwrap();
+        let output = directory.path().join("root.bcs.asc");
+        let (public_cert, _) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        assert!(
+            recover_mpc_key(
+                &[record],
+                &public_key,
+                &output,
+                &recipient,
+                None,
+                false,
+                None
+            )
+            .is_err()
+        );
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
 
     /// Fixture holding a populated source directory and node config.
     struct TestFixture {

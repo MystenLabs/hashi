@@ -655,10 +655,6 @@ impl OnchainState {
             .copied()
     }
 
-    pub(crate) fn is_key_rotation_epoch(&self, epoch: u64) -> bool {
-        Self::epoch_after_first_committee(self.earliest_committee_epoch(), epoch)
-    }
-
     pub(crate) fn epoch_after_first_committee(
         earliest_committee_epoch: Option<u64>,
         epoch: u64,
