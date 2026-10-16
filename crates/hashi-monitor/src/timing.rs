@@ -20,6 +20,9 @@
 //! - Deposits: the Bitcoin confirmation time may be after the Hashi
 //!   confirmation by at most the skew. The Bitcoin event is the user's
 //!   payment, so no delay bounds it.
+//! - Deposit requests: Bitcoin is asked about a request's transaction for
+//!   the watch period. The monitor assumes an honest deposit confirms on
+//!   Bitcoin within it.
 //!
 //! A Bitcoin event is timed by the block that gave the transaction
 //! `MIN_CONFIRMATIONS` in `rpc::btc`, not by the block that holds it.
@@ -53,6 +56,16 @@ pub const WITHDRAWAL_E2_AFTER_E3_SKEW: u64 = 2 * 60 * 60;
 /// real time.
 pub const DEPOSIT_CONFIRMATION_SKEW: u64 = 2 * 60 * 60;
 
+/// How long Bitcoin is asked about a deposit request's transaction.
+/// Assumption: an honest deposit confirms on Bitcoin within two days of
+/// its request. Move marks a request expired after a day
+/// (`MAX_DEPOSIT_REQUEST_AGE_MS` in `deposit_queue.move`) and an honest
+/// leader deletes it then, so the user requests again, which is a new
+/// watch. But Move does not refuse to confirm an old request, so a
+/// committee that keeps one can confirm it later; a UTXO that confirms
+/// after the watch is seen only when the committee confirms it.
+pub const DEPOSIT_REQUEST_WATCH: u64 = 2 * 24 * 60 * 60;
+
 /// The bounds in force. `Default` is the protocol set above. Tests build
 /// their own with small numbers.
 #[derive(Clone, Debug)]
@@ -66,6 +79,8 @@ pub struct Timing {
     /// How far a deposit's confirmation time may be after its Hashi
     /// confirmation.
     pub deposit_confirmation_skew: u64,
+    /// How long Bitcoin is asked about a deposit request's transaction.
+    pub deposit_request_watch: u64,
 }
 
 impl Default for Timing {
@@ -94,6 +109,7 @@ impl Default for Timing {
             ])
             .expect("one bound per non-terminal event"),
             deposit_confirmation_skew: DEPOSIT_CONFIRMATION_SKEW,
+            deposit_request_watch: DEPOSIT_REQUEST_WATCH,
         }
     }
 }
@@ -161,6 +177,7 @@ impl Timing {
             ])
             .expect("valid predecessor skews"),
             deposit_confirmation_skew: 10,
+            deposit_request_watch: 1_000,
         }
     }
 }

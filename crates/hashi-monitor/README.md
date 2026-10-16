@@ -49,6 +49,21 @@ output with the Sui request: the same amount, and the same script as the bridge
 address of the claimed derivation path. Without this, a compromised committee
 can mint hBTC against any confirmed transaction.
 
+The monitor also follows every `DepositRequested`, the user's own claim that a
+Bitcoin output pays the bridge. The committee cannot suppress it. Bitcoin is
+asked about the transaction for the watch period of two days. Assumption: an
+honest deposit confirms on Bitcoin within it. Move marks a request expired
+after a day and an honest leader deletes it, so a slow deposit is requested
+again. Move does not refuse to confirm an older request, though, so a UTXO
+that confirms after the watch is seen only when the committee confirms it.
+An output that pays the bridge script of a
+claimed derivation path is bridge money, whatever Move does with the request
+later; the monitor's UTXO pool takes it (IOP-747). A UTXO Move never confirms,
+whether the committee withholds it or a member's sanctions screening rejected
+it, shows up in the pool's checks. A claim no output matches is the user's
+problem and is dropped. Each request has its own lookup, so a corrected
+request for the same UTXO is followed on its own.
+
 Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 `WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
 lookback still matches. An E1 found this way inside the range the Sui scan
@@ -142,6 +157,7 @@ are constants in `src/timing.rs`, each with its reason:
 | E1 after E2 skew | 5 min | the guardian's request clock tolerance |
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
 | deposit confirmation skew | 2 h | a deposit's confirmation time may be after its Hashi confirmation by this; a miner may date a block two hours ahead |
+| deposit request watch | 2 d | Bitcoin is asked about a deposit request's transaction for this; an honest deposit is assumed to confirm within it |
 
 ```yaml
 # Deployment identity and builds accepted when auditing Guardian logs.
