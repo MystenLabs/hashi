@@ -5,8 +5,13 @@ use anyhow::Context;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
+use tracing::Instrument;
 
 use crate::deposits::UnapprovedDepositError;
+use crate::metrics::SIGNING_REFUSAL_BUSY;
+use crate::metrics::SIGNING_REFUSAL_CAP;
+use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
+use crate::metrics::SIGNING_REFUSAL_SHAPE;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -44,6 +49,7 @@ use sui_sdk_types::Address;
 
 use super::HttpService;
 use super::peer_limit::CallerTaskSlot;
+use super::peer_limit::SigningPlace;
 
 #[tonic::async_trait]
 impl BridgeService for HttpService {
@@ -220,10 +226,11 @@ impl BridgeService for HttpService {
     ) -> Result<Response<Self::SignWithdrawalTransactionStream>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        self.admit_committee_member(caller)?;
+        let member = self.admit_committee_member(caller)?;
         let req = request.get_ref();
-        let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
-            .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
+        let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id).map_err(|e| {
+            self.malformed_request(caller, format!("invalid withdrawal_txn_id: {e}"))
+        })?;
         tracing::Span::current().record(
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
@@ -236,28 +243,45 @@ impl BridgeService for HttpService {
                 }
             })
             .map_err(|e| self.signing_refusal(caller, e))?;
-        let slot = self.admit_withdrawal_signing(caller)?;
+        let slot = self.admit_withdrawal_signing(&member)?;
+        let place = self.take_signing_place(&member)?;
         let requested_input_indices = req.input_indices.clone();
         tracing::info!("sign_withdrawal_transaction called");
         let concurrency = self.inner.config.withdrawal_signing_concurrency();
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
         let inner = self.inner.clone();
-        tokio::spawn(async move {
-            let _slot = slot;
-            if let Err(e) = inner
-                .validate_and_sign_withdrawal_tx(
-                    &withdrawal_txn_id,
-                    &requested_input_indices,
-                    tx.clone(),
-                )
-                .await
-            {
-                tracing::error!("sign_withdrawal_transaction failed: {e}");
-                let _ = tx
-                    .send(Err(Status::failed_precondition(e.to_string())))
+        let work_seconds = self.work_seconds(caller);
+        tokio::spawn(
+            async move {
+                let _slot = slot;
+                let run = tokio::select! {
+                    biased;
+                    () = tx.closed() => return,
+                    run = place.run() => run,
+                };
+                let job_inner = inner.clone();
+                let (prepared, place) = run
+                    .run_blocking(work_seconds, move || {
+                        job_inner.prepare_withdrawal_signing(
+                            &withdrawal_txn_id,
+                            &requested_input_indices,
+                        )
+                    })
                     .await;
+                drop(place);
+                let signed = match prepared {
+                    Ok(prepared) => inner.mpc_sign_withdrawal_tx(prepared, tx.clone()).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = signed {
+                    tracing::error!("sign_withdrawal_transaction failed: {e}");
+                    let _ = tx
+                        .send(Err(Status::failed_precondition(e.to_string())))
+                        .await;
+                }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
         )))
@@ -275,19 +299,30 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalTxSigningResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        self.admit_committee_member(caller)?;
+        let member = self.admit_committee_member(caller)?;
         let req = request.get_ref();
         let expected_limiter_seq = req.expected_limiter_seq;
         let timestamp_secs = req.timestamp_secs;
-        let message = parse_withdrawal_tx_signing(req)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let message =
+            parse_withdrawal_tx_signing(req).map_err(|e| self.malformed_request(caller, e))?;
         tracing::Span::current().record(
             "withdrawal_id",
             tracing::field::display(&message.withdrawal_id),
         );
+        self.inner
+            .check_withdrawal_tx_signing_request(&message)
+            .map_err(|e| self.signing_refusal(caller, e))?;
+        let run = self.take_signing_place(&member)?.run().await;
+        let inner = self.inner.clone();
+        let (verified, _place) = run
+            .run_blocking(self.work_seconds(caller), move || {
+                inner.verify_withdrawal_tx_signing(message, expected_limiter_seq, timestamp_secs)
+            })
+            .await;
+        let verified = verified.map_err(|e| self.signing_refusal(caller, e))?;
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
+            .sign_verified_withdrawal_tx_signing(verified)
             .await
             .map_err(|e| self.signing_refusal(caller, e))?;
         tracing::info!("Signed withdrawal tx signing");
@@ -307,17 +342,24 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignMpcInputSignaturesResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        self.admit_committee_member(caller)?;
+        let member = self.admit_committee_member(caller)?;
         let message = parse_mpc_input_signatures(request.get_ref())
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|e| self.malformed_request(caller, e))?;
         tracing::Span::current().record(
             "withdrawal_id",
             tracing::field::display(&message.withdrawal_id),
         );
-        let member_signature = self
-            .inner
-            .validate_and_sign_mpc_input_signatures(&message)
+        self.inner
+            .check_mpc_input_signatures_request(&message)
             .map_err(|e| self.signing_refusal(caller, e))?;
+        let run = self.take_signing_place(&member)?.run().await;
+        let inner = self.inner.clone();
+        let (member_signature, _place) = run
+            .run_blocking(self.work_seconds(caller), move || {
+                inner.validate_and_sign_mpc_input_signatures(&message)
+            })
+            .await;
+        let member_signature = member_signature.map_err(|e| self.signing_refusal(caller, e))?;
         tracing::info!("Signed MPC input signatures chunk");
         Ok(Response::new(SignMpcInputSignaturesResponse {
             member_signature: Some(member_signature),
@@ -354,6 +396,9 @@ impl BridgeService for HttpService {
 }
 
 const SIGNING_TASK_LIMIT_MSG: &str = "per-caller withdrawal signing limit reached";
+const SIGNING_BUSY_MSG: &str = "per-caller withdrawal signing queue is full";
+
+struct Member(Address);
 
 impl HttpService {
     fn count_signing_refusal(&self, caller: Address, reason: &str) {
@@ -364,32 +409,55 @@ impl HttpService {
             .inc();
     }
 
-    fn admit_committee_member(&self, caller: Address) -> Result<(), Status> {
+    fn admit_committee_member(&self, caller: Address) -> Result<Member, Status> {
         let refusal = {
             let state = self.inner.onchain_state().state();
             let committees = &state.hashi().committees;
             let epoch = committees.epoch();
             match committees.current_committee() {
-                Some(committee) if committee.index_of(&caller).is_some() => return Ok(()),
+                Some(committee) if committee.index_of(&caller).is_some() => {
+                    return Ok(Member(caller));
+                }
                 Some(_) => format!("caller is not in the epoch {epoch} committee"),
                 None => format!("this node does not know the epoch {epoch} committee"),
             }
         };
-        self.count_signing_refusal(caller, "committee");
+        self.count_signing_refusal(caller, SIGNING_REFUSAL_COMMITTEE);
         Err(Status::permission_denied(refusal))
     }
 
-    fn admit_withdrawal_signing(&self, caller: Address) -> Result<CallerTaskSlot, Status> {
+    fn admit_withdrawal_signing(&self, member: &Member) -> Result<CallerTaskSlot, Status> {
         let limit = self.inner.config.withdrawal_signing_per_caller_limit();
-        self.signing_tasks.try_admit(caller, limit).ok_or_else(|| {
-            self.count_signing_refusal(caller, "cap");
-            Status::unavailable(SIGNING_TASK_LIMIT_MSG)
+        self.signing_tasks
+            .try_admit(member.0, limit)
+            .ok_or_else(|| {
+                self.count_signing_refusal(member.0, SIGNING_REFUSAL_CAP);
+                Status::unavailable(SIGNING_TASK_LIMIT_MSG)
+            })
+    }
+
+    fn take_signing_place(&self, member: &Member) -> Result<SigningPlace, Status> {
+        self.signing_work.try_take_place(member.0).ok_or_else(|| {
+            self.count_signing_refusal(member.0, SIGNING_REFUSAL_BUSY);
+            Status::unavailable(SIGNING_BUSY_MSG)
         })
+    }
+
+    fn work_seconds(&self, caller: Address) -> prometheus::Counter {
+        self.inner
+            .metrics
+            .peer_bridge_work_seconds_total
+            .with_label_values(&[caller.to_string().as_str()])
+    }
+
+    fn malformed_request(&self, caller: Address, err: impl std::fmt::Display) -> Status {
+        self.count_signing_refusal(caller, SIGNING_REFUSAL_SHAPE);
+        Status::invalid_argument(err.to_string())
     }
 
     fn signing_refusal(&self, caller: Address, err: anyhow::Error) -> Status {
         if err.is::<MalformedSigningRequest>() {
-            self.count_signing_refusal(caller, "shape");
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_SHAPE);
         }
         withdrawal_signing_refusal_status(err)
     }
