@@ -291,7 +291,7 @@ mod tests {
                 (WithdrawalEventType::E2GuardianApproved, 7_200),
             ])
             .unwrap(),
-            deposit_btc_block_time_skew: 300,
+            deposit_confirmation_skew: 300,
         };
         cfg
     }

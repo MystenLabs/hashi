@@ -230,7 +230,7 @@ impl WithdrawalStateMachine {
                     event_type: WithdrawalEventType::E3BtcConfirmed,
                     wid,
                     btc_txid,
-                    timestamp_secs: confirmation.block_time,
+                    timestamp_secs: confirmation.confirmed_time,
                 };
                 Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg)))
             }
@@ -319,7 +319,7 @@ impl DepositStateMachine {
             panic!("unexpected event type");
         }
         // btc confirmation is a predecessor event => we set the deadline to now (+skew).
-        let t_btc_expected = event.timestamp_secs + cfg.timing.deposit_btc_block_time_skew;
+        let t_btc_expected = event.timestamp_secs + cfg.timing.deposit_confirmation_skew;
         Self {
             hashi_deposit_event: event,
             btc_resolved: false,
@@ -859,7 +859,8 @@ mod tests {
     /// A confirmed transaction that pays `paid` sats to `script_pubkey` at vout 1.
     fn confirmation(paid: u64, script_pubkey: ScriptBuf) -> TxConfirmation {
         TxConfirmation {
-            block_time: 90,
+            block_time: 30,
+            confirmed_time: 90,
             outputs: vec![
                 TxOut {
                     value: Amount::from_sat(1_000),

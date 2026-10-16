@@ -7,10 +7,12 @@ Audits the cross-system bridge flow on two parallel tracks.
 ### Withdrawals (Sui → BTC)
 - **E1**: Hashi approval event on Sui (`WithdrawalPickedForProcessing`).
 - **E2**: Guardian approval event (success record logged to S3).
-- **E3**: BTC transaction confirmed on Bitcoin.
+- **E3**: BTC transaction confirmed on Bitcoin, timed by the block that gave it
+  six confirmations.
 
 ### Deposits (BTC → Sui)
-- **E1**: Deposit confirmed on Bitcoin.
+- **E1**: Deposit confirmed on Bitcoin, timed by the block that gave it six
+  confirmations.
 - **E2**: `DepositConfirmed` on Sui. Because its Move payload has no timestamp,
   the monitor uses the timestamp of its containing checkpoint returned by Sui
   gRPC.
@@ -116,10 +118,10 @@ are constants in `src/timing.rs`, each with its reason:
 | Bound | Value | Meaning |
 |---|---|---|
 | E1 -> E2 delay | 1 h | the guardian must sign within this of a Hashi approval |
-| E2 -> E3 delay | 1 d | the signed transaction must confirm on Bitcoin within this |
+| E2 -> E3 delay | 1 d | the signed transaction must get six confirmations on Bitcoin within this |
 | E1 after E2 skew | 5 min | the guardian's request clock tolerance |
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
-| deposit block-time skew | 5 min | a deposit's block time may be after its Hashi confirmation by this |
+| deposit confirmation skew | 2 h | a deposit's confirmation time may be after its Hashi confirmation by this; a miner may date a block two hours ahead |
 
 ```yaml
 # Deployment identity and builds accepted when auditing Guardian logs.
