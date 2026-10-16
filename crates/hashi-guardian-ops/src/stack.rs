@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -121,6 +122,11 @@ impl Stack {
         })
     }
 
+    /// The stack's name without its organization, which names its directory of rendered files.
+    pub fn short_name(&self) -> &str {
+        self.name.rsplit('/').next().unwrap_or(&self.name)
+    }
+
     /// A configuration value, or `None` when the key is unset.
     pub fn config(&self, key: &str) -> Option<&str> {
         self.config
@@ -226,7 +232,7 @@ impl Stack {
         }
     }
 
-    /// What a step needs about a slot: its build, its deployed guardian and its tunnel.
+    /// What a step needs about a slot: its build, its deployed guardian, its tunnel and its rendered files.
     pub fn slot(&self, ctx: &Ctx, slot: Slot) -> Result<SlotView> {
         let suffix = slot.suffix();
         let commit = self.config(&format!("hashi-commit{suffix}")).unwrap_or("");
@@ -250,7 +256,22 @@ impl Stack {
             instance: self.instance(slot)?.map(str::to_owned),
             port,
             endpoint: format!("http://127.0.0.1:{port}"),
+            dir: ctx
+                .repo
+                .join(".hashi/guardian")
+                .join(self.short_name())
+                .join(slot.to_string()),
         })
+    }
+
+    /// One output read on its own, so a secret one can be shown.
+    pub fn output_value(&self, ctx: &Ctx, key: &str, secret: bool) -> Result<String> {
+        let mut cmd = pulumi(&self.dir).args(["stack", "output", key]);
+        if secret {
+            cmd = cmd.arg("--show-secrets");
+        }
+        let value = read(ctx.exec, &cmd.args(["--stack", &self.name]))?;
+        Ok(value.trim_end_matches('\n').to_owned())
     }
 
     /// The `rotation:*` tags sui-operations' rotation scripts keep on the stack.
@@ -378,6 +399,8 @@ pub struct SlotView {
     /// The local port its tunnel forwards.
     pub port: u16,
     pub endpoint: String,
+    /// Its rendered files.
+    pub dir: PathBuf,
 }
 
 impl SlotView {
@@ -544,6 +567,7 @@ pub mod tests {
         assert_eq!(view.role, Role::Active);
         assert_eq!(view.instance.as_deref(), Some("i-0aaa"));
         assert_eq!(view.endpoint, "http://127.0.0.1:3000");
+        assert_eq!(view.dir, repo.path().join(".hashi/guardian/testnet/a"));
         assert_eq!(stack.bucket().unwrap().name, "guardian-bucket");
         assert_eq!(stack.role(Slot::B).unwrap(), Role::Absent);
     }

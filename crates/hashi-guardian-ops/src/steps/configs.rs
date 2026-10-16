@@ -1,0 +1,183 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! The step that writes a slot's configuration for the operator and the key provisioners: `render`.
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::bail;
+
+use crate::Ctx;
+use crate::commit::Tree;
+use crate::render::SlotRender;
+use crate::say;
+use crate::stack::Slot;
+use crate::steps::slot;
+use crate::warn;
+
+/// Writes the slot's configuration, then has the guardian's own tools load it as the ceremony will.
+pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
+    let (stack, view) = slot(ctx, arg, "render")?;
+    say(&format!(
+        "Render slot {}'s guardian configuration",
+        view.slot
+    ));
+    let tree = Tree::at(
+        ctx,
+        &view.commit,
+        &format!("the commit slot {}'s guardian runs", view.slot),
+    )?;
+    let guardian_init = tree.guardian_init(ctx)?;
+    let render = SlotRender::new(ctx, &stack, &view)?;
+    let check = guardian_init.has_tool(ctx, "check-config")?;
+    std::fs::create_dir_all(&view.dir)?;
+    render.rendered.write(&view.dir)?;
+    if check {
+        for config in render.rendered.configs() {
+            let path = view.dir.join(config);
+            // The configuration lists certificates relative to its own directory.
+            let checked = ctx.exec.output(
+                &guardian_init
+                    .cmd()
+                    .args(["tools", "check-config", "--config"])
+                    .arg(path.file_name().unwrap_or_default())
+                    .cwd(path.parent().unwrap_or(&view.dir)),
+            );
+            if !checked.as_ref().is_ok_and(|output| output.success) {
+                render.rendered.remove_operator_configs(&view.dir)?;
+                checked.with_context(|| {
+                    format!("Could not run the guardian's tools on {}.", path.display())
+                })?;
+                bail!(
+                    "The guardian's tools refuse {}, so no step will run with it. Fix what they name, then render again.",
+                    path.display()
+                );
+            }
+        }
+    } else {
+        warn(
+            "This guardian's build has no tools check-config, so its tools have not checked the rendered files.",
+        );
+    }
+
+    let settings = &render.settings;
+    println!("Guardian commit:  {}", settings.commit);
+    println!("PCR0:             {}", settings.pcr0);
+    println!("Log bucket:       s3://{}", settings.bucket);
+    println!("Bitcoin network:  {}", settings.bitcoin_network);
+    println!("Retention class:  {}", settings.retention_environment);
+    let dir = view.dir.display();
+    println!(
+        "Key provisioners: {}, any {} provision",
+        render.dealt.kp_count(),
+        render.dealt.threshold
+    );
+    println!("For key provisioners: {dir}/guardian-init.yaml");
+    println!("For the operator:     {dir}/operator.yaml");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::exec::Cmd;
+    use crate::exec::Exec;
+    use crate::exec::fake::Fake;
+    use crate::render::tests::roster_dir;
+    use crate::stack::tests::COMMIT;
+    use crate::stack::tests::stack_env;
+    use crate::stack::tests::stack_world;
+
+    /// A one-slot stack whose guardian tools answer `tools --help` and `check-config` with these successes.
+    fn render_world(help: bool, checked: bool) -> Fake {
+        let stack = stack_world(
+            json!({
+                "hashi-commit": COMMIT,
+                "eif-pcr0": "0c".repeat(48),
+                "refill-rate-sats-per-sec": "11574",
+                "max-bucket-capacity-sats": "1000000000",
+            }),
+            json!({
+                "active_slot": "a",
+                "enclave_instance_id": "i-0aaa",
+                "standby_instance_id": "",
+                "s3_bucket_name": "guardian-bucket",
+                "s3_bucket_region": "us-west-2",
+            }),
+        );
+        Fake::new(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            match w.as_slice() {
+                ["pulumi", "-C", _, "stack", "output", "s3_access_key_id", ..] => {
+                    Some((true, "test-access-key\n".to_owned()))
+                }
+                ["pulumi", "-C", _, "stack", "output", "s3_secret_access_key", ..] => {
+                    Some((true, "test-secret-key\n".to_owned()))
+                }
+                ["pulumi", ..] => stack
+                    .output(&Cmd::new("pulumi").args(&words[1..]))
+                    .ok()
+                    .map(|output| (output.success, output.stdout)),
+                ["cargo", "build", ..] => Some((
+                    true,
+                    r#"{"reason":"compiler-artifact","target":{"name":"hashi-guardian-init"},"executable":"/x/hashi-guardian-init"}"#
+                        .to_owned(),
+                )),
+                ["/x/hashi-guardian-init", "tools", "--help"] => {
+                    Some((help, "  check-config  Check a configuration\n".to_owned()))
+                }
+                ["/x/hashi-guardian-init", "tools", "check-config", ..] => {
+                    Some((checked, String::new()))
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn render_slot_a(exec: &Fake) -> (tempfile::TempDir, Result<()>) {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".hashi/guardian-init").join(COMMIT)).unwrap();
+        let roster = roster_dir(&repo.path().join("roster"), &["alice", "bob"], "v1");
+        let mut env = stack_env();
+        env.extend([
+            ("KP_ROSTER_DIR", roster.as_str()),
+            ("KP_THRESHOLD", "2"),
+            ("SUI_RPC", "https://fullnode.testnet.sui.io:443"),
+            ("HASHI_PACKAGE_ID", "0x1"),
+            ("HASHI_OBJECT_ID", "0x2"),
+            ("BITCOIN_NETWORK", "signet"),
+            ("RETENTION_ENVIRONMENT", "testnet"),
+        ]);
+        let result = render(&Ctx::for_test(repo.path(), exec, &env), None);
+        (repo, result)
+    }
+
+    #[test]
+    fn leaves_no_operator_file_the_guardians_tools_did_not_check() {
+        let (repo, result) = render_slot_a(&render_world(true, false));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("The guardian's tools refuse")
+        );
+        let dir = repo.path().join(".hashi/guardian/testnet/a");
+        assert!(dir.join("guardian-init.yaml").is_file());
+        assert!(!dir.join("operator.yaml").exists());
+
+        // Tools that cannot run stop the step before it writes anything.
+        let (repo, result) = render_slot_a(&render_world(false, true));
+        assert!(result.is_err());
+        assert!(!repo.path().join(".hashi/guardian/testnet/a").exists());
+
+        let (repo, result) = render_slot_a(&render_world(true, true));
+        result.unwrap();
+        assert!(
+            repo.path()
+                .join(".hashi/guardian/testnet/a/operator.yaml")
+                .is_file()
+        );
+    }
+}
