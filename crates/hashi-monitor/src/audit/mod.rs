@@ -65,6 +65,7 @@ use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 use pool::ConfirmedWithdrawal;
 use pool::UtxoPool;
 use std::fmt;
@@ -192,6 +193,25 @@ impl AuditorCore {
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
         })
+    }
+
+    /// Ask Bitcoin about every coin held in the UTXO pool and return the
+    /// findings. Nothing when no pool is kept.
+    pub fn check_utxo_pool(&self) -> anyhow::Result<Vec<MonitorFinding>> {
+        let Some(pool) = &self.utxo_pool else {
+            return Ok(Vec::new());
+        };
+        self.btc_client.ensure_synced()?;
+        let outpoints = pool.outpoints();
+        tracing::info!(coins = outpoints.len(), "starting UTXO pool check");
+        let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
+        let findings = pool.check(&states, now_timestamp_secs(), &self.cfg.timing);
+        tracing::info!(
+            coins = outpoints.len(),
+            findings = findings.len(),
+            "finished UTXO pool check"
+        );
+        Ok(findings)
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
