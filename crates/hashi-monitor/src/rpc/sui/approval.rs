@@ -166,6 +166,7 @@ pub mod tests {
     use sui_sdk_types::Address;
 
     pub const PACKAGE_ID: Address = Address::new([0x11; 32]);
+    pub const HASHI_OBJECT_ID: Address = Address::new([0x22; 32]);
     pub const WID: Address = Address::new([0x3d; 32]);
 
     pub fn package_versions() -> PackageVersions {
