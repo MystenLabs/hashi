@@ -298,10 +298,23 @@ threshold. With defaults: `30,000 - 546 = 29,454 sats` per request.
 
 ## Adding a parameter without a package upgrade
 
-The Move package reads only the keys documented on this page; any other key
+The Move package reads only the keys documented above; any other key
 is opaque to it and is consumed by the node software. To make a node-side
 setting governable, pass an `AddConfig` proposal naming the key, its initial
 value (which fixes the key's type for later updates), and the store: the epoch
 config when every node must agree on the value for the whole epoch, the
 instant config otherwise. A node reads an absent key as its built-in default,
-so the key can be added before or after the node release that consumes it.
+so the key can be added before or after the node release that consumes it,
+except as noted below.
+
+### `mpc_rotation_messages_bcs`
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+| **Store** | epoch config |
+
+When `true`, nodes exchange rotation messages as one BCS value instead of a
+protobuf map. Add it only after every node that can join the next committee
+runs a release that supports it, and keep every node on such a release after.

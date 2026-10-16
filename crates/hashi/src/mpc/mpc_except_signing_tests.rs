@@ -12014,6 +12014,96 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
 }
 
 #[test]
+fn rotation_messages_round_trip_as_a_map_and_as_one_bcs_blob() {
+    let rotation_setup = RotationTestSetup::new();
+    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
+    let request = SendMessagesRequest {
+        messages: messages.clone(),
+    };
+    let blob = request.to_proto(rotation_setup.setup.epoch(), true);
+    let map = request.to_proto(rotation_setup.setup.epoch(), false);
+
+    assert!(matches!(
+        blob.messages,
+        Some(hashi_types::proto::send_messages_request::Messages::RotationMessagesBcs(_))
+    ));
+    assert!(matches!(
+        map.messages,
+        Some(hashi_types::proto::send_messages_request::Messages::RotationMessages(_))
+    ));
+    for proto in [&blob, &map] {
+        let decoded = SendMessagesRequest::try_from(proto).unwrap();
+        assert_eq!(decoded.messages.compute_hash(), messages.compute_hash());
+    }
+}
+
+#[test]
+fn rotation_responses_take_the_shape_the_request_epochs_committee_selects() {
+    let rotation_setup = RotationTestSetup::new();
+    let dealer = rotation_setup.setup.address(0);
+    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
+    let Messages::Rotation(rotation_messages) = &messages else {
+        unreachable!()
+    };
+    let (mut receiver, _) = rotation_setup.create_receiver_with_memory_store(2);
+    receiver.previous_reconfig_input = Some(receiver.shape_params().current().clone());
+    fn with_blob(committee: &RuntimeCommittee) -> RuntimeCommittee {
+        let mut entries = committee.config().entries().to_vec();
+        entries.push((
+            "mpc_rotation_messages_bcs".to_string(),
+            hashi_types::move_types::ConfigValue::Bool(true),
+        ));
+        Committee::with_config(
+            committee.members().to_vec(),
+            committee.epoch(),
+            hashi_types::move_types::Config::from_entries(entries),
+        )
+        .into()
+    }
+    receiver.committee = with_blob(&receiver.committee);
+    let blob = Bytes::from(bcs::to_bytes(rotation_messages).unwrap());
+    let reply = RetrieveReply::Rotation(blob.clone());
+    let request = |epoch| RetrieveMessagesRequest {
+        dealer,
+        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch,
+        batch_index: None,
+    };
+
+    let shape = receiver.shape_params();
+    let current = reply
+        .to_proto(&shape, &request(receiver.mpc_config.epoch))
+        .unwrap();
+    let previous = reply
+        .to_proto(&shape, &request(receiver.previous_epoch))
+        .unwrap();
+
+    let Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessagesBcs(served)) =
+        &current.messages
+    else {
+        panic!("expected one BCS blob for the current epoch");
+    };
+    assert_eq!(served.value.as_deref(), Some(&blob[..]));
+    assert!(matches!(
+        previous.messages,
+        Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessages(_))
+    ));
+    for response in [&current, &previous] {
+        let decoded = RetrieveMessagesResponse::try_from(response).unwrap();
+        assert_eq!(decoded.messages.compute_hash(), messages.compute_hash());
+    }
+
+    receiver.previous_committee = receiver.previous_committee.as_ref().map(with_blob);
+    let previous_with_blob = reply
+        .to_proto(&receiver.shape_params(), &request(receiver.previous_epoch))
+        .unwrap();
+    assert!(matches!(
+        previous_with_blob.messages,
+        Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessagesBcs(_))
+    ));
+}
+
+#[test]
 fn test_handle_complain_request_rotation_no_message_from_dealer() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
@@ -18733,6 +18823,78 @@ fn send_messages_count_checks_before_the_manager_lock() {
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+#[test]
+fn a_rotation_blob_is_count_checked_before_the_manager_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let rotation_setup = RotationTestSetup::new();
+    let dealer = rotation_setup.setup.address(0);
+    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
+    let Messages::Rotation(honest) = messages else {
+        unreachable!()
+    };
+    let mut oversized = honest.clone();
+    oversized.insert(
+        ShareIndex::new(u16::MAX).unwrap(),
+        honest.values().next().unwrap().clone(),
+    );
+    let (mut receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    receiver.previous_output = Some(dkg_output);
+    let epoch = receiver.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(receiver);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+    let send = |messages: &RotationMessages| {
+        let mut request = tonic::Request::new(hashi_types::proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: Some(
+                hashi_types::proto::send_messages_request::Messages::RotationMessagesBcs(
+                    bcs::to_bytes(messages).unwrap().into(),
+                ),
+            ),
+        });
+        request.extensions_mut().insert(dealer);
+        let service = service.clone();
+        rt.spawn(async move {
+            use hashi_types::proto::mpc_service_server::MpcService;
+            service.send_messages(request).await
+        })
+    };
+
+    let held = mpc_lock.write().unwrap();
+    let handler = send(&oversized);
+    let refused = rt
+        .block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
+        .expect("the refusal waited for the manager lock")
+        .unwrap()
+        .unwrap_err();
+    drop(held);
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+    assert!(
+        refused.message().contains("count check: rotation_messages"),
+        "{}",
+        refused.message()
+    );
+
+    let accepted = rt.block_on(send(&honest)).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
 }
 

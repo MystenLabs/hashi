@@ -82,6 +82,9 @@ message SendMessagesRequest {
 
     // For AVID nonce generation.
     AvidNonceMessage avid_nonce_message = 5;
+
+    // For key rotation: messages keyed by share index, as one BCS value.
+    sui.rpc.v2.Bcs rotation_messages_bcs = 6;
   }
 }
 
@@ -136,6 +139,9 @@ message RetrieveMessagesResponse {
 
     // For AVID nonce generation: catch-up commitment and echo.
     AvidNonceRetrievalMessage avid_nonce_retrieval_message = 4;
+
+    // For key rotation: messages keyed by share index, as one BCS value.
+    sui.rpc.v2.Bcs rotation_messages_bcs = 5;
   }
 }
 

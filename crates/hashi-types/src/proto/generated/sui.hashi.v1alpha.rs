@@ -3802,7 +3802,7 @@ pub struct SendMessagesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 5")]
+    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 5, 6")]
     pub messages: ::core::option::Option<send_messages_request::Messages>,
 }
 /// Nested message and enum types in `SendMessagesRequest`.
@@ -3818,6 +3818,9 @@ pub mod send_messages_request {
         /// For AVID nonce generation.
         #[prost(message, tag = "5")]
         AvidNonceMessage(super::AvidNonceMessage),
+        /// For key rotation: messages keyed by share index, as one BCS value.
+        #[prost(message, tag = "6")]
+        RotationMessagesBcs(::sui_rpc::proto::sui::rpc::v2::Bcs),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3855,7 +3858,7 @@ pub struct AvidNonceRetrievalMessage {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
-    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2, 4")]
+    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2, 4, 5")]
     pub messages: ::core::option::Option<retrieve_messages_response::Messages>,
 }
 /// Nested message and enum types in `RetrieveMessagesResponse`.
@@ -3871,6 +3874,9 @@ pub mod retrieve_messages_response {
         /// For AVID nonce generation: catch-up commitment and echo.
         #[prost(message, tag = "4")]
         AvidNonceRetrievalMessage(super::AvidNonceRetrievalMessage),
+        /// For key rotation: messages keyed by share index, as one BCS value.
+        #[prost(message, tag = "5")]
+        RotationMessagesBcs(::sui_rpc::proto::sui::rpc::v2::Bcs),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

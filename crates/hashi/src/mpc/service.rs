@@ -2212,8 +2212,23 @@ impl MpcService {
             previous_certs.len(),
         );
         let signer = self.inner.config.operator_private_key()?;
+        let rotation_messages_bcs = mpc_manager
+            .read()
+            .unwrap()
+            .committee
+            .config()
+            .mpc_rotation_messages_bcs();
+        info!(
+            "run_key_rotation: the epoch {target_epoch} committee selects {} for rotation messages",
+            if rotation_messages_bcs {
+                "one BCS blob"
+            } else {
+                "a proto map"
+            }
+        );
         let p2p_channel =
-            RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_KEY_ROTATION);
+            RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_KEY_ROTATION)
+                .with_rotation_messages_bcs(rotation_messages_bcs);
         let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,

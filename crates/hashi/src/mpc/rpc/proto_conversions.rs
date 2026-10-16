@@ -182,10 +182,13 @@ fn avid_nonce_message_from_proto(
 //
 
 impl types::SendMessagesRequest {
-    pub fn to_proto(&self, epoch: u64) -> proto::SendMessagesRequest {
+    pub fn to_proto(&self, epoch: u64, rotation_messages_bcs: bool) -> proto::SendMessagesRequest {
         use proto::send_messages_request::Messages;
         let messages = match &self.messages {
             types::Messages::Dkg(message) => Messages::DkgMessage(serialize_bcs(message)),
+            types::Messages::Rotation(messages) if rotation_messages_bcs => {
+                Messages::RotationMessagesBcs(serialize_bcs(messages))
+            }
             types::Messages::Rotation(messages) => {
                 Messages::RotationMessages(proto::RotationMessages {
                     messages: rotation_messages_to_proto(messages),
@@ -217,6 +220,9 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
             }
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+            }
+            Some(Messages::RotationMessagesBcs(messages)) => {
+                types::Messages::Rotation(deserialize_bcs(messages, "rotation_messages_bcs")?)
             }
             Some(Messages::AvidNonceMessage(avid)) => {
                 types::Messages::NonceGenerationAvid(avid_nonce_message_from_proto(avid)?)
@@ -329,17 +335,26 @@ impl RetrieveReply {
                 let entries =
                     stored_rows::rotation_entries(shape, request.epoch, &request.dealer, blob)
                         .map_err(not_found_if_refused)?;
-                Messages::RotationMessages(proto::RotationMessages {
-                    messages: entries
-                        .into_iter()
-                        .map(|(index, range)| {
-                            (
-                                u32::from(index.get()),
-                                named_bcs::<avss::Message>(blob.slice(range)),
-                            )
-                        })
-                        .collect(),
-                })
+                if shape
+                    .committee_for_epoch(request.epoch)
+                    .is_some_and(|committee| committee.rotation_messages_bcs())
+                {
+                    Messages::RotationMessagesBcs(named_bcs::<types::RotationMessages>(
+                        blob.clone(),
+                    ))
+                } else {
+                    Messages::RotationMessages(proto::RotationMessages {
+                        messages: entries
+                            .into_iter()
+                            .map(|(index, range)| {
+                                (
+                                    u32::from(index.get()),
+                                    named_bcs::<avss::Message>(blob.slice(range)),
+                                )
+                            })
+                            .collect(),
+                    })
+                }
             }
             Self::Avid(retrieval) => {
                 Messages::AvidNonceRetrievalMessage(proto::AvidNonceRetrievalMessage {
@@ -371,6 +386,9 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
             }
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+            }
+            Some(Messages::RotationMessagesBcs(messages)) => {
+                types::Messages::Rotation(deserialize_bcs(messages, "rotation_messages_bcs")?)
             }
             Some(Messages::AvidNonceRetrievalMessage(retrieval)) => {
                 types::Messages::AvidNonceRetrieval(types::AvidNonceRetrievalMessage {
@@ -781,7 +799,7 @@ mod avid_conversion_tests {
 
     fn assert_round_trips(messages: types::Messages) {
         let request = types::SendMessagesRequest { messages };
-        let proto = request.to_proto(7);
+        let proto = request.to_proto(7, false);
         let back = types::SendMessagesRequest::try_from(&proto).unwrap();
         assert_eq!(
             bcs::to_bytes(&request.messages).unwrap(),
