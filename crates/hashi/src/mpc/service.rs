@@ -45,7 +45,6 @@ use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::ReconfigOutcome;
-use crate::mpc::types::RotationRole;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -223,8 +222,12 @@ impl MpcService {
         self.run_major_compaction(self.inner.onchain_state().epoch())
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
-        // Seed before reconfiguration replaces the current manager and may block.
-        self.seed_recovery_backup().await;
+        let pending = self.get_pending_epoch_change();
+        // Pending rotation reconstructs the active epoch's output with the right
+        // predecessor context and seeds its backup before continuing the protocol.
+        if pending.is_none() {
+            self.seed_recovery_backup().await;
+        }
         if let Some(epoch) = pending {
             self.drive_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
@@ -494,6 +497,30 @@ impl MpcService {
                     crate::backup::BackupAction::SaveNodeState,
                 );
             }
+        }
+    }
+
+    fn backup_previous_output(&self, epoch: u64, output: &MpcOutput) {
+        if epoch != self.inner.onchain_state().epoch() || output.key_shares.shares.is_empty() {
+            return;
+        }
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+        if *recovery_backup_epoch == Some(epoch) {
+            return;
+        }
+        match self.inner.capture_mpc_recovery(epoch, output) {
+            Ok(Some(recovery)) => {
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+                );
+                *recovery_backup_epoch = Some(epoch);
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                epoch,
+                "Unable to capture previous MPC output for recovery backup: {error:#}"
+            ),
         }
     }
 
@@ -2314,20 +2341,16 @@ impl MpcService {
              onchain_epoch={onchain_epoch}, onchain_mpc_key={}",
             hex::encode(&onchain_mpc_key),
         );
-        let role = {
+        {
             let mgr = mpc_manager.read().unwrap();
-            if mgr.is_committee_member() {
-                RotationRole::DealerAndParty
-            } else if mgr.is_previous_committee_member() {
-                RotationRole::DealerOnly
-            } else {
+            if !mgr.is_committee_member() && !mgr.is_previous_committee_member() {
                 info!(
                     "run_key_rotation: in neither the epoch {target_epoch} committee nor its \
                      predecessor, no role in this rotation"
                 );
                 return Ok(ReconfigOutcome::NoRole);
             }
-        };
+        }
         let previous_certs = key_generation_certificates(&onchain_state, previous_epoch)
             .map_err(|e| anyhow::anyhow!("Failed to read previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -2373,7 +2396,7 @@ impl MpcService {
             &p2p_channel,
             &mut tob_channel,
             &self.inner.metrics,
-            role,
+            |epoch, output| self.backup_previous_output(epoch, output),
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;

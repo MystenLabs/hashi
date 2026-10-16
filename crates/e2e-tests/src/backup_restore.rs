@@ -36,6 +36,7 @@ mod tests {
     use hashi::config::Config as HashiConfig;
     use hashi::config::HashiIds;
     use hashi::db::Database;
+    use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::move_types::ProtocolType;
     use hashi_types::move_types::TobKey;
@@ -166,6 +167,14 @@ mod tests {
         let node = &mut networks.hashi_network_mut().nodes_mut()[0];
         let initial_epoch = node.current_epoch().unwrap();
         let public_key = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+        let predecessor_threshold = node
+            .hashi()
+            .mpc_manager()
+            .unwrap()
+            .read()
+            .unwrap()
+            .mpc_config
+            .threshold;
         node.shutdown().await;
         node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient)?;
         // Keep this test local even when the surrounding environment has S3 credentials.
@@ -208,8 +217,54 @@ mod tests {
         .await
         .context("Late signing manager restoration did not complete")?;
 
+        // Change the active epoch's threshold so recovering it with its
+        // predecessor's threshold cannot accidentally produce a valid backup.
+        {
+            let nodes = networks.hashi_network().nodes();
+            let latest_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .context("No active Hashi package")?;
+            let mut executors: Vec<SuiTxExecutor> = nodes
+                .iter()
+                .map(|node| {
+                    let hashi = node.hashi();
+                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+                })
+                .collect::<Result<_>>()?;
+            let target = executors[3].sender();
+            let hashi_ids = networks.hashi_network().ids();
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
+            let ignore_member_type_tag =
+                sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("ignore_member"),
+                    sui_sdk_types::Identifier::from_static("IgnoreMember"),
+                    vec![],
+                )));
+            crate::submit_proposal_through_quorum(
+                hashi_ids,
+                hashi_isv,
+                latest_package_id,
+                &mut executors,
+                hashi::cli::client::CreateProposalParams::IgnoreMember {
+                    target_validator_address: target,
+                    ignored: true,
+                    metadata: vec![],
+                },
+                ignore_member_type_tag,
+                "ignore_member",
+                "IgnoreMember",
+            )
+            .await?;
+        }
         networks.sui_network.force_close_epoch().await?;
-        wait_for_rotation(networks.hashi_network().nodes(), initial_epoch + 1).await;
+        wait_for_rotation(&networks.hashi_network().nodes()[..3], initial_epoch + 1).await;
         let node = &networks.hashi_network().nodes()[0];
         // Waiting for the next epoch's archive also lets the serialized worker
         // finish the startup reuse before checking files and fresh-process counts.
@@ -231,6 +286,18 @@ mod tests {
         .await
         .context("Rotation recovery archive did not appear")??;
         wait_for_local_backup(node, 1.0).await?;
+        let active_threshold = node
+            .hashi()
+            .mpc_manager()
+            .unwrap()
+            .read()
+            .unwrap()
+            .mpc_config
+            .threshold;
+        assert_ne!(
+            active_threshold, predecessor_threshold,
+            "The active epoch must have a different threshold from its predecessor",
+        );
         let archives = scheduled_archives(node.config())?;
         assert_eq!(
             archives.len(),
@@ -249,9 +316,9 @@ mod tests {
 
         // Inspect the actual encrypted archives through the normal restore command,
         // not an in-memory record or a synthetic MPC fixture.
-        for (archive, expected_epoch) in [
-            (&startup_archive, initial_epoch),
-            (&rotation_archive, initial_epoch + 1),
+        for (archive, expected_epoch, expected_threshold) in [
+            (&startup_archive, initial_epoch, predecessor_threshold),
+            (&rotation_archive, initial_epoch + 1, active_threshold),
         ] {
             assert!(
                 archive
@@ -282,11 +349,11 @@ mod tests {
             assert_eq!(record.validator_address, node.config().validator_address()?);
             assert_eq!(record.epoch, expected_epoch);
             assert_eq!(record.public_key, public_key);
-            assert!(record.threshold > 0);
+            assert_eq!(record.threshold, expected_threshold);
             assert!(!record.key_shares.shares.is_empty());
             assert!(!record.commitments.is_empty());
         }
-        assert_nodes_agree_on_mpc_key(networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(&networks.hashi_network().nodes()[..3]);
 
         // Reaching the new on-chain epoch precedes signing preparation. Keep
         // every peer online until the initial presignatures are installed,
@@ -295,7 +362,7 @@ mod tests {
             let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
             loop {
                 poll.tick().await;
-                if networks.hashi_network().nodes().iter().all(|node| {
+                if networks.hashi_network().nodes()[..3].iter().all(|node| {
                     node.hashi()
                         .signing_manager_for(initial_epoch + 1)
                         .is_some()
@@ -341,8 +408,8 @@ mod tests {
         let node = &mut networks.hashi_network_mut().nodes_mut()[0];
         for restart in [false, true] {
             if restart {
-                // Boot while reconfiguration is still blocked. Startup must seed
-                // the worker with current recovery material before driving MPC.
+                // Boot while reconfiguration is still blocked. Rotation must seed
+                // the worker with active recovery material before awaiting peers.
                 node.shutdown().await;
                 for archive in scheduled_archives(node.config())?
                     .into_iter()
@@ -400,6 +467,7 @@ mod tests {
             record.validate()?;
             let MpcRecoveryRecord::V1(record) = record;
             assert_eq!(record.epoch, initial_epoch + 1);
+            assert_eq!(record.threshold, active_threshold);
             assert_eq!(record.public_key, public_key);
             assert_eq!(record.validator_address, node.config().validator_address()?);
         }

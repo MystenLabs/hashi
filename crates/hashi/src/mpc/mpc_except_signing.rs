@@ -1048,6 +1048,8 @@ impl MpcManager {
         Ok(output)
     }
 
+    /// Calls `on_previous_output` synchronously, outside the manager lock, once
+    /// predecessor preparation succeeds and before any subsequent protocol await.
     pub async fn run_key_rotation(
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
@@ -1055,8 +1057,18 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
-        role: RotationRole,
+        on_previous_output: impl FnOnce(u64, &MpcOutput) + Send,
     ) -> MpcResult<ReconfigOutcome> {
+        let role = {
+            let mgr = mpc_manager.read().unwrap();
+            if mgr.is_committee_member() {
+                RotationRole::DealerAndParty
+            } else if mgr.is_previous_committee_member() {
+                RotationRole::DealerOnly
+            } else {
+                return Ok(ReconfigOutcome::NoRole);
+            }
+        };
         tracing::info!("run_key_rotation: starting prepare_previous_output, role={role:?}");
         let _timer = metrics
             .mpc_rotation_prepare_previous_duration_seconds
@@ -1076,9 +1088,14 @@ impl MpcManager {
             "run_key_rotation: prepare_previous_output complete, \
              is_member={is_member_of_previous_committee}",
         );
-        {
+        let previous_epoch = {
             let mut mgr = mpc_manager.write().unwrap();
             mgr.set_previous_output(previous.clone());
+            mgr.previous_epoch
+        };
+        on_previous_output(previous_epoch, &previous);
+        {
+            let mut mgr = mpc_manager.write().unwrap();
             // Load rotation messages from DB for restart recovery.
             // For live rotation this is a no-op (no messages stored yet).
             mgr.load_stored_rotation_messages()?;

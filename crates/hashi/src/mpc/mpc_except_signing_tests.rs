@@ -7095,6 +7095,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
 
     let mock_p2p = MockP2PChannel::new(peers, departing_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let mut captured_previous = false;
 
     let outcome = MpcManager::run_key_rotation(
         &departing,
@@ -7103,10 +7104,19 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerOnly,
+        |epoch, output| {
+            let manager = departing
+                .try_write()
+                .expect("callback must run outside the lock");
+            assert_eq!(epoch, manager.previous_epoch);
+            assert!(manager.previous_output.is_some());
+            assert!(!output.key_shares.shares.is_empty());
+            captured_previous = true;
+        },
     )
     .await
     .expect("a departing node must be able to deal into the rotation that removes it");
+    assert!(captured_previous);
 
     assert!(
         matches!(outcome, ReconfigOutcome::Dealt),
@@ -7141,6 +7151,7 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
 
     let mock_p2p = MockP2PChannel::new(HashMap::new(), departing_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let mut captured_previous = false;
 
     let outcome = MpcManager::run_key_rotation(
         &departing,
@@ -7149,9 +7160,17 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerOnly,
+        |epoch, output| {
+            assert_eq!(epoch, departing.read().unwrap().previous_epoch);
+            assert!(!output.key_shares.shares.is_empty());
+            captured_previous = true;
+        },
     )
     .await;
+    assert!(
+        captured_previous,
+        "capture must precede a later failed deal"
+    );
 
     assert!(
         matches!(outcome, Err(MpcError::NotEnoughApprovals { .. })),
@@ -7189,13 +7208,15 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
 
     let mock_p2p = MockP2PChannel::new(peers, departing_addr);
 
-    let as_dealer_only = MpcManager::prepare_previous_output(
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let as_dealer_only = MpcManager::run_key_rotation(
         &departing,
         &[],
         &[],
         &mock_p2p,
+        &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerOnly,
+        |_, _| panic!("failed predecessor preparation must not invoke capture"),
     )
     .await;
     assert!(
@@ -7300,6 +7321,7 @@ async fn test_run_key_rotation() {
     // Create mock TOB with rotation certificates
     let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
 
+    let mut captured_previous = false;
     // Run key rotation
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
@@ -7308,12 +7330,24 @@ async fn test_run_key_rotation() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerAndParty,
+        |epoch, output| {
+            let manager = test_manager
+                .try_write()
+                .expect("callback must run outside the lock");
+            assert_eq!(epoch, manager.previous_epoch);
+            assert_eq!(output.threshold, test_dkg_output.threshold);
+            assert_eq!(
+                bcs::to_bytes(&output.key_shares).unwrap(),
+                bcs::to_bytes(&test_dkg_output.key_shares).unwrap()
+            );
+            captured_previous = true;
+        },
     )
     .await
     .unwrap()
     .into_output()
     .unwrap();
+    assert!(captured_previous);
 
     assert_eq!(
         new_output.key_shares.shares.len(),
@@ -7447,7 +7481,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerAndParty,
+        |_, _| {},
     )
     .await
     .unwrap()
@@ -7592,7 +7626,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerAndParty,
+        |_, _| {},
     )
     .await
     .unwrap()
@@ -7829,7 +7863,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerAndParty,
+        |_, _| {},
     )
     .await
     .unwrap()
@@ -7967,7 +8001,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
-        RotationRole::DealerAndParty,
+        |_, _| {},
     )
     .await
     .unwrap()
