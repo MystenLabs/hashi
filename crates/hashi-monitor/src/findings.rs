@@ -24,6 +24,7 @@ use crate::domain::WithdrawalTx;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
+use bitcoin::OutPoint;
 use bitcoin::Txid;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::WithdrawalID;
@@ -107,6 +108,26 @@ pub enum MonitorFinding {
         sui: MonitorDepositEvent,
         btc: MonitorDepositEvent,
     },
+    /// Bitcoin confirmed an outpoint the monitor's UTXO pool knows with a
+    /// second amount. An outpoint has one amount, so this is a monitor bug.
+    UtxoAmountMismatch {
+        outpoint: OutPoint,
+        held_amount: u64,
+        seen_amount: u64,
+    },
+    /// A confirmed Hashi withdrawal spent a coin the monitor's UTXO pool
+    /// records as spent by another transaction. A monitor bug or a reorg.
+    UtxoSpentTwice {
+        outpoint: OutPoint,
+        first_txid: Txid,
+        second_txid: Txid,
+    },
+    /// A confirmed Hashi withdrawal spent a coin the monitor's UTXO pool
+    /// never held. The pool missed the coin's entry.
+    UtxoUnknownInputSpent {
+        outpoint: OutPoint,
+        txid: Txid,
+    },
     /// The time the guardian signed into a log differs from the time S3
     /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
     GuardianClockSkew {
@@ -137,6 +158,9 @@ impl MonitorFinding {
             Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
+            Self::UtxoAmountMismatch { .. } => FindingCategory::Safety,
+            Self::UtxoSpentTwice { .. } => FindingCategory::Safety,
+            Self::UtxoUnknownInputSpent { .. } => FindingCategory::Liveness,
             Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
     }
@@ -209,6 +233,25 @@ impl fmt::Display for MonitorFinding {
                 "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
                 sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
             ),
+            Self::UtxoAmountMismatch {
+                outpoint,
+                held_amount,
+                seen_amount,
+            } => write!(
+                f,
+                "UtxoAmountMismatch(outpoint={outpoint}, held_amount={held_amount}, seen_amount={seen_amount})"
+            ),
+            Self::UtxoSpentTwice {
+                outpoint,
+                first_txid,
+                second_txid,
+            } => write!(
+                f,
+                "UtxoSpentTwice(outpoint={outpoint}, first_txid={first_txid}, second_txid={second_txid})"
+            ),
+            Self::UtxoUnknownInputSpent { outpoint, txid } => {
+                write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
+            }
             Self::GuardianClockSkew {
                 session_id,
                 object_key,
