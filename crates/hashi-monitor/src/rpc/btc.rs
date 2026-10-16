@@ -131,9 +131,17 @@ impl BlockchainInfo {
     }
 }
 
+/// A transaction mined at least `MIN_CONFIRMATIONS` deep, before its block
+/// header is read.
+struct ConfirmedTx {
+    block_hash: BlockHash,
+    inputs: Vec<OutPoint>,
+    outputs: Vec<TxOut>,
+}
+
 impl RawTransactionInfo {
-    /// The block hash and outputs of a sufficiently confirmed transaction.
-    fn confirmed(self, txid: Txid) -> anyhow::Result<Option<(BlockHash, Vec<TxOut>)>> {
+    /// The block hash, inputs and outputs of a sufficiently confirmed transaction.
+    fn confirmed(self, txid: Txid) -> anyhow::Result<Option<ConfirmedTx>> {
         let Some(block_hash) = self.blockhash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
@@ -157,7 +165,11 @@ impl RawTransactionInfo {
             "bitcoin returned transaction {} for {txid}",
             tx.compute_txid()
         );
-        Ok(Some((block_hash, tx.output)))
+        Ok(Some(ConfirmedTx {
+            block_hash,
+            inputs: tx.input.iter().map(|input| input.previous_output).collect(),
+            outputs: tx.output,
+        }))
     }
 }
 
@@ -365,7 +377,12 @@ impl HttpJsonRpcTransport {
                 .context("bitcoin getrawtransaction response is missing its result")?,
         )
         .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-        let Some((block_hash, outputs)) = tx_info.confirmed(txid)? else {
+        let Some(ConfirmedTx {
+            block_hash,
+            inputs,
+            outputs,
+        }) = tx_info.confirmed(txid)?
+        else {
             return Ok(None);
         };
 
@@ -377,6 +394,7 @@ impl HttpJsonRpcTransport {
         Ok(Some(BtcConfirmation {
             block_time,
             confirmed_time,
+            inputs,
             outputs,
         }))
     }
@@ -456,7 +474,7 @@ impl HttpJsonRpcTransport {
         let unique_block_hashes = confirmed
             .values()
             .flatten()
-            .map(|(block_hash, _)| *block_hash)
+            .map(|tx| tx.block_hash)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -466,15 +484,16 @@ impl HttpJsonRpcTransport {
             .into_iter()
             .map(|(txid, confirmed)| {
                 let confirmation = confirmed
-                    .map(|(hash, outputs)| {
-                        let (block_time, confirmed_time) = times
-                            .get(&hash)
-                            .copied()
-                            .with_context(|| format!("missing block times for {hash}"))?;
+                    .map(|tx| {
+                        let (block_time, confirmed_time) =
+                            times.get(&tx.block_hash).copied().with_context(|| {
+                                format!("missing block times for {}", tx.block_hash)
+                            })?;
                         Ok::<_, anyhow::Error>(BtcConfirmation {
                             block_time,
                             confirmed_time,
-                            outputs,
+                            inputs: tx.inputs,
+                            outputs: tx.outputs,
                         })
                     })
                     .transpose()?;

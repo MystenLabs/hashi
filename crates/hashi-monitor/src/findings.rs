@@ -14,6 +14,9 @@
 //! - A safety finding means a source contradicts another: a late or missing
 //!   predecessor, a contradictory event, a transaction or deposit that does
 //!   not match its claim, or a guardian clock that disagrees with S3.
+//! - `RpcInconsistency` is a safety finding where an RPC answer contradicts
+//!   one the monitor already holds. The bridge cannot cause it. The inner
+//!   enum names the contradiction.
 
 use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
@@ -24,6 +27,8 @@ use crate::domain::WithdrawalTx;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
+use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
 use bitcoin::Txid;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::WithdrawalID;
@@ -107,6 +112,15 @@ pub enum MonitorFinding {
         sui: MonitorDepositEvent,
         btc: MonitorDepositEvent,
     },
+    /// An RPC answer contradicts one the monitor already holds. See
+    /// `RpcInconsistency`.
+    RpcInconsistency(RpcInconsistency),
+    /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
+    /// never held. The pool missed the UTXO's entry.
+    UtxoUnknownInputSpent {
+        outpoint: OutPoint,
+        txid: Txid,
+    },
     /// The time the guardian signed into a log differs from the time S3
     /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
     GuardianClockSkew {
@@ -117,6 +131,54 @@ pub enum MonitorFinding {
         /// S3's `LastModified` time.
         stored_at_ms: UnixMillis,
     },
+}
+
+/// An RPC answer that contradicts one the monitor already holds. A chain
+/// cannot produce it, so it is a lying node, a reorg, or a monitor bug.
+/// The bridge is not the cause, and an engineer has to look.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RpcInconsistency {
+    /// Bitcoin confirmed an outpoint the monitor's UTXO pool knows with a
+    /// second amount or script. An output has one of each.
+    UtxoMismatch {
+        outpoint: OutPoint,
+        held_amount: u64,
+        seen_amount: u64,
+        held_script: ScriptBuf,
+        seen_script: ScriptBuf,
+    },
+    /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
+    /// records as spent by another confirmed transaction.
+    UtxoSpentTwice {
+        outpoint: OutPoint,
+        first_txid: Txid,
+        second_txid: Txid,
+    },
+}
+
+impl fmt::Display for RpcInconsistency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UtxoMismatch {
+                outpoint,
+                held_amount,
+                seen_amount,
+                held_script,
+                seen_script,
+            } => write!(
+                f,
+                "UtxoMismatch(outpoint={outpoint}, held_amount={held_amount}, seen_amount={seen_amount}, held_script={held_script:x}, seen_script={seen_script:x})"
+            ),
+            Self::UtxoSpentTwice {
+                outpoint,
+                first_txid,
+                second_txid,
+            } => write!(
+                f,
+                "UtxoSpentTwice(outpoint={outpoint}, first_txid={first_txid}, second_txid={second_txid})"
+            ),
+        }
+    }
 }
 
 impl MonitorFinding {
@@ -137,6 +199,8 @@ impl MonitorFinding {
             Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
+            Self::RpcInconsistency(_) => FindingCategory::Safety,
+            Self::UtxoUnknownInputSpent { .. } => FindingCategory::Liveness,
             Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
     }
@@ -209,6 +273,12 @@ impl fmt::Display for MonitorFinding {
                 "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
                 sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
             ),
+            Self::RpcInconsistency(inconsistency) => {
+                write!(f, "RpcInconsistency({inconsistency})")
+            }
+            Self::UtxoUnknownInputSpent { outpoint, txid } => {
+                write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
+            }
             Self::GuardianClockSkew {
                 session_id,
                 object_key,

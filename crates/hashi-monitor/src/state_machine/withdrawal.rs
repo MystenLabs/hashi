@@ -27,6 +27,7 @@
 //!   may have reported findings earlier.
 
 use crate::audit::AuditWindow;
+use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
@@ -55,6 +56,8 @@ pub struct WithdrawalStateMachine {
     expected_events: Vec<(WithdrawalEventType, UnixSeconds, EventRelation)>,
     /// The time of the last Bitcoin lookup of the transaction.
     btc_checked_at: Option<UnixSeconds>,
+    /// The withdrawal for the UTXO pool, once Bitcoin confirmed it.
+    confirmed: Option<ConfirmedWithdrawal>,
     /// The withdrawal id. Every event must carry it.
     wid: WithdrawalID,
     /// The transaction id. Every event must carry it.
@@ -71,6 +74,7 @@ impl WithdrawalStateMachine {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
             btc_checked_at: None,
+            confirmed: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
             tx: event.tx.clone(),
@@ -90,6 +94,16 @@ impl WithdrawalStateMachine {
 
     pub fn btc_txid(&self) -> Txid {
         self.btc_txid
+    }
+
+    /// The withdrawal's inputs and outputs, as every event states them.
+    pub fn tx(&self) -> &WithdrawalTx {
+        &self.tx
+    }
+
+    /// The withdrawal for the UTXO pool, or `None` until Bitcoin confirmed it.
+    pub fn confirmed(&self) -> Option<&ConfirmedWithdrawal> {
+        self.confirmed.as_ref()
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -146,6 +160,8 @@ impl WithdrawalStateMachine {
     }
 
     /// Add an event and update expectations for its immediate neighbors.
+    /// The auditor adds E1 and E2 as it reads Sui and the guardian log.
+    /// `try_fetch_btc_tx` adds E3 from Bitcoin's confirmation.
     ///
     /// A missing predecessor is expected by the event timestamp plus the
     /// predecessor's clock skew; a missing successor is expected by the
@@ -260,6 +276,12 @@ impl WithdrawalStateMachine {
                     self.btc_txid,
                     self.tx.clone(),
                 );
+                // E3 is expected only after E2, so E2 is present here. The
+                // pool takes the change layout from E2, the guardian's word.
+                let e2 = self
+                    .get(WithdrawalEventType::E2GuardianApproved)
+                    .expect("E3 is expected only after E2");
+                self.confirmed = Some(ConfirmedWithdrawal::from_confirmation(e2, confirmation));
                 BtcFetchOutcome::Confirmed(self.add_event(e_btc, timing))
             }
             None => BtcFetchOutcome::Unconfirmed,

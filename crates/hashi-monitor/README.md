@@ -25,9 +25,9 @@ Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
 - **safety** for a contradictory event, a late predecessor, a predecessor
   still missing after its source cursor passes the deadline, an event the
-  Sui scan covered but never returned, a Hashi approval whose txid does not
-  match its inputs and outputs or whose inputs and outputs differ from the
-  guardian's, a confirmed deposit
+  Sui scan covered but never returned, a Hashi approval or a guardian log
+  whose txid does not match its inputs and outputs, a Hashi approval whose
+  inputs and outputs differ from the guardian's, a confirmed deposit
   whose Bitcoin output does not match the Sui request, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
@@ -68,6 +68,47 @@ Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 `WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
 lookback still matches. An E1 found this way inside the range the Sui scan
 already covered also raises `SuiScanMissedEvent`.
+
+### UTXO pool (continuous mode)
+Each bridge UTXO is a 2-of-2 between the MPC committee and the guardian, plus
+a recovery leaf that lets the committee spend alone 60 days after the UTXO
+confirms. A compromised committee can mark a UTXO spent on Move without
+spending it on Bitcoin, or keep a deposit out of Move, then wait for that day.
+So the monitor keeps its own pool of the UTXOs the bridge holds, and only a
+Bitcoin fact changes it:
+
+- A UTXO enters when Bitcoin confirms a deposit request's output at the
+  bridge script of the claimed path. The committee is not needed.
+- When a withdrawal flow is complete, E1, E2 and E3 seen, its change
+  outputs enter and its inputs move to a spent record, with the spending
+  txid. The inputs and amounts come from the confirmed Bitcoin transaction.
+  Which outputs are change comes from E2: the guardian labels each output
+  from paths it derives itself. A withdrawal that never completes never
+  touches the pool.
+
+Every operation is strict. One the pool already applied is a repeat and is
+skipped, so a restart can replay any range of events. One that contradicts
+the pool is a finding: **safety** `RpcInconsistency`, for `UtxoMismatch`
+when Bitcoin confirms a known outpoint with a second amount or script, and
+`UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
+transaction already spent, since Bitcoin cannot produce either; **liveness**
+`UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
+never held; the pool records nothing for that spend. In one Bitcoin pass
+every add comes before every spend, so a pass
+that answers a deposit and the withdrawal that spends it is right in any
+order.
+
+Move's records are never read for the pool. The pool starts empty on the
+first run, which must start at the bridge's genesis on a fullnode that still
+serves the history, so every UTXO is seen enter. The spent record is never
+pruned; a spent UTXO is a few dozen bytes. Keeping the pool between runs, in
+the monitor's snapshot, follows in a later change. Until then no pool is
+kept.
+
+A UTXO paid to a bridge address with no `DepositRequested`, or with a wrong
+derivation path, is invisible to the monitor and out of scope. The daily
+check of every UTXO against Bitcoin, and the check against Move's records,
+follow in later changes.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.

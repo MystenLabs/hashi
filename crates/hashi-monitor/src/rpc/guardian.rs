@@ -35,7 +35,6 @@ use anyhow::Context;
 use bitcoin::Network;
 use hashi_guardian::MAX_EXPECTED_LOG_CLOCK_SKEW;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -61,17 +60,6 @@ impl GuardianWithdrawalsPoller {
             cursor: S3HourDirectory::withdraw(start)?,
             hashi_btc_keys: None,
         })
-    }
-
-    /// The E2 event of a verified guardian withdrawal log.
-    fn withdrawal_event(&self, log: VerifiedLogEntry) -> anyhow::Result<MonitorWithdrawalEvent> {
-        let keys = self
-            .hashi_btc_keys
-            .as_ref()
-            .context("the bridge keys must be read before polling guardian logs")?;
-        let event = MonitorWithdrawalEvent::from_guardian(log, keys)?;
-        debug!(wid = %event.wid, txid = %event.btc_txid, "guardian withdrawal log");
-        Ok(event)
     }
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
@@ -122,6 +110,10 @@ impl GuardianWithdrawalsPoller {
         // this caller accepts any record whose session build verifies against the
         // configured allowlist. Add a cursor/cutoff policy here if tailing must
         // require the current build after the upgrade window.
+        let keys = self
+            .hashi_btc_keys
+            .as_ref()
+            .context("the bridge keys must be read before polling guardian logs")?;
         let mut findings = Vec::new();
         let mut withdrawal_events = Vec::with_capacity(verified_logs.len());
         for log in verified_logs {
@@ -135,7 +127,19 @@ impl GuardianWithdrawalsPoller {
                     stored_at_ms: log.stored_at_ms(),
                 });
             }
-            withdrawal_events.push(MonitorEvent::Withdrawal(self.withdrawal_event(log)?));
+            let entry = log.into_entry();
+            let timestamp_ms = entry.timestamp_ms();
+            let withdrawal = entry
+                .into_message()
+                .into_withdrawal()
+                .context("non-withdrawal log in the guardian's withdrawal logs")?;
+            match MonitorWithdrawalEvent::from_guardian(&withdrawal, timestamp_ms, keys) {
+                Ok(event) => {
+                    debug!(wid = %event.wid, txid = %event.btc_txid, "guardian withdrawal log");
+                    withdrawal_events.push(MonitorEvent::Withdrawal(event));
+                }
+                Err(found) => findings.extend(found),
+            }
         }
 
         self.cursor = next_cursor;

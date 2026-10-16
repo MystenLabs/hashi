@@ -9,13 +9,13 @@ use std::fmt;
 use anyhow::Context as _;
 use bitcoin::Transaction;
 use bitcoin::Txid;
-use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::bitcoin::DerivationPath;
 use hashi_types::bitcoin::OutputUTXOWire;
 use hashi_types::bitcoin::TxUTXOsWire;
 use hashi_types::bitcoin::unsigned_withdrawal_tx;
 use hashi_types::bitcoin::witness_program_from_address;
 use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::OutputUtxo;
@@ -55,7 +55,8 @@ impl MonitorWithdrawalEvent {
         wid: WithdrawalID,
         txn: WithdrawalTransaction,
     ) -> Result<Self, Vec<MonitorFinding>> {
-        Self::checked_approval(
+        Self::checked(
+            WithdrawalEventType::E1HashiApproved,
             wid,
             txn.txid.into(),
             WithdrawalTx::new(txn.inputs, txn.withdrawal_outputs, txn.change_outputs),
@@ -67,7 +68,8 @@ impl MonitorWithdrawalEvent {
     pub fn from_sui_event(
         event: WithdrawalPickedForProcessing,
     ) -> Result<Self, Vec<MonitorFinding>> {
-        Self::checked_approval(
+        Self::checked(
+            WithdrawalEventType::E1HashiApproved,
             event.withdrawal_txn_id,
             event.txid.into(),
             WithdrawalTx::new(event.inputs, event.withdrawal_outputs, event.change_outputs),
@@ -75,13 +77,15 @@ impl MonitorWithdrawalEvent {
         )
     }
 
-    /// Check what Move does not on the Hashi approval of `wid`: the claimed
-    /// txid must be the txid of the transaction `tx` builds. Otherwise a
-    /// committee can commit a user's outputs under the txid of a transaction
-    /// that pays itself. A failed check is returned as findings, and the
-    /// approval is not ingested. The event carries `tx` for the state
-    /// machine to compare with the guardian's once E2 arrives.
-    fn checked_approval(
+    /// Check what Move does not on an approval of `wid`: the claimed txid
+    /// must be the txid of the transaction `tx` builds. Otherwise a committee
+    /// can commit a user's outputs under the txid of a transaction that pays
+    /// itself, and a guardian's log could label outputs the txid does not
+    /// have. A failed check is returned as findings, and the event is not
+    /// ingested. The event carries `tx` for the state machine to compare the
+    /// two approvals.
+    fn checked(
+        event_type: WithdrawalEventType,
         wid: WithdrawalID,
         claimed_txid: Txid,
         tx: WithdrawalTx,
@@ -105,7 +109,7 @@ impl MonitorWithdrawalEvent {
             }
         }
         Ok(Self {
-            event_type: WithdrawalEventType::E1HashiApproved,
+            event_type,
             wid,
             timestamp_secs,
             btc_txid: claimed_txid,
@@ -113,22 +117,31 @@ impl MonitorWithdrawalEvent {
         })
     }
 
-    /// E2 from a verified guardian withdrawal log. The log labels every
-    /// output it signed; `keys` turn its change paths into addresses.
-    pub fn from_guardian(log: VerifiedLogEntry, keys: &HashiBTCKeys) -> anyhow::Result<Self> {
-        let entry = log.into_entry();
-        let timestamp_ms = entry.timestamp_ms();
-        let withdrawal = entry
-            .into_message()
-            .into_withdrawal()
-            .ok_or_else(|| anyhow::anyhow!("non-withdrawal logs found"))?;
-        Ok(Self {
-            event_type: WithdrawalEventType::E2GuardianApproved,
-            wid: withdrawal.request_data.wid,
-            timestamp_secs: unix_millis_to_seconds(timestamp_ms),
-            btc_txid: withdrawal.txid,
-            tx: WithdrawalTx::from_guardian(keys, &withdrawal.request_data.utxos)?,
-        })
+    /// E2 from the guardian's withdrawal log message, logged at
+    /// `timestamp_ms`. The log labels every output it signed; `keys` turn its
+    /// change paths into addresses. A layout the keys cannot build, or one
+    /// that does not hash to the txid the log states, is returned as findings.
+    pub fn from_guardian(
+        withdrawal: &WithdrawalLogMessage,
+        timestamp_ms: u64,
+        keys: &HashiBTCKeys,
+    ) -> Result<Self, Vec<MonitorFinding>> {
+        let wid = withdrawal.request_data.wid;
+        let tx =
+            WithdrawalTx::from_guardian(keys, &withdrawal.request_data.utxos).map_err(|error| {
+                vec![MonitorFinding::WithdrawalTxUnbuildable {
+                    wid,
+                    claimed: withdrawal.txid,
+                    reason: format!("{error:#}"),
+                }]
+            })?;
+        Self::checked(
+            WithdrawalEventType::E2GuardianApproved,
+            wid,
+            withdrawal.txid,
+            tx,
+            unix_millis_to_seconds(timestamp_ms),
+        )
     }
 
     /// E3 from Bitcoin's confirmation of the withdrawal `wid` and `btc_txid`.
@@ -145,6 +158,32 @@ impl MonitorWithdrawalEvent {
             btc_txid,
             timestamp_secs: confirmation.confirmed_time,
             tx,
+        }
+    }
+}
+
+/// A withdrawal Bitcoin confirmed, with the guardian's word on which of its
+/// outputs are change. The UTXO pool applies it.
+#[derive(Clone, Debug)]
+pub struct ConfirmedWithdrawal {
+    pub txid: Txid,
+    pub confirmation: BtcConfirmation,
+    /// The vout of the first change output. The change outputs trail the
+    /// user payouts, so every output from here on is change.
+    pub first_change_vout: usize,
+}
+
+impl ConfirmedWithdrawal {
+    /// The withdrawal the guardian approved in `e2`, as Bitcoin confirmed
+    /// it. Only the change layout is E2's: Bitcoin cannot say which outputs
+    /// are change, and the guardian labels them from paths it derives. The
+    /// outputs themselves agree by construction: E2's layout was checked to
+    /// hash to the txid at ingest, and so was the confirmation at lookup.
+    pub fn from_confirmation(e2: &MonitorWithdrawalEvent, confirmation: BtcConfirmation) -> Self {
+        Self {
+            txid: e2.btc_txid,
+            confirmation,
+            first_change_vout: e2.tx.withdrawal_outputs.len(),
         }
     }
 }

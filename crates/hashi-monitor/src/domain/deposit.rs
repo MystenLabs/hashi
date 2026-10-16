@@ -36,6 +36,12 @@ impl DepositId {
     }
 }
 
+impl From<DepositId> for OutPoint {
+    fn from(deposit_id: DepositId) -> Self {
+        deposit_id.0
+    }
+}
+
 impl fmt::Display for DepositId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
