@@ -12,6 +12,7 @@ use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::inspect;
+use hashi_guardian_ops::steps::kp_keys;
 
 /// Runs one operator step against the guardian stack an environment file names. With two guardian slots, name the
 /// slot.
@@ -36,6 +37,11 @@ enum Step {
     Tunnel { slot: Option<Slot> },
     /// Write a slot's configuration for the operator and the key provisioners, and check it with the guardian's tools.
     Render { slot: Option<Slot> },
+    /// Download and verify every key provisioner's uploaded public key, then write the roster.
+    DownloadKpPubkeys {
+        /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_NAME>-<UTC time>.
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -61,5 +67,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::Host { slot } => inspect::host(&ctx, slot),
         Step::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Step::Render { slot } => configs::render(&ctx, slot),
+        Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
