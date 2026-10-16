@@ -494,6 +494,21 @@ pub enum BackupCommands {
 
         #[clap(
             long,
+            num_args = 3,
+            action = clap::ArgAction::Append,
+            value_names = ["SUBKEY_FINGERPRINT", "DEVICE_PEM", "DEC_PEM"],
+            help = "YubiKey device and DEC attestation PEMs for a selected encryption subkey; repeat for each attested recipient. Supplied evidence is always verified against pinned Yubico issuers"
+        )]
+        recipient_attestation: Vec<std::path::PathBuf>,
+
+        #[clap(
+            long,
+            help = "Require valid YubiKey DEC attestation for every selected recipient encryption subkey"
+        )]
+        require_recipient_attestation: bool,
+
+        #[clap(
+            long,
             help = "Write the armored public certificate here; must not already exist"
         )]
         output: std::path::PathBuf,
@@ -1300,6 +1315,8 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             BackupCommands::AssembleCert {
                 primary_cert,
                 recipient,
+                recipient_attestation,
+                require_recipient_attestation,
                 output,
                 gpg_homedir,
             } => {
@@ -1307,6 +1324,8 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::backup::assemble_cert(
                         &primary_cert,
                         &recipient,
+                        &recipient_attestation,
+                        require_recipient_attestation,
                         &output,
                         gpg_homedir.as_deref(),
                     )

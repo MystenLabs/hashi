@@ -41,6 +41,7 @@ use tracing::info;
 
 mod assembly;
 pub use assembly::EncryptionRecipient;
+pub use assembly::RecipientAttestation;
 pub use assembly::assemble_public_cert;
 
 mod yubikey_attestation;

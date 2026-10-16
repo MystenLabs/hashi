@@ -128,6 +128,38 @@ pub(crate) fn verify_yubikey_attestations_with_issuers(
     })
 }
 
+pub(crate) fn verify_yubikey_encryption_key(
+    key: &openpgp::packet::Key<
+        openpgp::packet::key::PublicParts,
+        openpgp::packet::key::SubordinateRole,
+    >,
+    device_pem: &[u8],
+    dec_pem: &[u8],
+) -> Result<()> {
+    let device_der = parse_single_certificate_pem(device_pem).context("device attestation")?;
+    let dec_der = parse_single_certificate_pem(dec_pem).context("DEC attestation")?;
+    let issuers = TRUSTED_ISSUERS.each_ref().map(Vec::as_slice);
+    verify_encryption_key_with_issuers(key.mpis(), &device_der, &dec_der, &issuers)
+}
+
+fn verify_encryption_key_with_issuers(
+    key: &mpi::PublicKey,
+    device_der: &[u8],
+    dec_der: &[u8],
+    trusted_issuers: &[&[u8]],
+) -> Result<()> {
+    let device = parse_certificate_der(device_der, "device attestation")?;
+    let dec = parse_certificate_der(dec_der, "DEC attestation")?;
+    verify_device_issuer(&device, trusted_issuers)?;
+    verify_statement(&dec, &device, DEC_COMMON_NAME)?;
+    let (curve, bytes) = encryption_key_material(key)?;
+    anyhow::ensure!(
+        statement_key(&dec, &curve)? == bytes,
+        "DEC attestation key does not match the OpenPGP encryption key"
+    );
+    Ok(())
+}
+
 fn parse_single_certificate_pem(input: &[u8]) -> Result<Vec<u8>> {
     let (remainder, der) = parse_certificate_pem(input)?;
     anyhow::ensure!(
@@ -294,14 +326,19 @@ fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
         candidates.next().is_none(),
         "OpenPGP certificate has multiple usable encryption keys"
     );
-    match candidate.key().mpis() {
+    let (curve, bytes) = encryption_key_material(candidate.key().mpis())?;
+    Ok((candidate.key().fingerprint(), curve, bytes))
+}
+
+fn encryption_key_material(key: &mpi::PublicKey) -> Result<(Curve, &[u8])> {
+    match key {
         mpi::PublicKey::ECDH {
             curve: Curve::Cv25519,
             q,
             ..
         } => q
             .decode_point(&Curve::Cv25519)
-            .map(|(key, _)| (candidate.key().fingerprint(), Curve::Cv25519, key))
+            .map(|(key, _)| (Curve::Cv25519, key))
             .context("OpenPGP encryption key has invalid Cv25519 encoding"),
         mpi::PublicKey::ECDH {
             curve: Curve::NistP256,
@@ -310,7 +347,7 @@ fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
         } => {
             q.decode_point(&Curve::NistP256)
                 .context("OpenPGP encryption key has invalid NIST P-256 encoding")?;
-            Ok((candidate.key().fingerprint(), Curve::NistP256, q.value()))
+            Ok((Curve::NistP256, q.value()))
         }
         _ => anyhow::bail!("OpenPGP encryption key does not use Cv25519 or NIST P-256 ECDH"),
     }

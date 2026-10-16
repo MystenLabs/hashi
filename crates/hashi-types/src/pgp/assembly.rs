@@ -14,6 +14,7 @@ use openpgp::serialize::Serialize;
 use openpgp::types::KeyFlags;
 use openpgp::types::SignatureType;
 use sequoia_openpgp as openpgp;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -22,9 +23,16 @@ pub struct EncryptionRecipient<'a> {
     pub subkey: Option<&'a Fingerprint>,
 }
 
+pub struct RecipientAttestation<'a> {
+    pub device_pem: &'a [u8],
+    pub dec_pem: &'a [u8],
+}
+
 pub fn assemble_public_cert(
     primary: &openpgp::Cert,
     recipients: &[EncryptionRecipient<'_>],
+    attestations: &BTreeMap<Fingerprint, RecipientAttestation<'_>>,
+    require_attestation: bool,
     certifier: &mut dyn Signer,
 ) -> Result<PgpPublicCert> {
     ensure!(
@@ -58,7 +66,7 @@ pub fn assemble_public_cert(
     );
 
     let mut selected = BTreeSet::new();
-    let mut packets = Vec::with_capacity(recipients.len() * 2);
+    let mut bindings = Vec::with_capacity(recipients.len());
     for recipient in recipients {
         ensure!(
             !recipient.cert.is_tsk(),
@@ -94,10 +102,24 @@ pub fn assemble_public_cert(
             candidates.next().is_none(),
             "recipient has ambiguous encryption subkeys; select a fingerprint"
         );
+        let fingerprint = key.key().fingerprint();
+        let attestation = attestations.get(&fingerprint);
         ensure!(
-            selected.insert(key.key().fingerprint()),
+            selected.insert(fingerprint),
             "duplicate encryption recipient"
         );
+        match attestation {
+            Some(attestation) => super::yubikey_attestation::verify_yubikey_encryption_key(
+                key.key(),
+                attestation.device_pem,
+                attestation.dec_pem,
+            )
+            .context("recipient DEC attestation is invalid")?,
+            None => ensure!(
+                !require_attestation,
+                "recipient DEC attestation is required"
+            ),
+        }
         let expiration = [
             key.key_expiration_time(),
             key.binding_signature().signature_expiration_time(),
@@ -120,13 +142,25 @@ pub fn assemble_public_cert(
             expiration.is_none_or(|expiration| expiration > now),
             "recipient has expired"
         );
-        let signature = SignatureBuilder::new(SignatureType::SubkeyBinding)
+        let binding = SignatureBuilder::new(SignatureType::SubkeyBinding)
             .set_signature_creation_time(now)?
             .set_key_flags(KeyFlags::empty().set_transport_encryption())?
-            .set_key_expiration_time(key.key(), expiration)?
-            .sign_subkey_binding(certifier, primary.primary_key().key(), key.key())
+            .set_key_expiration_time(key.key(), expiration)?;
+        bindings.push((key.key(), binding));
+    }
+    ensure!(
+        attestations
+            .keys()
+            .all(|fingerprint| selected.contains(fingerprint)),
+        "attestation supplied for an unselected encryption key"
+    );
+
+    let mut packets = Vec::with_capacity(bindings.len() * 2);
+    for (key, binding) in bindings {
+        let signature = binding
+            .sign_subkey_binding(certifier, primary.primary_key().key(), key)
             .context("failed to certify encryption subkey")?;
-        packets.push(openpgp::Packet::PublicSubkey(key.key().clone()));
+        packets.push(openpgp::Packet::PublicSubkey(key.clone()));
         packets.push(openpgp::Packet::Signature(signature));
     }
 
@@ -189,6 +223,8 @@ mod tests {
                 cert: &recipient,
                 subkey: Some(&fingerprint),
             }],
+            &BTreeMap::new(),
+            false,
             &mut signer,
         )
         .unwrap();
@@ -262,6 +298,8 @@ mod tests {
                     cert: &recipient,
                     subkey: None,
                 }],
+                &BTreeMap::new(),
+                false,
                 &mut signer,
             )
             .unwrap();
@@ -310,7 +348,43 @@ mod tests {
             .unwrap()
             .key()
             .fingerprint();
-        assert!(assemble_public_cert(&public, &[], &mut signer).is_err());
+        assert!(assemble_public_cert(&public, &[], &BTreeMap::new(), false, &mut signer).is_err());
+        let recipients = [EncryptionRecipient {
+            cert: &recipient_public,
+            subkey: Some(&fingerprint),
+        }];
+        assert!(
+            assemble_public_cert(&public, &recipients, &BTreeMap::new(), true, &mut signer)
+                .unwrap_err()
+                .to_string()
+                .contains("attestation is required")
+        );
+        let invalid = BTreeMap::from([(
+            fingerprint.clone(),
+            RecipientAttestation {
+                device_pem: b"invalid",
+                dec_pem: b"invalid",
+            },
+        )]);
+        assert!(
+            assemble_public_cert(&public, &recipients, &invalid, false, &mut signer)
+                .unwrap_err()
+                .to_string()
+                .contains("attestation is invalid")
+        );
+        let surplus = BTreeMap::from([(
+            public.fingerprint(),
+            RecipientAttestation {
+                device_pem: b"invalid",
+                dec_pem: b"invalid",
+            },
+        )]);
+        assert!(
+            assemble_public_cert(&public, &recipients, &surplus, false, &mut signer)
+                .unwrap_err()
+                .to_string()
+                .contains("unselected encryption key")
+        );
         assert!(
             assemble_public_cert(
                 &public,
@@ -318,6 +392,8 @@ mod tests {
                     cert: &recipient_public,
                     subkey: None,
                 }],
+                &BTreeMap::new(),
+                false,
                 &mut signer
             )
             .is_err()
@@ -335,6 +411,8 @@ mod tests {
                         subkey: Some(&fingerprint)
                     },
                 ],
+                &BTreeMap::new(),
+                false,
                 &mut signer
             )
             .is_err()
@@ -346,6 +424,8 @@ mod tests {
                     cert: &recipient,
                     subkey: Some(&fingerprint),
                 }],
+                &BTreeMap::new(),
+                false,
                 &mut signer
             )
             .is_err()
@@ -357,6 +437,8 @@ mod tests {
                     cert: &recipient_public,
                     subkey: Some(&fingerprint),
                 }],
+                &BTreeMap::new(),
+                false,
                 &mut signer
             )
             .is_err()
@@ -369,6 +451,8 @@ mod tests {
                     cert: &recipient_public,
                     subkey: Some(&fingerprint),
                 }],
+                &BTreeMap::new(),
+                false,
                 &mut signer
             )
             .is_err()

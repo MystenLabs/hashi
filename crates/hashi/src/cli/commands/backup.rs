@@ -11,12 +11,14 @@ use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use hashi_types::pgp::EncryptionRecipient;
 use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::RecipientAttestation;
 use hashi_types::pgp::assemble_public_cert;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
 use sequoia_openpgp::Cert;
 use sequoia_openpgp::Fingerprint;
 use sequoia_openpgp::parse::Parse;
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -50,14 +52,7 @@ impl FromStr for RecipientInput {
 
     fn from_str(value: &str) -> Result<Self> {
         let (path, subkey) = match value.rsplit_once('=') {
-            Some((path, fingerprint)) => {
-                anyhow::ensure!(
-                    matches!(fingerprint.len(), 40 | 64)
-                        && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                    "recipient subkey fingerprint must be a full 40- or 64-digit hexadecimal fingerprint (PATH[=SUBKEY_FINGERPRINT])"
-                );
-                (path, Some(fingerprint.parse::<Fingerprint>()?))
-            }
+            Some((path, fingerprint)) => (path, Some(parse_recipient_fingerprint(fingerprint)?)),
             None => (value, None),
         };
         anyhow::ensure!(
@@ -71,9 +66,67 @@ impl FromStr for RecipientInput {
     }
 }
 
+fn parse_recipient_fingerprint(value: &str) -> Result<Fingerprint> {
+    anyhow::ensure!(
+        matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "recipient subkey fingerprint must be a full 40- or 64-digit hexadecimal fingerprint"
+    );
+    value.parse()
+}
+
+#[derive(Debug)]
+struct RecipientAttestationBytes {
+    device_pem: Vec<u8>,
+    dec_pem: Vec<u8>,
+}
+
+fn load_recipient_attestations(
+    inputs: &[PathBuf],
+) -> Result<BTreeMap<Fingerprint, RecipientAttestationBytes>> {
+    let mut attestations = BTreeMap::new();
+    let mut triples = inputs.chunks_exact(3);
+    anyhow::ensure!(
+        triples.remainder().is_empty(),
+        "each recipient attestation requires SUBKEY_FINGERPRINT DEVICE_PEM DEC_PEM"
+    );
+    for triple in &mut triples {
+        let fingerprint = parse_recipient_fingerprint(
+            triple[0]
+                .to_str()
+                .context("recipient subkey fingerprint must be valid UTF-8")?,
+        )?;
+        anyhow::ensure!(
+            !attestations.contains_key(&fingerprint),
+            "duplicate recipient attestation for subkey {fingerprint}"
+        );
+        let device_pem = fs::read(&triple[1]).with_context(|| {
+            format!(
+                "Failed to read recipient device attestation PEM {}",
+                triple[1].display()
+            )
+        })?;
+        let dec_pem = fs::read(&triple[2]).with_context(|| {
+            format!(
+                "Failed to read recipient DEC attestation PEM {}",
+                triple[2].display()
+            )
+        })?;
+        attestations.insert(
+            fingerprint,
+            RecipientAttestationBytes {
+                device_pem,
+                dec_pem,
+            },
+        );
+    }
+    Ok(attestations)
+}
+
 pub fn assemble_cert(
     primary_cert: &Path,
     recipients: &[RecipientInput],
+    recipient_attestations: &[PathBuf],
+    require_recipient_attestation: bool,
     output: &Path,
     gpg_homedir: Option<&Path>,
 ) -> Result<()> {
@@ -102,6 +155,19 @@ pub fn assemble_cert(
             subkey: input.subkey.as_ref(),
         })
         .collect::<Vec<_>>();
+    let attestation_bytes = load_recipient_attestations(recipient_attestations)?;
+    let attestations = attestation_bytes
+        .iter()
+        .map(|(fingerprint, evidence)| {
+            (
+                fingerprint.clone(),
+                RecipientAttestation {
+                    device_pem: &evidence.device_pem,
+                    dec_pem: &evidence.dec_pem,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let context = match gpg_homedir {
         Some(home) => sequoia_gpg_agent::Context::with_homedir(home),
         None => sequoia_gpg_agent::Context::new(),
@@ -112,8 +178,14 @@ pub fn assemble_cert(
     let mut signer =
         sequoia_gpg_agent::KeyPair::new_for_gnupg_context(&context, primary.primary_key().key())
             .context("Failed to create the gpg-agent signer for the primary key")?;
-    let assembled = assemble_public_cert(&primary, &recipients, &mut signer)
-        .context("Failed to assemble backup certificate using gpg-agent")?;
+    let assembled = assemble_public_cert(
+        &primary,
+        &recipients,
+        &attestations,
+        require_recipient_attestation,
+        &mut signer,
+    )
+    .context("Failed to assemble backup certificate")?;
     let cert = Cert::from_bytes(assembled.armored().as_bytes())
         .context("Failed to parse assembled public certificate")?;
 
@@ -538,6 +610,80 @@ mod tests {
         ] {
             assert!(invalid.parse::<RecipientInput>().is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn assemble_cert_cli_parses_recipient_attestation_triples() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: crate::cli::BackupCommands,
+        }
+
+        let first = "a".repeat(40);
+        let second = "B".repeat(64);
+        let mut args = vec![
+            "hashi",
+            "assemble-cert",
+            "--primary-cert",
+            "primary.asc",
+            "--recipient",
+            "recipient.asc",
+            "--output",
+            "assembled.asc",
+            "--require-recipient-attestation",
+            "--recipient-attestation",
+            &first,
+            "device one.pem",
+            "dec one.pem",
+            "--recipient-attestation",
+            &second,
+            "device two.pem",
+            "dec two.pem",
+        ];
+        let crate::cli::BackupCommands::AssembleCert {
+            recipient_attestation,
+            require_recipient_attestation,
+            ..
+        } = TestCli::try_parse_from(&args).unwrap().command
+        else {
+            panic!("expected assemble-cert");
+        };
+        assert!(require_recipient_attestation);
+        assert_eq!(
+            recipient_attestation,
+            [
+                first.as_str(),
+                "device one.pem",
+                "dec one.pem",
+                second.as_str(),
+                "device two.pem",
+                "dec two.pem",
+            ]
+            .map(PathBuf::from)
+        );
+        args.pop();
+        assert!(TestCli::try_parse_from(&args).is_err());
+    }
+
+    #[test]
+    fn recipient_attestation_files_reject_case_insensitive_duplicate_fingerprints() {
+        let dir = TempDir::new().unwrap();
+        let device = dir.path().join("device.pem");
+        let dec = dir.path().join("dec.pem");
+        fs::write(&device, b"device evidence").unwrap();
+        fs::write(&dec, b"DEC evidence").unwrap();
+        let fingerprint = "a".repeat(40);
+        let mut inputs = vec![PathBuf::from(&fingerprint), device.clone(), dec.clone()];
+        inputs.extend([PathBuf::from(fingerprint.to_uppercase()), device, dec]);
+        assert!(
+            load_recipient_attestations(&inputs)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate recipient attestation")
+        );
     }
 
     /// Fixture holding a populated source directory and node config.
