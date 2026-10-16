@@ -136,6 +136,15 @@ impl WithdrawalStateMachine {
             .any(|e| window.in_window(e.timestamp_secs))
     }
 
+    /// The time of the earliest event seen.
+    pub fn earliest_event_at(&self) -> UnixSeconds {
+        self.seen_events
+            .iter()
+            .map(|e| e.timestamp_secs)
+            .min()
+            .expect("a machine holds its first event")
+    }
+
     /// Add an event and update expectations for its immediate neighbors.
     ///
     /// A missing predecessor is expected by the event timestamp plus the

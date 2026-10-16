@@ -94,6 +94,8 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
 pub struct ProgressWatermarks {
     pub verified_up_to_withdrawals: UnixSeconds,
     pub verified_up_to_deposits: UnixSeconds,
+    /// Where a restart starts. It is at or before both cursors and every
+    /// pending flow in the window, so a restart reads each one again.
     pub restart_start: UnixSeconds,
     withdrawal_blockers: WithdrawalProgressBlockers,
 }
@@ -125,7 +127,7 @@ impl fmt::Display for WithdrawalProgressBlockers {
 struct WithdrawalProgressBlocker {
     wid: WithdrawalID,
     btc_txid: Txid,
-    guardian_approved_at: UnixSeconds,
+    earliest_event_at: UnixSeconds,
     waiting_for: Vec<WithdrawalEventType>,
 }
 
@@ -133,10 +135,10 @@ impl fmt::Display for WithdrawalProgressBlocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "wid={}, btc_txid={}, guardian_approved_at={}, waiting_for={:?}",
+            "wid={}, btc_txid={}, earliest_event_at={}, waiting_for={:?}",
             self.wid,
             self.btc_txid,
-            utc_timestamp(self.guardian_approved_at),
+            utc_timestamp(self.earliest_event_at),
             self.waiting_for,
         )
     }
@@ -395,24 +397,18 @@ impl AuditorCore {
                 continue;
             }
 
-            if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
-                if e2.timestamp_secs < verified_up_to_withdrawals {
-                    verified_up_to_withdrawals = e2.timestamp_secs;
-                    withdrawal_blockers.clear();
-                }
-                if e2.timestamp_secs == verified_up_to_withdrawals {
-                    withdrawal_blockers.push(WithdrawalProgressBlocker {
-                        wid: sm.wid(),
-                        btc_txid: sm.btc_txid(),
-                        guardian_approved_at: e2.timestamp_secs,
-                        waiting_for: sm.expected_event_types(),
-                    });
-                }
-            } else {
-                tracing::debug!(
-                    wid = %sm.wid(),
-                    "in-window withdrawal missing guardian anchor; skipping in verified_up_to computation"
-                );
+            let earliest_event_at = sm.earliest_event_at();
+            if earliest_event_at < verified_up_to_withdrawals {
+                verified_up_to_withdrawals = earliest_event_at;
+                withdrawal_blockers.clear();
+            }
+            if earliest_event_at == verified_up_to_withdrawals {
+                withdrawal_blockers.push(WithdrawalProgressBlocker {
+                    wid: sm.wid(),
+                    btc_txid: sm.btc_txid(),
+                    earliest_event_at,
+                    waiting_for: sm.expected_event_types(),
+                });
             }
         }
 
@@ -597,6 +593,42 @@ mod tests {
         assert!(matches!(
             auditor.detect_violations(&AllTime)[..],
             [MonitorFinding::ExpectedEventMissing { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_open_withdrawal_holds_the_restart_start_at_its_earliest_event() {
+        let cfg = Config::for_tests();
+        let approval = looked_up_approval();
+        let approved_at = approval.timestamp_secs;
+        let signature = MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            timestamp_secs: approved_at + 60,
+            ..approval.clone()
+        };
+        let mut auditor = AuditorCore {
+            pending_withdrawals: HashMap::new(),
+            pending_deposits: HashMap::new(),
+            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
+            sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
+            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            cfg,
+        };
+        assert!(
+            auditor
+                .ingest_batch(vec![
+                    MonitorEvent::Withdrawal(signature),
+                    MonitorEvent::Withdrawal(approval),
+                ])
+                .is_empty()
+        );
+
+        let progress = auditor.progress_watermarks(&AllTime);
+
+        assert_eq!(progress.restart_start, approved_at);
+        assert!(matches!(
+            &progress.withdrawal_blockers.0[..],
+            [blocker] if blocker.earliest_event_at == approved_at
         ));
     }
 }

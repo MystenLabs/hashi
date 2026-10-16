@@ -116,6 +116,14 @@ impl Timing {
             .expect("E1 is a predecessor")
     }
 
+    /// How far before the audit start to read the guardian for E2. An E1 in
+    /// the window may be recorded after its E2 by at most the E1 skew.
+    pub fn guardian_lookback(&self) -> u64 {
+        self.predecessor_skews
+            .get(WithdrawalEventType::E1HashiApproved)
+            .expect("E1 is a predecessor")
+    }
+
     /// The time by which `event`'s predecessor must be recorded.
     pub fn predecessor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
         let predecessor = event.event_type.predecessor().expect("has a predecessor");
@@ -204,6 +212,14 @@ mod tests {
     fn the_sui_lookahead_is_the_e1_skew() {
         assert_eq!(
             Timing::default().sui_lookahead(),
+            WITHDRAWAL_E1_AFTER_E2_SKEW
+        );
+    }
+
+    #[test]
+    fn the_guardian_lookback_is_the_e1_skew() {
+        assert_eq!(
+            Timing::default().guardian_lookback(),
             WITHDRAWAL_E1_AFTER_E2_SKEW
         );
     }

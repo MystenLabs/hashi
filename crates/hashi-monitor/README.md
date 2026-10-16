@@ -63,6 +63,8 @@ already covered also raises `SuiScanMissedEvent`.
 - Sui withdrawal events are polled from one E1 delay before the guardian
   window, since an E1 older than that is a late E2 in its own right. An E1
   outside the scan is still read from Sui by its withdrawal id.
+- Continuous mode reads the guardian from one E1 skew before its start, since
+  an E1 at the start may follow its E2 by that much.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
 - Deposits are audited over the derived Sui range rather than gated by the
   withdrawal audit-window logic.
@@ -94,13 +96,24 @@ cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
   --start 2026-08-04T19:00:00Z
 ```
-Without `--start`, the audit starts far enough back to cover a monitor outage of
-up to a week, including checks that were still pending when it began. Findings
-from that period are reported again after a restart. If the Sui node has pruned
-part of that range (the public testnet fullnode keeps under six days), the Sui
-scan starts near its oldest checkpoint: withdrawal approvals from before it are
-still read by withdrawal id if the guardian signed them, but deposits and
-unsigned approvals from before it are not audited.
+Without `--start` or a snapshot, the audit starts far enough back to cover a
+monitor outage of up to a week, including checks that were still pending when
+it began. Findings from that period are reported again after a restart. If the
+Sui node has pruned part of that range (the public testnet fullnode keeps under
+six days), the Sui scan starts near its oldest checkpoint: withdrawal approvals
+from before it are still read by withdrawal id if the guardian signed them, but
+deposits and unsigned approvals from before it are not audited.
+
+With `--snapshot-bucket <BUCKET>`, the monitor saves a snapshot to
+`gs://<BUCKET>/snapshot.json` after every state check: the `restart_start` its
+previous state check logged, and the deployment it audits. A restart resumes
+from the snapshot, or from `--start` if that is earlier, and ignores another
+deployment's snapshot; delete the object to start over. A flow that never
+completes holds the restart start back, so a restart replays everything since
+that flow began, subject to the Sui pruning above. The monitor needs read and
+write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS` or, on
+GKE, its workload identity, and fails to start without it. It must be the
+bucket's only writer.
 
 ## Config
 The config file holds the identity of one deployment. See `audit.sample.yaml`

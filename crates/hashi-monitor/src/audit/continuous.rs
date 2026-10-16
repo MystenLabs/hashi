@@ -7,16 +7,18 @@
 //! event soon after it happens, and alerting reads its metrics.
 //!
 //! How it works:
-//! 1. The start is on the guardian timeline. Without `--start`, it is far
-//!    enough back to re-audit a `DEFAULT_RESTART_LOOKBACK` outage and the
-//!    checks that were pending when it began. Sui polling starts
-//!    `Timing::sui_lookback` before it.
+//! 1. The start is on the guardian timeline. A snapshot this deployment
+//!    saved sets it to the snapshot's restart start, unless `--start` is
+//!    earlier. Without one, it is `--start`, or far enough back to re-audit
+//!    a `DEFAULT_RESTART_LOOKBACK` outage and the checks that were pending
+//!    when it began. Sui polling starts `Timing::sui_lookback` before it, and
+//!    guardian polling `Timing::guardian_lookback` before it.
 //! 2. At startup, each source catches up once. A source that fails is
 //!    logged and retried on its next tick.
 //! 3. Then the Sui, guardian and Bitcoin ticks run every `POLL_INTERVAL`,
 //!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
-//!    Sui approvals, report the violations, garbage collect, and log the
-//!    progress watermarks.
+//!    Sui approvals, report the violations, garbage collect, log the
+//!    progress watermarks, and save the snapshot one state check behind.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
 //!    checked-through time is exported.
 //!
@@ -39,6 +41,8 @@ use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SUI;
+use crate::store::Snapshot;
+use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
 use crate::timing::Timing;
 use hashi_types::guardian::s3::MAX_DIR_COMPLETION_LAG;
@@ -62,12 +66,17 @@ pub struct ContinuousAuditWindow {
 }
 
 /// A continuous auditor that runs indefinitely and processes events as they
-/// arrive. Its start time is on the guardian timeline; Sui polling begins
-/// `Timing::sui_lookback` before it.
+/// arrive. Its start time is on the guardian timeline; Sui and guardian
+/// polling begin their lookbacks before it.
 pub struct ContinuousAuditor {
     pub inner: AuditorCore,
     pub window: ContinuousAuditWindow,
     metrics: Arc<MonitorMetrics>,
+    /// Where the snapshot is kept between runs. `None` keeps nothing.
+    store: Option<SnapshotStore>,
+    /// The last state check's restart start, saved by the next one, so a
+    /// restart re-reports findings alerting may not have read yet.
+    previous_restart_start: UnixSeconds,
 }
 
 impl AuditWindow for ContinuousAuditWindow {
@@ -79,7 +88,7 @@ impl AuditWindow for ContinuousAuditWindow {
 impl ContinuousAuditWindow {
     pub fn new(timing: &Timing, start: UnixSeconds) -> Self {
         let sui_start = start.saturating_sub(timing.sui_lookback());
-        let guardian_start = start;
+        let guardian_start = start.saturating_sub(timing.guardian_lookback());
 
         Self {
             user_start: start,
@@ -104,18 +113,49 @@ impl ContinuousAuditWindow {
 }
 
 impl ContinuousAuditor {
+    /// `requested_start` is the operator's `--start`, if given. Fails if the
+    /// store cannot be read or written.
     pub async fn new(
         cfg: &Config,
-        start: UnixSeconds,
+        requested_start: Option<UnixSeconds>,
         metrics: Arc<MonitorMetrics>,
+        store: Option<SnapshotStore>,
     ) -> anyhow::Result<Self> {
         let cur_time = now_timestamp_secs();
+        let snapshot = match &store {
+            Some(store) => store.load().await?,
+            None => None,
+        };
+        let snapshot_restart_start = match snapshot {
+            Some(snapshot) if snapshot.is_for(cfg) => {
+                tracing::info!(
+                    restart_start = %utc_timestamp(snapshot.restart_start),
+                    "loaded the snapshot"
+                );
+                Some(snapshot.restart_start)
+            }
+            Some(snapshot) => {
+                tracing::warn!(?snapshot, "ignoring the snapshot of another deployment");
+                None
+            }
+            None => None,
+        };
+        let start = resume_start(
+            requested_start,
+            snapshot_restart_start,
+            ContinuousAuditWindow::default_start(&cfg.timing, cur_time),
+        );
         anyhow::ensure!(
             start <= cur_time,
             "start is in the future: start={} > current_time={}",
             utc_timestamp(start),
             utc_timestamp(cur_time),
         );
+        // Fail now on a bucket that is missing or read-only: a missing one
+        // loads as empty.
+        if let Some(store) = &store {
+            store.save(&Snapshot::new(cfg, start)).await?;
+        }
         let audit_window = ContinuousAuditWindow::new(&cfg.timing, start);
         let cursors = Cursors {
             sui: audit_window.sui_start,
@@ -129,7 +169,27 @@ impl ContinuousAuditor {
             inner,
             window: audit_window,
             metrics,
+            store,
+            previous_restart_start: start,
         })
+    }
+
+    /// Save the snapshot. A failed save is logged and does not stop the
+    /// audit; the next state check saves again.
+    async fn save_snapshot(&self, restart_start: UnixSeconds) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store
+            .save(&Snapshot::new(&self.inner.cfg, restart_start))
+            .await
+        {
+            Ok(()) => tracing::debug!(
+                restart_start = %utc_timestamp(restart_start),
+                "saved the snapshot"
+            ),
+            Err(error) => tracing::warn!(?error, "failed to save the snapshot; continuing"),
+        }
     }
 
     fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
@@ -205,6 +265,9 @@ impl ContinuousAuditor {
             utc_timestamp(progress.verified_up_to_deposits),
             utc_timestamp(progress.restart_start),
         );
+        let restart_start =
+            std::mem::replace(&mut self.previous_restart_start, progress.restart_start);
+        self.save_snapshot(restart_start).await;
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -264,11 +327,32 @@ impl ContinuousAuditor {
     }
 }
 
+/// Where the audit starts: the snapshot's restart start, or the operator's
+/// start if that is earlier, since a later one would skip flows the snapshot
+/// has yet to verify. Without a snapshot, the operator's start or the default.
+fn resume_start(
+    requested: Option<UnixSeconds>,
+    snapshot_restart_start: Option<UnixSeconds>,
+    default: UnixSeconds,
+) -> UnixSeconds {
+    match (requested, snapshot_restart_start) {
+        (Some(requested), Some(resume)) => requested.min(resume),
+        (None, Some(resume)) => resume,
+        (Some(requested), None) => requested,
+        (None, None) => default,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::WithdrawalEventType;
+    use crate::rpc::btc::BtcRpcClient;
+    use crate::rpc::guardian::GuardianWithdrawalsPoller;
+    use crate::rpc::sui::tests::looked_up_approval;
+    use crate::rpc::sui::tests::poller_scanned;
     use crate::timing::EventBounds;
+    use std::collections::HashMap;
 
     /// Timing with a day's E2 -> E3 delay and the protocol skews.
     fn timing() -> Timing {
@@ -306,5 +390,95 @@ mod tests {
         let oldest_unjudged_start = now - MAX_DIR_COMPLETION_LAG - timing.successor_delays.max();
 
         assert!(ContinuousAuditWindow::default_start(&timing, now) <= oldest_unjudged_start);
+    }
+
+    #[test]
+    fn the_guardian_is_read_early_enough_to_match_every_approval_in_the_window() {
+        let timing = timing();
+        let start = 1_700_002_800;
+
+        let window = ContinuousAuditWindow::new(&timing, start);
+
+        let earliest_signature = start
+            - timing
+                .predecessor_skews
+                .get(WithdrawalEventType::E1HashiApproved)
+                .unwrap();
+        assert!(window.guardian_start <= earliest_signature);
+    }
+
+    #[tokio::test]
+    async fn a_restart_still_audits_an_approval_the_guardian_never_signed() {
+        let cfg = Config::for_tests();
+        let approval = looked_up_approval();
+        let approved_at = approval.timestamp_secs;
+        let guardian_cursor = approved_at + 7_200;
+        let window = ContinuousAuditWindow::new(&cfg.timing, approved_at - 86_400);
+        let mut inner = AuditorCore {
+            cfg: cfg.clone(),
+            pending_withdrawals: HashMap::new(),
+            pending_deposits: HashMap::new(),
+            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
+            sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
+            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+        };
+        assert!(
+            inner
+                .ingest_batch(vec![MonitorEvent::Withdrawal(approval)])
+                .is_empty()
+        );
+        assert_eq!(inner.detect_violations(&window).len(), 1);
+
+        let restart = ContinuousAuditWindow::new(
+            &cfg.timing,
+            inner.progress_watermarks(&window).restart_start,
+        );
+
+        assert!(restart.sui_start <= approved_at && restart.in_window(approved_at));
+    }
+
+    #[test]
+    fn the_snapshot_sets_the_start_unless_the_operator_asks_for_earlier() {
+        assert_eq!(resume_start(None, Some(500), 100), 500);
+        assert_eq!(resume_start(Some(300), Some(500), 100), 300);
+        assert_eq!(resume_start(Some(700), Some(500), 100), 500);
+        assert_eq!(resume_start(Some(700), None, 100), 700);
+        assert_eq!(resume_start(None, None, 100), 100);
+    }
+
+    #[tokio::test]
+    async fn a_state_check_saves_the_restart_start_of_the_check_before() {
+        let cfg = Config::for_tests();
+        let approval = looked_up_approval();
+        let approved_at = approval.timestamp_secs;
+        let guardian_cursor = approved_at + 7_200;
+        let window = ContinuousAuditWindow::new(&cfg.timing, approved_at - 86_400);
+        let resumed_from = window.user_start;
+        let mut auditor = ContinuousAuditor {
+            inner: AuditorCore {
+                cfg: cfg.clone(),
+                pending_withdrawals: HashMap::new(),
+                pending_deposits: HashMap::new(),
+                guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
+                sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
+                btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            },
+            window,
+            metrics: Arc::new(MonitorMetrics::new()),
+            store: Some(SnapshotStore::in_memory()),
+            previous_restart_start: resumed_from,
+        };
+        auditor.ingest_batch(vec![MonitorEvent::Withdrawal(approval)]);
+
+        auditor.tick_state_checks_and_gc().await;
+        let saved = auditor.store.as_ref().unwrap().load().await.unwrap();
+        assert_eq!(saved, Some(Snapshot::new(&cfg, resumed_from)));
+
+        // The approval's flow ends before the next check, which still saves a
+        // start that reads it again.
+        auditor.inner.pending_withdrawals.clear();
+        auditor.tick_state_checks_and_gc().await;
+        let saved = auditor.store.as_ref().unwrap().load().await.unwrap();
+        assert_eq!(saved, Some(Snapshot::new(&cfg, approved_at)));
     }
 }
