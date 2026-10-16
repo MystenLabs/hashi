@@ -3793,7 +3793,10 @@ impl MpcManager {
                 spawn_blocking(move || {
                     let response = response_checks::avid_complaint_response(&response)
                         .map_err(|reason| {
-                            tracing::warn!("Complaint response from {signer:?} refused: {reason}")
+                            tracing::warn!(
+                                "AVID complaint response from {signer:?} for dealer {dealer:?} \
+                                 batch {batch_index} refused: {reason}"
+                            )
                         })
                         .ok()?;
                     let response = receiver
@@ -4557,7 +4560,10 @@ impl MpcManager {
             let complaint_response = match checked {
                 Ok(resp) => resp,
                 Err(reason) => {
-                    tracing::warn!("Complaint response from {signer:?} refused: {reason}");
+                    tracing::warn!(
+                        "DKG complaint response from {signer:?} for dealer {dealer:?} refused: \
+                         {reason}"
+                    );
                     continue;
                 }
             };
@@ -4656,7 +4662,10 @@ impl MpcManager {
                     let resp = match checked {
                         Ok(resp) => resp,
                         Err(reason) => {
-                            tracing::warn!("Complaint response from {signer:?} refused: {reason}");
+                            tracing::warn!(
+                                "Rotation complaint response from {signer:?} for dealer \
+                                 {dealer:?} share {share_index} refused: {reason}"
+                            );
                             continue;
                         }
                     };
@@ -6729,7 +6738,10 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
                         {
                             Ok(prepared) => return Some(prepared),
                             Err(reason) => tracing::warn!(
-                                "Retrieval response from {signer:?} refused: {reason}"
+                                "{:?} retrieval response from {signer:?} for dealer {:?} \
+                                 refused: {reason}",
+                                request.protocol_type,
+                                request.dealer,
                             ),
                         }
                     }
