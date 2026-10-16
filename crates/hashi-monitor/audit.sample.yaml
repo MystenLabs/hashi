@@ -23,8 +23,8 @@ deployment:
       pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until a restart no longer re-audits its records: a week and
-    # 2.5 hours plus the longest next-event delay and clock skew.
+    # replaced build until a restart no longer re-audits its records: a week
+    # and 1 hour 25 minutes plus the longest next-event delay and clock skew.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

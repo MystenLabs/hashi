@@ -31,8 +31,13 @@ pub struct MonitorMetrics {
     checked_through_timestamp_seconds: IntGaugeVec,
 }
 
+impl Default for MonitorMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MonitorMetrics {
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let registry = Registry::new();
         let last_finding_timestamp_seconds = IntGaugeVec::new(

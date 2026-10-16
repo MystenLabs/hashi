@@ -1,6 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The `hashi-monitor` command: a batch audit or a continuous monitor.
+//!
+//! How it works:
+//! 1. `batch` loads the config file and audits one guardian time range. It
+//!    exits with an error if the audit produced findings.
+//! 2. `continuous` loads the config file, binds the metrics port, and
+//!    monitors from the start time on, or from the default start that
+//!    covers an outage of up to a week.
+//!
+//! Assumptions:
+//! - Timestamps on the command line are whole-second UTC RFC 3339.
+//! - The metrics port must bind before the audit starts, since alerting
+//!   reads it.
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,8 +23,8 @@ use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
 use hashi_monitor::audit::continuous::ContinuousAuditWindow;
-use hashi_monitor::domain::parse_utc_timestamp;
 use hashi_monitor::metrics::MonitorMetrics;
+use hashi_monitor::time::parse_utc_timestamp;
 use hashi_types::guardian::time::now_timestamp_secs;
 
 #[derive(Debug, Parser)]
@@ -82,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let start = start.unwrap_or_else(|| {
-                ContinuousAuditWindow::default_start(&cfg, now_timestamp_secs())
+                ContinuousAuditWindow::default_start(&cfg.timing, now_timestamp_secs())
             });
             let metrics = Arc::new(MonitorMetrics::new());
             // Alerting reads this port, so a monitor that cannot serve it is

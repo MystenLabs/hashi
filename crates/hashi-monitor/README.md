@@ -1,7 +1,7 @@
 # hashi-monitor
 Hashi monitoring library and CLI tool.
 
-## What it does?
+## What it does
 Audits the cross-system bridge flow on two parallel tracks.
 
 ### Withdrawals (Sui → BTC)
@@ -19,7 +19,7 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
-- **Successor existence**: for each non-terminal event, the configured next-event delay bound must hold.
+- **Successor existence**: for each non-terminal event, the next-event delay bound must hold.
 
 Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
@@ -146,8 +146,8 @@ deployment:
       pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until a restart no longer re-audits its records: a week and
-    # 2.5 hours plus the longest next-event delay and clock skew.
+    # replaced build until a restart no longer re-audits its records: a week
+    # and 1 hour 25 minutes plus the longest next-event delay and clock skew.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"
@@ -170,11 +170,3 @@ btc:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
 ```
-
-## Status
-- Implemented:
-  - Domain model and withdrawal / deposit state-machine checks.
-  - Batch and continuous auditor loops (cursor advancement, BTC fetch, violation detection, GC, progress watermarks).
-  - Guardian S3 withdrawal log polling with attestation and signature verification.
-  - Checkpoint-bounded, resumable Sui polling for withdrawal and deposit events.
-  - Batched BTC confirmation lookup over HTTP JSON-RPC.

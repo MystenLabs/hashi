@@ -1,6 +1,28 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The batch auditor: one audit of a closed guardian time range.
+//!
+//! Why it exists: an operator audits a past range once, for example after an
+//! incident or before a build is retired, and wants a pass or fail answer.
+//!
+//! How it works:
+//! 1. The user's `[start, end]` is on the guardian timeline. The Sui range
+//!    is widened by `Timing::sui_lookback` before it and
+//!    `Timing::sui_lookahead` after it, so every E1 that can match an E2 in
+//!    the range is read.
+//! 2. Both pollers run until they reach the end of their range. The audit
+//!    fails if the guardian's last hour is not complete yet, or if the Sui
+//!    node has pruned the start of the Sui range.
+//! 3. The core then looks up Bitcoin, fetches the missing Sui approvals,
+//!    and reports the violations.
+//! 4. The progress watermarks say where the next audit can start.
+//!
+//! Assumptions:
+//! - Events near the end may stay unresolved, because their successors are
+//!   not due yet. They are not failures.
+//! - An infrastructure failure is an error, not a partial audit.
+
 use crate::audit::AuditWindow;
 use crate::audit::AuditorCore;
 use crate::audit::log_findings;
@@ -8,9 +30,9 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEventType;
-use crate::domain::utc_timestamp;
 use crate::findings::MonitorFinding;
+use crate::time::utc_timestamp;
+use crate::timing::Timing;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -30,15 +52,16 @@ pub struct BatchAuditWindow {
 }
 
 impl BatchAuditWindow {
-    pub fn new(cfg: &Config, start: UnixSeconds, end: UnixSeconds, cur_time: UnixSeconds) -> Self {
-        // Guardian timeline is authoritative. We still fetch Sui in a relaxed range to validate E2 -> E1.
-        let sui_start = start.saturating_sub(cfg.timing.sui_lookback());
-        let e1_skew = cfg
-            .timing
-            .predecessor_skews
-            .get(WithdrawalEventType::E1HashiApproved)
-            .expect("E1 has a successor");
-        let sui_end = end.saturating_add(e1_skew).min(cur_time); // guardian_e2@{end} might match sui_e1@{end+e1_skew}
+    pub fn new(
+        timing: &Timing,
+        start: UnixSeconds,
+        end: UnixSeconds,
+        cur_time: UnixSeconds,
+    ) -> Self {
+        // The guardian timeline is authoritative. Sui is read in a wider
+        // range, so every E1 that can match an E2 in the range is found.
+        let sui_start = start.saturating_sub(timing.sui_lookback());
+        let sui_end = end.saturating_add(timing.sui_lookahead()).min(cur_time);
 
         // User [start, end] is interpreted as guardian timestamps.
         let guardian_start = start;
@@ -74,25 +97,8 @@ impl AuditWindow for BatchAuditWindow {
     }
 }
 
-/// A batch auditor that tries to validate all events emitted during a given time period `[t1, t2]`.
-///
-/// It functions as follows:
-///     - fetch guardian events from `[t1, t2]` (authoritative timeline)
-///     - fetch withdrawal and deposit events from
-///       `[t1 - E1's successor delay, t2 + E1's predecessor skew]`
-///     - fetch BTC data for in-scope withdrawals and deposits found in the Sui range
-///     - fetch each overdue Hashi approval missing from the Sui range by its withdrawal id
-/// Finally, it logs progress watermarks that identify a safe start for the next audit.
-///
-/// Notes:
-/// 1) If no findings are emitted, Guardian events in the verified withdrawal
-///    range were cross-checked against their Sui and Bitcoin neighbors.
-/// 2) We currently also report orphan E1 findings if they fall in the user window.
-///    TODO: If desired, this can be relaxed later to strict guardian-anchored scope.
-/// 3) Events near the end may remain unresolved because their successors are
-///    not yet due or observed. The progress watermarks capture a safe restart;
-///    infrastructure failures return an error instead of a partial audit.
-/// 4) The current approach is fetch-then-check. An alternate streaming auditor can be implemented in the future if needed.
+/// One audit of the events in a guardian time range. See the module doc for
+/// the steps. `violation_found` is set once any finding is reported.
 pub struct BatchAuditor {
     pub inner: AuditorCore,
     pub audit_window: BatchAuditWindow,
@@ -115,7 +121,7 @@ impl BatchAuditor {
             utc_timestamp(cur_time),
         );
 
-        let audit_window = BatchAuditWindow::new(cfg, start, end, cur_time);
+        let audit_window = BatchAuditWindow::new(&cfg.timing, start, end, cur_time);
         let cursors = Cursors {
             sui: audit_window.sui_start,
             guardian: audit_window.guardian_start,
@@ -152,8 +158,8 @@ impl BatchAuditor {
         let mut stalled_iterations = 0_u8;
 
         loop {
-            let sui_cursor = self.inner.get_sui_cursor();
-            let guardian_cursor = self.inner.get_guardian_cursor();
+            let sui_cursor = self.inner.sui_cursor();
+            let guardian_cursor = self.inner.guardian_cursor();
 
             let should_poll_sui = sui_cursor < self.audit_window.sui_end;
             let should_poll_guardian = guardian_cursor < self.audit_window.guardian_end;
@@ -183,18 +189,18 @@ impl BatchAuditor {
             }
 
             if should_poll_guardian && !guardian_cursor_moved {
-                let ready_at = self.inner.get_guardian_next_partition_ready_at();
+                let ready_at = self.inner.guardian_next_partition_ready_at();
                 if now_timestamp_secs() < ready_at {
                     anyhow::bail!(
                         "Guardian data is not finalized for the requested batch range:\n  \
                          guardian_complete_through={}\n  requested_end={}\n  \
                          next_partition_ready_at={}\nRerun at or after {}, or choose an end \
                          time at or before {}.",
-                        utc_timestamp(self.inner.get_guardian_cursor()),
+                        utc_timestamp(self.inner.guardian_cursor()),
                         utc_timestamp(self.audit_window.guardian_end),
                         utc_timestamp(ready_at),
                         utc_timestamp(ready_at),
-                        utc_timestamp(self.inner.get_guardian_cursor()),
+                        utc_timestamp(self.inner.guardian_cursor()),
                     );
                 }
             }
@@ -205,9 +211,9 @@ impl BatchAuditor {
                     anyhow::bail!(
                         "batch polling stalled:\n  sui_cursor={}\n  sui_target={}\n  \
                          guardian_cursor={}\n  guardian_target={}",
-                        utc_timestamp(self.inner.get_sui_cursor()),
+                        utc_timestamp(self.inner.sui_cursor()),
                         utc_timestamp(self.audit_window.sui_end),
-                        utc_timestamp(self.inner.get_guardian_cursor()),
+                        utc_timestamp(self.inner.guardian_cursor()),
                         utc_timestamp(self.audit_window.guardian_end),
                     );
                 }
@@ -223,7 +229,7 @@ impl BatchAuditor {
         self.violation_found = false;
         self.fetch_all_sui_guardian_events().await?;
         self.audit_window
-            .ensure_sui_history(self.inner.get_sui_scan_start())?;
+            .ensure_sui_history(self.inner.sui_scan_start())?;
 
         tracing::info!(
             "finished batch polling:\n  start={}\n  end={}\n  sui_start={}\n  sui_target_end={}\n  sui_cursor={}\n  guardian_start={}\n  guardian_target_end={}\n  guardian_cursor={}",
@@ -231,34 +237,23 @@ impl BatchAuditor {
             utc_timestamp(self.audit_window.user_end),
             utc_timestamp(self.audit_window.sui_start),
             utc_timestamp(self.audit_window.sui_end),
-            utc_timestamp(self.inner.get_sui_cursor()),
+            utc_timestamp(self.inner.sui_cursor()),
             utc_timestamp(self.audit_window.guardian_start),
             utc_timestamp(self.audit_window.guardian_end),
-            utc_timestamp(self.inner.get_guardian_cursor()),
+            utc_timestamp(self.inner.guardian_cursor()),
         );
 
-        // Fetch all BTC info
         let btc_findings = self.inner.fetch_btc_info(&self.audit_window)?;
-        log_findings("batch", "btc", &btc_findings);
-        if !btc_findings.is_empty() {
-            self.violation_found = true;
-        }
+        self.report_findings("btc", &btc_findings);
 
         let lookup_findings = self
             .inner
             .fetch_missing_hashi_approvals(&self.audit_window)
             .await;
-        log_findings("batch", "lookup", &lookup_findings);
-        if !lookup_findings.is_empty() {
-            self.violation_found = true;
-        }
+        self.report_findings("lookup", &lookup_findings);
 
-        // Gather all violations
         let violations = self.inner.detect_violations(&self.audit_window);
-        log_findings("batch", "violations", &violations);
-        if !violations.is_empty() {
-            self.violation_found = true;
-        }
+        self.report_findings("violations", &violations);
 
         let progress = self.inner.progress_watermarks(&self.audit_window);
 

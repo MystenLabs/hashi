@@ -44,10 +44,8 @@
 //!   inputs, outputs and timestamp.
 
 use anyhow::Context;
-use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
-use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::MoveType;
 use hashi_types::move_types::PackageVersions;
@@ -56,15 +54,11 @@ use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::StructTag;
 
-use crate::domain::DepositEventType;
-use crate::domain::DepositId;
-use crate::domain::HashiBTCKeys;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
-use crate::domain::WithdrawalEventType;
-use crate::domain::WithdrawalTx;
 use crate::findings::MonitorFinding;
+use crate::keys::HashiBTCKeys;
 
 /// A Hashi approval read from Sui.
 #[derive(Debug, PartialEq, Eq)]
@@ -75,41 +69,13 @@ pub enum HashiApproval {
     Rejected(Vec<MonitorFinding>),
 }
 
-/// Check what Move does not on the Hashi approval of `wid`: the claimed
-/// txid must be the txid of the transaction `tx` builds. Otherwise a
-/// committee can commit a user's outputs under the txid of a transaction
-/// that pays itself. The event carries `tx` for the state machine to compare
-/// with the guardian's once E2 arrives.
-fn validate_withdrawal(
-    wid: WithdrawalID,
-    claimed_txid: Txid,
-    tx: WithdrawalTx,
-    timestamp_secs: UnixSeconds,
-) -> HashiApproval {
-    match tx.unsigned_tx() {
-        Ok(built) if built.compute_txid() == claimed_txid => {}
-        Ok(built) => {
-            return HashiApproval::Rejected(vec![MonitorFinding::WithdrawalTxidMismatch {
-                wid,
-                claimed: claimed_txid,
-                computed: built.compute_txid(),
-            }]);
-        }
-        Err(error) => {
-            return HashiApproval::Rejected(vec![MonitorFinding::WithdrawalTxUnbuildable {
-                wid,
-                claimed: claimed_txid,
-                reason: format!("{error:#}"),
-            }]);
+impl From<Result<MonitorWithdrawalEvent, Vec<MonitorFinding>>> for HashiApproval {
+    fn from(checked: Result<MonitorWithdrawalEvent, Vec<MonitorFinding>>) -> Self {
+        match checked {
+            Ok(event) => Self::Valid(event),
+            Err(findings) => Self::Rejected(findings),
         }
     }
-    HashiApproval::Valid(MonitorWithdrawalEvent {
-        event_type: WithdrawalEventType::E1HashiApproved,
-        wid,
-        timestamp_secs,
-        btc_txid: claimed_txid,
-        tx,
-    })
 }
 
 /// The Hashi approval recorded by the object at `wid`, or `None` if that object
@@ -136,12 +102,9 @@ pub fn parse_withdrawal_object(
         "Sui returned withdrawal transaction {} for {wid}",
         txn.id
     );
-    Ok(Some(validate_withdrawal(
-        wid,
-        txn.txid.into(),
-        WithdrawalTx::new(txn.inputs, txn.withdrawal_outputs, txn.change_outputs),
-        unix_millis_to_seconds(txn.created_timestamp_ms),
-    )))
+    Ok(Some(
+        MonitorWithdrawalEvent::from_sui_object(wid, txn).into(),
+    ))
 }
 
 /// Parse the monitored event a Sui event carries into `events`, or its
@@ -162,29 +125,19 @@ pub fn parse_event(
 
     match event {
         Some(HashiEvent::WithdrawalPickedForProcessing(event)) => {
-            let approval = validate_withdrawal(
-                event.withdrawal_txn_id,
-                event.txid.into(),
-                WithdrawalTx::new(event.inputs, event.withdrawal_outputs, event.change_outputs),
-                unix_millis_to_seconds(event.timestamp_ms),
-            );
-            match approval {
-                HashiApproval::Valid(event) => events.push(MonitorEvent::Withdrawal(event)),
-                HashiApproval::Rejected(rejection) => findings.extend(rejection),
+            match MonitorWithdrawalEvent::from_sui_event(event) {
+                Ok(event) => events.push(MonitorEvent::Withdrawal(event)),
+                Err(rejection) => findings.extend(rejection),
             }
         }
         Some(HashiEvent::DepositConfirmed(event)) => {
-            events.push(MonitorEvent::Deposit(MonitorDepositEvent {
-                event_type: DepositEventType::E2HashiDeposited,
-                // DepositConfirmed has no timestamp in its Move payload.
-                // ListTransactions supplies the containing checkpoint's
-                // timestamp alongside the nested events.
-                timestamp_secs: transaction_timestamp_secs,
-                deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
-                amount: event.utxo.amount,
-                // The state machine compares the claim with the paid output.
-                script_pubkey: hashi_btc_keys.script_pubkey(event.utxo.derivation_path.as_ref()),
-            }));
+            // ListTransactions supplies the containing checkpoint's timestamp
+            // alongside the nested events.
+            events.push(MonitorEvent::Deposit(MonitorDepositEvent::from_sui(
+                event,
+                transaction_timestamp_secs,
+                hashi_btc_keys,
+            )));
         }
         Some(_) | None => {}
     }
@@ -193,23 +146,22 @@ pub fn parse_event(
 
 #[cfg(test)]
 pub mod tests {
+    use bitcoin::Txid;
+
     use super::*;
+    use crate::domain::WithdrawalEventType;
+    use crate::domain::WithdrawalTx;
 
     use std::collections::BTreeMap;
 
-    use crate::domain::HashiBTCKeys;
     use crate::findings::FindingCategory;
-    use hashi_types::bitcoin::BTC_LIB;
+    use crate::test_utils::test_hashi_btc_keys;
+    use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::BitcoinAddress;
-    use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::DerivationPath;
-    use hashi_types::bitcoin::HashiMasterG;
     use hashi_types::bitcoin::witness_program_from_address;
     use hashi_types::bitcoin_txid::BitcoinTxid;
-    use hashi_types::move_types::OutputUtxo;
     use hashi_types::move_types::SigningBatch;
-    use hashi_types::move_types::Utxo;
-    use hashi_types::move_types::UtxoId;
     use sui_rpc::proto::sui::rpc::v2::Bcs;
     use sui_sdk_types::Address;
 
@@ -220,25 +172,8 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
-    /// Bridge keys from fixed test guardian and MPC keys, on Signet.
-    pub fn test_hashi_btc_keys() -> HashiBTCKeys {
-        let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
-            .unwrap()
-            .x_only_public_key()
-            .0;
-        let mpc = HashiMasterG::with_even_y_from_x_be_bytes(
-            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32])
-                .unwrap()
-                .x_only_public_key()
-                .0
-                .serialize(),
-        )
-        .unwrap();
-        HashiBTCKeys::new(guardian, mpc, bitcoin::Network::Signet)
-    }
-
     /// The bridge change address of `test_hashi_btc_keys`.
-    pub fn test_change_address() -> BitcoinAddress {
+    fn test_change_address() -> BitcoinAddress {
         BitcoinAddress::from_script(
             &test_hashi_btc_keys().script_pubkey(None),
             bitcoin::Network::Signet,
@@ -262,32 +197,18 @@ pub mod tests {
         txn
     }
 
-    /// A withdrawal of one input into one user output and one change output to
-    /// the bridge, whose txid is the one its inputs and outputs build.
+    /// The `withdrawal_tx` of one input into one user output and one change
+    /// output to the bridge, as a `WithdrawalTransaction` object whose txid is
+    /// the one its inputs and outputs build.
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
-        let inputs = vec![Utxo {
-            id: UtxoId {
-                txid: BitcoinTxid::from(Address::new([0x51; 32])),
-                vout: 1,
-            },
-            amount: 120_000,
-            derivation_path: Some(Address::new([0x52; 32])),
-        }];
-        let withdrawal_outputs = vec![OutputUtxo {
-            amount: 100_000,
-            bitcoin_address: vec![0x53; 20],
-        }];
-        let change_outputs = vec![OutputUtxo {
-            amount: 19_000,
-            bitcoin_address: witness_program_from_address(&test_change_address()).unwrap(),
-        }];
+        let tx = withdrawal_tx(witness_program_from_address(&test_change_address()).unwrap());
         let txn = WithdrawalTransaction {
             id,
             txid: BitcoinTxid::ZERO,
             request_ids: vec![Address::new([0x55; 32])],
-            inputs,
-            withdrawal_outputs,
-            change_outputs,
+            inputs: tx.inputs,
+            withdrawal_outputs: tx.withdrawal_outputs,
+            change_outputs: tx.change_outputs,
             created_timestamp_ms: 1_789_805_327_448,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: None,

@@ -22,12 +22,14 @@
 //!   payment, so no delay bounds it.
 //!
 //! A Bitcoin event is timed by the block that gave the transaction
-//! `MIN_CONFIRMATIONS`, not by the block that holds it.
+//! `MIN_CONFIRMATIONS` in `rpc::btc`, not by the block that holds it.
 
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
+use hashi_types::guardian::time::UnixSeconds;
 
+use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 
 /// E1 -> E2. The guardian signs about 15 minutes after a Hashi approval on
@@ -105,6 +107,54 @@ impl Timing {
             .get(WithdrawalEventType::E1HashiApproved)
             .expect("E1 has a successor")
     }
+
+    /// How far after the guardian audit end to scan Sui for E1. An E1 may
+    /// be recorded after its E2 by at most the E1 skew.
+    pub fn sui_lookahead(&self) -> u64 {
+        self.predecessor_skews
+            .get(WithdrawalEventType::E1HashiApproved)
+            .expect("E1 is a predecessor")
+    }
+
+    /// The time by which `event`'s predecessor must be recorded.
+    pub fn predecessor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
+        let predecessor = event.event_type.predecessor().expect("has a predecessor");
+        event.timestamp_secs
+            + self
+                .predecessor_skews
+                .get(predecessor)
+                .expect("a predecessor has a successor")
+    }
+
+    /// The time by which `event`'s successor must follow.
+    pub fn successor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
+        event.timestamp_secs
+            + self
+                .successor_delays
+                .get(event.event_type)
+                .expect("has a successor")
+    }
+}
+
+#[cfg(test)]
+impl Timing {
+    /// Short bounds for tests: E1 -> E2 in 100 s and E2 -> E3 in 200 s, with
+    /// skews of 10 s, 30 s and 10 s.
+    pub fn for_tests() -> Self {
+        Self {
+            successor_delays: EventBounds::new([
+                (WithdrawalEventType::E1HashiApproved, 100),
+                (WithdrawalEventType::E2GuardianApproved, 200),
+            ])
+            .expect("valid successor delays"),
+            predecessor_skews: EventBounds::new([
+                (WithdrawalEventType::E1HashiApproved, 10),
+                (WithdrawalEventType::E2GuardianApproved, 30),
+            ])
+            .expect("valid predecessor skews"),
+            deposit_confirmation_skew: 10,
+        }
+    }
 }
 
 /// One bound per non-terminal withdrawal event.
@@ -148,6 +198,14 @@ mod tests {
     #[test]
     fn the_sui_lookback_is_the_e1_delay() {
         assert_eq!(Timing::default().sui_lookback(), WITHDRAWAL_E1_TO_E2_DELAY);
+    }
+
+    #[test]
+    fn the_sui_lookahead_is_the_e1_skew() {
+        assert_eq!(
+            Timing::default().sui_lookahead(),
+            WITHDRAWAL_E1_AFTER_E2_SKEW
+        );
     }
 
     #[test]

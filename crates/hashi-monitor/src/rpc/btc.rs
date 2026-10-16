@@ -1,6 +1,31 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The Bitcoin client: confirmation lookups over HTTP JSON-RPC.
+//!
+//! Why it exists: the withdrawal E3 and the deposit E1 are Bitcoin
+//! confirmations. Bitcoin has no event stream to scan, so the auditor looks
+//! each pending transaction up by txid.
+//!
+//! How it works:
+//! 1. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
+//!    since a lagging node reports recent transactions as unconfirmed.
+//! 2. `prefetch_confirmations` looks all pending txids up in batches of
+//!    `HTTP_JSON_RPC_BATCH_SIZE`, and `lookup_confirmation` serves each one
+//!    from that cache. The cache is cleared at the start of each pass, so an
+//!    unconfirmed transaction is looked up again next pass.
+//! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
+//!    returned with the time of its own block and the time of the block that
+//!    gave it `MIN_CONFIRMATIONS`.
+//! 4. Requests are paced by `HTTP_JSON_RPC_BATCH_DELAY`, and a rate-limited
+//!    request is retried with exponential backoff.
+//!
+//! Assumptions:
+//! - The endpoint serves `getrawtransaction` with verbose output, which
+//!   needs `txindex` or a hosted provider.
+//! - Only rate limits are retried. Other transient failures fail the pass
+//!   and are retried on the next tick.
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -23,46 +48,16 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::domain::DepositEventType;
-use crate::domain::DepositId;
-use crate::domain::MonitorDepositEvent;
+use crate::domain::BtcConfirmation;
 
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
 
-/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
-#[derive(Clone, Debug)]
-pub struct TxConfirmation {
-    /// The time of the block that holds the transaction. The recovery leaf's
-    /// clock starts at this block, so a coin's age counts from here.
-    pub block_time: UnixSeconds,
-    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
-    /// The bridge acts on that block, so the Bitcoin events carry this time.
-    pub confirmed_time: UnixSeconds,
-    /// The transaction's outputs, in order.
-    pub outputs: Vec<TxOut>,
-}
-
-impl TxConfirmation {
-    /// The deposit this transaction confirms at `deposit_id`, or `None` if it
-    /// has no output at that vout.
-    pub fn deposit_event(&self, deposit_id: DepositId) -> Option<MonitorDepositEvent> {
-        let output = self.outputs.get(deposit_id.vout() as usize)?;
-        Some(MonitorDepositEvent {
-            event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: self.confirmed_time,
-            deposit_id,
-            amount: output.value.to_sat(),
-            script_pubkey: output.script_pubkey.clone(),
-        })
-    }
-}
-
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
-    confirmation_cache: RefCell<HashMap<Txid, Option<TxConfirmation>>>,
+    confirmation_cache: RefCell<HashMap<Txid, Option<BtcConfirmation>>>,
 }
 
 struct HttpJsonRpcTransport {
@@ -199,7 +194,7 @@ impl BtcRpcClient {
     /// - `Ok(Some(confirmation))` if txid is confirmed,
     /// - `Ok(None)` if txid is not seen or txid is seen but not confirmed,
     /// - `Err(...)` for all other errors
-    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
+    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<BtcConfirmation>> {
         if let Some(result) = self.confirmation_cache.borrow().get(&txid) {
             return Ok(result.clone());
         }
@@ -286,7 +281,7 @@ impl HttpJsonRpcTransport {
         Ok(())
     }
 
-    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
+    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<BtcConfirmation>> {
         let response = self.call(
             "getrawtransaction",
             serde_json::json!([txid.to_string(), true]),
@@ -317,7 +312,7 @@ impl HttpJsonRpcTransport {
             .get(&block_hash)
             .copied()
             .with_context(|| format!("missing block times for {block_hash}"))?;
-        Ok(Some(TxConfirmation {
+        Ok(Some(BtcConfirmation {
             block_time,
             confirmed_time,
             outputs,
@@ -327,7 +322,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmations(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
         let mut confirmations = HashMap::with_capacity(txids.len());
         for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
             confirmations.extend(self.lookup_confirmation_batch(chunk)?);
@@ -346,7 +341,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmation_batch(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
         let requests = txids
             .iter()
             .enumerate()
@@ -414,7 +409,7 @@ impl HttpJsonRpcTransport {
                             .get(&hash)
                             .copied()
                             .with_context(|| format!("missing block times for {hash}"))?;
-                        Ok::<_, anyhow::Error>(TxConfirmation {
+                        Ok::<_, anyhow::Error>(BtcConfirmation {
                             block_time,
                             confirmed_time,
                             outputs,
@@ -613,8 +608,6 @@ mod tests {
     use base64ct::Base64;
     use base64ct::Encoding as _;
     use bitcoin::Amount;
-    use bitcoin::Txid;
-    use bitcoin::hashes::Hash as _;
     use e2e_tests::BitcoinNodeBuilder;
     use e2e_tests::bitcoin_node::RPC_PASSWORD;
     use e2e_tests::bitcoin_node::RPC_USER;
@@ -624,12 +617,13 @@ mod tests {
     use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
-    use super::TxConfirmation;
     use crate::config::BtcConfig;
     use crate::config::Config;
     use crate::domain::DepositEventType;
     use crate::domain::DepositId;
     use crate::domain::MonitorDepositEvent;
+    use crate::test_utils::confirmation;
+    use crate::test_utils::txid;
 
     static TRACING_INIT: Once = Once::new();
 
@@ -672,7 +666,7 @@ mod tests {
         let btc_rpc_client = BtcRpcClient::new(&cfg)?;
         btc_rpc_client.ensure_synced()?;
 
-        let unknown_txid = Txid::from_slice(&[7u8; 32])?;
+        let unknown_txid = txid(7);
         let unknown = btc_rpc_client.lookup_confirmation(unknown_txid)?;
         assert!(
             unknown.is_none(),
@@ -731,24 +725,11 @@ mod tests {
     #[test]
     fn a_confirmation_builds_the_deposit_event_of_its_output() {
         let script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-        let confirmation = TxConfirmation {
-            block_time: 30,
-            confirmed_time: 90,
-            outputs: vec![
-                bitcoin::TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: bitcoin::ScriptBuf::new(),
-                },
-                bitcoin::TxOut {
-                    value: Amount::from_sat(40_000),
-                    script_pubkey: script_pubkey.clone(),
-                },
-            ],
-        };
-        let txid = Txid::from_slice(&[9u8; 32]).unwrap();
+        let confirmation = confirmation(40_000, script_pubkey.clone());
+        let txid = txid(9);
 
         assert_eq!(
-            confirmation.deposit_event(DepositId::new(txid, 1)),
+            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 1)),
             Some(MonitorDepositEvent {
                 event_type: DepositEventType::E1BtcConfirmed,
                 timestamp_secs: 90,
@@ -757,7 +738,10 @@ mod tests {
                 script_pubkey,
             })
         );
-        assert_eq!(confirmation.deposit_event(DepositId::new(txid, 2)), None);
+        assert_eq!(
+            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 2)),
+            None
+        );
     }
 
     #[test]
