@@ -277,14 +277,6 @@ impl<T> VerifiedNonceCerts<T> {
         Self { certs, kinds }
     }
 
-    #[cfg(test)]
-    pub(crate) fn unclassified(certs: Vec<(Address, T)>) -> Self {
-        Self {
-            certs,
-            kinds: HashMap::new(),
-        }
-    }
-
     pub(crate) fn as_slice(&self) -> &[(Address, T)] {
         &self.certs
     }
@@ -665,36 +657,6 @@ impl MpcManager {
             self.message_responses.insert(key, result.clone());
         }
         result
-    }
-
-    #[cfg(test)]
-    fn handle_retrieve_messages_request(
-        &self,
-        requester: Address,
-        request: &RetrieveMessagesRequest,
-    ) -> MpcResult<RetrieveMessagesResponse> {
-        RetrieveMessagesResponse::try_from(&self.retrieve_messages_proto(requester, request)?)
-            .map_err(|e| MpcError::ProtocolFailed(e.to_string()))
-    }
-
-    #[cfg(test)]
-    fn retrieve_messages_proto(
-        &self,
-        requester: Address,
-        request: &RetrieveMessagesRequest,
-    ) -> MpcResult<proto::RetrieveMessagesResponse> {
-        let shape = self.shape_params();
-        let reply =
-            match self.begin_retrieve(requester, request)? {
-                RetrieveOutcome::Ready(reply) => reply,
-                RetrieveOutcome::NeedsStore => {
-                    retrieve_from_store(&*self.public_messages_store, request)?
-                }
-                RetrieveOutcome::NeedsAvidStore(pending) => RetrieveReply::Avid(
-                    finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
-                ),
-            };
-        reply.to_proto(&shape, request)
     }
 
     pub(crate) fn begin_retrieve(
@@ -1435,23 +1397,6 @@ impl MpcManager {
             window_closed: window.closed(),
             dealers,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn avid_certified_nonce_dealers_from_certs(
-        &self,
-        certs: &VerifiedNonceCerts<CertificateV1>,
-        cutoff_ms: Option<u64>,
-    ) -> (HashSet<Address>, u32) {
-        let (admitted, window) = self.certified_nonce_dealers_in_window(
-            certs,
-            NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms),
-            self.avid_admission(),
-        );
-        (
-            admitted.into_iter().map(|a| a.dealer).collect(),
-            window.weight(),
-        )
     }
 
     fn avid_admission(&self) -> impl Fn(&CertificateV1, Option<CertKind>) -> bool + '_ {
