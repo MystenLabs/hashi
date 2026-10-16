@@ -17,6 +17,7 @@ use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
+use crate::mpc::rpc::response_checks;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::stored_rows;
@@ -110,6 +111,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
 use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
+use hashi_types::proto;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -671,6 +673,16 @@ impl MpcManager {
         requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
+        RetrieveMessagesResponse::try_from(&self.retrieve_messages_proto(requester, request)?)
+            .map_err(|e| MpcError::ProtocolFailed(e.to_string()))
+    }
+
+    #[cfg(test)]
+    fn retrieve_messages_proto(
+        &self,
+        requester: Address,
+        request: &RetrieveMessagesRequest,
+    ) -> MpcResult<proto::RetrieveMessagesResponse> {
         let shape = self.shape_params();
         let reply =
             match self.begin_retrieve(requester, request)? {
@@ -682,8 +694,7 @@ impl MpcManager {
                     finish_avid_retrieval(&*self.public_messages_store, pending, &shape)?,
                 ),
             };
-        RetrieveMessagesResponse::try_from(&reply.to_proto(&shape, request)?)
-            .map_err(|e| MpcError::ProtocolFailed(e.to_string()))
+        reply.to_proto(&shape, request)
     }
 
     pub(crate) fn begin_retrieve(
@@ -3574,7 +3585,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<(CertKind, MessagesHash)> {
-        let (request, signers) = {
+        let (request, signers, shape, dealer_party) = {
             let mgr = mpc_manager.read().unwrap();
             let request = RetrieveMessagesRequest {
                 dealer,
@@ -3589,7 +3600,11 @@ impl MpcManager {
                 .into_iter()
                 .filter(|addr| *addr != mgr.address)
                 .collect();
-            (request, signers)
+            let shape = mgr.shape_params();
+            let dealer_party = shape.current().party_of(&dealer).ok_or_else(|| {
+                MpcError::InvalidCertificate(format!("dealer {dealer} is not in the committee"))
+            })?;
+            (request, signers, shape, dealer_party)
         };
         let complaint_signers = signers.clone();
         let request = &request;
@@ -3603,25 +3618,32 @@ impl MpcManager {
             (addr, result)
         }))
         .await;
-        let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
-            .into_iter()
-            .filter_map(|(addr, result)| match result {
-                Ok(RetrieveMessagesResponse {
-                    messages: Messages::AvidNonceRetrieval(bundle),
-                }) => Some((addr, bundle)),
-                Ok(_) => {
-                    tracing::info!("Unexpected retrieval response from {:?}", addr);
-                    None
-                }
-                Err(e) => {
-                    tracing::info!("AVID retrieval from {:?} failed: {}", addr, e);
-                    None
-                }
-            })
-            .collect();
         let mgr = Arc::clone(mpc_manager);
         let nonce_cert = nonce_cert.clone();
         let outcome = spawn_blocking(move || {
+            let mut refused = Vec::new();
+            let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
+                .into_iter()
+                .filter_map(|(addr, result)| match result {
+                    Ok(response) => {
+                        response_checks::avid_bundle(addr, &shape, dealer_party, &response)
+                            .map(|bundle| (addr, bundle))
+                            .inspect_err(|reason| refused.push(format!("{addr:?}: {reason}")))
+                            .ok()
+                    }
+                    Err(e) => {
+                        tracing::info!("AVID retrieval from {:?} failed: {}", addr, e);
+                        None
+                    }
+                })
+                .collect();
+            if !refused.is_empty() {
+                tracing::warn!(
+                    "AVID pull for {dealer:?} batch {batch_index} refused {} response(s): {}",
+                    refused.len(),
+                    refused.join("; ")
+                );
+            }
             let mut mgr = mgr.write().unwrap();
             let digest = nonce_cert.message().messages_hash;
             let avid_vote = bundles.iter().find_map(|(_, b)| {
@@ -3802,17 +3824,11 @@ impl MpcManager {
         let receiver = Arc::new(receiver);
         let verified_common = Arc::new(verified_common);
         let mut verified: Vec<batch_avss_avid::VerifiedComplaintResponse> = Vec::new();
-        let mut futures = fan_out_complaints(signers, p2p_channel, &request);
+        let calls = signers.into_iter().map(|signer| (signer, None)).collect();
+        let mut futures = fan_out_complaints(calls, p2p_channel, &request);
         while let Some((signer, result)) = futures.next().await {
             let response = match result {
-                Ok(ComplaintResponse::NonceGenerationAvid(response)) => response,
-                Ok(_) => {
-                    tracing::info!(
-                        "Unexpected response kind in AVID complaint recovery from {:?}",
-                        signer
-                    );
-                    continue;
-                }
+                Ok(response) => response,
                 Err(e) => {
                     tracing::info!("AVID complaint to {:?} failed: {}", signer, e);
                     continue;
@@ -3830,6 +3846,11 @@ impl MpcManager {
                 let verified_common = Arc::clone(&verified_common);
                 let verified_so_far = verified.clone();
                 spawn_blocking(move || {
+                    let response = response_checks::avid_complaint_response(&response)
+                        .map_err(|reason| {
+                            tracing::warn!("Complaint response from {signer:?} refused: {reason}")
+                        })
+                        .ok()?;
                     let response = receiver
                         .verify_complaint_response(responder_id, response, &verified_common)
                         .map_err(|e| {
@@ -4378,7 +4399,7 @@ impl MpcManager {
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
-        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
             .await
             .ok_or_else(|| {
                 MpcError::PairwiseCommunicationError(format!(
@@ -4386,12 +4407,8 @@ impl MpcManager {
                     message.dealer_address
                 ))
             })?;
-        let entry = match messages {
-            Messages::Dkg(msg) => Cached::new(msg),
-            other => unreachable!(
-                "Hash matched DKG certificate but got {:?}",
-                std::mem::discriminant(&other)
-            ),
+        let PreparedMessages::Dkg(entry) = prepared else {
+            unreachable!("a DKG retrieval accepts only a DKG response")
         };
         let mut mgr = mpc_manager.write().unwrap();
         mgr.persist_and_cache_dkg_entry(message.dealer_address, entry)?;
@@ -4518,19 +4535,15 @@ impl MpcManager {
                 })?;
             (request, signers)
         };
-        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
             .await
             .ok_or_else(|| {
                 MpcError::PairwiseCommunicationError(
                     "Failed to retrieve rotation messages from any signer".to_string(),
                 )
             })?;
-        let entry = match messages {
-            Messages::Rotation(msgs) => Cached::new(msgs),
-            other => unreachable!(
-                "Hash matched rotation certificate but got {:?}",
-                std::mem::discriminant(&other)
-            ),
+        let PreparedMessages::Rotation(entry) = prepared else {
+            unreachable!("a rotation retrieval accepts only a rotation response")
         };
         let mut mgr = mpc_manager.write().unwrap();
         mgr.persist_and_cache_rotation_entry(message.dealer_address, entry)?;
@@ -4545,7 +4558,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         epoch: u64,
     ) -> MpcResult<avss::AvssOutput> {
-        let (complaint_request, receiver, committee) = {
+        let (complaint_request, receiver, committee, weights) = {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
                 .complaints_to_process
@@ -4553,6 +4566,7 @@ impl MpcManager {
                 .ok_or_else(|| MpcError::ProtocolFailed("No complaint for dealer".into()))?;
             let (nodes, party_id, params) = mgr.config_for_epoch(epoch)?;
             let committee = mgr.committee_for_epoch(epoch)?.clone();
+            let weights = responder_weights(&mgr.shape_params(), epoch, &signers)?;
             let complaint_request = ComplainRequest {
                 dealer: *dealer,
                 share_index: None,
@@ -4572,11 +4586,12 @@ impl MpcManager {
                 None,
                 mgr.encryption_key_for_epoch(epoch)?.inner().clone(),
             )?;
-            (complaint_request, receiver, committee)
+            (complaint_request, receiver, committee, weights)
         };
         let receiver = Arc::new(receiver);
         let mut responses = Vec::new();
-        let mut futures = fan_out_complaints(signers, p2p_channel, &complaint_request);
+        let calls = avss_complaint_calls(&signers, &weights);
+        let mut futures = fan_out_complaints(calls, p2p_channel, &complaint_request);
         while let Some((signer, result)) = futures.next().await {
             let response = match result {
                 Ok(r) => r,
@@ -4585,10 +4600,19 @@ impl MpcManager {
                     continue;
                 }
             };
-            let complaint_response = match response {
-                ComplaintResponse::Dkg(resp) => resp,
-                ComplaintResponse::Rotation(_) | ComplaintResponse::NonceGenerationAvid(_) => {
-                    tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
+            let weight = weights.get(&signer).copied();
+            let checked = spawn_blocking(move || {
+                response_checks::avss_complaint_response(
+                    ProtocolTypeIndicator::Dkg,
+                    weight,
+                    &response,
+                )
+            })
+            .await;
+            let complaint_response = match checked {
+                Ok(resp) => resp,
+                Err(reason) => {
+                    tracing::warn!("Complaint response from {signer:?} refused: {reason}");
                     continue;
                 }
             };
@@ -4636,39 +4660,36 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         epoch: u64,
     ) -> MpcResult<HashMap<ShareIndex, avss::AvssOutput>> {
-        let (recovery_contexts, committee) = {
+        let (recovery_contexts, committee, weights) = {
             let mgr = mpc_manager.read().unwrap();
             let contexts =
                 mgr.prepare_rotation_complain_requests(dealer, rotation_messages, epoch)?;
-            (contexts, mgr.committee_for_epoch(epoch)?.clone())
+            let committee = mgr.committee_for_epoch(epoch)?.clone();
+            if contexts.is_empty() {
+                return Ok(HashMap::new());
+            }
+            let weights = responder_weights(&mgr.shape_params(), epoch, &signers)?;
+            (contexts, committee, weights)
         };
-        if recovery_contexts.is_empty() {
-            return Ok(HashMap::new());
-        }
         tracing::info!(
             "Rotation complaint detected for dealer {:?} ({} share(s)), recovering via Complain RPC",
             dealer,
             recovery_contexts.len()
         );
+        let calls = avss_complaint_calls(&signers, &weights);
+        let weights = &weights;
         let per_share = recovery_contexts.into_iter().map(|ctx| {
-            let signers = signers.clone();
+            let calls = calls.clone();
             let committee = committee.clone();
             async move {
                 let share_index = ctx.share_index();
                 let receiver = Arc::new(ctx.receiver);
                 let message = ctx.message;
                 let mut responses: Vec<avss::VerifiedComplaintResponse> = Vec::new();
-                let mut futures = fan_out_complaints(signers, p2p_channel, &ctx.request);
+                let mut futures = fan_out_complaints(calls, p2p_channel, &ctx.request);
                 while let Some((signer, result)) = futures.next().await {
-                    let resp = match result {
-                        Ok(ComplaintResponse::Rotation(resp)) => resp,
-                        Ok(_) => {
-                            tracing::info!(
-                                "Unexpected non-rotation response from {} in rotation complaint recovery",
-                                signer
-                            );
-                            continue;
-                        }
+                    let response = match result {
+                        Ok(response) => response,
                         Err(e) => {
                             tracing::info!(
                                 "Failed to get rotation complaint response from {}: {}",
@@ -4678,12 +4699,24 @@ impl MpcManager {
                             continue;
                         }
                     };
+                    let weight = weights.get(&signer).copied();
+                    let checked = spawn_blocking(move || {
+                        response_checks::avss_complaint_response(
+                            ProtocolTypeIndicator::KeyRotation,
+                            weight,
+                            &response,
+                        )
+                    })
+                    .await;
+                    let resp = match checked {
+                        Ok(resp) => resp,
+                        Err(reason) => {
+                            tracing::warn!("Complaint response from {signer:?} refused: {reason}");
+                            continue;
+                        }
+                    };
                     let Some(verified) = verify_complaint_response_from_signer(
-                        &receiver,
-                        &committee,
-                        &message,
-                        &signer,
-                        resp,
+                        &receiver, &committee, &message, &signer, resp,
                     ) else {
                         continue;
                     };
@@ -6156,7 +6189,7 @@ impl MpcManager {
                 })?;
             (request, signers)
         };
-        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
             .await
             .ok_or_else(|| {
                 MpcError::PairwiseCommunicationError(format!(
@@ -6166,27 +6199,27 @@ impl MpcManager {
             })?;
         let mut mgr = mpc_manager.write().unwrap();
         let previous_epoch = mgr.previous_epoch;
-        match messages {
-            Messages::Dkg(ref msg) => {
-                mgr.persist_and_cache_dkg_message(previous_epoch, message.dealer_address, msg)?;
+        match prepared {
+            PreparedMessages::Dkg(entry) => {
+                mgr.persist_and_cache_dkg_message(previous_epoch, message.dealer_address, &entry)?;
+                Ok(Messages::Dkg(entry.into_value()))
             }
-            Messages::Rotation(ref msgs) => {
+            PreparedMessages::Rotation(entry) => {
                 mgr.persist_and_cache_rotation_messages(
                     previous_epoch,
                     message.dealer_address,
-                    msgs,
+                    &entry,
                 )?;
+                Ok(Messages::Rotation(entry.into_value()))
             }
-            Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
-                return Err(MpcError::ProtocolFailed(format!(
+            PreparedMessages::NonceGenerationAvid(_) | PreparedMessages::AvidNonceRetrieval => {
+                Err(MpcError::ProtocolFailed(format!(
                     "Retrieved non-key-generation message for dealer {:?} during previous-epoch \
-                     repair: {:?}",
+                     repair",
                     message.dealer_address,
-                    std::mem::discriminant(&messages)
-                )));
+                )))
             }
         }
-        Ok(messages)
     }
 
     fn current_session_id(&self) -> SessionId {
@@ -6658,15 +6691,52 @@ fn log_verified_complaint(
 }
 
 fn fan_out_complaints<'a, P: P2PChannel + 'a>(
-    signers: Vec<Address>,
+    signers: Vec<(Address, Option<usize>)>,
     p2p_channel: &'a P,
     request: &'a ComplainRequest,
-) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponse>)> + 'a> {
+) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<proto::ComplainResponse>)> + 'a>
+{
     signers
         .into_iter()
-        .map(move |signer| async move {
-            let result = with_timeout_and_retry(|| p2p_channel.complain(&signer, request)).await;
+        .map(move |(signer, response_limit)| async move {
+            let result =
+                with_timeout_and_retry(|| p2p_channel.complain(&signer, request, response_limit))
+                    .await;
             (signer, result)
+        })
+        .collect()
+}
+
+fn responder_weights(
+    shape: &ShapeParams,
+    epoch: u64,
+    signers: &[Address],
+) -> MpcResult<HashMap<Address, u16>> {
+    let committee = shape
+        .committee_for_epoch(epoch)
+        .ok_or_else(|| MpcError::InvalidConfig(format!("no committee known for epoch {epoch}")))?;
+    Ok(signers
+        .iter()
+        .filter_map(|signer| {
+            committee
+                .party_of(signer)
+                .map(|party| (*signer, committee.weight_of(party)))
+        })
+        .collect())
+}
+
+fn avss_complaint_calls(
+    signers: &[Address],
+    weights: &HashMap<Address, u16>,
+) -> Vec<(Address, Option<usize>)> {
+    signers
+        .iter()
+        .map(|signer| {
+            let weight = weights.get(signer).copied().unwrap_or(0);
+            (
+                *signer,
+                Some(response_checks::complaint_response_limit(weight)),
+            )
         })
         .collect()
 }
@@ -6676,7 +6746,7 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
     p2p_channel: &'a P,
     request: &'a RetrieveMessagesRequest,
     expected_hash: MessagesHash,
-) -> Option<Messages> {
+) -> Option<PreparedMessages> {
     signers.shuffle(&mut rand::thread_rng());
     let mut remaining = signers.into_iter();
     let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
@@ -6702,13 +6772,21 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
                 biased;
                 Some((signer, result)) = in_flight.next() => match result {
                     Ok(response) => {
-                        if response.messages.compute_hash() == expected_hash {
-                            return Some(response.messages);
+                        let protocol_type = request.protocol_type;
+                        match spawn_blocking(move || {
+                            response_checks::certified_retrieval(
+                                protocol_type,
+                                &response,
+                                expected_hash,
+                            )
+                        })
+                        .await
+                        {
+                            Ok(prepared) => return Some(prepared),
+                            Err(reason) => tracing::warn!(
+                                "Retrieval response from {signer:?} refused: {reason}"
+                            ),
                         }
-                        tracing::info!(
-                            "Hash mismatch from signer {:?} during retrieval",
-                            signer
-                        );
                     }
                     Err(e) => tracing::info!(
                         "Retrieve from signer {:?} failed: {}",

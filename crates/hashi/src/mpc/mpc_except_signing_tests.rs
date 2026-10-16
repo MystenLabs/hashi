@@ -478,7 +478,7 @@ impl P2PChannel for MockP2PChannel {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         self.retrieve_calls.fetch_add(1, Ordering::Relaxed);
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
@@ -488,7 +488,7 @@ impl P2PChannel for MockP2PChannel {
             ))
         })?;
         let response = manager
-            .handle_retrieve_messages_request(self.current_sender, request)
+            .retrieve_messages_proto(self.current_sender, request)
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
@@ -499,7 +499,8 @@ impl P2PChannel for MockP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         let mut managers = self.managers.lock().unwrap();
         let manager = managers.get_mut(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -512,6 +513,15 @@ impl P2PChannel for MockP2PChannel {
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
+        let response = proto::ComplainResponse::from(&response);
+        if let Some(limit) = response_limit
+            && prost::Message::encoded_len(&response) > limit
+        {
+            return Err(crate::communication::ChannelError::RequestFailed(format!(
+                "response of {} bytes exceeds the {limit}-byte limit",
+                prost::Message::encoded_len(&response)
+            )));
+        }
         Ok(response)
     }
 
@@ -658,7 +668,7 @@ impl P2PChannel for FailingP2PChannel {
         &self,
         party: &Address,
         _request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         self.retrieved_from.lock().unwrap().push(*party);
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
@@ -669,7 +679,8 @@ impl P2PChannel for FailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        _response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -734,7 +745,7 @@ impl P2PChannel for SucceedingP2PChannel {
         &self,
         _party: &Address,
         _request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         unimplemented!("SucceedingP2PChannel does not implement retrieve_messages")
     }
 
@@ -742,7 +753,8 @@ impl P2PChannel for SucceedingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        _response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         unimplemented!("SucceedingP2PChannel does not implement complain")
     }
 
@@ -804,7 +816,7 @@ impl<P: P2PChannel> P2PChannel for FlakyP2PChannel<P> {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         self.inner.retrieve_messages(party, request).await
     }
 
@@ -812,8 +824,9 @@ impl<P: P2PChannel> P2PChannel for FlakyP2PChannel<P> {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
-        self.inner.complain(party, request).await
+        response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
+        self.inner.complain(party, request, response_limit).await
     }
 
     async fn get_public_mpc_output(
@@ -897,7 +910,7 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         &self,
         _party: &Address,
         _request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         unimplemented!("PartiallyFailingP2PChannel does not implement retrieve_messages")
     }
 
@@ -905,7 +918,8 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        _response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         unimplemented!("PartiallyFailingP2PChannel does not implement complain")
     }
 
@@ -954,7 +968,7 @@ impl P2PChannel for PreCollectedP2PChannel {
         &self,
         _: &Address,
         _: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         unimplemented!("PreCollectedP2PChannel does not implement retrieve_messages")
     }
 
@@ -962,12 +976,13 @@ impl P2PChannel for PreCollectedP2PChannel {
         &self,
         party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        _response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         self.responses
             .lock()
             .unwrap()
             .get(party)
-            .cloned()
+            .map(proto::ComplainResponse::from)
             .ok_or_else(|| ChannelError::RequestFailed("No response".into()))
     }
 
@@ -5380,6 +5395,190 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
             .contains_key(&dealer_a_addr)
     );
 }
+
+struct ScriptedRetrievalChannel {
+    responses: HashMap<Address, (Duration, proto::RetrieveMessagesResponse)>,
+    calls: std::sync::Mutex<HashMap<Address, usize>>,
+}
+
+#[async_trait::async_trait]
+impl P2PChannel for ScriptedRetrievalChannel {
+    async fn send_messages(
+        &self,
+        _: &Address,
+        _: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
+        unimplemented!()
+    }
+
+    async fn retrieve_messages(
+        &self,
+        party: &Address,
+        _: &RetrieveMessagesRequest,
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
+        *self.calls.lock().unwrap().entry(*party).or_default() += 1;
+        let (delay, response) = self
+            .responses
+            .get(party)
+            .cloned()
+            .ok_or_else(|| ChannelError::RequestFailed("offline".into()))?;
+        tokio::time::sleep(delay).await;
+        Ok(response)
+    }
+
+    async fn complain(
+        &self,
+        _: &Address,
+        _: &ComplainRequest,
+        _: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
+        unimplemented!()
+    }
+
+    async fn get_public_mpc_output(
+        &self,
+        _: &Address,
+        _: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!()
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        _: &Address,
+        _: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        unimplemented!()
+    }
+}
+
+fn bcs_value(bytes: impl Into<Bytes>) -> sui_rpc::proto::sui::rpc::v2::Bcs {
+    let mut bcs = sui_rpc::proto::sui::rpc::v2::Bcs::default();
+    bcs.value = Some(bytes.into());
+    bcs
+}
+
+#[tokio::test(start_paused = true)]
+#[tracing_test::traced_test]
+async fn test_retrieve_dealer_message_drops_a_mismatched_response_without_retrying_it() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_addr = setup.address(0);
+    let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
+    let message = dealer_mgr
+        .current_dkg_messages
+        .get(&dealer_addr)
+        .unwrap()
+        .clone();
+    let dealer_message = Messages::Dkg(message.clone());
+    let dkg_message = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: dealer_message.compute_hash(),
+    };
+    let mismatched_signer = setup.address(1);
+    let cert = create_certificate_with_signers(
+        setup.committee(),
+        dealer_addr,
+        &dealer_message,
+        vec![
+            setup.signing_keys[1].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                mismatched_signer,
+                &dkg_message,
+            ),
+            setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer_addr, &dkg_message),
+        ],
+    )
+    .unwrap();
+    let served = Bytes::from(bcs::to_bytes(&message).unwrap());
+    let dkg_response = |bytes: Bytes| proto::RetrieveMessagesResponse {
+        messages: Some(proto::retrieve_messages_response::Messages::DkgMessage(
+            bcs_value(bytes),
+        )),
+    };
+    let channel = ScriptedRetrievalChannel {
+        responses: HashMap::from([
+            (
+                mismatched_signer,
+                (Duration::ZERO, dkg_response(Bytes::from_static(&[0xff; 8]))),
+            ),
+            (
+                dealer_addr,
+                (Duration::from_secs(20), dkg_response(served.clone())),
+            ),
+        ]),
+        calls: Default::default(),
+    };
+    let party_mgr = Arc::new(RwLock::new(setup.create_manager(2)));
+
+    MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &channel)
+        .await
+        .unwrap();
+
+    assert_eq!(channel.calls.lock().unwrap()[&mismatched_signer], 1);
+    assert!(logs_contain("bytes don't match the certificate's hash"));
+    let mgr = party_mgr.read().unwrap();
+    let entry = mgr.current_dkg_messages.get_entry(&dealer_addr).unwrap();
+    assert_eq!(entry.bytes(), &served);
+    assert_ne!(entry.bytes().as_ptr(), served.as_ptr());
+}
+
+#[test]
+fn test_certified_retrieval_decodes_a_rotation_map_as_its_rebuilt_blob() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer = setup.create_dealer_with_message(0, &mut rng);
+    let message = dealer
+        .current_dkg_messages
+        .get(&setup.address(0))
+        .unwrap()
+        .clone();
+    let encoded = bcs::to_bytes(&message).unwrap();
+    let rotation: RotationMessages = [255, 256]
+        .into_iter()
+        .map(|index| (ShareIndex::new(index).unwrap(), message.clone()))
+        .collect();
+    let blob = bcs::to_bytes(&rotation).unwrap();
+    let expected = Messages::Rotation(rotation).compute_hash();
+    let map_response = |entries: Vec<(u32, Vec<u8>)>| proto::RetrieveMessagesResponse {
+        messages: Some(
+            proto::retrieve_messages_response::Messages::RotationMessages(
+                proto::RotationMessages {
+                    messages: entries
+                        .into_iter()
+                        .map(|(index, bytes)| (index, bcs_value(bytes)))
+                        .collect(),
+                },
+            ),
+        ),
+    };
+    let retrieve = |entries| match response_checks::certified_retrieval(
+        ProtocolTypeIndicator::KeyRotation,
+        &map_response(entries),
+        expected,
+    )
+    .unwrap()
+    {
+        PreparedMessages::Rotation(entry) => bcs::to_bytes(&**entry).unwrap(),
+        _ => panic!("expected rotation messages"),
+    };
+
+    assert_eq!(
+        retrieve(vec![(255, encoded.clone()), (256, encoded.clone())]),
+        blob
+    );
+
+    let resplit_index = u16::from_le_bytes([encoded[0], encoded[1]]);
+    let mut resplit = encoded[2..].to_vec();
+    resplit.extend_from_slice(&255u16.to_le_bytes());
+    resplit.extend_from_slice(&encoded);
+    assert_eq!(
+        retrieve(vec![(256, vec![]), (resplit_index.into(), resplit)]),
+        blob
+    );
+}
+
 fn create_certificate_with_signers(
     committee: &RuntimeCommittee,
     dealer_address: Address,
@@ -6149,7 +6348,7 @@ impl P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         self.retrieve_count.fetch_add(1, Ordering::SeqCst);
         self.inner.retrieve_messages(party, request).await
     }
@@ -6158,8 +6357,9 @@ impl P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
-        self.inner.complain(party, request).await
+        response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
+        self.inner.complain(party, request, response_limit).await
     }
 
     async fn get_public_mpc_output(
@@ -8789,14 +8989,15 @@ async fn test_prepare_previous_output_adopts_only_the_on_chain_key() {
             &self,
             _party: &Address,
             _request: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -13852,7 +14053,7 @@ impl P2PChannel for BundleScenarioP2PChannel {
         &self,
         _party: &Address,
         _request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         unimplemented!("BundleScenarioP2PChannel does not implement retrieve_messages")
     }
 
@@ -13860,7 +14061,8 @@ impl P2PChannel for BundleScenarioP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
+        _response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
         unimplemented!("BundleScenarioP2PChannel does not implement complain")
     }
 
@@ -17273,14 +17475,15 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
             &self,
             _party: &Address,
             _request: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

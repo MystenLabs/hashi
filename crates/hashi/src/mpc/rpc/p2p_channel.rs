@@ -7,14 +7,13 @@ use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
 use crate::grpc::Client;
 use crate::grpc::MPC_PROTOCOL_METADATA_KEY;
+use crate::grpc::SIGNATURE_REPLY_LIMIT;
 use crate::mpc::types::ComplainRequest;
-use crate::mpc::types::ComplaintResponse;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::GetPublicMpcOutputRequest;
 use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
-use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::SendMessagesRequest;
 use crate::mpc::types::SendMessagesResponse;
 use crate::onchain::OnchainState;
@@ -112,7 +111,9 @@ impl P2PChannel for RpcP2PChannel {
         recipient: &Address,
         request: &SendMessagesRequest,
     ) -> ChannelResult<SendMessagesResponse> {
-        let client = self.get_client(recipient)?;
+        let client = self
+            .get_client(recipient)?
+            .tighten_max_decoding_message_size(SIGNATURE_REPLY_LIMIT);
         let proto_request =
             self.build_request(request.to_proto(self.epoch, self.rotation_messages_bcs));
         let response = client
@@ -128,7 +129,7 @@ impl P2PChannel for RpcP2PChannel {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse> {
+    ) -> ChannelResult<proto::RetrieveMessagesResponse> {
         let client = self.get_client(party)?;
         let proto_request = self.build_request(request.to_proto());
         let response = client
@@ -136,24 +137,26 @@ impl P2PChannel for RpcP2PChannel {
             .retrieve_messages(proto_request)
             .await
             .map_err(map_status)?;
-        RetrieveMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+        Ok(response.into_inner())
     }
 
     async fn complain(
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse> {
-        let client = self.get_client(party)?;
+        response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse> {
+        let mut client = self.get_client(party)?;
+        if let Some(limit) = response_limit {
+            client = client.tighten_max_decoding_message_size(limit);
+        }
         let proto_request = self.build_request(request.to_proto());
         let response = client
             .mpc_service_client()
             .complain(proto_request)
             .await
             .map_err(map_status)?;
-        ComplaintResponse::try_from(response.get_ref())
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+        Ok(response.into_inner())
     }
 
     async fn get_public_mpc_output(

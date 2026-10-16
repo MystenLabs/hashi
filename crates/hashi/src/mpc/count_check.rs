@@ -130,6 +130,12 @@ pub fn check_rotation_messages(
     Ok(entries)
 }
 
+pub fn avss_complaint_response_size(responder_weight: u16) -> usize {
+    let weight = usize::from(responder_weight);
+    let length_prefix = (usize::BITS - weight.leading_zeros()).div_ceil(7).max(1) as usize;
+    length_prefix + weight * SHARE
+}
+
 pub fn check_avss_complaint_response(bytes: &[u8], responder_weight: u16) -> CountCheckResult<()> {
     const FIELD: &str = "complaint_response.shares";
     let mut cursor = Cursor::new(bytes);

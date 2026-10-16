@@ -4,16 +4,15 @@
 //! Communication channel interfaces
 
 use crate::mpc::ComplainRequest;
-use crate::mpc::ComplaintResponse;
 use crate::mpc::GetPublicMpcOutputRequest;
 use crate::mpc::GetPublicMpcOutputResponse;
 use crate::mpc::RetrieveMessagesRequest;
-use crate::mpc::RetrieveMessagesResponse;
 use crate::mpc::SendMessagesRequest;
 use crate::mpc::SendMessagesResponse;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use async_trait::async_trait;
+use hashi_types::proto;
 use sui_sdk_types::Address;
 use thiserror::Error;
 
@@ -67,13 +66,14 @@ pub trait P2PChannel: Send + Sync {
         &self,
         party: &Address,
         request: &RetrieveMessagesRequest,
-    ) -> ChannelResult<RetrieveMessagesResponse>;
+    ) -> ChannelResult<proto::RetrieveMessagesResponse>;
 
     async fn complain(
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponse>;
+        response_limit: Option<usize>,
+    ) -> ChannelResult<proto::ComplainResponse>;
 
     async fn get_public_mpc_output(
         &self,

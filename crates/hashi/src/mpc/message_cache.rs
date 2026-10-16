@@ -8,6 +8,7 @@ use crate::mpc::types::RotationMessages;
 use bytes::Bytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -42,6 +43,28 @@ impl<T: CachedPayload> Cached<T> {
         let bytes = Bytes::from(encoded);
         let hash = T::payload_hash(&bytes);
         Arc::new(Self { value, bytes, hash })
+    }
+
+    pub fn certified(bytes: &[u8], expected: MessagesHash) -> Result<Arc<Self>, String>
+    where
+        T: DeserializeOwned,
+    {
+        if T::payload_hash(bytes) != expected {
+            return Err("bytes don't match the certificate's hash".into());
+        }
+        let bytes = Bytes::copy_from_slice(bytes);
+        let value = bcs::from_bytes(&bytes).map_err(|e| format!("certified bytes: {e}"))?;
+        Ok(Arc::new(Self {
+            value,
+            bytes,
+            hash: expected,
+        }))
+    }
+}
+
+impl<T: Clone> Cached<T> {
+    pub fn into_value(self: Arc<Self>) -> T {
+        Arc::try_unwrap(self).map_or_else(|shared| shared.value.clone(), |entry| entry.value)
     }
 }
 

@@ -1548,11 +1548,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
-    use crate::mpc::types::ComplaintResponse;
     use crate::mpc::types::GetPublicMpcOutputRequest;
     use crate::mpc::types::GetPublicMpcOutputResponse;
     use crate::mpc::types::RetrieveMessagesRequest;
-    use crate::mpc::types::RetrieveMessagesResponse;
     use crate::mpc::types::SendMessagesRequest;
     use crate::mpc::types::SendMessagesResponse;
     use crate::mpc::types::message_delta;
@@ -1568,6 +1566,7 @@ pub(crate) mod tests {
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::proto;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -1696,14 +1695,15 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -1749,14 +1749,15 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -1848,14 +1849,15 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -1910,14 +1912,15 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -1965,14 +1968,15 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &RetrieveMessagesRequest,
-        ) -> ChannelResult<RetrieveMessagesResponse> {
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
             unimplemented!()
         }
         async fn complain(
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponse> {
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

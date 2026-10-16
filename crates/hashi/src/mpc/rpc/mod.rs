@@ -5,6 +5,7 @@ mod caller_membership;
 mod gates;
 mod p2p_channel;
 mod proto_conversions;
+pub(crate) mod response_checks;
 mod service;
 
 pub use p2p_channel::RpcP2PChannel;
