@@ -39,6 +39,10 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use tracing::info;
 
+mod assembly;
+pub use assembly::EncryptionRecipient;
+pub use assembly::assemble_public_cert;
+
 mod yubikey_attestation;
 pub use yubikey_attestation::verify_yubikey_attestations;
 pub(crate) use yubikey_attestation::verify_yubikey_attestations_and_keys;
