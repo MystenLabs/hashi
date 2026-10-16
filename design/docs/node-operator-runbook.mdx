@@ -57,7 +57,7 @@ This document assumes familiarity with Sui validator operations, Linux system ad
 
 Onboarding takes 6 steps. The remaining sections cover the detail, the defaults, and the failure modes:
 
-1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
+1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. For a Mainnet Bitcoin node, provision 2 TB of SSD storage. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
 2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [2.2](#22-tls-key-dedicated), [2.4](#24-operator-key-day-to-day-signing), and [2.5](#25-backup-key-openpgp).
 3. **Write the validator config:** use your target network's column in [Networks](#networks). See [3.1](#31-validator-config).
 4. **Register your validator:** run `hashi register --serialize-unsigned-transaction` and sign the result offline with your Sui validator account key. See [2.3](#23-registration-must-be-signed-by-the-account-key) and [5.3](#53-step-2-register-your-validator).
@@ -70,6 +70,28 @@ These details trip up most operators:
 - Hashi defaults `bitcoin-rpc` to port `8332`, the Mainnet port. On Testnet (Bitcoin Signet) you must set `38332` explicitly. See [1.5](#15-bitcoin-node).
 - A self-hosted Sui fullnode needs `rpc.enable-indexing: true` in its own config, which is off by default. See [1.4](#14-sui-rpc).
 - Fund the operator address with at least 2 SUI. With exactly 1 SUI, the node's gas bootstrap fails with `InsufficientCoinBalance` and retries every 10 minutes until you add SUI. See [2.4](#24-operator-key-day-to-day-signing).
+
+## Common questions
+
+### Does the Hashi node connect to your Sui validator?
+
+The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your validator, and the Hashi node should run on a separate host from your Sui validator ([1.1](#11-resources)). The link to your validator is onchain: `validator-address` in the validator config is your Sui validator address, and your validator account key signs the initial registration ([2.3](#23-registration-must-be-signed-by-the-account-key)).
+
+### Which validators can run a Hashi node?
+
+Only active Sui validators. Onchain registration asserts that the sender is in the Sui active validator set, so the registration must come from your Sui validator account key ([2.3](#23-registration-must-be-signed-by-the-account-key), [11.3](#113-registration-and-offline-signing)). [Committee](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators) explains why the committee is not exactly the set of Sui validators.
+
+### Do you need to generate a backup key?
+
+Yes. The backup key is required: `backup-pgp-cert` and `backup-dir` are both required in the validator config. Generate an OpenPGP key on a YubiKey or locally with `sq` or `gpg`, and give the node only the public certificate. See [2.5](#25-backup-key-openpgp) and [Hashi Node Backups](node-backup.mdx).
+
+### How much storage does the Bitcoin node need on Mainnet?
+
+Provision 2 TB of SSD storage for a self-hosted archival Mainnet Bitcoin node with `txindex` and `blockfilterindex`; see the Mainnet tab of [1.5](#15-bitcoin-node). This is separate from the Hashi process itself, which needs 10 GB of persistent storage ([1.1](#11-resources)).
+
+### What does a Mainnet node depend on?
+
+A self-hosted Sui fullnode serving the gRPC v2 API with `rpc.enable-indexing: true`, an archival Bitcoin Core v29 or newer node reachable over both JSON-RPC and P2P (self-hosting is strongly encouraged), a dedicated TLS key, an operator key funded with at least 2 SUI, and an OpenPGP backup key. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), [1.5](#15-bitcoin-node), and [2](#2-key-management-and-security).
 
 ## On this page
 
@@ -228,7 +250,7 @@ Hashi talks to Bitcoin over **two independent channels**, both of which must be 
 
 Whichever endpoint serves the **JSON-RPC** channel must be **archival** (Hashi calls `getrawtransaction` on arbitrary deposit txids) and must permit `sendrawtransaction` and `testmempoolaccept`. The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) needs a full, unpruned peer that serves filters (`peerblockfilters=1`): the light client drops any peer that does not advertise both `NODE_NETWORK` and `NODE_COMPACT_FILTERS`, and a pruned node never advertises the first. The simplest setup that satisfies both channels is a single self-hosted archival node.
 
-**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `testmempoolaccept`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockhash`, `getbestblockhash`. Off Mainnet the light client resolves its startup anchor with `getblockhash`, so the node can't start without it. `testmempoolaccept` sees each signed withdrawal before finalize, so prefer a bitcoind you run. That check is not in the 1.0 releases, which never call `testmempoolaccept`; allow it now so the next release needs no RPC change. Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
+**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `testmempoolaccept`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockhash`, `getbestblockhash`. Off Mainnet the light client resolves its startup anchor with `getblockhash`, so the node can't start without it. The 1.0 releases never call `testmempoolaccept`. The next release adds a check in which `testmempoolaccept` sees each signed withdrawal before finalize, so prefer a bitcoind you run; allow the method now so that release needs no RPC permission change. Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
 
 **Installing Bitcoin Core.** Download the release binaries for **v29 or newer** from [bitcoincore.org](https://bitcoincore.org/en/download/), verify them against the published checksums and signatures, then extract and install:
 
@@ -363,6 +385,8 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 | **BLS12-381 key** | BLS12-381 | Auto-generated at startup | MPC protocol participation. Stored in local DB. |
 | **Encryption key** | ECIES | Auto-generated at startup | Encrypts MPC share exchange between validators. Stored in local DB. |
 | **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Required. |
+
+You do not generate or manage the BLS12-381 and ECIES keys: the node creates them at startup, stores them in its local database, and writes their public keys onchain when it starts ([5.4](#54-step-3-start-the-server)). Because they live in the database, the database is the part of a backup you cannot recreate ([10.1](#101-what-a-backup-holds)).
 
 ### 2.2 TLS key (dedicated)
 
@@ -1165,7 +1189,7 @@ hashi proposal create ignore-member --validator <address> [--unignore] [-m key=v
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
+Nodes use the guardian for guardian info, limiter bootstrap, and withdrawal signing ([4.2](#42-outbound)). Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
 
 ```bash
 hashi proposal create update-config guardian_node_url string:<url> [-m key=value]
@@ -1258,6 +1282,8 @@ Keep a resigned node running until the next committee forms. Members ignored by 
 > Governance actions are authorized by [member](#24-operator-key-day-to-day-signing): the signer must be the committee member's validator key **or** its delegated operator key, and the system records the vote under the validator for stake-weight purposes. So your operator key can vote on the validator's behalf.
 
 ### 7.2 Proposal types
+
+Config parameters live in 2 stores: **instant config**, where a change applies as soon as the proposal executes, and **epoch config**, where a change lands in the next committee.
 
 | Type | Threshold | Purpose | Parameters |
 |------|-----------|---------|-----------|
@@ -1407,7 +1433,7 @@ Notes:
 | `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
-| `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`, or `-1` until the pool holds a UTXO to probe. |
+| `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`. It reads `-1` until the pool holds a UTXO to probe; that is expected, not a fault. |
 | `hashi_peer_requests_shed_total`, `hashi_peer_requests_over_byte_budget_total`, `hashi_peer_requests_too_large_total`, `hashi_peer_mpc_work_shed_total`, `hashi_peer_responses_shed_total`, `hashi_peer_requests_over_connection_limit_total` | counter | Traffic a per-peer limit shed or refused, by `peer`. Healthy: flat. |
 | `hashi_mpc_unguarded_spawn_blocking_total` | counter | MPC work started outside the per-peer budget. Healthy: `0`. |
 | `hashi_peer_first_seen_timestamp_seconds` | gauge | When this node first saw each peer since start. The peer alerts need it. |
@@ -1513,7 +1539,7 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ### 10.1 What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configure-hashi-backups). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Each archive holds:
 
@@ -1528,7 +1554,7 @@ The optional `[backup-s3]` table in the [config template](#31-validator-config)
 enables uploads using the AWS default credential chain. Without it, backups
 remain local-only. Each scheduled backup saves locally before one upload
 attempt; failed uploads retain the local archive and are not queued or retried.
-See [Cloud backup](node-backup.mdx#cloud-backup) for the server-side
+See [Back up to S3](node-backup.mdx#back-up-to-s3) for the server-side
 missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
 read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
 read access is unchanged; per-node AWS credentials remain to be provisioned.
@@ -1611,7 +1637,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
    sudo mv hashi-db-snapshot /var/lib/hashi/db
    ```
 
-4. **Put the config and key files back, if you are restoring them.** Inspect the recovered manifest and config, then install files at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. Never blindly follow archived absolute paths. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths, and update endpoints for the new host.
+4. **Put the config and key files back, if you are restoring them.** Inspect the recovered manifest and config, then install files at the paths your deployment uses. The manifest lists the path each one came from; it is a record, not something the command acts on. Never blindly follow archived absolute paths. If the layout changed, edit `tls-private-key`, `operator-private-key`, `db`, and `backup-dir` in the config to match the new paths, and update endpoints for the new host. In the commands below and in step 6, replace `<tls-key-file>` and `<operator-key-file>` with the key file names you find in the extracted directory (the manifest records the path each came from).
 
    ```bash
    cat hashi-backup-manifest.toml

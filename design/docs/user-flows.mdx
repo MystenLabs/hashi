@@ -40,8 +40,10 @@ answer: >-
   validator stake weight.
 ---
 
-There are two main user flows for interacting with `hashi`: deposits and
-withdrawals.
+There are two main user flows for interacting with `hashi`: deposits, which
+turn `BTC` into `hBTC` on Sui, and withdrawals, which turn `hBTC` back into
+native `BTC` at a Bitcoin address you specify. For the phase-by-phase details,
+see [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx).
 
 :::info
 The only coin the Hashi protocol creates is `hBTC`, the Bitcoin-backed asset it
@@ -55,7 +57,10 @@ or airdrop as an imitation.
 
 To use `BTC` on Sui (for example, as collateral for a loan), you must
 deposit your `BTC` to a Hashi Bitcoin address, spendable by the MPC committee
-together with the Guardian.
+together with the Guardian. The deposit address is not held by your own wallet
+keys. To try the flow without real `BTC`, see
+[Running a test deposit on Testnet](#running-a-test-deposit-on-testnet), which
+uses Bitcoin Signet coins that have no value.
 
 <div style={{zoom: 1.5}}>
 
@@ -88,13 +93,14 @@ Every Sui address has its own unique Hashi Bitcoin deposit address. See
 [Bitcoin Address Scheme](address-scheme.mdx) for the full derivation
 details.
 
-### Deposit
+### How to deposit BTC
 
 After your deposit address is determined, you can initiate a deposit to
 Hashi.
 
-1. Broadcast a Bitcoin transaction depositing `BTC` into your unique deposit
-   address.
+1. Broadcast a Bitcoin transaction depositing `BTC` (at least
+   [`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum)) into your
+   unique deposit address.
 1. Notify Hashi of the deposit by submitting a transaction to Sui that
    includes the deposit transaction ID.
 1. Hashi nodes query Bitcoin and watch for confirmation of the deposit
@@ -174,7 +180,7 @@ sequenceDiagram
 
 </div>
 
-### Withdraw
+### How to withdraw BTC
 
 1. You send a transaction to Sui with the amount of `hBTC` you want to
    withdraw (at least
