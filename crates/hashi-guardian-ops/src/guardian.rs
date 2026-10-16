@@ -37,7 +37,8 @@ impl Lifecycle {
         self.0 == name
     }
 
-    /// Whether key provisioners are mid-round with this guardian, holding shares the relay keeps only in memory.
+    /// Whether key provisioners are mid-round with this guardian. A provisioning round's shares live only in the relay's
+    /// memory; a ceremony's confirmations go straight to the guardian, but a proxy restart still cuts the round off.
     pub fn in_kp_round(&self) -> bool {
         self.is("withdraw/OPERATOR_INITIALIZED")
             || self.is("ceremony/AWAITING_KEY_PROVISIONER_CONFIRMATIONS")
@@ -234,6 +235,16 @@ pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -
     if target != signing_key {
         bail!(
             "The proxy's relay sends key provisioners to guardian {target}, but {} reaches slot {}'s {signing_key}. Check that the tunnel is slot {}'s.",
+            view.endpoint,
+            view.slot,
+            view.slot
+        );
+    }
+    // Until the proxy follows a new standby, its relay leads to the active guardian, so a tunnel that reaches that one
+    // passes the check above.
+    if proxy_info(ctx)?.signing_pub_key.as_deref() == Some(signing_key.as_str()) {
+        bail!(
+            "{} reaches the guardian the proxy fronts, {signing_key}, not slot {}'s standby. Check that the tunnel is slot {}'s.",
             view.endpoint,
             view.slot,
             view.slot

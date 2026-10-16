@@ -40,6 +40,13 @@ impl Slot {
             Self::B => "-b",
         }
     }
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
 }
 
 impl fmt::Display for Slot {

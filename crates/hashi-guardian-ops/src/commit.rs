@@ -66,6 +66,19 @@ fn extract(ctx: &Ctx, commit: &str, root: &Path, dir: &Path) -> Result<()> {
     if partial.exists() {
         std::fs::remove_dir_all(&partial)?;
     }
+    let renamed = unpack(ctx, commit, &partial).map(|tree| std::fs::rename(tree, dir));
+    // The partial directory goes whether or not the extraction finished.
+    let cleaned = std::fs::remove_dir_all(&partial);
+    match renamed? {
+        // Another step's extraction finished first.
+        Err(_) if dir.is_dir() => {}
+        renamed => renamed?,
+    }
+    Ok(cleaned?)
+}
+
+/// Unpacks `commit` into `partial`'s `tree/`.
+fn unpack(ctx: &Ctx, commit: &str, partial: &Path) -> Result<PathBuf> {
     let tree = partial.join("tree");
     std::fs::create_dir_all(&tree)?;
     let archive = partial.join("tree.tar");
@@ -85,13 +98,7 @@ fn extract(ctx: &Ctx, commit: &str, root: &Path, dir: &Path) -> Result<()> {
             .arg("-C")
             .arg(&tree),
     )?;
-    let renamed = std::fs::rename(&tree, dir);
-    std::fs::remove_dir_all(&partial)?;
-    match renamed {
-        // Another step's extraction finished first.
-        Err(_) if dir.is_dir() => Ok(()),
-        renamed => Ok(renamed?),
-    }
+    Ok(tree)
 }
 
 fn git(repo: &Path) -> Cmd {
@@ -136,6 +143,21 @@ mod tests {
                 .join("crates/hashi-types/proto")
         );
         assert!(exec.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn leaves_nothing_behind_when_the_extraction_fails() {
+        let repo = tempfile::tempdir().unwrap();
+        let commit = "ef".repeat(20);
+        let exec = Fake::new(|words| match words[3].as_str() {
+            "rev-parse" => Some((true, format!("{}\n", "ef".repeat(20)))),
+            "archive" => Some((false, String::new())),
+            _ => None,
+        });
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        assert!(Tree::at(&ctx, &commit, "").is_err());
+        let root = repo.path().join(".hashi/guardian-init");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 
     #[test]

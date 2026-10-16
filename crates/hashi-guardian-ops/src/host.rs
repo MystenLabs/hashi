@@ -19,7 +19,8 @@ pub struct HostOutput {
     pub success: bool,
 }
 
-/// Runs shell commands on a guardian host and returns what they printed, and whether every one succeeded.
+/// Runs shell commands on a guardian host as one script and returns what they printed, and whether the script ended in
+/// success. SSM reports only the last command's status, so a check that must fail the run exits non-zero itself.
 pub fn run(ctx: &Ctx, region: &str, instance: &str, commands: &[&str]) -> Result<HostOutput> {
     let command_id = read(
         ctx.exec,

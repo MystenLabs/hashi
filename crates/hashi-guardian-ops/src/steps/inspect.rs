@@ -61,9 +61,16 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         Err(error) => format!("unknown: {error:#}"),
     };
     println!("Proxy:         {proxy}");
+    // The relay leads to a standby once the proxy follows it, so its answer is read with the standby's build.
     let relay = stack
         .active()
-        .and_then(|active| stack.slot(ctx, active))
+        .and_then(|active| {
+            let read_as = match stack.role(active.other())? {
+                Role::Standby => active.other(),
+                _ => active,
+            };
+            stack.slot(ctx, read_as)
+        })
         .and_then(|view| {
             Tree::at(
                 ctx,
@@ -83,7 +90,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
                 ""
             }
         ),
-        Err(error) => format!("unknown: {error}"),
+        Err(error) => format!("unknown: {error:#}"),
     };
     println!("Relay:         {relay}");
     Ok(())
@@ -310,6 +317,50 @@ mod tests {
             info(&ctx, None).unwrap_err().to_string(),
             "Stack mysten/testnet has guardian slots a and b. Name the one this step acts on: info a or info b."
         );
+    }
+
+    #[test]
+    fn info_refuses_a_standby_tunnel_that_reaches_the_active_guardian() {
+        // Before the proxy follows a new standby, its relay leads to the guardian it fronts.
+        let repo = tempfile::tempdir().unwrap();
+        let exec = world(KEY_B, KEY_B);
+        let ctx = test_ctx(repo.path(), &exec);
+        assert_eq!(
+            info(&ctx, Some(Slot::B)).unwrap_err().to_string(),
+            format!(
+                "http://127.0.0.1:3001 reaches the guardian the proxy fronts, {KEY_B}, not slot b's standby. Check that the tunnel is slot b's."
+            )
+        );
+    }
+
+    #[test]
+    fn status_reports_a_partly_broken_stack() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = crate::stack::tests::sui_operations(repo.path());
+        let stack = crate::stack::tests::two_slots();
+        // The stack loads, and every other read fails.
+        let exec = Fake::new(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            match w.as_slice() {
+                ["pulumi", "-C", _, "config", ..] | ["pulumi", "-C", _, "stack", "output", ..] => {
+                    crate::exec::Exec::output(&stack, &Cmd::new("pulumi").args(&words[1..]))
+                        .ok()
+                        .map(|output| (output.success, output.stdout))
+                }
+                _ => Some((false, String::new())),
+            }
+        });
+        let ctx = Ctx::for_test(repo.path(), &exec, &crate::stack::tests::stack_env_at(&dir));
+        status(&ctx).unwrap();
+        for read in [
+            &["pulumi", "version"][..],
+            &["pulumi", "-C", &dir, "stack", "export"],
+            &["pulumi", "-C", &dir, "stack", "tag", "ls"],
+            &["curl"],
+            &["git"],
+        ] {
+            assert!(exec.ran(read), "{read:?}");
+        }
     }
 
     #[test]
