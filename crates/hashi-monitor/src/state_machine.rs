@@ -14,6 +14,7 @@ use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
+use crate::domain::WithdrawalTx;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
@@ -52,6 +53,9 @@ pub struct WithdrawalStateMachine {
     wid: WithdrawalID,
     /// immutable txid
     btc_txid: Txid,
+    /// The inputs and outputs stated by the first event seen. Every later
+    /// event must state the same.
+    tx: WithdrawalTx,
 }
 
 pub enum BtcFetchOutcome {
@@ -69,6 +73,7 @@ impl WithdrawalStateMachine {
             btc_checked_at: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
+            tx: event.tx.clone(),
         };
         assert!(
             sm.add_event(event, cfg).is_empty(),
@@ -89,6 +94,11 @@ impl WithdrawalStateMachine {
 
     pub fn wid(&self) -> WithdrawalID {
         self.wid
+    }
+
+    /// The withdrawal's inputs and outputs.
+    pub fn tx(&self) -> &WithdrawalTx {
+        &self.tx
     }
 
     pub fn expects(&self, event_type: WithdrawalEventType) -> bool {
@@ -173,6 +183,20 @@ impl WithdrawalStateMachine {
         }
 
         let mut timing_findings = Vec::new();
+        // The txid pins the inputs and outputs, but not which outputs Sui
+        // calls change. Sui's and the guardian's statements must be equal,
+        // else a committee can label a payout to itself as change.
+        if new_event.tx != self.tx {
+            let (sui, guardian) = match new_event.event_type {
+                WithdrawalEventType::E1HashiApproved => (new_event.tx.clone(), self.tx.clone()),
+                _ => (self.tx.clone(), new_event.tx.clone()),
+            };
+            timing_findings.push(MonitorFinding::WithdrawalMismatch {
+                wid: self.wid,
+                sui,
+                guardian,
+            });
+        }
         if let Some(predecessor_event_type) = new_event.event_type.predecessor() {
             match self.get(predecessor_event_type) {
                 Some(predecessor) => {
@@ -231,6 +255,7 @@ impl WithdrawalStateMachine {
                     wid,
                     btc_txid,
                     timestamp_secs: confirmation.confirmed_time,
+                    tx: self.tx.clone(),
                 };
                 Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg)))
             }
@@ -443,6 +468,10 @@ mod tests {
     use bitcoin::WPubkeyHash;
     use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin::DerivationPath;
+    use hashi_types::bitcoin::witness_program_from_address;
+    use hashi_types::move_types::OutputUtxo;
+    use hashi_types::move_types::Utxo;
+    use hashi_types::move_types::UtxoId;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -474,7 +503,39 @@ mod tests {
             wid: WithdrawalID::new([wid_seed; 32]),
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
+            tx: withdrawal_tx(bridge_program(&change_path())),
         }
+    }
+
+    /// One input, one user payout, and change to `change_address`.
+    fn withdrawal_tx(change_address: Vec<u8>) -> WithdrawalTx {
+        WithdrawalTx::new(
+            vec![Utxo {
+                id: UtxoId {
+                    txid: txid(0x51).into(),
+                    vout: 1,
+                },
+                amount: 120_000,
+                derivation_path: Some(DerivationPath::new([0x52; 32])),
+            }],
+            vec![OutputUtxo {
+                amount: 100_000,
+                bitcoin_address: vec![0x53; 20],
+            }],
+            vec![OutputUtxo {
+                amount: 19_000,
+                bitcoin_address: change_address,
+            }],
+        )
+    }
+
+    fn change_path() -> DerivationPath {
+        DerivationPath::new([0x42; 32])
+    }
+
+    /// The bridge address of `path` as a witness program.
+    fn bridge_program(path: &DerivationPath) -> Vec<u8> {
+        witness_program_from_address(&test_hashi_btc_keys().address(Some(path))).unwrap()
     }
 
     fn deposit_event(timestamp: UnixSeconds, fill: u8) -> MonitorDepositEvent {
@@ -841,11 +902,75 @@ mod tests {
         assert!(sm.is_in_audit_window(&window));
     }
 
+    #[test]
+    fn equal_transactions_from_sui_and_the_guardian_have_no_finding() {
+        let cfg = cfg();
+        let e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
+        let e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
+
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
+        assert!(sm.add_event(e2.clone(), &cfg).is_empty());
+
+        // The check runs in either ingestion order.
+        let mut sm = WithdrawalStateMachine::new(e2, &cfg);
+        assert!(sm.add_event(e1, &cfg).is_empty());
+    }
+
+    #[test]
+    fn a_change_output_not_paying_the_guardians_path_is_a_safety_finding() {
+        let cfg = cfg();
+        let e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
+        let mut e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
+        e2.tx = withdrawal_tx(bridge_program(&DerivationPath::new([0x43; 32])));
+        let expected = vec![MonitorFinding::WithdrawalMismatch {
+            wid: e1.wid,
+            sui: e1.tx.clone(),
+            guardian: e2.tx.clone(),
+        }];
+        assert_eq!(expected[0].category(), FindingCategory::Safety);
+
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
+        assert_eq!(sm.add_event(e2.clone(), &cfg), expected);
+        // The event is kept, so the flow goes on to E3.
+        assert!(sm.get(WithdrawalEventType::E2GuardianApproved).is_some());
+
+        let mut sm = WithdrawalStateMachine::new(e2, &cfg);
+        assert_eq!(sm.add_event(e1, &cfg), expected);
+    }
+
+    #[test]
+    fn an_output_sui_calls_change_and_the_guardian_calls_a_payout_is_a_safety_finding() {
+        let cfg = cfg();
+        // The committee pays itself at vout 1, tells Sui it is change, and
+        // tells the guardian it is a user payout.
+        let mut e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
+        e1.tx = withdrawal_tx(vec![0x54; 20]);
+        let mut e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
+        e2.tx = WithdrawalTx {
+            withdrawal_outputs: [
+                e1.tx.withdrawal_outputs.clone(),
+                e1.tx.change_outputs.clone(),
+            ]
+            .concat(),
+            change_outputs: Vec::new(),
+            ..e1.tx.clone()
+        };
+
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
+        assert_eq!(
+            sm.add_event(e2.clone(), &cfg),
+            vec![MonitorFinding::WithdrawalMismatch {
+                wid: e1.wid,
+                sui: e1.tx,
+                guardian: e2.tx,
+            }]
+        );
+    }
+
     fn p2wpkh(fill: u8) -> ScriptBuf {
         ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([fill; 20]))
     }
 
-    /// A Sui claim of `amount` sats at vout 1 paying `script_pubkey`.
     fn sui_deposit(amount: u64, script_pubkey: ScriptBuf) -> MonitorDepositEvent {
         MonitorDepositEvent {
             event_type: DepositEventType::E2HashiDeposited,

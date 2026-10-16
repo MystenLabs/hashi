@@ -20,13 +20,18 @@ use std::fmt;
 use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
+use bitcoin::Transaction;
 use bitcoin::Txid;
+use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::DerivationPath;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::taproot_address;
+use hashi_types::bitcoin::unsigned_withdrawal_tx;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::move_types::OutputUtxo;
+use hashi_types::move_types::Utxo;
 use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
@@ -221,8 +226,87 @@ pub struct MonitorWithdrawalEvent {
     /// Unix timestamp embedded in the Sui event / S3 log / BTC block.
     pub timestamp_secs: UnixSeconds,
 
-    /// btc txid
+    /// The txid of `tx`. It is derivable, and carried so that the Bitcoin
+    /// lookup and the join of the three events need not rebuild the
+    /// transaction. E1 carries Sui's claim, checked against `tx` on ingest.
+    /// E2 carries the txid the guardian signed.
     pub btc_txid: Txid,
+
+    /// The withdrawal's inputs and outputs as the source of this event states
+    /// them. E3 repeats what the state machine already holds.
+    pub tx: WithdrawalTx,
+}
+
+/// A withdrawal transaction in Move's shape: the inputs, the user payouts, then
+/// the change back to the bridge. Sui records it so, and the guardian's log is
+/// converted into it, so the two can be compared as a whole.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalTx {
+    pub inputs: Vec<Utxo>,
+    pub withdrawal_outputs: Vec<OutputUtxo>,
+    pub change_outputs: Vec<OutputUtxo>,
+}
+
+impl WithdrawalTx {
+    /// Move leaves an input's derivation path unset for change coins. The
+    /// guardian and the transaction builder read that as the zero path, so it
+    /// is made explicit here and the two sources compare equal.
+    pub fn new(
+        inputs: Vec<Utxo>,
+        withdrawal_outputs: Vec<OutputUtxo>,
+        change_outputs: Vec<OutputUtxo>,
+    ) -> Self {
+        let inputs = inputs
+            .into_iter()
+            .map(|input| Utxo {
+                derivation_path: Some(input.derivation_path.unwrap_or(DerivationPath::ZERO)),
+                ..input
+            })
+            .collect();
+        Self {
+            inputs,
+            withdrawal_outputs,
+            change_outputs,
+        }
+    }
+
+    /// The unsigned Bitcoin transaction these inputs and outputs build.
+    pub fn unsigned_tx(&self) -> anyhow::Result<Transaction> {
+        let outputs = [&self.withdrawal_outputs[..], &self.change_outputs[..]].concat();
+        unsigned_withdrawal_tx(&self.inputs, &outputs)
+    }
+}
+
+impl fmt::Display for WithdrawalTx {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn outputs(outputs: &[OutputUtxo]) -> String {
+            outputs
+                .iter()
+                .map(|output| format!("{}:{}", hex::encode(&output.bitcoin_address), output.amount))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|input| {
+                format!(
+                    "{}:{}:{}:{}",
+                    bitcoin::Txid::from(input.id.txid),
+                    input.id.vout,
+                    input.amount,
+                    input.derivation_path.unwrap_or(DerivationPath::ZERO),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        write!(
+            formatter,
+            "inputs=[{inputs}], payouts=[{}], change=[{}]",
+            outputs(&self.withdrawal_outputs),
+            outputs(&self.change_outputs),
+        )
+    }
 }
 
 /// Event source or type.
@@ -271,16 +355,24 @@ impl HashiBTCKeys {
         }
     }
 
-    /// The script of the bridge address for `derivation_path`. A missing path
-    /// is the zero path, as in Move.
-    pub fn script_pubkey(&self, derivation_path: Option<&DerivationPath>) -> ScriptBuf {
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
+    /// The bridge address for `derivation_path`. A missing path is the zero
+    /// path, as in Move.
+    pub fn address(&self, derivation_path: Option<&DerivationPath>) -> BitcoinAddress {
         taproot_address(
             &self.guardian_btc_pubkey,
             &self.mpc_master_g,
             derivation_path.unwrap_or(&DerivationPath::ZERO),
             self.network,
         )
-        .script_pubkey()
+    }
+
+    /// The script of the bridge address for `derivation_path`.
+    pub fn script_pubkey(&self, derivation_path: Option<&DerivationPath>) -> ScriptBuf {
+        self.address(derivation_path).script_pubkey()
     }
 }
 

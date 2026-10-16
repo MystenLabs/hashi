@@ -6,6 +6,7 @@ use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
+use crate::domain::WithdrawalTx;
 use crate::domain::human_duration;
 use crate::domain::human_timestamp_delta;
 use crate::domain::utc_timestamp;
@@ -74,11 +75,12 @@ pub enum MonitorFinding {
         claimed: Txid,
         reason: String,
     },
-    /// A change output of the Hashi approval does not pay the bridge's change address.
-    ChangeOutputNotToBridge {
+    /// The Hashi approval and the guardian's log state different inputs,
+    /// user payouts or change for the withdrawal.
+    WithdrawalMismatch {
         wid: WithdrawalID,
-        vout: u32,
-        bitcoin_address: Vec<u8>,
+        sui: WithdrawalTx,
+        guardian: WithdrawalTx,
     },
     /// The confirmed Bitcoin transaction has no output at the deposit's vout.
     DepositOutputMissing {
@@ -118,7 +120,7 @@ impl MonitorFinding {
             Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
-            Self::ChangeOutputNotToBridge { .. } => FindingCategory::Safety,
+            Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
             Self::GuardianClockSkew { .. } => FindingCategory::Safety,
@@ -177,14 +179,9 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "WithdrawalTxUnbuildable(wid={wid}, claimed={claimed}, reason={reason})"
             ),
-            Self::ChangeOutputNotToBridge {
-                wid,
-                vout,
-                bitcoin_address,
-            } => write!(
+            Self::WithdrawalMismatch { wid, sui, guardian } => write!(
                 f,
-                "ChangeOutputNotToBridge(wid={wid}, vout={vout}, bitcoin_address={})",
-                hex::encode(bitcoin_address),
+                "WithdrawalMismatch(wid={wid}, sui={{{sui}}}, guardian={{{guardian}}})",
             ),
             Self::DepositOutputMissing {
                 deposit_id,

@@ -790,7 +790,7 @@ impl MoveType for WithdrawalTransaction {
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.
-#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct OutputUtxo {
     /// In satoshis
     pub amount: u64,
@@ -814,7 +814,7 @@ pub struct DepositRequest {
     pub confirmed_timestamp_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
