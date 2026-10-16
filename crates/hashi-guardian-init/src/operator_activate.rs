@@ -196,13 +196,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         standby.enclave_btc_pubkey,
         committee_epoch,
         limiter_state,
+        standby.init_config.limiter_config(),
     )?;
     info!(
         phase = "guardian postcheck",
         session_id = %session_id,
-        committee_epoch,
-        limiter_next_seq = limiter_state.next_seq,
-        "activated GuardianInfo matches expected state",
+        committee_epoch = ?post.info().current_committee_epoch,
+        limiter_next_seq = ?post.info().limiter_state.map(|state| state.next_seq),
+        "activated GuardianInfo is at or past the expected state",
     );
 
     info!(
@@ -380,6 +381,7 @@ fn verify_oi_info_matches_provisioned_standby(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_activated_info(
     post: &GuardianInfo,
     post_session_id: &str,
@@ -388,6 +390,7 @@ fn verify_activated_info(
     expected_enclave_btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
     expected_committee_epoch: u64,
     expected_limiter_state: hashi_types::guardian::LimiterState,
+    limiter_config: &hashi_types::guardian::LimiterConfig,
 ) -> anyhow::Result<()> {
     ensure!(
         post_session_id == expected_session_id,
@@ -408,7 +411,7 @@ fn verify_activated_info(
         "Guardian BTC pubkey changed during operator activation"
     );
     // The guardian serves once active, so withdrawals and committee handoffs may
-    // already have advanced both; it refuses to activate from any other state.
+    // already have advanced both, but only to states reachable from the expected one.
     ensure!(
         post.current_committee_epoch
             .is_some_and(|epoch| epoch >= expected_committee_epoch),
@@ -418,9 +421,14 @@ fn verify_activated_info(
     );
     ensure!(
         post.limiter_state.is_some_and(|state| {
-            state.next_seq > expected_limiter_state.next_seq || state == expected_limiter_state
+            state == expected_limiter_state
+                || (state.next_seq > expected_limiter_state.next_seq
+                    && state.last_updated_at >= expected_limiter_state.last_updated_at
+                    && state.num_tokens_available
+                        <= expected_limiter_state
+                            .capacity_at(limiter_config, state.last_updated_at))
         }),
-        "Guardian limiter state mismatch: expected {:?} or a later next_seq, got {:?}",
+        "Guardian limiter state mismatch: expected {:?} or a state later withdrawals reach from it, got {:?}",
         expected_limiter_state,
         post.limiter_state
     );
@@ -431,6 +439,7 @@ fn verify_activated_info(
 mod tests {
     use super::*;
     use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::SessionID;
 
@@ -457,6 +466,11 @@ mod tests {
         }
     }
 
+    const LIMITER_CONFIG: LimiterConfig = LimiterConfig {
+        refill_rate: 10,
+        max_bucket_capacity: 5_000,
+    };
+
     fn verify(post: &GuardianInfo) -> anyhow::Result<()> {
         let expected_signing_key = activated_info().signing_pub_key;
         verify_activated_info(
@@ -467,6 +481,7 @@ mod tests {
             btc_pubkey(),
             EPOCH,
             LIMITER_STATE,
+            &LIMITER_CONFIG,
         )
     }
 
@@ -491,6 +506,32 @@ mod tests {
         let mut info = activated_info();
         info.current_committee_epoch = Some(EPOCH + 1);
         verify(&info).unwrap();
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_a_later_next_seq_no_withdrawal_reaches() {
+        let later = |num_tokens_available, last_updated_at| {
+            let mut info = activated_info();
+            info.limiter_state = Some(LimiterState {
+                num_tokens_available,
+                last_updated_at,
+                next_seq: LIMITER_STATE.next_seq + 1,
+            });
+            verify(&info)
+        };
+        // 60 seconds refill 600 sats on top of the expected 1,000.
+        later(1_600, 160).unwrap();
+        assert!(later(1_601, 160).is_err());
+        assert!(later(1_000, LIMITER_STATE.last_updated_at - 1).is_err());
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_another_btc_key() {
+        let mut info = activated_info();
+        info.enclave_btc_pubkey = Some(hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[8u8; 32]).unwrap(),
+        ));
+        assert!(verify(&info).is_err());
     }
 
     #[test]
