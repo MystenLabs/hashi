@@ -3,6 +3,8 @@
 
 /// Normalized event types and findings.
 pub mod domain;
+pub mod keys;
+pub mod time;
 
 /// Withdrawal state machine.
 pub mod state_machine;

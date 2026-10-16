@@ -54,11 +54,11 @@ use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::StructTag;
 
-use crate::domain::HashiBTCKeys;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::findings::MonitorFinding;
+use crate::keys::HashiBTCKeys;
 
 /// A Hashi approval read from Sui.
 #[derive(Debug, PartialEq, Eq)]
@@ -154,8 +154,8 @@ pub mod tests {
 
     use std::collections::BTreeMap;
 
-    use crate::domain::HashiBTCKeys;
     use crate::findings::FindingCategory;
+    use crate::keys::HashiBTCKeys;
     use hashi_types::bitcoin::BTC_LIB;
     use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::bitcoin::BitcoinKeypair;

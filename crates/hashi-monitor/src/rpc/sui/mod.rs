@@ -29,11 +29,11 @@ use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 use sui_sdk_types::Address;
 
 use crate::config::SuiConfig;
-use crate::domain::HashiBTCKeys;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::utc_timestamp;
 use crate::findings::MonitorFinding;
+use crate::keys::HashiBTCKeys;
+use crate::time::utc_timestamp;
 
 pub mod approval;
 

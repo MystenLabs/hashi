@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::Config;
-use crate::domain::HashiBTCKeys;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
-use crate::domain::utc_timestamp;
 use crate::findings::MonitorFinding;
+use crate::keys::HashiBTCKeys;
+use crate::time::utc_timestamp;
 use anyhow::Context;
 use bitcoin::Network;
 use hashi_guardian::MAX_EXPECTED_LOG_CLOCK_SKEW;

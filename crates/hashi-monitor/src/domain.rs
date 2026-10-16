@@ -1,37 +1,36 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Domain model for the monitor.
+//! The monitor's core types: the events it follows, their ids, and the
+//! cursors of its sources.
 //!
-//! We model the cross-system withdrawal flow as a sequence of events:
-//! - E1 or E_hashi: Hashi approval event on sui (corresponds to WithdrawalPickedForProcessing)
-//! - E2 or E_guardian: Guardian approval event on S3 (corresponds to NormalWithdrawalSuccess)
-//! - E3 or E_btc: BTC transaction confirmed
+//! Why it exists: every source, Sui, the guardian's S3 logs and Bitcoin, is
+//! parsed into one of these events, and the state machines reason about the
+//! events alone. Each event type has a constructor named for its source, so
+//! the mapping from a source's shape to the monitor's lives next to the type.
 //!
-//! Predecessor checks: every E_{i+1} has a corresponding E_i, and E_i does not
-//! occur more than its configured clock skew after E_{i+1}.
-//! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
+//! The flows:
+//! - A withdrawal is three events: E1, the Hashi approval on Sui; E2, the
+//!   guardian's signature in its log; E3, the transaction confirmed on
+//!   Bitcoin. Every event states the transaction in Move's shape,
+//!   `WithdrawalTx`, so the sources can be compared as a whole.
+//! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
+//!   Hashi's `DepositConfirmed` on Sui.
 //!
-//! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
-//! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
+//! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
 use std::fmt;
 
 use anyhow::Context as _;
-use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use hashi_guardian::s3_reader::VerifiedLogEntry;
-use hashi_types::bitcoin::BitcoinAddress;
-use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::DerivationPath;
-use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::OutputUTXOWire;
 use hashi_types::bitcoin::TxUTXOsWire;
-use hashi_types::bitcoin::taproot_address;
 use hashi_types::bitcoin::unsigned_withdrawal_tx;
 use hashi_types::bitcoin::witness_program_from_address;
 use hashi_types::guardian::WithdrawalID;
@@ -46,108 +45,8 @@ use hashi_types::move_types::WithdrawalTransaction;
 use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
-
-/// Unix seconds rendered in the monitor's canonical UTC timestamp format.
-pub struct UtcTimestamp(UnixSeconds);
-
-pub fn utc_timestamp(timestamp: UnixSeconds) -> UtcTimestamp {
-    UtcTimestamp(timestamp)
-}
-
-impl fmt::Display for UtcTimestamp {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Ok(timestamp) = i64::try_from(self.0)
-            && let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(timestamp)
-        {
-            return write!(
-                formatter,
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                datetime.year(),
-                u8::from(datetime.month()),
-                datetime.day(),
-                datetime.hour(),
-                datetime.minute(),
-                datetime.second(),
-            );
-        }
-
-        formatter.write_str("<invalid UTC timestamp>")
-    }
-}
-
-/// Seconds rendered as a compact human-readable duration.
-pub struct HumanDuration(UnixSeconds);
-
-pub fn human_duration(seconds: UnixSeconds) -> HumanDuration {
-    HumanDuration(seconds)
-}
-
-impl fmt::Display for HumanDuration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hours = self.0 / 3_600;
-        let minutes = (self.0 % 3_600) / 60;
-        let seconds = self.0 % 60;
-
-        if hours > 0 {
-            write!(formatter, "{hours}h")?;
-        }
-        if minutes > 0 || hours > 0 {
-            write!(formatter, "{minutes}m")?;
-        }
-        write!(formatter, "{seconds}s")
-    }
-}
-
-/// Signed difference between two Unix timestamps, rendered compactly.
-pub struct HumanTimestampDelta(i128);
-
-pub fn human_timestamp_delta(later: UnixSeconds, earlier: UnixSeconds) -> HumanTimestampDelta {
-    HumanTimestampDelta(i128::from(later) - i128::from(earlier))
-}
-
-impl fmt::Display for HumanTimestampDelta {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 < 0 {
-            formatter.write_str("-")?;
-        }
-
-        let total_seconds = self.0.unsigned_abs();
-        let hours = total_seconds / 3_600;
-        let minutes = (total_seconds % 3_600) / 60;
-        let seconds = total_seconds % 60;
-
-        if hours > 0 {
-            write!(formatter, "{hours}h")?;
-        }
-        if minutes > 0 || hours > 0 {
-            write!(formatter, "{minutes}m")?;
-        }
-        write!(formatter, "{seconds}s")
-    }
-}
-
-/// Parse the monitor's sole public timestamp format: whole-second UTC RFC 3339.
-pub fn parse_utc_timestamp(value: &str) -> Result<UnixSeconds, String> {
-    if !value.ends_with('Z') {
-        return Err(
-            "timestamp must be UTC and end in `Z` (for example, 2026-08-04T19:00:00Z)".to_string(),
-        );
-    }
-
-    let datetime =
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
-            .map_err(|error| format!("invalid UTC timestamp `{value}`: {error}"))?;
-    let timestamp = UnixSeconds::try_from(datetime.unix_timestamp())
-        .map_err(|_| "timestamp must not precede 1970-01-01T00:00:00Z".to_string())?;
-    if utc_timestamp(timestamp).to_string() != value {
-        return Err(
-            "timestamp must use exactly `YYYY-MM-DDTHH:MM:SSZ` with no fractional seconds"
-                .to_string(),
-        );
-    }
-
-    Ok(timestamp)
-}
+use crate::keys::HashiBTCKeys;
+use crate::time::utc_timestamp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorEvent {
@@ -535,48 +434,6 @@ pub struct TxConfirmation {
     pub outputs: Vec<TxOut>,
 }
 
-/// The two fixed keys that every bridge address derives from.
-#[derive(Clone)]
-pub struct HashiBTCKeys {
-    guardian_btc_pubkey: BitcoinPubkey,
-    mpc_master_g: HashiMasterG,
-    network: Network,
-}
-
-impl HashiBTCKeys {
-    pub fn new(
-        guardian_btc_pubkey: BitcoinPubkey,
-        mpc_master_g: HashiMasterG,
-        network: Network,
-    ) -> Self {
-        Self {
-            guardian_btc_pubkey,
-            mpc_master_g,
-            network,
-        }
-    }
-
-    pub fn network(&self) -> Network {
-        self.network
-    }
-
-    /// The bridge address for `derivation_path`. A missing path is the zero
-    /// path, as in Move.
-    pub fn address(&self, derivation_path: Option<&DerivationPath>) -> BitcoinAddress {
-        taproot_address(
-            &self.guardian_btc_pubkey,
-            &self.mpc_master_g,
-            derivation_path.unwrap_or(&DerivationPath::ZERO),
-            self.network,
-        )
-    }
-
-    /// The script of the bridge address for `derivation_path`.
-    pub fn script_pubkey(&self, derivation_path: Option<&DerivationPath>) -> ScriptBuf {
-        self.address(derivation_path).script_pubkey()
-    }
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
 pub enum DepositEventType {
     /// deposit confirmed event on btc
@@ -733,27 +590,5 @@ mod tests {
         };
 
         assert!(WithdrawalTx::from_guardian(&keys, &utxos).is_err());
-    }
-
-    #[test]
-    fn utc_timestamp_round_trip() {
-        let input = "2026-08-04T19:45:38Z";
-        let timestamp = parse_utc_timestamp(input).unwrap();
-        assert_eq!(utc_timestamp(timestamp).to_string(), input);
-    }
-
-    #[test]
-    fn timestamp_parser_requires_canonical_utc_format() {
-        assert!(parse_utc_timestamp("1785872738").is_err());
-        assert!(parse_utc_timestamp("2026-08-04T19:45:38+00:00").is_err());
-        assert!(parse_utc_timestamp("2026-08-04T19:45:38.000Z").is_err());
-    }
-
-    #[test]
-    fn duration_uses_compact_human_readable_format() {
-        assert_eq!(human_duration(0).to_string(), "0s");
-        assert_eq!(human_duration(191).to_string(), "3m11s");
-        assert_eq!(human_duration(4_028).to_string(), "1h7m8s");
-        assert_eq!(human_timestamp_delta(100, 120).to_string(), "-20s");
     }
 }

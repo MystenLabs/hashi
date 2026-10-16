@@ -9,8 +9,8 @@ use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
 use hashi_monitor::audit::continuous::ContinuousAuditWindow;
-use hashi_monitor::domain::parse_utc_timestamp;
 use hashi_monitor::metrics::MonitorMetrics;
+use hashi_monitor::time::parse_utc_timestamp;
 use hashi_types::guardian::time::now_timestamp_secs;
 
 #[derive(Debug, Parser)]

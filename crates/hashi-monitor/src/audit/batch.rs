@@ -9,8 +9,8 @@ use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
-use crate::domain::utc_timestamp;
 use crate::findings::MonitorFinding;
+use crate::time::utc_timestamp;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
