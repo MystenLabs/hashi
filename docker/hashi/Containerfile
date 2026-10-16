@@ -18,9 +18,10 @@ COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
 WORKDIR /src
 
 # Create stub source files so cargo can resolve and compile all external deps
-RUN mkdir -p crates/hashi/src \
+RUN mkdir -p crates/hashi/src crates/hashi/tests \
  && echo 'fn main(){}' > crates/hashi/src/main.rs \
  && touch crates/hashi/src/lib.rs \
+ && touch crates/hashi/tests/backup_cli_e2e.rs \
  && mkdir -p crates/hashi-types/src \
  && touch crates/hashi-types/src/lib.rs
 

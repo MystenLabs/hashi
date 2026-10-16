@@ -30,7 +30,7 @@ COPY crates/hashi-guardian-proxy/Cargo.toml /src/crates/hashi-guardian-proxy/Car
 WORKDIR /src
 
 # Create stub source files so cargo can resolve and compile all external deps
-RUN mkdir -p crates/hashi-monitor/src crates/hashi-guardian/src crates/hashi-types/src crates/e2e-tests/src crates/hashi/src crates/hashi-guardian-proxy/src \
+RUN mkdir -p crates/hashi-monitor/src crates/hashi-guardian/src crates/hashi-types/src crates/e2e-tests/src crates/hashi/src crates/hashi/tests crates/hashi-guardian-proxy/src \
  && echo 'fn main(){}' > crates/hashi-monitor/src/main.rs \
  && touch crates/hashi-monitor/src/lib.rs \
  && touch crates/hashi-guardian/src/lib.rs \
@@ -38,6 +38,7 @@ RUN mkdir -p crates/hashi-monitor/src crates/hashi-guardian/src crates/hashi-typ
  && echo 'fn main(){}' > crates/e2e-tests/src/main.rs \
  && touch crates/e2e-tests/src/lib.rs \
  && touch crates/hashi/src/lib.rs \
+ && touch crates/hashi/tests/backup_cli_e2e.rs \
  && touch crates/hashi-guardian-proxy/src/lib.rs
 
 ENV TARGET=x86_64-unknown-linux-musl
