@@ -16,6 +16,8 @@
 //!   `WithdrawalTx`, so the sources can be compared as a whole.
 //! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
 //!   Hashi's `DepositConfirmed` on Sui.
+//! - A deposit request is the user's `DepositRequested` on Sui, followed on
+//!   its own until Bitcoin confirms the coin it names.
 //!
 //! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
@@ -23,9 +25,11 @@ pub mod deposit;
 pub mod withdrawal;
 
 use bitcoin::TxOut;
+pub use deposit::ConfirmedDeposit;
 pub use deposit::DepositEventType;
 pub use deposit::DepositId;
 pub use deposit::MonitorDepositEvent;
+pub use deposit::SuiDepositRequestedEvent;
 pub use withdrawal::MonitorWithdrawalEvent;
 pub use withdrawal::WithdrawalEventType;
 pub use withdrawal::WithdrawalTx;
@@ -42,6 +46,7 @@ use crate::time::utc_timestamp;
 pub enum MonitorEvent {
     Withdrawal(MonitorWithdrawalEvent),
     Deposit(MonitorDepositEvent),
+    DepositRequested(SuiDepositRequestedEvent),
 }
 
 impl fmt::Display for MonitorEvent {
@@ -59,6 +64,15 @@ impl fmt::Display for MonitorEvent {
                 formatter,
                 "Deposit(type={:?}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
                 event.event_type,
+                event.deposit_id,
+                utc_timestamp(event.timestamp_secs),
+                event.amount,
+                event.script_pubkey,
+            ),
+            Self::DepositRequested(event) => write!(
+                formatter,
+                "DepositRequested(request_id={}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
+                event.request_id,
                 event.deposit_id,
                 utc_timestamp(event.timestamp_secs),
                 event.amount,

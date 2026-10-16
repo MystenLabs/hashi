@@ -29,12 +29,14 @@
 //! - Deposits are checked over the Sui range the window derives, not gated
 //!   by the window.
 
+use crate::domain::ConfirmedDeposit;
 use crate::domain::Cursors;
 use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
+use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalEventType;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
@@ -53,6 +55,7 @@ use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::approval::HashiApproval;
 use crate::state_machine::BtcFetchOutcome;
+use crate::state_machine::DepositRequestStateMachine;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;
@@ -61,6 +64,7 @@ pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use std::fmt;
+use sui_sdk_types::Address;
 
 pub trait AuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
@@ -150,6 +154,10 @@ pub struct AuditorCore {
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
     pending_deposits: HashMap<DepositId, DepositStateMachine>,
+    /// Deposit requests Bitcoin is still asked about. Keyed by the Sui
+    /// request id, so a replayed event is ignored and each request has its
+    /// own.
+    pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
@@ -165,6 +173,7 @@ impl AuditorCore {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
+            pending_deposit_requests: HashMap::new(),
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
@@ -175,7 +184,17 @@ impl AuditorCore {
         match event {
             MonitorEvent::Withdrawal(event) => self.ingest_withdrawal(event),
             MonitorEvent::Deposit(event) => self.ingest_deposit(event),
+            MonitorEvent::DepositRequested(event) => {
+                self.ingest_deposit_request(event);
+                Vec::new()
+            }
         }
+    }
+
+    fn ingest_deposit_request(&mut self, event: SuiDepositRequestedEvent) {
+        self.pending_deposit_requests
+            .entry(event.request_id)
+            .or_insert_with(|| DepositRequestStateMachine::new(event, &self.cfg.timing));
     }
 
     fn ingest_withdrawal(&mut self, event: MonitorWithdrawalEvent) -> Vec<MonitorFinding> {
@@ -235,6 +254,11 @@ impl AuditorCore {
             .values()
             .filter(|sm| sm.is_expecting_events())
             .count();
+        let deposit_request_count = self
+            .pending_deposit_requests
+            .values()
+            .filter(|sm| sm.is_expecting_events())
+            .count();
         let unique_txids = self
             .pending_withdrawals
             .values()
@@ -248,12 +272,19 @@ impl AuditorCore {
                     .filter(|sm| sm.is_expecting_events())
                     .map(DepositStateMachine::btc_txid),
             )
+            .chain(
+                self.pending_deposit_requests
+                    .values()
+                    .filter(|sm| sm.is_expecting_events())
+                    .map(DepositRequestStateMachine::btc_txid),
+            )
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         tracing::info!(
             withdrawal_count,
             deposit_count,
+            deposit_request_count,
             unique_txids = unique_txids.len(),
             "starting bitcoin confirmation lookups"
         );
@@ -282,7 +313,38 @@ impl AuditorCore {
             }
         }
 
+        for sm in self.pending_deposit_requests.values_mut() {
+            if sm.is_expecting_events() {
+                sm.try_fetch_btc_tx(&self.btc_client)?;
+            }
+        }
+        for coin in self.take_confirmed_deposits() {
+            // TODO(IOP-747): add the coin to the monitor's UTXO pool.
+            tracing::info!(
+                deposit_id = %coin.deposit_id,
+                amount = coin.amount,
+                block_time = %utc_timestamp(coin.block_time),
+                "deposit request confirmed on Bitcoin at a bridge address"
+            );
+        }
+
         Ok(findings)
+    }
+
+    /// The coins Bitcoin confirmed for deposit requests since the last
+    /// call. Each is removed from the pending requests.
+    fn take_confirmed_deposits(&mut self) -> Vec<ConfirmedDeposit> {
+        let confirmed = self
+            .pending_deposit_requests
+            .iter()
+            .filter(|(_, sm)| sm.coin().is_some())
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        confirmed
+            .into_iter()
+            .filter_map(|request_id| self.pending_deposit_requests.remove(&request_id))
+            .filter_map(DepositRequestStateMachine::into_coin)
+            .collect()
     }
 
     /// Fetches each overdue Hashi approval from Sui. One for the guardian's txid inside the
@@ -387,6 +449,20 @@ impl AuditorCore {
             tracing::debug!(%deposit_id, "deposit flow is complete");
             false
         });
+
+        // A request Bitcoin answered without a coin, or that lapsed. A coin
+        // never waits here: `fetch_btc_info` takes it in the same call.
+        self.pending_deposit_requests.retain(|request_id, sm| {
+            if sm.is_expecting_events() {
+                return true;
+            }
+            tracing::debug!(
+                %request_id,
+                deposit_id = %sm.deposit_id(),
+                "deposit request closed without a coin"
+            );
+            false
+        });
     }
 
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
@@ -412,11 +488,19 @@ impl AuditorCore {
             }
         }
 
+        // A deposit request still asked about pins the floor too, so a
+        // restart replays it and its coin is not lost.
         let unresolved_deposit_floor = self
             .pending_deposits
             .values()
             .filter(|sm| sm.is_expecting_events())
             .map(|sm| sm.sui_event().timestamp_secs)
+            .chain(
+                self.pending_deposit_requests
+                    .values()
+                    .filter(|sm| sm.is_expecting_events())
+                    .map(DepositRequestStateMachine::requested_at),
+            )
             .min()
             .unwrap_or(u64::MAX);
 
@@ -493,6 +577,7 @@ mod tests {
         let mut auditor = AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
+            pending_deposit_requests: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -507,6 +592,48 @@ mod tests {
         }));
         assert!(findings.is_empty());
         auditor
+    }
+
+    #[tokio::test]
+    async fn a_replayed_deposit_request_is_ingested_once() {
+        let approval = looked_up_approval();
+        let mut auditor = auditor_missing_approval(
+            approval.timestamp_secs,
+            approval.timestamp_secs,
+            approval.btc_txid,
+        )
+        .await;
+        let request = SuiDepositRequestedEvent {
+            request_id: Address::new([0x61; 32]),
+            timestamp_secs: approval.timestamp_secs,
+            deposit_id: DepositId::new(approval.btc_txid, 0),
+            amount: 1,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        };
+
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositRequested(request.clone()))
+                .is_empty()
+        );
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositRequested(request.clone()))
+                .is_empty()
+        );
+        assert_eq!(auditor.pending_deposit_requests.len(), 1);
+
+        // Another request for the same UTXO has its own machine.
+        let again = SuiDepositRequestedEvent {
+            request_id: Address::new([0x62; 32]),
+            ..request
+        };
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositRequested(again))
+                .is_empty()
+        );
+        assert_eq!(auditor.pending_deposit_requests.len(), 2);
     }
 
     #[tokio::test]
@@ -609,6 +736,7 @@ mod tests {
         let mut auditor = AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
+            pending_deposit_requests: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),

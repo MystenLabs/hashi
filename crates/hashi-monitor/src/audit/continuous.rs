@@ -368,6 +368,7 @@ mod tests {
             ])
             .unwrap(),
             deposit_confirmation_skew: 300,
+            deposit_request_watch: 172_800,
         }
     }
 
@@ -418,6 +419,7 @@ mod tests {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
+            pending_deposit_requests: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
             sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -459,6 +461,7 @@ mod tests {
                 cfg: cfg.clone(),
                 pending_withdrawals: HashMap::new(),
                 pending_deposits: HashMap::new(),
+                pending_deposit_requests: HashMap::new(),
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
                 sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
                 btc_client: BtcRpcClient::new(&cfg).unwrap(),

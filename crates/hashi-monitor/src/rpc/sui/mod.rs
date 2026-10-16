@@ -583,6 +583,7 @@ impl SuiEventsPoller {
                 self.package_id
             ),
             format!("{}::deposit::DepositConfirmed", self.package_id),
+            format!("{}::deposit::DepositRequested", self.package_id),
         ];
         TransactionFilter::any(event_types.into_iter().map(tx_filter::event_type))
     }
