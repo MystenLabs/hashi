@@ -175,6 +175,9 @@ pub fn assemble_cert(
     .context(
         "Failed to initialize GnuPG context; gpgconf and an existing GnuPG home are required",
     )?;
+    context
+        .start("gpg-agent")
+        .context("Failed to start the GnuPG agent")?;
     let mut signer =
         sequoia_gpg_agent::KeyPair::new_for_gnupg_context(&context, primary.primary_key().key())
             .context("Failed to create the gpg-agent signer for the primary key")?;

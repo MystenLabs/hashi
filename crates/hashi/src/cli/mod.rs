@@ -488,7 +488,7 @@ pub enum BackupCommands {
             long,
             required = true,
             value_name = "PATH[=SUBKEY_FINGERPRINT]",
-            help = "Recipient public certificate, optionally selecting a full encryption subkey fingerprint; repeat for each recipient"
+            help = "Recipient public certificate, optionally selecting a full encryption subkey fingerprint; repeat for each recipient. Advertised OpenPGP features must match the certifier's"
         )]
         recipient: Vec<commands::backup::RecipientInput>,
 

@@ -236,7 +236,25 @@ impl AssemblyFixture {
 
 #[test]
 fn same_cli_archive_restores_with_each_independent_recipient() {
+    assert_same_cli_archive_restores_with_each_independent_recipient(false);
+}
+
+#[test]
+fn same_cli_archive_restores_with_each_independent_recipient_after_agent_stops() {
+    assert_same_cli_archive_restores_with_each_independent_recipient(true);
+}
+
+fn assert_same_cli_archive_restores_with_each_independent_recipient(stop_certifier_agent: bool) {
     let fixture = AssemblyFixture::new();
+    if stop_certifier_agent {
+        // Keep the imported primary key, but require assembly to start its agent.
+        success(
+            fixture
+                .home
+                .command("gpgconf")
+                .args(["--kill", "gpg-agent"]),
+        );
+    }
     let certificate_path = fixture.root.path().join("assembled.asc");
     success(
         fixture

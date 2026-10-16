@@ -11,6 +11,7 @@ use openpgp::cert::prelude::*;
 use openpgp::crypto::Signer;
 use openpgp::packet::signature::SignatureBuilder;
 use openpgp::serialize::Serialize;
+use openpgp::types::Features;
 use openpgp::types::KeyFlags;
 use openpgp::types::SignatureType;
 use sequoia_openpgp as openpgp;
@@ -64,6 +65,10 @@ pub fn assemble_public_cert(
         certifier.public().fingerprint() == primary.fingerprint(),
         "certifier does not match the primary certificate"
     );
+    let primary_features = primary_key
+        .valid_cert()
+        .features()
+        .unwrap_or_else(Features::empty);
 
     let mut selected = BTreeSet::new();
     let mut bindings = Vec::with_capacity(recipients.len());
@@ -103,6 +108,13 @@ pub fn assemble_public_cert(
             "recipient has ambiguous encryption subkeys; select a fingerprint"
         );
         let fingerprint = key.key().fingerprint();
+        let recipient_features = key.valid_cert().features().unwrap_or_else(Features::empty);
+        ensure!(
+            recipient_features.normalized_eq(&primary_features),
+            "recipient encryption subkey {fingerprint} has effective features \
+             {recipient_features:?} differing from certifier {} features {primary_features:?}",
+            primary.fingerprint()
+        );
         let attestation = attestations.get(&fingerprint);
         ensure!(
             selected.insert(fingerprint),
@@ -144,8 +156,13 @@ pub fn assemble_public_cert(
         );
         let binding = SignatureBuilder::new(SignatureType::SubkeyBinding)
             .set_signature_creation_time(now)?
-            .set_key_flags(KeyFlags::empty().set_transport_encryption())?
-            .set_key_expiration_time(key.key(), expiration)?;
+            .set_key_flags(KeyFlags::empty().set_transport_encryption())?;
+        let binding = match expiration {
+            Some(expiration) => binding.set_key_expiration_time(key.key(), expiration)?,
+            // An absent subpacket inherits the primary's validity period,
+            // measured from this subkey's creation time. Encode no expiry.
+            None => binding.set_key_validity_period(std::time::Duration::ZERO)?,
+        };
         bindings.push((key.key(), binding));
     }
     ensure!(
@@ -599,6 +616,291 @@ mod tests {
                     .fingerprint()
             );
             assert_eq!(bound.key_expiration_time(), Some(creation + short));
+        }
+    }
+
+    #[test]
+    fn assembly_preserves_nonexpiring_old_subkey_under_finite_primary() {
+        let now = SystemTime::now();
+        let lifetime = Duration::from_secs(365 * 24 * 60 * 60);
+        let primary = CertBuilder::new()
+            .set_creation_time(now - Duration::from_secs(60))
+            .set_validity_period(lifetime)
+            .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing())
+            .add_userid("Finite backup identity")
+            .generate()
+            .unwrap()
+            .0;
+        let mut signer = signer(&primary);
+        let primary = primary.strip_secret_key_material();
+        let recipient = CertBuilder::new()
+            .set_creation_time(now - lifetime * 2)
+            .set_validity_period(None)
+            .add_subkey(KeyFlags::empty().set_transport_encryption(), None, None)
+            .generate()
+            .unwrap()
+            .0
+            .strip_secret_key_material();
+        let assembled = assemble_public_cert(
+            &primary,
+            &[EncryptionRecipient {
+                cert: &recipient,
+                subkey: None,
+            }],
+            &BTreeMap::new(),
+            false,
+            &mut signer,
+        )
+        .unwrap();
+        let subkey = super::super::usable_keys(&assembled.cert)
+            .for_transport_encryption()
+            .next()
+            .unwrap();
+        assert_eq!(subkey.key_expiration_time(), None);
+        assert_eq!(
+            subkey.key().fingerprint(),
+            recipient
+                .keys()
+                .subkeys()
+                .next()
+                .unwrap()
+                .key()
+                .fingerprint()
+        );
+        let expiration = primary
+            .primary_key()
+            .with_policy(&*POLICY, now)
+            .unwrap()
+            .key_expiration_time()
+            .unwrap();
+        assert_eq!(
+            assembled
+                .cert
+                .primary_key()
+                .with_policy(&*POLICY, now)
+                .unwrap()
+                .key_expiration_time(),
+            Some(expiration)
+        );
+        assert!(
+            assembled
+                .cert
+                .with_policy(&*POLICY, expiration - Duration::from_secs(1))
+                .unwrap()
+                .alive()
+                .is_ok()
+        );
+        assert!(
+            assembled
+                .cert
+                .with_policy(&*POLICY, expiration + Duration::from_secs(1))
+                .unwrap()
+                .alive()
+                .is_err()
+        );
+    }
+
+    fn feature_cert(features: Features, with_userid: bool, recipient: bool) -> openpgp::Cert {
+        let mut builder = CertBuilder::new()
+            .set_profile(openpgp::Profile::RFC4880)
+            .unwrap()
+            .set_features(if with_userid {
+                Features::empty()
+            } else {
+                features.clone()
+            })
+            .unwrap()
+            .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing());
+        if recipient {
+            builder = builder.add_transport_encryption_subkey();
+        }
+        let mut cert = builder.generate().unwrap().0;
+        if with_userid {
+            // Deliberately disagree with the direct-key signature: the
+            // primary User ID's preferences must take precedence.
+            let userid = openpgp::packet::UserID::from("Backup identity");
+            let signature = SignatureBuilder::new(SignatureType::PositiveCertification)
+                .set_features(features.clone())
+                .unwrap()
+                .sign_userid_binding(&mut signer(&cert), cert.primary_key().key(), &userid)
+                .unwrap();
+            cert = cert
+                .insert_packets([
+                    openpgp::Packet::UserID(userid),
+                    openpgp::Packet::Signature(signature),
+                ])
+                .unwrap()
+                .0;
+        }
+        assert!(
+            cert.with_policy(&*POLICY, None)
+                .unwrap()
+                .features()
+                .unwrap()
+                .normalized_eq(&features)
+        );
+        cert
+    }
+
+    #[test]
+    fn assembly_rejects_mismatched_effective_features_before_signing() {
+        let modern = Features::empty().set_seipdv1().set_seipdv2();
+        let legacy = Features::empty().set_seipdv1();
+        for primary_userid in [false, true] {
+            for recipient_userid in [false, true] {
+                for primary_features in [legacy.clone(), modern.clone()] {
+                    let other_features = if primary_features.supports_seipdv2() {
+                        legacy.clone()
+                    } else {
+                        modern.clone()
+                    };
+                    let primary = feature_cert(primary_features.clone(), primary_userid, false);
+                    let mut certifier = CountingSigner {
+                        inner: signer(&primary),
+                        calls: 0,
+                    };
+                    let primary = primary.strip_secret_key_material();
+                    let matching = feature_cert(primary_features, recipient_userid, true)
+                        .strip_secret_key_material();
+                    let mismatched = feature_cert(other_features, recipient_userid, true)
+                        .strip_secret_key_material();
+                    let offending = mismatched
+                        .keys()
+                        .subkeys()
+                        .next()
+                        .unwrap()
+                        .key()
+                        .fingerprint();
+                    // Both a single mismatched recipient and a mixed group
+                    // must fail without certifying even the matching subkey.
+                    for sources in [vec![&mismatched], vec![&matching, &mismatched]] {
+                        let selections: Vec<_> = sources
+                            .into_iter()
+                            .map(|cert| EncryptionRecipient { cert, subkey: None })
+                            .collect();
+                        let error = assemble_public_cert(
+                            &primary,
+                            &selections,
+                            &BTreeMap::new(),
+                            false,
+                            &mut certifier,
+                        )
+                        .unwrap_err()
+                        .to_string();
+                        assert!(error.contains("effective features"), "{error}");
+                        assert!(error.contains(&offending.to_string()), "{error}");
+                        assert!(
+                            error.contains(&primary.fingerprint().to_string()),
+                            "{error}"
+                        );
+                        assert_eq!(certifier.calls, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assembly_preserves_homogeneous_v1_and_v2_features_and_decryptability() {
+        use openpgp::parse::PacketParser;
+        use openpgp::parse::PacketParserResult;
+        use openpgp::parse::Parse;
+        use std::io::Cursor;
+        use std::io::Read;
+
+        for (features, pkesk_version, seip_version) in [
+            (Features::empty().set_seipdv1(), 3, 1),
+            (Features::empty().set_seipdv1().set_seipdv2(), 6, 2),
+        ] {
+            for with_userid in [false, true] {
+                let primary = feature_cert(features.clone(), with_userid, false);
+                let mut certifier = CountingSigner {
+                    inner: signer(&primary),
+                    calls: 0,
+                };
+                let primary = primary.strip_secret_key_material();
+                // Padding is not a capability difference.
+                let padded_features = Features::new([
+                    if features.supports_seipdv2() {
+                        0x09
+                    } else {
+                        0x01
+                    },
+                    0,
+                ]);
+                assert_ne!(features, padded_features);
+                assert!(features.normalized_eq(&padded_features));
+                let recipients = [
+                    feature_cert(features.clone(), false, true),
+                    feature_cert(padded_features, true, true),
+                ];
+                let public_recipients: Vec<_> = recipients
+                    .iter()
+                    .cloned()
+                    .map(openpgp::Cert::strip_secret_key_material)
+                    .collect();
+                let selections: Vec<_> = public_recipients
+                    .iter()
+                    .map(|cert| EncryptionRecipient { cert, subkey: None })
+                    .collect();
+                let assembled = assemble_public_cert(
+                    &primary,
+                    &selections,
+                    &BTreeMap::new(),
+                    false,
+                    &mut certifier,
+                )
+                .unwrap();
+                assert_eq!(certifier.calls, recipients.len());
+                assert_eq!(assembled.cert.fingerprint(), primary.fingerprint());
+                assert_eq!(
+                    assembled
+                        .cert
+                        .userids()
+                        .map(|uid| uid.userid())
+                        .collect::<Vec<_>>(),
+                    primary
+                        .userids()
+                        .map(|uid| uid.userid())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(assembled.cert.clone().retain_subkeys(|_| false), primary);
+                let plaintext = b"backup decryptable by each original recipient";
+                let ciphertext = super::super::encrypt_armored(plaintext, &assembled).unwrap();
+                let mut parser = PacketParser::from_bytes(ciphertext.as_bytes()).unwrap();
+                let mut pkesks = 0;
+                let mut seips = 0;
+                while let PacketParserResult::Some(packet) = parser {
+                    let (packet, next) = packet.recurse().unwrap();
+                    match packet {
+                        openpgp::Packet::PKESK(pkesk) => {
+                            assert_eq!(pkesk.version(), pkesk_version);
+                            pkesks += 1;
+                        }
+                        openpgp::Packet::SEIP(seip) => {
+                            assert_eq!(seip.version(), seip_version);
+                            seips += 1;
+                        }
+                        _ => {}
+                    }
+                    parser = next;
+                }
+                assert_eq!(pkesks, recipients.len());
+                assert_eq!(seips, 1);
+                for recipient in &recipients {
+                    let mut secret = Vec::new();
+                    recipient.as_tsk().serialize(&mut secret).unwrap();
+                    let mut decrypted = Vec::new();
+                    super::super::decrypt_with_secret_key(
+                        Cursor::new(ciphertext.clone().into_bytes()),
+                        &secret,
+                    )
+                    .unwrap()
+                    .read_to_end(&mut decrypted)
+                    .unwrap();
+                    assert_eq!(decrypted, plaintext);
+                }
+            }
         }
     }
 
