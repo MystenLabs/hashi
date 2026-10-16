@@ -537,7 +537,7 @@ impl Metrics {
             .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
-                "Withdrawal signing calls refused, by caller and reason (committee or cap)",
+                "SignWithdrawalTransaction, SignWithdrawalTxSigning and SignMpcInputSignatures calls refused, by caller and reason (committee, cap or shape)",
                 &["peer", "reason"],
                 registry,
             )
