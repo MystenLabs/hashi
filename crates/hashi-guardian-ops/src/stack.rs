@@ -65,7 +65,7 @@ impl fmt::Display for Role {
     }
 }
 
-/// One snapshot of the stack's configuration and outputs, so a step sees both as they were at one moment.
+/// The stack's configuration and outputs as a step found them when it started, so it acts on one view of both.
 pub struct Stack {
     pub name: String,
     pub dir: String,
@@ -121,11 +121,12 @@ impl Stack {
             .filter(|value| !value.is_empty())
     }
 
-    /// As the enclave program reads it: slot a is on unless disabled, slot b is off unless enabled.
+    /// As the enclave program reads it, with Go's `strconv.ParseBool`: slot a is on unless disabled, slot b is off
+    /// unless enabled.
     pub fn slot_enabled(&self, slot: Slot) -> Result<bool> {
         match self.config(&format!("slot-{slot}-enabled")) {
-            Some("true") => Ok(true),
-            Some("false") => Ok(false),
+            Some("1" | "t" | "T" | "TRUE" | "true" | "True") => Ok(true),
+            Some("0" | "f" | "F" | "FALSE" | "false" | "False") => Ok(false),
             None => Ok(slot == Slot::A),
             Some(other) => bail!(
                 "Stack {} sets slot-{slot}-enabled to {other}, not true or false.",
@@ -223,15 +224,24 @@ impl Stack {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if !(name.starts_with("hashi-guardian-") && name.ends_with(".yaml")) {
+            // deploy-hashi applies the guardian stacks too, on the environments it deploys.
+            if !((name.starts_with("hashi-guardian-") || name.starts_with("deploy-hashi"))
+                && name.ends_with(".yaml"))
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("Could not read {}.", path.display()))?;
+            if text.contains("pulumi/actions") || text.contains("pulumi-version") {
+                bail!(
+                    "{} installs Pulumi through pulumi/actions, whose version this tool does not read.",
+                    path.display()
+                );
+            }
             for line in text.lines().filter(|line| line.contains("get.pulumi.com")) {
                 let Some(version) = line
                     .split_once("--version")
-                    .and_then(|(_, rest)| rest.split_whitespace().next())
+                    .and_then(|(_, rest)| rest.trim_start_matches('=').split_whitespace().next())
                 else {
                     bail!(
                         "{} installs Pulumi without naming its version.",
@@ -245,11 +255,11 @@ impl Stack {
         match (versions.next(), versions.next()) {
             (Some(version), None) => Ok(format!("v{version}")),
             (None, _) => bail!(
-                "No hashi-guardian workflow in {} names the Pulumi version it installs.",
+                "No workflow in {} that applies the guardian stacks names the Pulumi version it installs.",
                 workflows.display()
             ),
             (Some(_), Some(_)) => bail!(
-                "The hashi-guardian workflows in {} install different Pulumi versions.",
+                "The workflows in {} that apply the guardian stacks install different Pulumi versions.",
                 workflows.display()
             ),
         }
@@ -481,5 +491,45 @@ pub mod tests {
                     "hashi-guardian-rotate.yaml installs Pulumi without naming its version."
                 )
         );
+        std::fs::write(
+            &rotate,
+            "run: curl -fsSL https://get.pulumi.com | sh -s -- --version=v3.148.0\n",
+        )
+        .unwrap();
+        assert_eq!(stack.pinned_pulumi_version().unwrap(), "v3.148.0");
+        // deploy-hashi applies the guardian stacks too, and an install whose version can't be read is refused.
+        let deploy = root.path().join(".github/workflows/deploy-hashi.yaml");
+        std::fs::write(&deploy, "uses: pulumi/actions@v6\n").unwrap();
+        assert!(
+            stack
+                .pinned_pulumi_version()
+                .unwrap_err()
+                .to_string()
+                .ends_with(
+                    "installs Pulumi through pulumi/actions, whose version this tool does not read."
+                )
+        );
+    }
+
+    #[test]
+    fn follows_the_active_slot_after_a_switchover() {
+        let repo = tempfile::tempdir().unwrap();
+        // The program exports an empty standby once the old slot is torn down.
+        let exec = stack_world(
+            serde_json::json!({ "slot-a-enabled": "False", "slot-b-enabled": "1", "active-slot": "b" }),
+            serde_json::json!({
+                "active_slot": "b",
+                "enclave_instance_id": "i-0bbb",
+                "standby_instance_id": "",
+                "s3_bucket_name": "guardian-bucket",
+            }),
+        );
+        let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
+        let stack = Stack::load(&ctx).unwrap();
+        assert_eq!(stack.active().unwrap(), Slot::B);
+        assert!(!stack.slot_enabled(Slot::A).unwrap());
+        assert!(stack.slot_enabled(Slot::B).unwrap());
+        assert_eq!(stack.role(Slot::A).unwrap(), Role::Absent);
+        assert_eq!(stack.instance(Slot::B).unwrap(), Some("i-0bbb"));
     }
 }

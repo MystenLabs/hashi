@@ -42,22 +42,24 @@ pub struct ProxyUrl {
 }
 
 impl Env {
-    /// Reads `path`. A key the file leaves out falls back to the shell's value, as when bash sourced it.
+    /// Reads `path`. Unlike when bash sourced it, a key the file leaves out stays unset: a shell value meant for
+    /// another stack would otherwise mix in.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).map_err(|_| {
-            anyhow!(
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!(
                 "No environment file at {}. Copy operator/guardian.env.sample.",
                 path.display()
-            )
-        })?;
-        let home = std::env::var("HOME").ok();
-        let mut values = parse(&text, home.as_deref())
-            .with_context(|| format!("Could not read the environment file {}.", path.display()))?;
-        for key in KEYS {
-            if let Ok(value) = std::env::var(key) {
-                values.entry(key.to_owned()).or_insert(value);
+            ),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Could not read the environment file {}.", path.display())
+                });
             }
-        }
+        };
+        let home = std::env::var("HOME").ok();
+        let values = parse(&text, home.as_deref())
+            .with_context(|| format!("Could not read the environment file {}.", path.display()))?;
         Ok(Self::new(path.to_owned(), values))
     }
 
@@ -107,6 +109,9 @@ fn parse(text: &str, home: Option<&str>) -> Result<BTreeMap<String, String>> {
         let Some((key, raw)) = line.split_once('=') else {
             bail!("Line {number} is not KEY=VALUE.");
         };
+        if key.starts_with("export ") {
+            bail!("Line {number} starts with export: write KEY=VALUE.");
+        }
         if !KEYS.contains(&key) {
             bail!("Line {number} sets {key}, which no step reads. Set it in your shell instead.");
         }
@@ -233,6 +238,33 @@ mod tests {
         ] {
             assert!(parsed(text).is_err(), "accepted {text:?}");
         }
+        assert_eq!(
+            parsed("export KP_NAME=testnet").unwrap_err().to_string(),
+            "Line 1 starts with export: write KEY=VALUE."
+        );
+    }
+
+    #[test]
+    fn says_why_it_cannot_read_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("testnet.env");
+        assert_eq!(
+            Env::load(&missing).err().unwrap().to_string(),
+            format!(
+                "No environment file at {}. Copy operator/guardian.env.sample.",
+                missing.display()
+            )
+        );
+        let error = format!("{:#}", Env::load(dir.path()).err().unwrap());
+        assert!(
+            error.starts_with(&format!(
+                "Could not read the environment file {}.: ",
+                dir.path().display()
+            )),
+            "{error}"
+        );
+        std::fs::write(&missing, "KP_NAME=testnet\n").unwrap();
+        assert_eq!(Env::load(&missing).unwrap().get("KP_NAME"), Some("testnet"));
     }
 
     fn env(values: &[(&str, &str)]) -> Env {
