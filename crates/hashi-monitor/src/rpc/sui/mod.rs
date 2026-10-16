@@ -1,6 +1,29 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The Sui poller: the Hashi events read from Sui, in checkpoint order.
+//!
+//! Why it exists: the withdrawal E1 and the deposit E2 are Sui events. The
+//! poller scans the checkpoints for them and gives each one its time.
+//!
+//! How it works:
+//! 1. The poller keeps a cursor in seconds. On the first poll it finds the
+//!    checkpoint before the cursor by probing checkpoint timestamps, or
+//!    starts at the oldest checkpoint a pruning node serves.
+//! 2. Each poll lists the transactions that emit a monitored event, from the
+//!    next checkpoint through the one that covers the poll end. A failed
+//!    range is retried, then split.
+//! 3. The cursor advances through the last checkpoint the node declared
+//!    complete. The transactions of later checkpoints wait for the next poll,
+//!    so a checkpoint is ingested whole.
+//! 4. A Hashi approval missing from the scan is read from its
+//!    `WithdrawalTransaction` object by withdrawal id.
+//!
+//! Assumptions:
+//! - Every monitored event type keeps the original package's address across
+//!   upgrades.
+//! - Checkpoint timestamps are cached. A checkpoint's time never changes.
+
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
@@ -14,7 +37,6 @@ use hashi_types::move_types::PackageVersions;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
-use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
@@ -161,12 +183,11 @@ impl SuiEventsPoller {
     ///
     /// The timestamp cursor advances only through `watermark.checkpoint`, which
     /// is the inclusive boundary that `ListTransactions` reports as fully
-    /// covered. Transactions provide the
-    /// checkpoint timestamp needed by `DepositConfirmed`, while their nested
-    /// events provide the Hashi payloads. The Sui SDK handles item and scan
-    /// limits, resumable cursors, and retryable partial streams. A terminal
-    /// failure discards the partial range; that range is retried and may be
-    /// split.
+    /// covered. Each transaction provides the checkpoint timestamp that
+    /// `DepositConfirmed` needs, and its nested events provide the Hashi
+    /// payloads. The Sui SDK handles item and scan limits, resumable cursors,
+    /// and retryable partial streams. A terminal failure discards the partial
+    /// range; that range is retried and may be split.
     pub async fn poll(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
         if up_to <= self.cursor_seconds {
             return Ok(PollOutcome::CursorUnmoved);
@@ -448,56 +469,31 @@ impl SuiEventsPoller {
             .context("Sui service info is missing timestamp")?;
         let timestamp_ms =
             proto_to_timestamp_ms(timestamp).context("invalid Sui service info timestamp")?;
-        let latest = (sequence_number, timestamp_ms / 1_000);
+        let latest = (sequence_number, unix_millis_to_seconds(timestamp_ms));
         self.checkpoint_timestamps.insert(latest.0, latest.1);
         self.observed_chain_head = Some(latest);
         self.lowest_available_checkpoint = service_info.lowest_available_checkpoint.unwrap_or(0);
         Ok(latest)
     }
 
+    /// The timestamp of checkpoint `sequence_number`, from the cache or the node.
     async fn checkpoint_timestamp(&mut self, sequence_number: u64) -> anyhow::Result<UnixSeconds> {
         if let Some(timestamp) = self.checkpoint_timestamps.get(&sequence_number) {
             return Ok(*timestamp);
         }
-        let (actual_sequence, timestamp) = self
-            .get_checkpoint(GetCheckpointRequest::by_sequence_number(sequence_number))
-            .await?;
-        anyhow::ensure!(
-            actual_sequence == sequence_number,
-            "requested Sui checkpoint {sequence_number}, received {actual_sequence}"
+        let request = GetCheckpointRequest::by_sequence_number(sequence_number).with_read_mask(
+            FieldMask::from_paths(["sequence_number", "summary.timestamp"]),
         );
-        self.checkpoint_timestamps
-            .insert(sequence_number, timestamp);
-        Ok(timestamp)
-    }
-
-    async fn get_checkpoint(
-        &mut self,
-        request: GetCheckpointRequest,
-    ) -> anyhow::Result<(u64, UnixSeconds)> {
-        let request = request.with_read_mask(FieldMask::from_paths([
-            "sequence_number",
-            "summary.timestamp",
-        ]));
-        let response = self
+        let checkpoint = self
             .client
             .ledger_client()
             .get_checkpoint(request)
             .await
             .context("failed to fetch Sui checkpoint")?
-            .into_inner();
-        let checkpoint = response.checkpoint.context("missing Sui checkpoint")?;
-        let (sequence_number, timestamp_secs) =
-            Self::checkpoint_sequence_and_timestamp(checkpoint)?;
-        self.checkpoint_timestamps
-            .insert(sequence_number, timestamp_secs);
-        Ok((sequence_number, timestamp_secs))
-    }
-
-    fn checkpoint_sequence_and_timestamp(
-        checkpoint: Checkpoint,
-    ) -> anyhow::Result<(u64, UnixSeconds)> {
-        let sequence_number = checkpoint
+            .into_inner()
+            .checkpoint
+            .context("missing Sui checkpoint")?;
+        let actual_sequence = checkpoint
             .sequence_number
             .context("Sui checkpoint is missing sequence_number")?;
         let timestamp = checkpoint
@@ -506,8 +502,14 @@ impl SuiEventsPoller {
             .context("Sui checkpoint is missing summary.timestamp")?;
         let timestamp_ms =
             proto_to_timestamp_ms(timestamp).context("invalid Sui checkpoint timestamp")?;
-        let timestamp_secs = timestamp_ms / 1_000;
-        Ok((sequence_number, timestamp_secs))
+        let timestamp_secs = unix_millis_to_seconds(timestamp_ms);
+        self.checkpoint_timestamps
+            .insert(actual_sequence, timestamp_secs);
+        anyhow::ensure!(
+            actual_sequence == sequence_number,
+            "requested Sui checkpoint {sequence_number}, received {actual_sequence}"
+        );
+        Ok(timestamp_secs)
     }
 
     async fn list_transactions_in_range(
@@ -624,17 +626,18 @@ pub mod tests {
     use super::approval::tests::WID;
     use super::approval::tests::approval_tx;
     use super::approval::tests::object_at_wid;
-    use super::approval::tests::test_hashi_btc_keys;
     use super::approval::tests::withdrawal_transaction;
     use super::*;
     use crate::domain::MonitorWithdrawalEvent;
     use crate::domain::WithdrawalEventType;
+    use crate::test_utils::test_hashi_btc_keys;
     use hashi_types::move_types::WithdrawalTransaction;
 
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use sui_rpc::proto::sui::rpc::v2::Checkpoint;
     use sui_rpc::proto::sui::rpc::v2::CheckpointSummary;
     use sui_rpc::proto::sui::rpc::v2::GetCheckpointResponse;
     use sui_rpc::proto::sui::rpc::v2::GetObjectResponse;

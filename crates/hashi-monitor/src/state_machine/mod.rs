@@ -11,7 +11,6 @@ mod deposit;
 mod withdrawal;
 
 pub use deposit::DepositStateMachine;
-pub use deposit::deposit_mismatch;
 pub use withdrawal::WithdrawalStateMachine;
 
 use crate::findings::MonitorFinding;

@@ -23,14 +23,13 @@ use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalPickedForProcessing;
 use hashi_types::move_types::WithdrawalTransaction;
-use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonitorWithdrawalEvent {
-    /// Who produced the event?
+    /// The source that produced the event.
     pub event_type: WithdrawalEventType,
 
     /// Stable withdrawal identifier.
@@ -268,7 +267,7 @@ impl fmt::Display for WithdrawalTx {
 
 /// Event source or type.
 /// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum WithdrawalEventType {
     /// E_hashi (WithdrawalPickedForProcessing on sui)
     E1HashiApproved,
@@ -291,10 +290,6 @@ impl WithdrawalEventType {
         }
     }
 
-    pub fn has_successor(&self) -> bool {
-        self.successor().is_some()
-    }
-
     pub fn predecessor(&self) -> Option<Self> {
         match self {
             WithdrawalEventType::E1HashiApproved => None,
@@ -307,20 +302,19 @@ impl WithdrawalEventType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
+    use crate::test_utils::p2wpkh;
+    use crate::test_utils::test_hashi_btc_keys;
+    use crate::test_utils::txid;
+    use crate::test_utils::withdrawal_tx;
     use bitcoin::Amount;
     use bitcoin::Network;
     use bitcoin::OutPoint;
-    use bitcoin::ScriptBuf;
-    use bitcoin::WPubkeyHash;
-    use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::InputUTXO;
     use hashi_types::bitcoin::OutputUTXOWire;
     use hashi_types::bitcoin::TxUTXOsWire;
     use hashi_types::bitcoin::witness_program_from_address;
-    use hashi_types::move_types::UtxoId;
 
     #[test]
     fn the_guardians_utxos_convert_to_moves_shape() {
@@ -328,11 +322,10 @@ mod tests {
         let input_path = DerivationPath::new([0x52; 32]);
         let change_path = DerivationPath::new([0x42; 32]);
         let outpoint = OutPoint {
-            txid: bitcoin::Txid::from_slice(&[0x51; 32]).unwrap(),
+            txid: txid(0x51),
             vout: 1,
         };
-        let user_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20]));
-        let user_address = BitcoinAddress::from_script(&user_script, keys.network()).unwrap();
+        let user_address = BitcoinAddress::from_script(&p2wpkh(0x53), keys.network()).unwrap();
         let utxos = TxUTXOsWire {
             inputs: vec![InputUTXO::new(
                 outpoint,
@@ -347,38 +340,14 @@ mod tests {
 
         assert_eq!(
             WithdrawalTx::from_guardian(&keys, &utxos).unwrap(),
-            WithdrawalTx {
-                inputs: vec![Utxo {
-                    id: UtxoId {
-                        txid: outpoint.txid.into(),
-                        vout: 1,
-                    },
-                    amount: 120_000,
-                    derivation_path: Some(input_path),
-                }],
-                withdrawal_outputs: vec![OutputUtxo {
-                    amount: 100_000,
-                    bitcoin_address: vec![0x53; 20],
-                }],
-                change_outputs: vec![OutputUtxo {
-                    amount: 19_000,
-                    bitcoin_address: witness_program_from_address(
-                        &keys.address(Some(&change_path))
-                    )
-                    .unwrap(),
-                }],
-            }
+            withdrawal_tx(witness_program_from_address(&keys.address(Some(&change_path))).unwrap())
         );
     }
 
     #[test]
     fn an_external_address_for_another_network_is_an_error() {
         let keys = test_hashi_btc_keys();
-        let mainnet = BitcoinAddress::from_script(
-            &ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20])),
-            Network::Bitcoin,
-        )
-        .unwrap();
+        let mainnet = BitcoinAddress::from_script(&p2wpkh(0x53), Network::Bitcoin).unwrap();
         let utxos = TxUTXOsWire {
             inputs: vec![InputUTXO::new(
                 OutPoint::null(),

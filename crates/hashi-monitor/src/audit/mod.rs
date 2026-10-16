@@ -1,19 +1,33 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Auditor implementations.
-//! Goal: Attempt to match all withdrawals with a guardian event inside the input time window,
-//!       even if some corresponding events for that withdrawal occur outside the window.
-//! Core workflow:
-//!     - User inputs a window (either just start or both start & end).
-//!     - Guardian window is authoritative; Sui uses relaxed bounds for predecessor checks.
-//!     - At a desired frequency, auditors do:
-//!         - advance cursors
-//!         - call `if wsm.is_in_audit_window() { wsm.violations(&cursors) }` to identify errors.
-//!     - Currently we also report orphan E1 findings when they fall in the user window.
+//! The auditor core, shared by the batch and continuous auditors.
 //!
-//! Deposits are checked over the derived Sui polling range rather than gated by
-//! the withdrawal audit window.
+//! Why it exists: both auditors read the same sources and judge the same
+//! flows. They differ only in when they poll and when they stop. The core
+//! holds one state machine per pending withdrawal and per pending deposit,
+//! and the auditors drive it.
+//!
+//! How it works:
+//! 1. The Sui and guardian pollers return events, and the core ingests each
+//!    one into its withdrawal's or deposit's state machine. A contradictory
+//!    event is reported and dropped.
+//! 2. Each tick, the core looks up on Bitcoin every machine that expects a
+//!    Bitcoin event, and ingests the confirmations it finds.
+//! 3. A Sui approval still missing after its deadline is fetched by its
+//!    withdrawal id, since the Sui scan may have started after it.
+//! 4. Each tick, the core reports the violations of every machine in the
+//!    audit window: the expected events whose deadline a cursor has passed.
+//! 5. Completed machines are garbage collected.
+//! 6. The progress watermarks give the time through which every flow is
+//!    verified, which is where a restart starts.
+//!
+//! Assumptions:
+//! - The user's window is on the guardian timeline. A withdrawal is in the
+//!   window if any of its events is, so an orphan E1 in the window is
+//!   reported too.
+//! - Deposits are checked over the Sui range the window derives, not gated
+//!   by the window.
 
 use crate::domain::Cursors;
 use crate::domain::DepositId;
@@ -155,7 +169,7 @@ impl AuditorCore {
         })
     }
 
-    pub fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
+    fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
         match event {
             MonitorEvent::Withdrawal(event) => self.ingest_withdrawal(event),
             MonitorEvent::Deposit(event) => self.ingest_deposit(event),
@@ -165,9 +179,9 @@ impl AuditorCore {
     fn ingest_withdrawal(&mut self, event: MonitorWithdrawalEvent) -> Vec<MonitorFinding> {
         let wid = event.wid;
         match self.pending_withdrawals.entry(wid) {
-            Entry::Occupied(mut entry) => entry.get_mut().add_event(event, &self.cfg),
+            Entry::Occupied(mut entry) => entry.get_mut().add_event(event, &self.cfg.timing),
             Entry::Vacant(entry) => {
-                entry.insert(WithdrawalStateMachine::new(event, &self.cfg));
+                entry.insert(WithdrawalStateMachine::new(event, &self.cfg.timing));
                 Vec::new()
             }
         }
@@ -177,7 +191,7 @@ impl AuditorCore {
         let deposit_id = event.deposit_id;
         match self.pending_deposits.entry(deposit_id) {
             Entry::Occupied(entry) => {
-                if entry.get().hashi_deposit_event() != &event {
+                if entry.get().sui_event() != &event {
                     return vec![MonitorFinding::InvalidEventAdded(
                         "duplicate deposit event for same outpoint with different contents"
                             .to_string(),
@@ -185,7 +199,7 @@ impl AuditorCore {
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert(DepositStateMachine::new(event, &self.cfg));
+                entry.insert(DepositStateMachine::new(event, &self.cfg.timing));
             }
         }
         Vec::new()
@@ -251,7 +265,7 @@ impl AuditorCore {
             // Fetch BTC info for expecting withdrawals
             if sm.expects(WithdrawalEventType::E3BtcConfirmed)
                 && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.cfg, &self.btc_client)?
+                    sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client)?
             {
                 findings.extend(new_findings);
             }
@@ -275,7 +289,7 @@ impl AuditorCore {
         &mut self,
         window: &impl AuditWindow,
     ) -> Vec<MonitorFinding> {
-        let cursors = self.get_cursors();
+        let cursors = self.cursors();
         let missing = self
             .pending_withdrawals
             .values()
@@ -329,69 +343,52 @@ impl AuditorCore {
                 continue;
             }
 
-            // Gather all violations so far
-            let violations = sm.violations(&self.get_cursors());
-            if !violations.is_empty() {
-                findings.extend(violations);
-            }
+            findings.extend(sm.violations(&self.cursors()));
         }
         for sm in self.pending_deposits.values() {
-            let violations = sm.violations();
-            if !violations.is_empty() {
-                findings.extend(violations);
-            }
+            findings.extend(sm.violations());
         }
         findings
     }
 
+    /// Drop every complete flow in the window, and log each one.
     pub fn garbage_collect(&mut self, window: &impl AuditWindow) {
-        let mut completed_withdrawals = Vec::new();
-        for (wid, sm) in &mut self.pending_withdrawals {
-            if !sm.is_in_audit_window(window) {
-                continue;
+        self.pending_withdrawals.retain(|wid, sm| {
+            if !sm.is_in_audit_window(window) || sm.is_expecting_events() {
+                return true;
             }
-            if !sm.is_expecting_events() {
-                let e1 = sm
-                    .get(WithdrawalEventType::E1HashiApproved)
-                    .expect("completed withdrawal has E1");
-                let e2 = sm
-                    .get(WithdrawalEventType::E2GuardianApproved)
-                    .expect("completed withdrawal has E2");
-                let e3 = sm
-                    .get(WithdrawalEventType::E3BtcConfirmed)
-                    .expect("completed withdrawal has E3");
-                tracing::info!(
-                    %wid,
-                    e1_at = %utc_timestamp(e1.timestamp_secs),
-                    e2_at = %utc_timestamp(e2.timestamp_secs),
-                    e3_at = %utc_timestamp(e3.timestamp_secs),
-                    e1_to_e2 = %human_timestamp_delta(e2.timestamp_secs, e1.timestamp_secs),
-                    e2_to_e3 = %human_timestamp_delta(e3.timestamp_secs, e2.timestamp_secs),
-                    "withdrawal flow is complete"
-                );
-                completed_withdrawals.push(*wid);
-            }
-        }
-        // Garbage collect
-        for wid in completed_withdrawals {
-            self.pending_withdrawals.remove(&wid);
-        }
+            let e1 = sm
+                .get(WithdrawalEventType::E1HashiApproved)
+                .expect("completed withdrawal has E1");
+            let e2 = sm
+                .get(WithdrawalEventType::E2GuardianApproved)
+                .expect("completed withdrawal has E2");
+            let e3 = sm
+                .get(WithdrawalEventType::E3BtcConfirmed)
+                .expect("completed withdrawal has E3");
+            tracing::info!(
+                %wid,
+                e1_at = %utc_timestamp(e1.timestamp_secs),
+                e2_at = %utc_timestamp(e2.timestamp_secs),
+                e3_at = %utc_timestamp(e3.timestamp_secs),
+                e1_to_e2 = %human_timestamp_delta(e2.timestamp_secs, e1.timestamp_secs),
+                e2_to_e3 = %human_timestamp_delta(e3.timestamp_secs, e2.timestamp_secs),
+                "withdrawal flow is complete"
+            );
+            false
+        });
 
-        let mut completed_deposits = Vec::new();
-        for (deposit_id, sm) in &mut self.pending_deposits {
-            if !sm.is_expecting_events() {
-                tracing::debug!(%deposit_id, "deposit flow is complete");
-                completed_deposits.push(*deposit_id);
+        self.pending_deposits.retain(|deposit_id, sm| {
+            if sm.is_expecting_events() {
+                return true;
             }
-        }
-
-        for deposit_id in completed_deposits {
-            self.pending_deposits.remove(&deposit_id);
-        }
+            tracing::debug!(%deposit_id, "deposit flow is complete");
+            false
+        });
     }
 
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
-        let mut verified_up_to_withdrawals = self.get_guardian_cursor();
+        let mut verified_up_to_withdrawals = self.guardian_cursor();
         let mut withdrawal_blockers = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_in_audit_window(window) || !sm.is_expecting_events() {
@@ -423,11 +420,11 @@ impl AuditorCore {
             .pending_deposits
             .values()
             .filter(|sm| sm.is_expecting_events())
-            .map(|sm| sm.hashi_deposit_event().timestamp_secs)
+            .map(|sm| sm.sui_event().timestamp_secs)
             .min()
             .unwrap_or(u64::MAX);
 
-        let verified_up_to_deposits = self.get_sui_cursor().min(unresolved_deposit_floor);
+        let verified_up_to_deposits = self.sui_cursor().min(unresolved_deposit_floor);
 
         ProgressWatermarks {
             verified_up_to_withdrawals,
@@ -447,25 +444,26 @@ impl AuditorCore {
         self.sui_poller.poll(up_to).await
     }
 
-    fn get_cursors(&self) -> Cursors {
+    fn cursors(&self) -> Cursors {
         Cursors {
-            sui: self.get_sui_cursor(),
-            guardian: self.get_guardian_cursor(),
+            sui: self.sui_cursor(),
+            guardian: self.guardian_cursor(),
         }
     }
-    fn get_sui_cursor(&self) -> UnixSeconds {
+
+    fn sui_cursor(&self) -> UnixSeconds {
         self.sui_poller.cursor_seconds()
     }
 
-    fn get_sui_scan_start(&self) -> UnixSeconds {
+    fn sui_scan_start(&self) -> UnixSeconds {
         self.sui_poller.start_seconds()
     }
 
-    fn get_guardian_cursor(&self) -> UnixSeconds {
+    fn guardian_cursor(&self) -> UnixSeconds {
         self.guardian_poller.cursor_seconds()
     }
 
-    fn get_guardian_next_partition_ready_at(&self) -> UnixSeconds {
+    fn guardian_next_partition_ready_at(&self) -> UnixSeconds {
         self.guardian_poller.next_partition_ready_at()
     }
 }

@@ -11,7 +11,6 @@ use bitcoin::ScriptBuf;
 use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::move_types::DepositConfirmed;
-use serde::Deserialize;
 
 use crate::keys::HashiBTCKeys;
 
@@ -85,7 +84,7 @@ impl MonitorDepositEvent {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DepositEventType {
     /// deposit confirmed event on btc
     E1BtcConfirmed,

@@ -48,18 +48,23 @@ pub fn human_duration(seconds: UnixSeconds) -> HumanDuration {
 
 impl fmt::Display for HumanDuration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hours = self.0 / 3_600;
-        let minutes = (self.0 % 3_600) / 60;
-        let seconds = self.0 % 60;
-
-        if hours > 0 {
-            write!(formatter, "{hours}h")?;
-        }
-        if minutes > 0 || hours > 0 {
-            write!(formatter, "{minutes}m")?;
-        }
-        write!(formatter, "{seconds}s")
+        write_hms(formatter, self.0.into())
     }
+}
+
+/// Write `total_seconds` as `{h}h{m}m{s}s`, without the leading zero units.
+fn write_hms(formatter: &mut fmt::Formatter<'_>, total_seconds: u128) -> fmt::Result {
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        write!(formatter, "{hours}h")?;
+    }
+    if minutes > 0 || hours > 0 {
+        write!(formatter, "{minutes}m")?;
+    }
+    write!(formatter, "{seconds}s")
 }
 
 /// Signed difference between two Unix timestamps, rendered compactly.
@@ -74,19 +79,7 @@ impl fmt::Display for HumanTimestampDelta {
         if self.0 < 0 {
             formatter.write_str("-")?;
         }
-
-        let total_seconds = self.0.unsigned_abs();
-        let hours = total_seconds / 3_600;
-        let minutes = (total_seconds % 3_600) / 60;
-        let seconds = total_seconds % 60;
-
-        if hours > 0 {
-            write!(formatter, "{hours}h")?;
-        }
-        if minutes > 0 || hours > 0 {
-            write!(formatter, "{minutes}m")?;
-        }
-        write!(formatter, "{seconds}s")
+        write_hms(formatter, self.0.unsigned_abs())
     }
 }
 

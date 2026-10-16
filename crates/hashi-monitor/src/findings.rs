@@ -1,6 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The findings the monitor reports, and their category.
+//!
+//! Why it exists: every check in the pollers and the state machines reports
+//! its result as one value of `MonitorFinding`. The auditors log each
+//! finding at the level of its category, and the metrics count them by
+//! category.
+//!
+//! The categories:
+//! - A liveness finding means a successor event is late or still missing
+//!   after its deadline.
+//! - A safety finding means a source contradicts another: a late or missing
+//!   predecessor, a contradictory event, a transaction or deposit that does
+//!   not match its claim, or a guardian clock that disagrees with S3.
+
 use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
@@ -94,7 +108,7 @@ pub enum MonitorFinding {
         btc: MonitorDepositEvent,
     },
     /// The time the guardian signed into a log differs from the time S3
-    /// recorded the object by more than the configured skew.
+    /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
     GuardianClockSkew {
         session_id: SessionID,
         object_key: String,

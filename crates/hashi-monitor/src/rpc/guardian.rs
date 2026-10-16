@@ -1,6 +1,29 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The guardian poller: the withdrawal E2 events read from the guardian's
+//! S3 logs, one hourly directory at a time.
+//!
+//! Why it exists: the guardian's signature on a withdrawal is only recorded
+//! in its log. The poller reads the log through `GuardianReader`, which
+//! verifies each session's attestation against the allowlist and each
+//! record's signature.
+//!
+//! How it works:
+//! 1. The cursor is an hourly directory. A directory is read once its write
+//!    completion time has passed.
+//! 2. Every verified withdrawal log in the directory becomes an E2 event.
+//!    A log whose signed time differs from its S3 `LastModified` time by more
+//!    than `MAX_EXPECTED_LOG_CLOCK_SKEW` is also a finding.
+//! 3. The cursor moves to the next directory.
+//!
+//! Assumptions:
+//! - The bridge keys are read once, before polling, from the genesis and
+//!   ceremony records. They never change.
+//! - Concurrent guardian sessions are not detected. One way to detect them
+//!   is to keep each session's first and last observed timestamp and require
+//!   that the ranges do not overlap.
+
 use crate::config::Config;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
@@ -18,8 +41,6 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use tracing::debug;
 
-// Note: current design does not check if multiple concurrent sessions are running.
-//       one way to impl this: store the first & last observed session timestamp & ensure no overlap between time ranges.
 pub struct GuardianWithdrawalsPoller {
     /// Owns the S3 client + the trusted-key cache, so a session's attestation is
     /// verified once for the poller's lifetime.
@@ -31,7 +52,7 @@ pub struct GuardianWithdrawalsPoller {
 }
 
 impl GuardianWithdrawalsPoller {
-    // Note: Throws an error if there is a S3 connectivity issue
+    /// Fails if S3 cannot be reached.
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         let s3_credentials =
             hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
@@ -139,7 +160,7 @@ impl GuardianWithdrawalsPoller {
         Self {
             reader: hashi_guardian::test_utils::mock_reader(config.deployment.clone()),
             cursor: S3HourDirectory::withdraw(start).expect("valid test timestamp"),
-            hashi_btc_keys: Some(crate::rpc::sui::approval::tests::test_hashi_btc_keys()),
+            hashi_btc_keys: Some(crate::test_utils::test_hashi_btc_keys()),
         }
     }
 }

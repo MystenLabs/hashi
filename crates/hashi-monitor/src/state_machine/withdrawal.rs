@@ -1,10 +1,32 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Withdrawal state machine for tracking event flow.
+//! The state machine that follows one withdrawal through its three events.
+//!
+//! Why it exists: the withdrawal's events come from three sources at
+//! different times and in any order. The machine joins them by withdrawal id
+//! and judges each pair of neighbors by the timing bounds, so the auditors
+//! need not know the order the sources were read in.
+//!
+//! How it works:
+//! 1. The first event creates the machine. The machine expects the event's
+//!    missing neighbors, each by a deadline: a predecessor by the event's
+//!    time plus the predecessor's skew, a successor by the event's time plus
+//!    the successor's delay.
+//! 2. A later event is checked against the machine's wid, txid and
+//!    transaction. A contradiction is reported and the event is dropped.
+//! 3. A consistent event is kept. It is judged against each neighbor the
+//!    machine has seen, and it removes itself from the expected events.
+//! 4. The auditor looks the transaction up on Bitcoin while E3 is expected,
+//!    and asks for violations each tick: an expected event whose deadline the
+//!    source's cursor has passed is reported missing.
+//!
+//! Invariants:
+//! - `expected_events` never holds an event type in `seen_events`.
+//! - Findings are returned to the caller and not kept. A complete machine
+//!   may have reported findings earlier.
 
 use crate::audit::AuditWindow;
-use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
@@ -16,39 +38,26 @@ use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::state_machine::BtcFetchOutcome;
+use crate::timing::Timing;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
-/// A record of all the events tracking a single withdrawal.
-///
-/// `add_event` validates and stores an event. A structurally valid late event
-/// is retained even though the method returns its timing finding.
-///
-/// `violations(cursors)` checks if there are any violations given current cursors
-///
-/// Invariant: `expected_events` should not contain an event type that exists in `seen_events`.
-///
-/// Four current scope/progress combinations are possible:
-/// - Window: Out, In
-/// - Progress: Expecting events, Complete
-///
-/// `is_expecting_events()` distinguishes the two progress states. Findings are
-/// emitted to the caller and are not retained in the WSM, so `Complete` does not
-/// mean that no earlier finding was reported.
+/// The events seen and still expected for one withdrawal. See the module
+/// doc for how an event is added and judged.
 pub struct WithdrawalStateMachine {
-    /// the set of non-zero events we have seen until now related to this withdrawal.
+    /// The events seen so far, at most one per type.
     seen_events: Vec<MonitorWithdrawalEvent>,
     /// Each `(event, deadline, relation)` entry means `event` is expected by
     /// `deadline`; `relation` records whether it precedes or follows an event
     /// already observed for this withdrawal.
     expected_events: Vec<(WithdrawalEventType, UnixSeconds, EventRelation)>,
-    /// last time at which we checked for a btc withdrawal tx
+    /// The time of the last Bitcoin lookup of the transaction.
     btc_checked_at: Option<UnixSeconds>,
-    /// immutable wid
+    /// The withdrawal id. Every event must carry it.
     wid: WithdrawalID,
-    /// immutable txid
+    /// The transaction id. Every event must carry it.
     btc_txid: Txid,
     /// The inputs and outputs stated by the first event seen. Every later
     /// event must state the same.
@@ -56,8 +65,8 @@ pub struct WithdrawalStateMachine {
 }
 
 impl WithdrawalStateMachine {
-    /// Note: Initialization ensures that the state machine has at least one event.
-    pub fn new(event: MonitorWithdrawalEvent, cfg: &Config) -> Self {
+    /// A machine holding `event`. The first event cannot produce a finding.
+    pub fn new(event: MonitorWithdrawalEvent, timing: &Timing) -> Self {
         let mut sm = Self {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
@@ -67,7 +76,7 @@ impl WithdrawalStateMachine {
             tx: event.tx.clone(),
         };
         assert!(
-            sm.add_event(event, cfg).is_empty(),
+            sm.add_event(event, timing).is_empty(),
             "first event cannot produce a finding"
         );
         sm
@@ -85,11 +94,6 @@ impl WithdrawalStateMachine {
 
     pub fn wid(&self) -> WithdrawalID {
         self.wid
-    }
-
-    /// The withdrawal's inputs and outputs.
-    pub fn tx(&self) -> &WithdrawalTx {
-        &self.tx
     }
 
     pub fn expects(&self, event_type: WithdrawalEventType) -> bool {
@@ -125,8 +129,7 @@ impl WithdrawalStateMachine {
             .collect()
     }
 
-    // TODO: If we fully move to strict guardian-led audits, this can be relaxed to only include
-    // withdrawals with guardian E2 in the user window.
+    /// Whether any seen event falls in `window`.
     pub fn is_in_audit_window(&self, window: &impl AuditWindow) -> bool {
         self.seen_events
             .iter()
@@ -137,8 +140,9 @@ impl WithdrawalStateMachine {
     ///
     /// A missing predecessor is expected by the event timestamp plus the
     /// predecessor's clock skew; a missing successor is expected by the
-    /// configured next-event deadline. A neighbor already seen is checked
-    /// against the pair's deadlines, so findings do not depend on ingestion order.
+    /// event timestamp plus the successor's delay. A neighbor already seen is
+    /// checked against the pair's deadlines, so findings do not depend on
+    /// ingestion order.
     ///
     /// Event retention is based on structural validity, not finding category.
     /// `MonitorFinding::InvalidEventAdded` denotes a contradictory, definite
@@ -151,7 +155,7 @@ impl WithdrawalStateMachine {
     pub fn add_event(
         &mut self,
         new_event: MonitorWithdrawalEvent,
-        cfg: &Config,
+        timing: &Timing,
     ) -> Vec<MonitorFinding> {
         if let Some(existing_event) = self.get(new_event.event_type) {
             return if *existing_event == new_event {
@@ -190,12 +194,14 @@ impl WithdrawalStateMachine {
         }
         if let Some(predecessor_event_type) = new_event.event_type.predecessor() {
             match self.get(predecessor_event_type) {
-                Some(predecessor) => {
-                    timing_findings.extend(neighbor_timing_findings(predecessor, &new_event, cfg))
-                }
+                Some(predecessor) => timing_findings.extend(neighbor_timing_findings(
+                    predecessor,
+                    &new_event,
+                    timing,
+                )),
                 None => self.expected_events.push((
                     predecessor_event_type,
-                    cfg.predecessor_deadline(&new_event),
+                    timing.predecessor_deadline(&new_event),
                     EventRelation::Predecessor,
                 )),
             }
@@ -203,11 +209,11 @@ impl WithdrawalStateMachine {
         if let Some(successor_event_type) = new_event.event_type.successor() {
             match self.get(successor_event_type) {
                 Some(successor) => {
-                    timing_findings.extend(neighbor_timing_findings(&new_event, successor, cfg))
+                    timing_findings.extend(neighbor_timing_findings(&new_event, successor, timing))
                 }
                 None => self.expected_events.push((
                     successor_event_type,
-                    cfg.successor_deadline(&new_event),
+                    timing.successor_deadline(&new_event),
                     EventRelation::Successor,
                 )),
             }
@@ -228,29 +234,27 @@ impl WithdrawalStateMachine {
     ///     - Returns `Err` for BTC RPC/infrastructure failures.
     pub fn try_fetch_btc_tx(
         &mut self,
-        cfg: &Config,
+        timing: &Timing,
         btc_rpc_client: &BtcRpcClient,
     ) -> anyhow::Result<BtcFetchOutcome> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
             return Ok(BtcFetchOutcome::NotExpected);
         }
-        let btc_txid = self.btc_txid;
-        let wid = self.wid;
-        let cur_time = now_timestamp_secs();
 
-        match btc_rpc_client.lookup_confirmation(btc_txid) {
-            Ok(Some(confirmation)) => {
-                self.btc_checked_at = Some(cur_time);
-                let e_btc =
-                    MonitorWithdrawalEvent::from_btc(&confirmation, wid, btc_txid, self.tx.clone());
-                Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg)))
+        let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid)?;
+        self.btc_checked_at = Some(now_timestamp_secs());
+        Ok(match confirmation {
+            Some(confirmation) => {
+                let e_btc = MonitorWithdrawalEvent::from_btc(
+                    &confirmation,
+                    self.wid,
+                    self.btc_txid,
+                    self.tx.clone(),
+                );
+                BtcFetchOutcome::Confirmed(self.add_event(e_btc, timing))
             }
-            Ok(None) => {
-                self.btc_checked_at = Some(cur_time);
-                Ok(BtcFetchOutcome::Unconfirmed)
-            }
-            Err(e) => Err(e),
-        }
+            None => BtcFetchOutcome::Unconfirmed,
+        })
     }
 
     /// Check for violations given per-source cursors.
@@ -288,10 +292,10 @@ impl WithdrawalStateMachine {
 fn neighbor_timing_findings(
     predecessor: &MonitorWithdrawalEvent,
     successor: &MonitorWithdrawalEvent,
-    cfg: &Config,
+    timing: &Timing,
 ) -> Vec<MonitorFinding> {
     let mut findings = Vec::new();
-    let deadline = cfg.successor_deadline(predecessor);
+    let deadline = timing.successor_deadline(predecessor);
     if deadline < successor.timestamp_secs {
         findings.push(MonitorFinding::EventOccurredAfterDeadline {
             event: MonitorEvent::Withdrawal(successor.clone()),
@@ -300,7 +304,7 @@ fn neighbor_timing_findings(
             occurred_at: successor.timestamp_secs,
         });
     }
-    let deadline = cfg.predecessor_deadline(successor);
+    let deadline = timing.predecessor_deadline(successor);
     if deadline < predecessor.timestamp_secs {
         findings.push(MonitorFinding::EventOccurredAfterDeadline {
             event: MonitorEvent::Withdrawal(predecessor.clone()),
@@ -316,13 +320,11 @@ fn neighbor_timing_findings(
 mod tests {
     use super::*;
     use crate::findings::FindingCategory;
-    use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
-    use bitcoin::hashes::Hash as _;
+    use crate::test_utils::test_hashi_btc_keys;
+    use crate::test_utils::txid;
+    use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::witness_program_from_address;
-    use hashi_types::move_types::OutputUtxo;
-    use hashi_types::move_types::Utxo;
-    use hashi_types::move_types::UtxoId;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -333,14 +335,6 @@ mod tests {
         fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
             timestamp_secs >= self.start && timestamp_secs <= self.end
         }
-    }
-
-    fn cfg() -> Config {
-        Config::for_tests()
-    }
-
-    fn txid(fill: u8) -> Txid {
-        Txid::from_slice(&[fill; 32]).expect("valid txid")
     }
 
     fn event(
@@ -358,28 +352,6 @@ mod tests {
         }
     }
 
-    /// One input, one user payout, and change to `change_address`.
-    fn withdrawal_tx(change_address: Vec<u8>) -> WithdrawalTx {
-        WithdrawalTx::new(
-            vec![Utxo {
-                id: UtxoId {
-                    txid: txid(0x51).into(),
-                    vout: 1,
-                },
-                amount: 120_000,
-                derivation_path: Some(DerivationPath::new([0x52; 32])),
-            }],
-            vec![OutputUtxo {
-                amount: 100_000,
-                bitcoin_address: vec![0x53; 20],
-            }],
-            vec![OutputUtxo {
-                amount: 19_000,
-                bitcoin_address: change_address,
-            }],
-        )
-    }
-
     fn change_path() -> DerivationPath {
         DerivationPath::new([0x42; 32])
     }
@@ -391,14 +363,17 @@ mod tests {
 
     #[test]
     fn add_event_rejects_duplicate_source() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
 
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 1, 100, 1),
-            &cfg,
+            &timing,
         );
 
-        let findings = sm.add_event(event(WithdrawalEventType::E1HashiApproved, 1, 110, 1), &cfg);
+        let findings = sm.add_event(
+            event(WithdrawalEventType::E1HashiApproved, 1, 110, 1),
+            &timing,
+        );
         assert_eq!(
             findings,
             vec![MonitorFinding::InvalidEventAdded(
@@ -408,7 +383,7 @@ mod tests {
 
         let wid_findings = sm.add_event(
             event(WithdrawalEventType::E2GuardianApproved, 2, 120, 1),
-            &cfg,
+            &timing,
         );
         assert_eq!(
             wid_findings,
@@ -417,7 +392,7 @@ mod tests {
 
         let txid_findings = sm.add_event(
             event(WithdrawalEventType::E2GuardianApproved, 1, 120, 2),
-            &cfg,
+            &timing,
         );
         assert_eq!(
             txid_findings,
@@ -429,26 +404,29 @@ mod tests {
 
     #[test]
     fn in_order_flow_completes() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
 
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 9, 100, 7),
-            &cfg,
+            &timing,
         );
         assert!(sm.expects(WithdrawalEventType::E2GuardianApproved));
 
         assert!(
             sm.add_event(
                 event(WithdrawalEventType::E2GuardianApproved, 9, 150, 7),
-                &cfg,
+                &timing,
             )
             .is_empty()
         );
         assert!(sm.expects(WithdrawalEventType::E3BtcConfirmed));
 
         assert!(
-            sm.add_event(event(WithdrawalEventType::E3BtcConfirmed, 9, 300, 7), &cfg)
-                .is_empty()
+            sm.add_event(
+                event(WithdrawalEventType::E3BtcConfirmed, 9, 300, 7),
+                &timing
+            )
+            .is_empty()
         );
 
         assert!(!sm.is_expecting_events());
@@ -456,14 +434,14 @@ mod tests {
 
     #[test]
     fn add_event_records_event_past_deadline() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 4, 100, 4),
-            &cfg,
+            &timing,
         );
         let event = event(WithdrawalEventType::E2GuardianApproved, 4, 201, 4);
 
-        let findings = sm.add_event(event.clone(), &cfg);
+        let findings = sm.add_event(event.clone(), &timing);
         assert_eq!(
             findings,
             vec![MonitorFinding::EventOccurredAfterDeadline {
@@ -480,16 +458,16 @@ mod tests {
 
     #[test]
     fn add_event_records_all_timing_findings() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 4, 100, 4),
-            &cfg,
+            &timing,
         );
         let btc_confirmed = event(WithdrawalEventType::E3BtcConfirmed, 4, 600, 4);
-        assert!(sm.add_event(btc_confirmed.clone(), &cfg).is_empty());
+        assert!(sm.add_event(btc_confirmed.clone(), &timing).is_empty());
 
         let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 4, 311, 4);
-        let findings = sm.add_event(guardian_approval.clone(), &cfg);
+        let findings = sm.add_event(guardian_approval.clone(), &timing);
 
         assert_eq!(
             findings,
@@ -513,7 +491,7 @@ mod tests {
 
     #[test]
     fn timing_findings_do_not_depend_on_ingestion_order() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let late = |event: &MonitorWithdrawalEvent, relation, deadline| {
             MonitorFinding::EventOccurredAfterDeadline {
                 event: MonitorEvent::Withdrawal(event.clone()),
@@ -571,10 +549,10 @@ mod tests {
                 [2, 0, 1],
                 [2, 1, 0],
             ] {
-                let mut sm = WithdrawalStateMachine::new(events[order[0]].clone(), &cfg);
+                let mut sm = WithdrawalStateMachine::new(events[order[0]].clone(), &timing);
                 let findings: Vec<_> = order[1..]
                     .iter()
-                    .flat_map(|&i| sm.add_event(events[i].clone(), &cfg))
+                    .flat_map(|&i| sm.add_event(events[i].clone(), &timing))
                     .collect();
                 assert_eq!(findings.len(), expected.len(), "{order:?}: {findings:?}");
                 assert!(
@@ -588,10 +566,10 @@ mod tests {
 
     #[test]
     fn violations_only_after_cursor_passes_deadline() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 1, 100, 5),
-            &cfg,
+            &timing,
         );
 
         let no_violation = sm.violations(&Cursors {
@@ -619,10 +597,10 @@ mod tests {
 
     #[test]
     fn hashi_approval_is_missing_once_the_sui_cursor_passes_its_deadline() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E2GuardianApproved, 7, 100, 7),
-            &cfg,
+            &timing,
         );
         let cursors = |sui| Cursors {
             sui,
@@ -633,8 +611,11 @@ mod tests {
         assert!(sm.is_missing_hashi_approval(&cursors(110)));
 
         assert!(
-            sm.add_event(event(WithdrawalEventType::E1HashiApproved, 7, 10, 7), &cfg)
-                .is_empty()
+            sm.add_event(
+                event(WithdrawalEventType::E1HashiApproved, 7, 10, 7),
+                &timing
+            )
+            .is_empty()
         );
         assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
         assert!(sm.violations(&cursors(1_000)).is_empty());
@@ -642,12 +623,12 @@ mod tests {
 
     #[test]
     fn a_late_or_mismatched_hashi_approval_is_a_safety_finding() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 8, 100, 8);
 
-        let mut late = WithdrawalStateMachine::new(guardian_approval.clone(), &cfg);
+        let mut late = WithdrawalStateMachine::new(guardian_approval.clone(), &timing);
         let approval = event(WithdrawalEventType::E1HashiApproved, 8, 111, 8);
-        let findings = late.add_event(approval.clone(), &cfg);
+        let findings = late.add_event(approval.clone(), &timing);
         assert_eq!(
             findings,
             vec![MonitorFinding::EventOccurredAfterDeadline {
@@ -659,9 +640,11 @@ mod tests {
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
 
-        let mut mismatched = WithdrawalStateMachine::new(guardian_approval, &cfg);
-        let findings =
-            mismatched.add_event(event(WithdrawalEventType::E1HashiApproved, 8, 50, 9), &cfg);
+        let mut mismatched = WithdrawalStateMachine::new(guardian_approval, &timing);
+        let findings = mismatched.add_event(
+            event(WithdrawalEventType::E1HashiApproved, 8, 50, 9),
+            &timing,
+        );
         assert_eq!(
             findings,
             vec![MonitorFinding::InvalidEventAdded(
@@ -677,15 +660,18 @@ mod tests {
 
     #[test]
     fn a_guardian_approval_past_its_skew_after_the_block_time_is_a_safety_finding() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 6, 100, 6),
-            &cfg,
+            &timing,
         );
         let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 6, 150, 6);
-        assert!(sm.add_event(guardian_approval.clone(), &cfg).is_empty());
+        assert!(sm.add_event(guardian_approval.clone(), &timing).is_empty());
 
-        let findings = sm.add_event(event(WithdrawalEventType::E3BtcConfirmed, 6, 119, 6), &cfg);
+        let findings = sm.add_event(
+            event(WithdrawalEventType::E3BtcConfirmed, 6, 119, 6),
+            &timing,
+        );
 
         assert_eq!(
             findings,
@@ -701,10 +687,10 @@ mod tests {
 
     #[test]
     fn backfill_e1_outside_window_e2_inside_is_still_valid() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 31, 90, 1),
-            &cfg,
+            &timing,
         );
         let window = TestWindow {
             start: 100,
@@ -714,7 +700,7 @@ mod tests {
         assert!(
             sm.add_event(
                 event(WithdrawalEventType::E2GuardianApproved, 31, 100, 1),
-                &cfg,
+                &timing,
             )
             .is_empty()
         );
@@ -730,10 +716,10 @@ mod tests {
 
     #[test]
     fn e1_inside_window_without_e2_is_in_scope() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 88, 120, 2),
-            &cfg,
+            &timing,
         );
         let window = TestWindow {
             start: 100,
@@ -745,21 +731,21 @@ mod tests {
 
     #[test]
     fn equal_transactions_from_sui_and_the_guardian_have_no_finding() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
         let e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
 
-        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
-        assert!(sm.add_event(e2.clone(), &cfg).is_empty());
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &timing);
+        assert!(sm.add_event(e2.clone(), &timing).is_empty());
 
         // The check runs in either ingestion order.
-        let mut sm = WithdrawalStateMachine::new(e2, &cfg);
-        assert!(sm.add_event(e1, &cfg).is_empty());
+        let mut sm = WithdrawalStateMachine::new(e2, &timing);
+        assert!(sm.add_event(e1, &timing).is_empty());
     }
 
     #[test]
     fn a_change_output_not_paying_the_guardians_path_is_a_safety_finding() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         let e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
         let mut e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
         e2.tx = withdrawal_tx(bridge_program(&DerivationPath::new([0x43; 32])));
@@ -770,18 +756,18 @@ mod tests {
         }];
         assert_eq!(expected[0].category(), FindingCategory::Safety);
 
-        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
-        assert_eq!(sm.add_event(e2.clone(), &cfg), expected);
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &timing);
+        assert_eq!(sm.add_event(e2.clone(), &timing), expected);
         // The event is kept, so the flow goes on to E3.
         assert!(sm.get(WithdrawalEventType::E2GuardianApproved).is_some());
 
-        let mut sm = WithdrawalStateMachine::new(e2, &cfg);
-        assert_eq!(sm.add_event(e1, &cfg), expected);
+        let mut sm = WithdrawalStateMachine::new(e2, &timing);
+        assert_eq!(sm.add_event(e1, &timing), expected);
     }
 
     #[test]
     fn an_output_sui_calls_change_and_the_guardian_calls_a_payout_is_a_safety_finding() {
-        let cfg = cfg();
+        let timing = Timing::for_tests();
         // The committee pays itself at vout 1, tells Sui it is change, and
         // tells the guardian it is a user payout.
         let mut e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
@@ -797,9 +783,9 @@ mod tests {
             ..e1.tx.clone()
         };
 
-        let mut sm = WithdrawalStateMachine::new(e1.clone(), &cfg);
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &timing);
         assert_eq!(
-            sm.add_event(e2.clone(), &cfg),
+            sm.add_event(e2.clone(), &timing),
             vec![MonitorFinding::WithdrawalMismatch {
                 wid: e1.wid,
                 sui: e1.tx,

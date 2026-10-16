@@ -155,18 +155,13 @@ pub mod tests {
     use std::collections::BTreeMap;
 
     use crate::findings::FindingCategory;
-    use crate::keys::HashiBTCKeys;
-    use hashi_types::bitcoin::BTC_LIB;
+    use crate::test_utils::test_hashi_btc_keys;
+    use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::BitcoinAddress;
-    use hashi_types::bitcoin::BitcoinKeypair;
     use hashi_types::bitcoin::DerivationPath;
-    use hashi_types::bitcoin::HashiMasterG;
     use hashi_types::bitcoin::witness_program_from_address;
     use hashi_types::bitcoin_txid::BitcoinTxid;
-    use hashi_types::move_types::OutputUtxo;
     use hashi_types::move_types::SigningBatch;
-    use hashi_types::move_types::Utxo;
-    use hashi_types::move_types::UtxoId;
     use sui_rpc::proto::sui::rpc::v2::Bcs;
     use sui_sdk_types::Address;
 
@@ -177,25 +172,8 @@ pub mod tests {
         PackageVersions::new(BTreeMap::from([(1, PACKAGE_ID)]))
     }
 
-    /// Bridge keys from fixed test guardian and MPC keys, on Signet.
-    pub fn test_hashi_btc_keys() -> HashiBTCKeys {
-        let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[6u8; 32])
-            .unwrap()
-            .x_only_public_key()
-            .0;
-        let mpc = HashiMasterG::with_even_y_from_x_be_bytes(
-            &BitcoinKeypair::from_seckey_slice(&BTC_LIB, &[7u8; 32])
-                .unwrap()
-                .x_only_public_key()
-                .0
-                .serialize(),
-        )
-        .unwrap();
-        HashiBTCKeys::new(guardian, mpc, bitcoin::Network::Signet)
-    }
-
     /// The bridge change address of `test_hashi_btc_keys`.
-    pub fn test_change_address() -> BitcoinAddress {
+    fn test_change_address() -> BitcoinAddress {
         BitcoinAddress::from_script(
             &test_hashi_btc_keys().script_pubkey(None),
             bitcoin::Network::Signet,
@@ -219,32 +197,18 @@ pub mod tests {
         txn
     }
 
-    /// A withdrawal of one input into one user output and one change output to
-    /// the bridge, whose txid is the one its inputs and outputs build.
+    /// The `withdrawal_tx` of one input into one user output and one change
+    /// output to the bridge, as a `WithdrawalTransaction` object whose txid is
+    /// the one its inputs and outputs build.
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
-        let inputs = vec![Utxo {
-            id: UtxoId {
-                txid: BitcoinTxid::from(Address::new([0x51; 32])),
-                vout: 1,
-            },
-            amount: 120_000,
-            derivation_path: Some(Address::new([0x52; 32])),
-        }];
-        let withdrawal_outputs = vec![OutputUtxo {
-            amount: 100_000,
-            bitcoin_address: vec![0x53; 20],
-        }];
-        let change_outputs = vec![OutputUtxo {
-            amount: 19_000,
-            bitcoin_address: witness_program_from_address(&test_change_address()).unwrap(),
-        }];
+        let tx = withdrawal_tx(witness_program_from_address(&test_change_address()).unwrap());
         let txn = WithdrawalTransaction {
             id,
             txid: BitcoinTxid::ZERO,
             request_ids: vec![Address::new([0x55; 32])],
-            inputs,
-            withdrawal_outputs,
-            change_outputs,
+            inputs: tx.inputs,
+            withdrawal_outputs: tx.withdrawal_outputs,
+            change_outputs: tx.change_outputs,
             created_timestamp_ms: 1_789_805_327_448,
             signed_timestamp_ms: None,
             confirmed_timestamp_ms: None,

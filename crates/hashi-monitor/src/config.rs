@@ -26,11 +26,8 @@ use std::path::Path;
 use anyhow::Context;
 use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::S3Credentials;
-use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 
-use crate::domain::MonitorWithdrawalEvent;
-use crate::domain::WithdrawalEventType;
 use crate::timing::Timing;
 
 /// Configuration shared by the batch and continuous monitor modes.
@@ -87,27 +84,6 @@ impl Config {
         resolve_env_references(&mut tree, "")?;
         serde_yaml::from_value(tree).context("failed to parse config yaml")
     }
-
-    pub fn next_event_delay(&self, source: WithdrawalEventType) -> Option<u64> {
-        self.timing.successor_delays.get(source)
-    }
-
-    pub fn predecessor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
-        let predecessor = event.event_type.predecessor().expect("has a predecessor");
-        event.timestamp_secs
-            + self
-                .timing
-                .predecessor_skews
-                .get(predecessor)
-                .expect("a predecessor has a successor")
-    }
-
-    pub fn successor_deadline(&self, event: &MonitorWithdrawalEvent) -> UnixSeconds {
-        event.timestamp_secs
-            + self
-                .next_event_delay(event.event_type)
-                .expect("has a successor")
-    }
 }
 
 /// Replace every `env:NAME` string under `value` with the environment
@@ -143,25 +119,11 @@ fn resolve_env_references(value: &mut serde_yaml::Value, path: &str) -> anyhow::
 
 #[cfg(test)]
 impl Config {
-    /// A regtest config with short timing bounds, unreachable RPC endpoints,
+    /// A regtest config with `Timing::for_tests`, unreachable RPC endpoints,
     /// and explicit S3 credentials. Tests override the fields they exercise.
     pub fn for_tests() -> Self {
-        use crate::timing::EventBounds;
-
         Self {
-            timing: Timing {
-                successor_delays: EventBounds::new([
-                    (WithdrawalEventType::E1HashiApproved, 100),
-                    (WithdrawalEventType::E2GuardianApproved, 200),
-                ])
-                .expect("valid successor delays"),
-                predecessor_skews: EventBounds::new([
-                    (WithdrawalEventType::E1HashiApproved, 10),
-                    (WithdrawalEventType::E2GuardianApproved, 30),
-                ])
-                .expect("valid predecessor skews"),
-                deposit_confirmation_skew: 10,
-            },
+            timing: Timing::for_tests(),
             deployment: DeploymentConfig {
                 bucket_info: hashi_types::guardian::S3BucketInfo {
                     name: "bucket".to_string(),

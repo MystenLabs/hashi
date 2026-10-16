@@ -1,6 +1,31 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! The Bitcoin client: confirmation lookups over HTTP JSON-RPC.
+//!
+//! Why it exists: the withdrawal E3 and the deposit E1 are Bitcoin
+//! confirmations. Bitcoin has no event stream to scan, so the auditor looks
+//! each pending transaction up by txid.
+//!
+//! How it works:
+//! 1. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
+//!    since a lagging node reports recent transactions as unconfirmed.
+//! 2. `prefetch_confirmations` looks all pending txids up in batches of
+//!    `HTTP_JSON_RPC_BATCH_SIZE`, and `lookup_confirmation` serves each one
+//!    from that cache. The cache is cleared at the start of each pass, so an
+//!    unconfirmed transaction is looked up again next pass.
+//! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
+//!    returned with the time of its own block and the time of the block that
+//!    gave it `MIN_CONFIRMATIONS`.
+//! 4. Requests are paced by `HTTP_JSON_RPC_BATCH_DELAY`, and a rate-limited
+//!    request is retried with exponential backoff.
+//!
+//! Assumptions:
+//! - The endpoint serves `getrawtransaction` with verbose output, which
+//!   needs `txindex` or a hosted provider.
+//! - Only rate limits are retried. Other transient failures fail the pass
+//!   and are retried on the next tick.
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -583,15 +608,12 @@ mod tests {
     use base64ct::Base64;
     use base64ct::Encoding as _;
     use bitcoin::Amount;
-    use bitcoin::Txid;
-    use bitcoin::hashes::Hash as _;
     use e2e_tests::BitcoinNodeBuilder;
     use e2e_tests::bitcoin_node::RPC_PASSWORD;
     use e2e_tests::bitcoin_node::RPC_USER;
     use tempfile::TempDir;
 
     use super::BlockchainInfo;
-    use super::BtcConfirmation;
     use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
@@ -600,6 +622,8 @@ mod tests {
     use crate::domain::DepositEventType;
     use crate::domain::DepositId;
     use crate::domain::MonitorDepositEvent;
+    use crate::test_utils::confirmation;
+    use crate::test_utils::txid;
 
     static TRACING_INIT: Once = Once::new();
 
@@ -642,7 +666,7 @@ mod tests {
         let btc_rpc_client = BtcRpcClient::new(&cfg)?;
         btc_rpc_client.ensure_synced()?;
 
-        let unknown_txid = Txid::from_slice(&[7u8; 32])?;
+        let unknown_txid = txid(7);
         let unknown = btc_rpc_client.lookup_confirmation(unknown_txid)?;
         assert!(
             unknown.is_none(),
@@ -701,21 +725,8 @@ mod tests {
     #[test]
     fn a_confirmation_builds_the_deposit_event_of_its_output() {
         let script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-        let confirmation = BtcConfirmation {
-            block_time: 30,
-            confirmed_time: 90,
-            outputs: vec![
-                bitcoin::TxOut {
-                    value: Amount::from_sat(1_000),
-                    script_pubkey: bitcoin::ScriptBuf::new(),
-                },
-                bitcoin::TxOut {
-                    value: Amount::from_sat(40_000),
-                    script_pubkey: script_pubkey.clone(),
-                },
-            ],
-        };
-        let txid = Txid::from_slice(&[9u8; 32]).unwrap();
+        let confirmation = confirmation(40_000, script_pubkey.clone());
+        let txid = txid(9);
 
         assert_eq!(
             MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 1)),

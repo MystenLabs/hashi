@@ -10,7 +10,8 @@ bitcoin.workspace = true
 clap.workspace = true
 futures.workspace = true
 hashi-types = { path = "../hashi-types" }
-# guardian imported for s3 logger
+# The guardian's S3 log reader, its S3 credential resolution and its log
+# clock-skew bound.
 hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
 minreq = { workspace = true, features = ["json-using-serde"] }
@@ -25,10 +26,10 @@ tokio.workspace = true
 tonic.workspace = true
 tower.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 base64ct.workspace = true
 e2e-tests = { path = "../e2e-tests" }
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
 tempfile.workspace = true
+tracing-subscriber.workspace = true

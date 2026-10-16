@@ -34,7 +34,6 @@ use std::fmt;
 
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
-use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
 use crate::time::utc_timestamp;
@@ -86,7 +85,7 @@ impl fmt::Display for MonitorEventId {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MonitorEventType {
     Withdrawal(WithdrawalEventType),
     Deposit(DepositEventType),
@@ -105,7 +104,7 @@ pub struct BtcConfirmation {
     pub outputs: Vec<TxOut>,
 }
 
-/// Per-source cursors tracking how far we've read from each data source.
+/// The time through which each source has been read.
 #[derive(Clone, Copy, Debug)]
 pub struct Cursors {
     pub sui: UnixSeconds,
@@ -122,13 +121,9 @@ impl Cursors {
             }
         }
     }
-
-    pub fn min(&self) -> UnixSeconds {
-        self.sui.min(self.guardian)
-    }
 }
 
-/// Outcome of a Guardian or Sui poll
+/// Outcome of a guardian or Sui poll.
 pub enum PollOutcome {
     /// The events of the newly scanned range, and the findings of events that failed a check.
     CursorAdvanced {
