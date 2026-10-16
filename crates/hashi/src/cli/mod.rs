@@ -476,6 +476,35 @@ pub enum ConfigCommands {
 
 #[derive(Subcommand)]
 pub enum BackupCommands {
+    #[clap(about = "Assemble a multi-recipient OpenPGP backup certificate using gpg-agent")]
+    AssembleCert {
+        #[clap(
+            long,
+            help = "Public certificate whose primary key will certify the recipients"
+        )]
+        primary_cert: std::path::PathBuf,
+
+        #[clap(
+            long,
+            required = true,
+            value_name = "PATH[=SUBKEY_FINGERPRINT]",
+            help = "Recipient public certificate, optionally selecting a full encryption subkey fingerprint; repeat for each recipient"
+        )]
+        recipient: Vec<commands::backup::RecipientInput>,
+
+        #[clap(
+            long,
+            help = "Write the armored public certificate here; must not already exist"
+        )]
+        output: std::path::PathBuf,
+
+        #[clap(
+            long,
+            help = "Existing GnuPG home for the certifying primary key (defaults to the agent's normal home)"
+        )]
+        gpg_homedir: Option<std::path::PathBuf>,
+    },
+
     /// Save an encrypted backup of the node config and referenced files
     Save {
         /// Path to the validator node config file
@@ -1268,6 +1297,23 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
         },
         CliCommand::Backup { action } => match action {
+            BackupCommands::AssembleCert {
+                primary_cert,
+                recipient,
+                output,
+                gpg_homedir,
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    commands::backup::assemble_cert(
+                        &primary_cert,
+                        &recipient,
+                        &output,
+                        gpg_homedir.as_deref(),
+                    )
+                })
+                .await
+                .context("Backup certificate assembly task failed")??;
+            }
             BackupCommands::Save {
                 node_config_path,
                 backup_pgp_cert,

@@ -9,14 +9,21 @@
 use anyhow::Context;
 use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
+use hashi_types::pgp::EncryptionRecipient;
 use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::assemble_public_cert;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
+use sequoia_openpgp::Cert;
+use sequoia_openpgp::Fingerprint;
+use sequoia_openpgp::parse::Parse;
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::backup;
 use crate::backup_s3::BackupS3Client;
@@ -30,6 +37,128 @@ pub enum RestoreDecryptor {
     Unencrypted,
     LocalSecretKey { secret_key_path: PathBuf },
     GpgAgent { homedir: Option<PathBuf> },
+}
+
+#[derive(Clone, Debug)]
+pub struct RecipientInput {
+    path: PathBuf,
+    subkey: Option<Fingerprint>,
+}
+
+impl FromStr for RecipientInput {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (path, subkey) = match value.rsplit_once('=') {
+            Some((path, fingerprint)) => {
+                anyhow::ensure!(
+                    matches!(fingerprint.len(), 40 | 64)
+                        && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "recipient subkey fingerprint must be a full 40- or 64-digit hexadecimal fingerprint (PATH[=SUBKEY_FINGERPRINT])"
+                );
+                (path, Some(fingerprint.parse::<Fingerprint>()?))
+            }
+            None => (value, None),
+        };
+        anyhow::ensure!(
+            !path.is_empty(),
+            "recipient certificate path must not be empty"
+        );
+        Ok(Self {
+            path: PathBuf::from(path),
+            subkey,
+        })
+    }
+}
+
+pub fn assemble_cert(
+    primary_cert: &Path,
+    recipients: &[RecipientInput],
+    output: &Path,
+    gpg_homedir: Option<&Path>,
+) -> Result<()> {
+    let primary = Cert::from_file(primary_cert).with_context(|| {
+        format!(
+            "Failed to read primary public certificate {}",
+            primary_cert.display()
+        )
+    })?;
+    let recipient_certs = recipients
+        .iter()
+        .map(|recipient| {
+            Cert::from_file(&recipient.path).with_context(|| {
+                format!(
+                    "Failed to read recipient public certificate {}",
+                    recipient.path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let recipients = recipients
+        .iter()
+        .zip(&recipient_certs)
+        .map(|(input, cert)| EncryptionRecipient {
+            cert,
+            subkey: input.subkey.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    let context = match gpg_homedir {
+        Some(home) => sequoia_gpg_agent::Context::with_homedir(home),
+        None => sequoia_gpg_agent::Context::new(),
+    }
+    .context(
+        "Failed to initialize GnuPG context; gpgconf and an existing GnuPG home are required",
+    )?;
+    let mut signer =
+        sequoia_gpg_agent::KeyPair::new_for_gnupg_context(&context, primary.primary_key().key())
+            .context("Failed to create the gpg-agent signer for the primary key")?;
+    let assembled = assemble_public_cert(&primary, &recipients, &mut signer)
+        .context("Failed to assemble backup certificate using gpg-agent")?;
+    let cert = Cert::from_bytes(assembled.armored().as_bytes())
+        .context("Failed to parse assembled public certificate")?;
+
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staging = tempfile::Builder::new()
+        .prefix(".hashi-assemble-cert-")
+        .tempfile_in(parent)
+        .with_context(|| {
+            format!(
+                "Failed to create certificate staging file in {}",
+                parent.display()
+            )
+        })?;
+    staging
+        .write_all(assembled.armored().as_bytes())
+        .context("Failed to write assembled public certificate")?;
+    staging
+        .as_file()
+        .sync_all()
+        .context("Failed to sync assembled public certificate")?;
+    staging
+        .persist_noclobber(output)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "Failed to publish certificate {}; output must not exist",
+                output.display()
+            )
+        })?;
+
+    print_success(&format!(
+        "Assembled backup certificate written to {}",
+        output.display()
+    ));
+    print_info(&format!("Primary fingerprint: {}", cert.fingerprint()));
+    for key in cert.keys().subkeys() {
+        print_info(&format!(
+            "Recipient encryption subkey fingerprint: {}",
+            key.key().fingerprint()
+        ));
+    }
+    Ok(())
 }
 
 /// Save an encrypted backup of the node config, referenced files, and database
@@ -386,6 +515,30 @@ mod tests {
     const CLI_CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
     const KEYPAIR_CONTENTS: &[u8] = b"test-ed25519-keypair-bytes";
     const BTC_KEY_CONTENTS: &[u8] = b"test-bitcoin-wif-bytes";
+
+    #[test]
+    fn recipient_input_parses_paths_and_full_fingerprints() {
+        let path = "certs/recipient public.asc";
+        let input: RecipientInput = path.parse().unwrap();
+        assert_eq!(input.path, Path::new(path));
+        assert!(input.subkey.is_none());
+
+        for fingerprint in ["a".repeat(40), "B".repeat(64)] {
+            let input: RecipientInput = format!("{path}={fingerprint}").parse().unwrap();
+            assert_eq!(input.path, Path::new(path));
+            assert_eq!(input.subkey, Some(fingerprint.parse().unwrap()));
+        }
+
+        for invalid in [
+            String::new(),
+            format!("={}", "A".repeat(40)),
+            format!("{path}="),
+            format!("{path}=0123456789ABCDEF"),
+            format!("{path}={}", "G".repeat(40)),
+        ] {
+            assert!(invalid.parse::<RecipientInput>().is_err(), "{invalid}");
+        }
+    }
 
     /// Fixture holding a populated source directory and node config.
     struct TestFixture {
