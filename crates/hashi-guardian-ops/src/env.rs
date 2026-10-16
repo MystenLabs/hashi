@@ -30,6 +30,8 @@ const KEYS: [&str; 13] = [
     "SUI_OPERATIONS_REF",
 ];
 
+const DEFAULT_TUNNEL_PORT: u16 = 3000;
+
 pub struct Env {
     path: PathBuf,
     values: BTreeMap<String, String>,
@@ -78,6 +80,18 @@ impl Env {
     pub fn require(&self, key: &str) -> Result<&str> {
         self.get(key)
             .ok_or_else(|| anyhow!("{} does not set {key}.", self.path.display()))
+    }
+
+    /// The local port slot a's tunnel uses; slot b's is the next one.
+    pub fn tunnel_port(&self) -> Result<u16> {
+        let Some(value) = self.get("TUNNEL_PORT") else {
+            return Ok(DEFAULT_TUNNEL_PORT);
+        };
+        value
+            .parse::<u16>()
+            .ok()
+            .filter(|port| port.checked_add(1).is_some())
+            .ok_or_else(|| anyhow!("TUNNEL_PORT is not a port: {value}"))
     }
 
     pub fn proxy_url(&self) -> Result<ProxyUrl> {
@@ -279,6 +293,12 @@ mod tests {
 
     #[test]
     fn checks_values() {
+        assert_eq!(env(&[]).tunnel_port().unwrap(), 3000);
+        assert_eq!(env(&[("TUNNEL_PORT", "3100")]).tunnel_port().unwrap(), 3100);
+        for bad in ["x", "65535", "70000", "-1"] {
+            assert!(env(&[("TUNNEL_PORT", bad)]).tunnel_port().is_err());
+        }
+
         let proxy = env(&[(
             "GUARDIAN_PROXY_URL",
             "https://guardian.testnet.hashi.sui.io",
