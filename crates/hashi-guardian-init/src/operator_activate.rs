@@ -20,7 +20,6 @@ use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitInfo;
 use hashi_types::guardian::OperatorInitMode;
 use hashi_types::guardian::RuntimeCommittee;
-use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -190,7 +189,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     let post = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
     verify_activated_info(
-        post,
+        post.info(),
+        &post.session_id(),
         &session_id,
         signing_pub_key,
         standby.enclave_btc_pubkey,
@@ -381,7 +381,8 @@ fn verify_oi_info_matches_provisioned_standby(
 }
 
 fn verify_activated_info(
-    post: VerifiedGuardianInfo,
+    post: &GuardianInfo,
+    post_session_id: &str,
     expected_session_id: &str,
     expected_signing_key: hashi_types::guardian::GuardianPubKey,
     expected_enclave_btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
@@ -389,34 +390,155 @@ fn verify_activated_info(
     expected_limiter_state: hashi_types::guardian::LimiterState,
 ) -> anyhow::Result<()> {
     ensure!(
-        post.session_id().as_str() == expected_session_id,
+        post_session_id == expected_session_id,
         "guardian session changed during operator activation: started {}, now {}",
         expected_session_id,
-        post.session_id()
+        post_session_id
     );
     ensure!(
-        post.info().signing_pub_key == expected_signing_key,
+        post.signing_pub_key == expected_signing_key,
         "guardian signing key changed during operator activation"
     );
     ensure!(
-        post.info().lifecycle == WithdrawStage::Activated.into(),
+        post.lifecycle == WithdrawStage::Activated.into(),
         "guardian is not an activated withdraw enclave"
     );
     ensure!(
-        post.info().enclave_btc_pubkey == Some(expected_enclave_btc_pubkey),
+        post.enclave_btc_pubkey == Some(expected_enclave_btc_pubkey),
         "Guardian BTC pubkey changed during operator activation"
     );
+    // The guardian serves once active, so withdrawals and committee handoffs may
+    // already have advanced both; it refuses to activate from any other state.
     ensure!(
-        post.info().current_committee_epoch == Some(expected_committee_epoch),
-        "Guardian committee epoch mismatch: expected {}, got {:?}",
+        post.current_committee_epoch
+            .is_some_and(|epoch| epoch >= expected_committee_epoch),
+        "Guardian committee epoch mismatch: expected at least {}, got {:?}",
         expected_committee_epoch,
-        post.info().current_committee_epoch
+        post.current_committee_epoch
     );
     ensure!(
-        post.info().limiter_state == Some(expected_limiter_state),
-        "Guardian limiter state mismatch: expected {:?}, got {:?}",
+        post.limiter_state.is_some_and(|state| {
+            state.next_seq > expected_limiter_state.next_seq || state == expected_limiter_state
+        }),
+        "Guardian limiter state mismatch: expected {:?} or a later next_seq, got {:?}",
         expected_limiter_state,
-        post.info().limiter_state
+        post.limiter_state
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::SessionID;
+
+    const EPOCH: u64 = 5;
+    const LIMITER_STATE: LimiterState = LimiterState {
+        num_tokens_available: 1_000,
+        last_updated_at: 100,
+        next_seq: 7,
+    };
+
+    fn btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
+        hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[9u8; 32]).unwrap(),
+        )
+    }
+
+    fn activated_info() -> GuardianInfo {
+        GuardianInfo {
+            lifecycle: WithdrawStage::Activated.into(),
+            enclave_btc_pubkey: Some(btc_pubkey()),
+            current_committee_epoch: Some(EPOCH),
+            limiter_state: Some(LIMITER_STATE),
+            ..GuardianInfo::mock_for_testing()
+        }
+    }
+
+    fn verify(post: &GuardianInfo) -> anyhow::Result<()> {
+        let expected_signing_key = activated_info().signing_pub_key;
+        verify_activated_info(
+            post,
+            &SessionID::from_signing_pubkey(&post.signing_pub_key),
+            &SessionID::from_signing_pubkey(&expected_signing_key),
+            expected_signing_key,
+            btc_pubkey(),
+            EPOCH,
+            LIMITER_STATE,
+        )
+    }
+
+    #[test]
+    fn verify_activated_info_accepts_the_expected_state() {
+        verify(&activated_info()).unwrap();
+    }
+
+    #[test]
+    fn verify_activated_info_accepts_a_limiter_advanced_by_a_withdrawal() {
+        let mut info = activated_info();
+        info.limiter_state = Some(LimiterState {
+            num_tokens_available: 400,
+            last_updated_at: 160,
+            next_seq: LIMITER_STATE.next_seq + 1,
+        });
+        verify(&info).unwrap();
+    }
+
+    #[test]
+    fn verify_activated_info_accepts_a_later_committee_epoch() {
+        let mut info = activated_info();
+        info.current_committee_epoch = Some(EPOCH + 1);
+        verify(&info).unwrap();
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_an_earlier_next_seq() {
+        let mut info = activated_info();
+        info.limiter_state = Some(LimiterState {
+            next_seq: LIMITER_STATE.next_seq - 1,
+            ..LIMITER_STATE
+        });
+        assert!(verify(&info).is_err());
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_an_earlier_committee_epoch() {
+        let mut info = activated_info();
+        info.current_committee_epoch = Some(EPOCH - 1);
+        assert!(verify(&info).is_err());
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_another_limiter_state_at_the_expected_next_seq() {
+        let mut info = activated_info();
+        info.limiter_state = Some(LimiterState {
+            num_tokens_available: LIMITER_STATE.num_tokens_available + 1,
+            ..LIMITER_STATE
+        });
+        assert!(verify(&info).is_err());
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_a_missing_epoch_or_limiter_state() {
+        let mut info = activated_info();
+        info.current_committee_epoch = None;
+        assert!(verify(&info).is_err());
+
+        let mut info = activated_info();
+        info.limiter_state = None;
+        assert!(verify(&info).is_err());
+    }
+
+    #[test]
+    fn verify_activated_info_rejects_another_session_or_lifecycle() {
+        let mut info = activated_info();
+        info.signing_pub_key = GuardianSignKeyPair::from([2u8; 32]).verification_key();
+        assert!(verify(&info).is_err());
+
+        let mut info = activated_info();
+        info.lifecycle = WithdrawStage::ProvisionerInitialized.into();
+        assert!(verify(&info).is_err());
+    }
 }
