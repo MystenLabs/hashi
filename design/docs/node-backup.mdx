@@ -252,6 +252,10 @@ You can combine multiple YubiKey recipients into one OpenPGP certificate.
 not threshold recovery. Only public certificates are exchanged, so the YubiKeys
 never need to be in the same location. Software-key recipients are also supported.
 
+This command requires the optional `backup-assemble-cert` feature. Build it with
+`cargo build -p hashi --release --features backup-assemble-cert`; the binary is
+`target/release/hashi`. Normal node builds omit this command and its GPG-agent dependencies.
+
 The certifier's primary key must support certification and signing and be
 available through `gpg-agent`. Pass its **public** certificate to `--primary-cert`:
 

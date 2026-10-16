@@ -476,6 +476,7 @@ pub enum ConfigCommands {
 
 #[derive(Subcommand)]
 pub enum BackupCommands {
+    #[cfg(feature = "backup-assemble-cert")]
     #[clap(about = "Assemble a multi-recipient OpenPGP backup certificate using gpg-agent")]
     AssembleCert {
         #[clap(
@@ -490,7 +491,7 @@ pub enum BackupCommands {
             value_name = "PATH[=SUBKEY_FINGERPRINT]",
             help = "Recipient public certificate, optionally selecting a full encryption subkey fingerprint; repeat for each recipient. Advertised OpenPGP features must match the certifier's"
         )]
-        recipient: Vec<commands::backup::RecipientInput>,
+        recipient: Vec<commands::backup::assemble_cert::RecipientInput>,
 
         #[clap(
             long,
@@ -1312,6 +1313,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
         },
         CliCommand::Backup { action } => match action {
+            #[cfg(feature = "backup-assemble-cert")]
             BackupCommands::AssembleCert {
                 primary_cert,
                 recipient,
@@ -1321,7 +1323,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 gpg_homedir,
             } => {
                 tokio::task::spawn_blocking(move || {
-                    commands::backup::assemble_cert(
+                    commands::backup::assemble_cert::run(
                         &primary_cert,
                         &recipient,
                         &recipient_attestation,

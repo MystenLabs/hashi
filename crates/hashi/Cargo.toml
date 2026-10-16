@@ -3,6 +3,18 @@ name = "hashi"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+default = []
+backup-assemble-cert = [
+  "dep:sequoia-gpg-agent",
+  "dep:sequoia-ipc",
+  "dep:sequoia-openpgp",
+]
+
+[[test]]
+name = "backup_cli_e2e"
+required-features = ["backup-assemble-cert"]
+
 [dependencies]
 sui-sdk-types.workspace = true
 sui-crypto.workspace = true
@@ -53,9 +65,9 @@ anyhow.workspace = true
 toml.workspace = true
 futures.workspace = true
 tracing-subscriber.workspace = true
-sequoia-gpg-agent.workspace = true
-sequoia-ipc.workspace = true
-sequoia-openpgp.workspace = true
+sequoia-gpg-agent = { workspace = true, optional = true }
+sequoia-ipc = { workspace = true, optional = true }
+sequoia-openpgp = { workspace = true, optional = true }
 rust-embed.workspace = true
 rustls.workspace = true
 ed25519-dalek.workspace = true
