@@ -19,6 +19,8 @@
 //!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
 //!    Sui approvals, report the violations, retire the complete flows, log
 //!    the progress watermarks, and save the snapshot one state check behind.
+//!    The UTXO pool is checked against Bitcoin once at startup and then
+//!    every `UTXO_CHECK_INTERVAL`.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
 //!    checked-through time is exported.
 //!
@@ -41,6 +43,7 @@ use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SUI;
+use crate::metrics::SOURCE_UTXO;
 use crate::store::Snapshot;
 use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
@@ -51,6 +54,11 @@ use hashi_types::guardian::time::now_timestamp_secs;
 
 /// How often the Sui, guardian and Bitcoin sources are polled.
 const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How often every UTXO in the pool is checked against Bitcoin. Every
+/// tick runs on the one audit task, so this pass delays the polls by the
+/// time its batched lookups take.
+const UTXO_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How often the state checks run.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -239,6 +247,15 @@ impl ContinuousAuditor {
     }
 
     /// Fails if the Bitcoin RPC fails.
+    async fn tick_utxo_check(&mut self) -> anyhow::Result<()> {
+        let started_at = now_timestamp_secs();
+        let findings = self.inner.check_utxo_pool()?;
+        self.report_findings(SOURCE_UTXO, &findings);
+        self.metrics.set_checked_through(SOURCE_UTXO, started_at);
+        Ok(())
+    }
+
+    /// Fails if the Bitcoin RPC fails.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
         let findings = self.inner.fetch_btc_info(&self.window)?;
@@ -286,17 +303,23 @@ impl ContinuousAuditor {
         Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
+        // After the Bitcoin lookups, so confirmed withdrawals and deposits
+        // have moved through the pool first.
+        let utxo = self.tick_utxo_check().await;
+        Self::log_initial_catch_up(SOURCE_UTXO, utxo);
         self.tick_state_checks_and_gc().await;
 
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
+        let mut utxo_ticker = tokio::time::interval(UTXO_CHECK_INTERVAL);
 
         sui_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         guardian_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        utxo_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // The initial catch-up above handled startup; consume each immediate
         // interval tick so the next pass runs one interval later.
@@ -304,6 +327,7 @@ impl ContinuousAuditor {
         guardian_ticker.tick().await;
         btc_ticker.tick().await;
         state_checks_ticker.tick().await;
+        utxo_ticker.tick().await;
 
         loop {
             tokio::select! {
@@ -324,6 +348,11 @@ impl ContinuousAuditor {
                 }
                 _ = state_checks_ticker.tick() => {
                     self.tick_state_checks_and_gc().await;
+                }
+                _ = utxo_ticker.tick() => {
+                    if let Err(error) = self.tick_utxo_check().await {
+                        tracing::warn!(source = SOURCE_UTXO, ?error, "UTXO pool check failed; continuing");
+                    }
                 }
             }
         }
@@ -355,6 +384,8 @@ mod tests {
     use crate::rpc::sui::tests::looked_up_approval;
     use crate::rpc::sui::tests::poller_scanned;
     use crate::timing::EventBounds;
+    use crate::timing::UTXO_AGE_CRITICAL;
+    use crate::timing::UTXO_AGE_WARN;
     use std::collections::HashMap;
 
     /// Timing with a day's E2 -> E3 delay and the protocol skews.
@@ -372,6 +403,8 @@ mod tests {
             .unwrap(),
             deposit_confirmation_skew: 300,
             deposit_request_watch: 172_800,
+            utxo_age_warn: UTXO_AGE_WARN,
+            utxo_age_critical: UTXO_AGE_CRITICAL,
         }
     }
 

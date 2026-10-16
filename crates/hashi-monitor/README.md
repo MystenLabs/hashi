@@ -105,10 +105,27 @@ pruned; a spent UTXO is a few dozen bytes. Keeping the pool between runs, in
 the monitor's snapshot, follows in a later change. Until then no pool is
 kept.
 
+Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
+held:
+
+- **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
+  (31 days, since honest coin selection refreshes UTXOs older than 30);
+- **safety** `UtxoTooOld` past `UTXO_AGE_CRITICAL` (45 days), and
+  `UtxoUnexpectedSpend` when a UTXO was spent by a transaction that is not a
+  confirmed Hashi withdrawal;
+- **safety** `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
+  confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
+  entered, so a missing answer is a reorg, a node without the transaction
+  index, or a monitor bug.
+
+A UTXO that a withdrawal the monitor follows spends is not checked. Bitcoin
+spends it about an hour before the flow completes, and an incomplete flow
+has its own finding.
+
 A UTXO paid to a bridge address with no `DepositRequested`, or with a wrong
-derivation path, is invisible to the monitor and out of scope. The daily
-check of every UTXO against Bitcoin, and the check against Move's records,
-follow in later changes.
+derivation path, is invisible to the monitor and out of scope. A later check
+of the pool against Move's records will report a withheld deposit on the
+first day instead of at the warn age.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
@@ -199,6 +216,8 @@ are constants in `src/timing.rs`, each with its reason:
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
 | deposit confirmation skew | 2 h | a deposit's confirmation time may be after its Hashi confirmation by this; a miner may date a block two hours ahead |
 | deposit request watch | 2 d | Bitcoin is asked about a deposit request's transaction for this; an honest deposit is assumed to confirm within it |
+| UTXO warn age | 31 d | an unspent bridge UTXO older than this is a liveness finding; honest coin selection refreshes UTXOs older than 30 days |
+| UTXO critical age | 45 d | an unspent bridge UTXO older than this is a safety finding; the recovery leaf opens at 60 days |
 
 ```yaml
 # Deployment identity and builds accepted when auditing Guardian logs.

@@ -115,6 +115,21 @@ pub enum MonitorFinding {
     /// An RPC answer contradicts one the monitor already holds. See
     /// `RpcInconsistency`.
     RpcInconsistency(RpcInconsistency),
+    /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
+    /// warn age, or past the critical age. The committee can spend a UTXO
+    /// alone 60 days after it confirms.
+    UtxoTooOld {
+        outpoint: OutPoint,
+        age_secs: u64,
+        threshold_secs: u64,
+        critical: bool,
+    },
+    /// A UTXO in the monitor's UTXO pool was spent on Bitcoin, and no Hashi
+    /// withdrawal confirmed on Bitcoin spent it.
+    UtxoUnexpectedSpend {
+        outpoint: OutPoint,
+        amount: u64,
+    },
     /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
     /// never held. The pool missed the UTXO's entry.
     UtxoUnknownInputSpent {
@@ -154,6 +169,12 @@ pub enum RpcInconsistency {
         first_txid: Txid,
         second_txid: Txid,
     },
+    /// A UTXO the monitor's UTXO pool holds does not exist on Bitcoin, and
+    /// its grace period has passed. Bitcoin confirmed it once.
+    UtxoVanished {
+        outpoint: OutPoint,
+        first_seen: UnixSeconds,
+    },
 }
 
 impl fmt::Display for RpcInconsistency {
@@ -176,6 +197,14 @@ impl fmt::Display for RpcInconsistency {
             } => write!(
                 f,
                 "UtxoSpentTwice(outpoint={outpoint}, first_txid={first_txid}, second_txid={second_txid})"
+            ),
+            Self::UtxoVanished {
+                outpoint,
+                first_seen,
+            } => write!(
+                f,
+                "UtxoVanished(outpoint={outpoint}, first_seen={})",
+                utc_timestamp(*first_seen),
             ),
         }
     }
@@ -200,6 +229,14 @@ impl MonitorFinding {
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
             Self::RpcInconsistency(_) => FindingCategory::Safety,
+            Self::UtxoTooOld { critical, .. } => {
+                if *critical {
+                    FindingCategory::Safety
+                } else {
+                    FindingCategory::Liveness
+                }
+            }
+            Self::UtxoUnexpectedSpend { .. } => FindingCategory::Safety,
             Self::UtxoUnknownInputSpent { .. } => FindingCategory::Liveness,
             Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
@@ -276,6 +313,21 @@ impl fmt::Display for MonitorFinding {
             Self::RpcInconsistency(inconsistency) => {
                 write!(f, "RpcInconsistency({inconsistency})")
             }
+            Self::UtxoTooOld {
+                outpoint,
+                age_secs,
+                threshold_secs,
+                critical,
+            } => write!(
+                f,
+                "UtxoTooOld(outpoint={outpoint}, age={}, threshold={}, critical={critical})",
+                human_duration(*age_secs),
+                human_duration(*threshold_secs),
+            ),
+            Self::UtxoUnexpectedSpend { outpoint, amount } => write!(
+                f,
+                "UtxoUnexpectedSpend(outpoint={outpoint}, amount={amount})"
+            ),
             Self::UtxoUnknownInputSpent { outpoint, txid } => {
                 write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
             }

@@ -45,6 +45,13 @@
 //! 5. In one pass, every add comes before every spend. A pass can answer a
 //!    deposit and the withdrawal that spends it, or a withdrawal and the one
 //!    that spends its change, in any order.
+//! 6. Once a day the monitor asks Bitcoin about every UTXO held. `check`
+//!    turns the answers into findings. An unspent UTXO is reported by age.
+//!    A spent UTXO is a spend outside Hashi. A missing UTXO is a phantom:
+//!    every UTXO held was confirmed when it entered, so a missing answer is
+//!    an RPC inconsistency. A UTXO that a withdrawal the monitor follows
+//!    spends is not checked: Bitcoin spends it about an hour before the
+//!    flow completes, and an incomplete flow has its own finding.
 //!
 //! Invariants:
 //! - An outpoint is held or spent, never both.
@@ -60,6 +67,8 @@
 //!   a UTXO is reported as a spend of an unknown UTXO.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
@@ -73,6 +82,8 @@ use crate::domain::ConfirmedWithdrawal;
 use crate::domain::UtxoOrigin;
 use crate::findings::MonitorFinding;
 use crate::findings::RpcInconsistency;
+use crate::rpc::btc::OutpointState;
+use crate::timing::Timing;
 
 /// A UTXO the bridge holds, by Bitcoin's account.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -262,5 +273,58 @@ impl UtxoPool {
             )),
             None => Some(MonitorFinding::UtxoUnknownInputSpent { outpoint, txid }),
         }
+    }
+
+    /// The findings of one pass over Bitcoin's answer for every UTXO held.
+    /// A UTXO with no answer counts as missing. A UTXO in `pending_inputs`,
+    /// one a withdrawal the monitor follows spends, is skipped.
+    pub fn check(
+        &self,
+        states: &HashMap<OutPoint, OutpointState>,
+        pending_inputs: &HashSet<OutPoint>,
+        now: UnixSeconds,
+        timing: &Timing,
+    ) -> Vec<MonitorFinding> {
+        let mut findings = Vec::new();
+        for (outpoint, utxo) in &self.utxos {
+            if pending_inputs.contains(outpoint) {
+                continue;
+            }
+            match states.get(outpoint) {
+                Some(OutpointState::Unspent { block_time }) => {
+                    let age_secs = now.saturating_sub(*block_time);
+                    if age_secs >= timing.utxo_age_critical {
+                        findings.push(MonitorFinding::UtxoTooOld {
+                            outpoint: *outpoint,
+                            age_secs,
+                            threshold_secs: timing.utxo_age_critical,
+                            critical: true,
+                        });
+                    } else if age_secs >= timing.utxo_age_warn {
+                        findings.push(MonitorFinding::UtxoTooOld {
+                            outpoint: *outpoint,
+                            age_secs,
+                            threshold_secs: timing.utxo_age_warn,
+                            critical: false,
+                        });
+                    }
+                }
+                Some(OutpointState::Spent) => {
+                    findings.push(MonitorFinding::UtxoUnexpectedSpend {
+                        outpoint: *outpoint,
+                        amount: utxo.amount,
+                    });
+                }
+                Some(OutpointState::Missing) | None => {
+                    findings.push(MonitorFinding::RpcInconsistency(
+                        RpcInconsistency::UtxoVanished {
+                            outpoint: *outpoint,
+                            first_seen: utxo.first_seen,
+                        },
+                    ));
+                }
+            }
+        }
+        findings
     }
 }
