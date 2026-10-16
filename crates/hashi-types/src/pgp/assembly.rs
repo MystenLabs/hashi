@@ -196,52 +196,332 @@ mod tests {
             .0
     }
 
-    #[test]
-    fn assembly_preserves_identity_and_exact_public_subkeys() {
-        let primary = identity();
-        let mut signer = primary
-            .primary_key()
+    fn signer(cert: &openpgp::Cert) -> openpgp::crypto::KeyPair {
+        cert.primary_key()
             .key()
             .clone()
             .parts_into_secret()
             .unwrap()
             .into_keypair()
-            .unwrap();
+            .unwrap()
+    }
+
+    struct CountingSigner {
+        inner: openpgp::crypto::KeyPair,
+        calls: usize,
+    }
+
+    impl Signer for CountingSigner {
+        fn public(
+            &self,
+        ) -> &openpgp::packet::Key<
+            openpgp::packet::key::PublicParts,
+            openpgp::packet::key::UnspecifiedRole,
+        > {
+            self.inner.public()
+        }
+
+        fn sign(
+            &mut self,
+            hash_algo: openpgp::types::HashAlgorithm,
+            digest: &[u8],
+        ) -> openpgp::Result<openpgp::crypto::mpi::Signature> {
+            self.calls += 1;
+            self.inner.sign(hash_algo, digest)
+        }
+    }
+
+    #[test]
+    fn assembly_preserves_identity_and_exact_public_subkeys() {
+        let primary = identity();
+        let mut signer = signer(&primary);
         let primary = primary.strip_secret_key_material();
-        let recipient = CertBuilder::new()
-            .add_transport_encryption_subkey()
-            .add_transport_encryption_subkey()
+        let recipients: Vec<_> = (0..3)
+            .map(|_| {
+                CertBuilder::new()
+                    .add_transport_encryption_subkey()
+                    .add_transport_encryption_subkey()
+                    .generate()
+                    .unwrap()
+                    .0
+                    .strip_secret_key_material()
+            })
+            .collect();
+        let keys: Vec<_> = recipients
+            .iter()
+            .enumerate()
+            .map(|(i, cert)| cert.keys().subkeys().nth(i % 2).unwrap().key())
+            .collect();
+        let fingerprints: Vec<_> = keys.iter().map(|key| key.fingerprint()).collect();
+        let selections: Vec<_> = recipients
+            .iter()
+            .zip(&fingerprints)
+            .map(|(cert, fingerprint)| EncryptionRecipient {
+                cert,
+                subkey: Some(fingerprint),
+            })
+            .collect();
+        let result =
+            assemble_public_cert(&primary, &selections, &BTreeMap::new(), false, &mut signer)
+                .unwrap();
+        assert_eq!(result.fingerprint(), primary.fingerprint());
+        assert_eq!(
+            result.cert.clone().retain_subkeys(|_| false),
+            primary,
+            "all original identity packets must be preserved"
+        );
+        assert!(!result.cert.is_tsk());
+        assert_eq!(result.cert.keys().subkeys().count(), fingerprints.len());
+        let bound: Vec<_> = super::super::usable_keys(&result.cert)
+            .for_transport_encryption()
+            .collect();
+        assert_eq!(
+            bound
+                .iter()
+                .map(|key| key.key().fingerprint())
+                .collect::<BTreeSet<_>>(),
+            fingerprints.iter().cloned().collect::<BTreeSet<_>>()
+        );
+        for key in keys {
+            let assembled = bound
+                .iter()
+                .find(|bound| bound.key().fingerprint() == key.fingerprint())
+                .unwrap();
+            assert_eq!(assembled.key().role_as_subordinate(), key);
+        }
+    }
+
+    #[test]
+    fn assembly_rejects_expired_or_revoked_recipient_keys_before_signing() {
+        let primary = identity();
+        let mut signer = CountingSigner {
+            inner: signer(&primary),
+            calls: 0,
+        };
+        let primary = primary.strip_secret_key_material();
+        let creation = SystemTime::now() - Duration::from_secs(7200);
+        let valid = CertBuilder::new()
+            .set_creation_time(creation)
+            .set_validity_period(Duration::from_secs(86400))
+            .add_subkey(
+                KeyFlags::empty().set_transport_encryption(),
+                Duration::from_secs(86400),
+                None,
+            )
             .generate()
             .unwrap()
-            .0
+            .0;
+        let valid_public = valid.clone().strip_secret_key_material();
+        for (case, primary_invalid, revoked) in [
+            ("expired subkey", false, false),
+            ("revoked subkey", false, true),
+            ("expired source primary", true, false),
+            ("revoked source primary", true, true),
+        ] {
+            let invalid = if revoked {
+                let mut source_signer = self::signer(&valid);
+                let revocation = if primary_invalid {
+                    CertRevocationBuilder::new()
+                        .build(&mut source_signer, &valid, None)
+                        .unwrap()
+                } else {
+                    SubkeyRevocationBuilder::new()
+                        .build(
+                            &mut source_signer,
+                            &valid,
+                            valid.keys().subkeys().next().unwrap().key(),
+                            None,
+                        )
+                        .unwrap()
+                };
+                valid.clone().insert_packets(revocation).unwrap().0
+            } else {
+                CertBuilder::new()
+                    .set_creation_time(creation)
+                    .set_validity_period(Duration::from_secs(if primary_invalid {
+                        3600
+                    } else {
+                        86400
+                    }))
+                    .add_subkey(
+                        KeyFlags::empty().set_transport_encryption(),
+                        Duration::from_secs(if primary_invalid { 86400 } else { 3600 }),
+                        None,
+                    )
+                    .generate()
+                    .unwrap()
+                    .0
+            }
             .strip_secret_key_material();
-        let key = recipient.keys().subkeys().next().unwrap().key();
-        let fingerprint = key.fingerprint();
-        let result = assemble_public_cert(
+            let fingerprint = invalid.keys().subkeys().next().unwrap().key().fingerprint();
+            let error = assemble_public_cert(
+                &primary,
+                &[
+                    EncryptionRecipient {
+                        cert: &valid_public,
+                        subkey: None,
+                    },
+                    EncryptionRecipient {
+                        cert: &invalid,
+                        subkey: Some(&fingerprint),
+                    },
+                ],
+                &BTreeMap::new(),
+                false,
+                &mut signer,
+            )
+            .unwrap_err();
+            let reason = if primary_invalid {
+                "no usable primary key"
+            } else {
+                "no matching usable encryption subkey"
+            };
+            assert!(error.to_string().contains(reason), "{case}: {error:#}");
+            assert_eq!(signer.calls, 0, "{case} must be rejected before signing");
+        }
+        let assembled = assemble_public_cert(
             &primary,
             &[EncryptionRecipient {
-                cert: &recipient,
-                subkey: Some(&fingerprint),
+                cert: &valid_public,
+                subkey: None,
             }],
             &BTreeMap::new(),
             false,
             &mut signer,
         )
         .unwrap();
-        assert_eq!(result.fingerprint(), primary.fingerprint());
+        assert_eq!(signer.calls, 1);
         assert_eq!(
-            result.cert.userids().next().unwrap().userid(),
-            primary.userids().next().unwrap().userid()
+            super::super::usable_keys(&assembled.cert)
+                .for_transport_encryption()
+                .next()
+                .unwrap()
+                .key()
+                .fingerprint(),
+            valid_public
+                .keys()
+                .subkeys()
+                .next()
+                .unwrap()
+                .key()
+                .fingerprint()
         );
-        assert!(!result.cert.is_tsk());
-        assert_eq!(result.cert.keys().subkeys().count(), 1);
-        let bound = super::super::usable_keys(&result.cert)
-            .for_transport_encryption()
-            .next()
-            .unwrap();
-        assert_eq!(bound.key().fingerprint(), fingerprint);
-        assert_eq!(bound.key().creation_time(), key.creation_time());
-        assert_eq!(bound.key().role_as_subordinate(), key);
+    }
+
+    #[test]
+    fn assembly_rejects_inappropriate_certifier_flags() {
+        let recipient = CertBuilder::new()
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap()
+            .0
+            .strip_secret_key_material();
+        for (flags, reason) in [
+            (KeyFlags::empty().set_signing(), "certification and signing"),
+            (
+                KeyFlags::empty().set_certification(),
+                "certification and signing",
+            ),
+            (
+                KeyFlags::empty()
+                    .set_certification()
+                    .set_signing()
+                    .set_transport_encryption(),
+                "encryption-capable primary",
+            ),
+            (
+                KeyFlags::empty()
+                    .set_certification()
+                    .set_signing()
+                    .set_storage_encryption(),
+                "encryption-capable primary",
+            ),
+        ] {
+            let primary = CertBuilder::new()
+                .set_primary_key_flags(flags.clone())
+                .generate()
+                .unwrap()
+                .0;
+            let mut signer = signer(&primary);
+            let error = assemble_public_cert(
+                &primary.strip_secret_key_material(),
+                &[EncryptionRecipient {
+                    cert: &recipient,
+                    subkey: None,
+                }],
+                &BTreeMap::new(),
+                false,
+                &mut signer,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(reason), "{flags:?}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn assembly_validates_later_evidence_and_surplus_evidence_before_signing() {
+        let primary = identity();
+        let mut signer = CountingSigner {
+            inner: signer(&primary),
+            calls: 0,
+        };
+        let primary = primary.strip_secret_key_material();
+        let recipients: Vec<_> = (0..2)
+            .map(|_| {
+                CertBuilder::new()
+                    .add_transport_encryption_subkey()
+                    .generate()
+                    .unwrap()
+                    .0
+                    .strip_secret_key_material()
+            })
+            .collect();
+        let selections: Vec<_> = recipients
+            .iter()
+            .map(|cert| EncryptionRecipient { cert, subkey: None })
+            .collect();
+        for (fingerprint, reason) in [
+            (
+                recipients[1]
+                    .keys()
+                    .subkeys()
+                    .next()
+                    .unwrap()
+                    .key()
+                    .fingerprint(),
+                "attestation is invalid",
+            ),
+            (primary.fingerprint(), "unselected encryption key"),
+        ] {
+            let evidence = BTreeMap::from([(
+                fingerprint,
+                RecipientAttestation {
+                    device_pem: b"invalid",
+                    dec_pem: b"invalid",
+                },
+            )]);
+            let error = assemble_public_cert(&primary, &selections, &evidence, false, &mut signer)
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error:#}");
+            assert_eq!(
+                signer.calls, 0,
+                "all evidence must be checked before signing"
+            );
+        }
+        let assembled =
+            assemble_public_cert(&primary, &selections, &BTreeMap::new(), false, &mut signer)
+                .unwrap();
+        assert_eq!(signer.calls, selections.len());
+        assert_eq!(
+            super::super::usable_keys(&assembled.cert)
+                .for_transport_encryption()
+                .map(|key| key.key().fingerprint())
+                .collect::<BTreeSet<_>>(),
+            recipients
+                .iter()
+                .map(|cert| cert.keys().subkeys().next().unwrap().key().fingerprint())
+                .collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]
