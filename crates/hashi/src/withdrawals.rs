@@ -8,6 +8,7 @@ use bitcoin::Network;
 use bitcoin::TxOut;
 use bitcoin::Weight;
 use bitcoin::taproot::TapLeafHash;
+use fastcrypto::groups::secp256k1::schnorr::SIGNATURE_SIZE_IN_BYTES;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::hash::Blake2b256;
@@ -19,6 +20,7 @@ use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
@@ -79,26 +81,101 @@ fn select_withdrawal_signing_indices(
             .collect());
     }
 
+    check_requested_input_indices(requested_input_indices, signing.num_inputs())?;
+    requested_input_indices
+        .iter()
+        .map(|&input_index| {
+            let i = input_index as usize;
+            signing
+                .pending_index(i)
+                .map(|_| i)
+                .ok_or_else(|| anyhow!("input index {input_index} is already signed"))
+        })
+        .collect()
+}
+
+fn check_requested_input_indices(
+    requested_input_indices: &[u64],
+    input_count: usize,
+) -> Result<(), MalformedSigningRequest> {
     let mut seen = BTreeSet::new();
-    let mut selected = Vec::with_capacity(requested_input_indices.len());
     for &input_index in requested_input_indices {
         if !seen.insert(input_index) {
-            anyhow::bail!("duplicate input index {input_index} in withdrawal signing request");
+            return Err(MalformedSigningRequest(format!(
+                "duplicate input index {input_index}"
+            )));
         }
-        let i = usize::try_from(input_index)
-            .map_err(|_| anyhow!("input index {input_index} out of range"))?;
-        if i >= signing.num_inputs() {
-            anyhow::bail!(
-                "input index {input_index} out of range for withdrawal with {} inputs",
-                signing.num_inputs()
-            );
+        if input_index >= input_count as u64 {
+            return Err(MalformedSigningRequest(format!(
+                "input index {input_index} out of range for a withdrawal with {input_count} inputs"
+            )));
         }
-        if signing.pending_index(i).is_none() {
-            anyhow::bail!("input index {input_index} is already signed");
-        }
-        selected.push(i);
     }
-    Ok(selected)
+    Ok(())
+}
+
+fn check_signature_lengths(
+    kind: &str,
+    signatures: &[Vec<u8>],
+    input_indices: impl IntoIterator<Item = u64>,
+) -> Result<(), MalformedSigningRequest> {
+    signatures
+        .iter()
+        .zip(input_indices)
+        .find(|(signature, _)| signature.len() != SIGNATURE_SIZE_IN_BYTES)
+        .map_or(Ok(()), |(_, input_index)| {
+            Err(MalformedSigningRequest(format!(
+                "{kind} signature for input {input_index} is not {SIGNATURE_SIZE_IN_BYTES} bytes"
+            )))
+        })
+}
+
+fn check_mpc_input_signatures_shape(
+    indices: &[u64],
+    signatures: &[Vec<u8>],
+    input_count: usize,
+) -> Result<(), MalformedSigningRequest> {
+    if indices.len() != signatures.len() {
+        return Err(MalformedSigningRequest(format!(
+            "chunk has {} indices and {} signatures",
+            indices.len(),
+            signatures.len()
+        )));
+    }
+    if indices.is_empty() {
+        return Err(MalformedSigningRequest("empty chunk".to_string()));
+    }
+    check_requested_input_indices(indices, input_count)?;
+    check_signature_lengths("MPC", signatures, indices.iter().copied())
+}
+
+fn check_withdrawal_tx_signing_shape(
+    signatures: &[Vec<u8>],
+    guardian_signatures: &[Vec<u8>],
+    input_count: usize,
+) -> Result<(), MalformedSigningRequest> {
+    if signatures.len() != input_count || guardian_signatures.len() != input_count {
+        return Err(MalformedSigningRequest(format!(
+            "{} MPC and {} guardian signatures for {input_count} inputs",
+            signatures.len(),
+            guardian_signatures.len()
+        )));
+    }
+    check_signature_lengths("MPC", signatures, 0..)?;
+    check_signature_lengths("guardian", guardian_signatures, 0..)
+}
+
+fn ensure_current_signing_epoch(txn: &WithdrawalTransaction, epoch: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        txn.signing.epoch == epoch,
+        "Stale presig assignment: pending withdrawal {} has signing epoch {}, current is {}. \
+         Either the leader hasn't called reallocate_presigs yet, \
+         or this node's on-chain state is behind.",
+        txn.id,
+        txn.signing.epoch,
+        epoch,
+    );
+    Ok(())
 }
 
 /// BTC that leaves the pool when this txn broadcasts — the amount that
@@ -998,20 +1075,11 @@ impl Hashi {
             return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
         }
 
-        anyhow::ensure!(
-            message.signatures.len() == txn.inputs.len(),
-            "MPC signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
-            message.signatures.len(),
+        check_withdrawal_tx_signing_shape(
+            &message.signatures,
+            &message.guardian_signatures,
             txn.inputs.len(),
-            message.withdrawal_id
-        );
-        anyhow::ensure!(
-            message.guardian_signatures.len() == txn.inputs.len(),
-            "Guardian signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
-            message.guardian_signatures.len(),
-            txn.inputs.len(),
-            message.withdrawal_id
-        );
+        )?;
 
         // Single committee-side rate-limit gate: signing is driven unconditionally,
         // so the committee independently re-validates the limit once here, before
@@ -1165,13 +1233,7 @@ impl Hashi {
         if txn.is_fully_signed() {
             return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
         }
-        anyhow::ensure!(
-            message.indices.len() == message.signatures.len(),
-            "Chunk indices ({}) and signatures ({}) length mismatch for WithdrawalTransaction {}",
-            message.indices.len(),
-            message.signatures.len(),
-            message.withdrawal_id
-        );
+        check_mpc_input_signatures_shape(&message.indices, &message.signatures, txn.inputs.len())?;
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
@@ -1316,6 +1378,36 @@ impl Hashi {
             .await
     }
 
+    fn require_signing_manager(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<Arc<crate::mpc::SigningManager>> {
+        self.signing_manager_for(epoch).ok_or_else(|| {
+            anyhow::anyhow!(
+                "SigningManager not available for epoch {epoch}; \
+                 reconciliation may be catching up"
+            )
+        })
+    }
+
+    pub fn check_withdrawal_signing_request(
+        &self,
+        withdrawal_txn_id: &Address,
+        requested_input_indices: &[u64],
+    ) -> anyhow::Result<()> {
+        let txn = self
+            .onchain_state()
+            .withdrawal_txn(withdrawal_txn_id)
+            .ok_or_else(|| {
+                anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
+            })?;
+        let epoch = self.onchain_state().epoch();
+        ensure_current_signing_epoch(&txn, epoch)?;
+        self.require_signing_manager(epoch)?;
+        check_requested_input_indices(requested_input_indices, txn.signing.num_inputs())?;
+        Ok(())
+    }
+
     pub async fn validate_withdrawal_signing(
         &self,
         withdrawal_txn_id: &Address,
@@ -1413,22 +1505,8 @@ impl Hashi {
     ) -> anyhow::Result<()> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        if txn.signing.epoch != epoch {
-            anyhow::bail!(
-                "Stale presig assignment: pending withdrawal {} has signing epoch {}, current is {}. \
-                 Either the leader hasn't called reallocate_presigs yet, \
-                 or this node's on-chain state is behind.",
-                txn.id,
-                txn.signing.epoch,
-                epoch,
-            );
-        }
-        let signing_manager = self.signing_manager_for(epoch).ok_or_else(|| {
-            anyhow::anyhow!(
-                "SigningManager not available for epoch {epoch}; \
-                 reconciliation may be catching up"
-            )
-        })?;
+        ensure_current_signing_epoch(txn, epoch)?;
+        let signing_manager = self.require_signing_manager(epoch)?;
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
@@ -1935,6 +2013,10 @@ impl WithdrawalApprovalError {
 #[derive(Debug, Error)]
 #[error("WithdrawalTransaction {0} is already finalized")]
 pub struct WithdrawalAlreadyFinalized(pub Address);
+
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct MalformedSigningRequest(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
@@ -2496,7 +2578,7 @@ mod tests {
             &mut result_rx,
             &index_by_id,
             &sink,
-            &crate::metrics::Metrics::new(&prometheus::Registry::new()),
+            &metrics::Metrics::new(&prometheus::Registry::new()),
             std::time::Instant::now(),
             || 0,
         )
@@ -2836,6 +2918,35 @@ mod tests {
         let err = select_withdrawal_signing_indices(&signing, &[1, 1]).unwrap_err();
 
         assert!(err.to_string().contains("duplicate input index 1"));
+    }
+
+    #[test]
+    fn requested_input_indices_refuse_repeats_and_out_of_range() {
+        assert!(check_requested_input_indices(&[], 2).is_ok());
+        assert!(check_requested_input_indices(&[1, 0], 2).is_ok());
+        assert!(check_requested_input_indices(&[1, 1], 2).is_err());
+        assert!(check_requested_input_indices(&[2], 2).is_err());
+    }
+
+    #[test]
+    fn mpc_input_signatures_shape_refuses_malformed_chunks() {
+        let sig = vec![0; SIGNATURE_SIZE_IN_BYTES];
+        assert!(check_mpc_input_signatures_shape(&[2, 0], &[sig.clone(), sig.clone()], 3).is_ok());
+        assert!(check_mpc_input_signatures_shape(&[], &[], 3).is_err());
+        assert!(check_mpc_input_signatures_shape(&[0, 1], std::slice::from_ref(&sig), 3).is_err());
+        assert!(check_mpc_input_signatures_shape(&[0, 0], &[sig.clone(), sig.clone()], 3).is_err());
+        assert!(check_mpc_input_signatures_shape(&[3], std::slice::from_ref(&sig), 3).is_err());
+        assert!(check_mpc_input_signatures_shape(&[0], &[vec![0; 63]], 3).is_err());
+    }
+
+    #[test]
+    fn withdrawal_tx_signing_shape_needs_one_signature_of_each_kind_per_input() {
+        let sig = vec![0; SIGNATURE_SIZE_IN_BYTES];
+        let two = vec![sig.clone(); 2];
+        assert!(check_withdrawal_tx_signing_shape(&two, &two, 2).is_ok());
+        assert!(check_withdrawal_tx_signing_shape(&two[..1], &two, 2).is_err());
+        assert!(check_withdrawal_tx_signing_shape(&two, &two[..1], 2).is_err());
+        assert!(check_withdrawal_tx_signing_shape(&two, &[sig, vec![0; 65]], 2).is_err());
     }
 
     #[test]
