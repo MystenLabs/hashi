@@ -476,6 +476,51 @@ pub enum ConfigCommands {
 
 #[derive(Subcommand)]
 pub enum BackupCommands {
+    #[cfg(feature = "backup-assemble-cert")]
+    #[clap(about = "Assemble a multi-recipient OpenPGP backup certificate using gpg-agent")]
+    AssembleCert {
+        #[clap(
+            long,
+            help = "Public certificate whose primary key will certify the recipients"
+        )]
+        primary_cert: std::path::PathBuf,
+
+        #[clap(
+            long,
+            required = true,
+            value_name = "PATH[=SUBKEY_FINGERPRINT]",
+            help = "Recipient public certificate, optionally selecting a full encryption subkey fingerprint; repeat for each recipient. Every recipient must support SEIPDv2 if the certifier advertises it"
+        )]
+        recipient: Vec<commands::backup::assemble_cert::RecipientInput>,
+
+        #[clap(
+            long,
+            num_args = 3,
+            action = clap::ArgAction::Append,
+            value_names = ["SUBKEY_FINGERPRINT", "DEVICE_PEM", "DEC_PEM"],
+            help = "YubiKey device and DEC attestation PEMs for a selected encryption subkey; repeat for each attested recipient. Supplied evidence is always verified against pinned Yubico issuers"
+        )]
+        recipient_attestation: Vec<std::path::PathBuf>,
+
+        #[clap(
+            long,
+            help = "Require valid YubiKey DEC attestation for every selected recipient encryption subkey"
+        )]
+        require_recipient_attestation: bool,
+
+        #[clap(
+            long,
+            help = "Write the armored public certificate here; must not already exist"
+        )]
+        output: std::path::PathBuf,
+
+        #[clap(
+            long,
+            help = "Existing GnuPG home for the certifying primary key (defaults to the agent's normal home)"
+        )]
+        gpg_homedir: Option<std::path::PathBuf>,
+    },
+
     /// Save an encrypted backup of the node config and referenced files
     Save {
         /// Path to the validator node config file
@@ -1268,6 +1313,28 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
         },
         CliCommand::Backup { action } => match action {
+            #[cfg(feature = "backup-assemble-cert")]
+            BackupCommands::AssembleCert {
+                primary_cert,
+                recipient,
+                recipient_attestation,
+                require_recipient_attestation,
+                output,
+                gpg_homedir,
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    commands::backup::assemble_cert::run(
+                        &primary_cert,
+                        &recipient,
+                        &recipient_attestation,
+                        require_recipient_attestation,
+                        &output,
+                        gpg_homedir.as_deref(),
+                    )
+                })
+                .await
+                .context("Backup certificate assembly task failed")??;
+            }
             BackupCommands::Save {
                 node_config_path,
                 backup_pgp_cert,

@@ -269,6 +269,41 @@ impl Fixture {
 }
 
 #[test]
+fn dec_only_binding_checks_selected_key_for_both_curves() {
+    for suite in [CipherSuite::Cv25519, CipherSuite::P256] {
+        let fixture = Fixture::new(pgp_cert_with_suite(suite, true, true));
+        let mut keys = usable_keys(&fixture.cert.cert).for_transport_encryption();
+        let selected = keys.next().unwrap();
+        super::verify_encryption_key_with_issuers(
+            selected.key().mpis(),
+            fixture.device.der(),
+            &fixture.statements[1],
+            &[fixture.issuer.der().as_ref()],
+        )
+        .unwrap();
+        let other = keys.next().unwrap();
+        let error = super::verify_encryption_key_with_issuers(
+            other.key().mpis(),
+            fixture.device.der(),
+            &fixture.statements[1],
+            &[fixture.issuer.der().as_ref()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        assert!(
+            super::verify_yubikey_encryption_key(
+                selected.key().role_as_subordinate(),
+                pem(fixture.device.der()).as_bytes(),
+                pem(&fixture.statements[1]).as_bytes(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not signed by a trusted issuer")
+        );
+    }
+}
+
+#[test]
 fn valid_binding_accepts_ecdsa_issuer_and_both_slot_keys() {
     let fixture = Fixture::new(pgp_cert(false, false));
     fixture.verify().unwrap();
@@ -624,6 +659,20 @@ fn dev_attestations_are_trusted_only_by_non_enclave_dev_builds() {
         assert_eq!(
             verify_yubikey_attestations(&cert, device, sig, dec).is_ok(),
             cfg!(feature = "non-enclave-dev"),
+        );
+        let selected = usable_keys(&cert.cert)
+            .for_transport_encryption()
+            .next()
+            .unwrap();
+        assert!(
+            super::verify_yubikey_encryption_key(
+                selected.key().role_as_subordinate(),
+                device,
+                dec,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not signed by a trusted issuer")
         );
     }
 }

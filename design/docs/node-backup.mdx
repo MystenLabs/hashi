@@ -245,6 +245,49 @@ files.
 
 6. Save the revocation, public key, and private key files in a secure location.
 
+## Assemble a multi-recipient backup certificate
+
+You can combine multiple YubiKey recipients into one OpenPGP certificate.
+**Any selected recipient can independently decrypt the backup**; this is 1-of-n,
+not threshold recovery. Only public certificates are exchanged, so the YubiKeys
+never need to be in the same location. Software-key recipients are also supported.
+
+This command requires the optional `backup-assemble-cert` feature. Build it with
+`cargo build -p hashi --release --features backup-assemble-cert`; the binary is
+`target/release/hashi`. Normal node builds omit this command and its GPG-agent dependencies.
+
+The certifier's primary key must support certification and signing and be
+available through `gpg-agent`. Pass its **public** certificate to `--primary-cert`:
+
+```sh
+hashi backup assemble-cert \
+  --primary-cert certifier-public.asc \
+  --recipient alice-public.asc \
+  --recipient bob-public.asc \
+  --output hashi-backup-cert.asc
+```
+
+Repeat `--recipient` for each public recipient certificate. If a certificate has
+multiple usable encryption subkeys, select one with
+`--recipient "alice-public.asc=FULL_ENCRYPTION_SUBKEY_FINGERPRINT"`.
+The certifier is not automatically a recipient; list it explicitly if needed.
+Use `--gpg-homedir PATH` to select a different GnuPG home. The output must not
+already exist; configure it as `backup-pgp-cert` below.
+
+The command reports each key's expiry. A finite certifier expiry limits the whole
+certificate: replace it before then to avoid backup and node-startup failures.
+If the certifier advertises SEIPDv2, every recipient must support it; a v1-only
+certifier can include recipients that also support v2.
+
+To verify a recipient's YubiKey provenance, add
+`--recipient-attestation SUBKEY_FINGERPRINT DEVICE_PEM DEC_PEM`, supplying the
+device attestation certificate and DEC statement. Repeat for each attested
+recipient. Supplied evidence is always verified; add
+`--require-recipient-attestation` to require it for every recipient.
+
+Before relying on the certificate, make a backup and confirm that each recipient
+can restore that same archive independently.
+
 ## Configuring hashi
 
 Every node config must provide `backup-pgp-cert` (a certificate file path or inline

@@ -26,6 +26,9 @@ use crate::cli::print_success;
 use crate::config::Config;
 use crate::db::Database;
 
+#[cfg(feature = "backup-assemble-cert")]
+pub mod assemble_cert;
+
 pub enum RestoreDecryptor {
     Unencrypted,
     LocalSecretKey { secret_key_path: PathBuf },
