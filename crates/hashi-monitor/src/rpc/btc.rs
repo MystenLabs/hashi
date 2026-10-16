@@ -147,8 +147,8 @@ impl BtcRpcClient {
     pub fn new(cfg: &Config) -> anyhow::Result<Self> {
         Ok(Self {
             transport: HttpJsonRpcTransport {
-                rpc_url: cfg.btc.resolve_rpc_url()?,
-                headers: cfg.btc.resolve_http_headers()?,
+                rpc_url: cfg.btc.rpc_url.clone(),
+                headers: cfg.btc.http_headers.clone(),
             },
             confirmation_cache: RefCell::new(HashMap::new()),
         })
@@ -532,16 +532,10 @@ mod tests {
     use super::MIN_CONFIRMATIONS;
     use super::TxConfirmation;
     use crate::config::BtcConfig;
-    use crate::config::ClockSkews;
     use crate::config::Config;
-    use crate::config::NextEventDelays;
-    use crate::config::SuiConfig;
     use crate::domain::DepositEventType;
     use crate::domain::DepositId;
     use crate::domain::MonitorDepositEvent;
-    use crate::domain::WithdrawalEventType;
-    use hashi_types::guardian::DeploymentConfig;
-    use hashi_types::guardian::S3Credentials;
 
     static TRACING_INIT: Once = Once::new();
 
@@ -554,53 +548,20 @@ mod tests {
         });
     }
 
+    /// The test config pointed at a local regtest node with its basic auth.
     fn test_config(rpc_url: String) -> Config {
-        Config {
-            next_event_delays: NextEventDelays::new(vec![
-                (WithdrawalEventType::E1HashiApproved, 100),
-                (WithdrawalEventType::E2GuardianApproved, 200),
-            ])
-            .expect("valid next event delays"),
-            clock_skews: ClockSkews::new(vec![
-                (WithdrawalEventType::E1HashiApproved, 10),
-                (WithdrawalEventType::E2GuardianApproved, 30),
-            ])
-            .expect("valid clock skews"),
-            deposit_clock_skew: 10,
-            withdrawal_predecessor_lookback: 60 * 60,
-            deployment: DeploymentConfig {
-                bucket_info: hashi_types::guardian::S3BucketInfo {
-                    name: "bucket".to_string(),
-                    region: "us-east-1".to_string(),
-                },
-                retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
-                bitcoin_network: bitcoin::Network::Regtest,
-                pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
-                    hashi_types::guardian::BuildPcrs::mock_for_testing("", 1),
-                    vec![],
-                )
-                .expect("valid PCR allowlist"),
-            },
-            s3_credentials: Some(S3Credentials {
-                access_key: "access-key".to_string(),
-                secret_key: "secret-key".to_string(),
-                session_token: None,
-            }),
-            sui: SuiConfig {
-                rpc_url: "http://sui".to_string(),
-                package_id: format!("0x{}", "11".repeat(32)),
-            },
-            btc: BtcConfig {
-                rpc_url,
-                http_headers: BTreeMap::from([(
-                    "Authorization".to_string(),
-                    format!(
-                        "Basic {}",
-                        Base64::encode_string(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
-                    ),
-                )]),
-            },
-        }
+        let mut cfg = Config::for_tests();
+        cfg.btc = BtcConfig {
+            rpc_url,
+            http_headers: BTreeMap::from([(
+                "Authorization".to_string(),
+                format!(
+                    "Basic {}",
+                    Base64::encode_string(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
+                ),
+            )]),
+        };
+        cfg
     }
 
     // Note that this test requires local bitcoind running.
