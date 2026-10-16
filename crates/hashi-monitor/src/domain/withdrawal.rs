@@ -1,31 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The monitor's core types: the events it follows, their ids, and the
-//! cursors of its sources.
-//!
-//! Why it exists: every source, Sui, the guardian's S3 logs and Bitcoin, is
-//! parsed into one of these events, and the state machines reason about the
-//! events alone. Each event type has a constructor named for its source, so
-//! the mapping from a source's shape to the monitor's lives next to the type.
-//!
-//! The flows:
-//! - A withdrawal is three events: E1, the Hashi approval on Sui; E2, the
-//!   guardian's signature in its log; E3, the transaction confirmed on
-//!   Bitcoin. Every event states the transaction in Move's shape,
-//!   `WithdrawalTx`, so the sources can be compared as a whole.
-//! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
-//!   Hashi's `DepositConfirmed` on Sui.
-//!
-//! Formatting of times lives in `time`, and the bridge keys in `keys`.
+//! The withdrawal flow's events and the transaction they state.
 
+use crate::domain::BtcConfirmation;
 use std::fmt;
 
 use anyhow::Context as _;
-use bitcoin::OutPoint;
-use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
-use bitcoin::TxOut;
 use bitcoin::Txid;
 use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::bitcoin::DerivationPath;
@@ -36,7 +18,6 @@ use hashi_types::bitcoin::witness_program_from_address;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
-use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
@@ -46,84 +27,6 @@ use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
-use crate::time::utc_timestamp;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MonitorEvent {
-    Withdrawal(MonitorWithdrawalEvent),
-    Deposit(MonitorDepositEvent),
-}
-
-impl fmt::Display for MonitorEvent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Withdrawal(event) => write!(
-                formatter,
-                "Withdrawal(type={:?}, wid={}, timestamp={}, btc_txid={})",
-                event.event_type,
-                event.wid,
-                utc_timestamp(event.timestamp_secs),
-                event.btc_txid,
-            ),
-            Self::Deposit(event) => write!(
-                formatter,
-                "Deposit(type={:?}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
-                event.event_type,
-                event.deposit_id,
-                utc_timestamp(event.timestamp_secs),
-                event.amount,
-                event.script_pubkey,
-            ),
-        }
-    }
-}
-
-/// Stable identifier for a monitored deposit: its Bitcoin outpoint.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DepositId(OutPoint);
-
-impl DepositId {
-    pub fn new(txid: Txid, vout: u32) -> Self {
-        Self(OutPoint { txid, vout })
-    }
-
-    pub fn txid(self) -> Txid {
-        self.0.txid
-    }
-
-    pub fn vout(self) -> u32 {
-        self.0.vout
-    }
-}
-
-impl fmt::Display for DepositId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-/// Correlation identifier for an event in the monitor's withdrawal or deposit model.
-/// This is not a chain-native event ID.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MonitorEventId {
-    Withdrawal(WithdrawalID),
-    Deposit(DepositId),
-}
-
-impl fmt::Display for MonitorEventId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Withdrawal(wid) => write!(formatter, "wid={wid}"),
-            Self::Deposit(deposit_id) => write!(formatter, "deposit_id={deposit_id}"),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
-pub enum MonitorEventType {
-    Withdrawal(WithdrawalEventType),
-    Deposit(DepositEventType),
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonitorWithdrawalEvent {
@@ -232,7 +135,7 @@ impl MonitorWithdrawalEvent {
     /// E3 from Bitcoin's confirmation of the withdrawal `wid` and `btc_txid`.
     /// It repeats `tx`, which the state machine already holds.
     pub fn from_btc(
-        confirmation: &TxConfirmation,
+        confirmation: &BtcConfirmation,
         wid: WithdrawalID,
         btc_txid: Txid,
         tx: WithdrawalTx,
@@ -375,74 +278,6 @@ pub enum WithdrawalEventType {
     E3BtcConfirmed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MonitorDepositEvent {
-    pub event_type: DepositEventType,
-    pub timestamp_secs: UnixSeconds,
-    pub deposit_id: DepositId,
-    /// Satoshis in the deposit output. Sui gives the claimed amount, Bitcoin
-    /// the paid amount.
-    pub amount: u64,
-    /// Script the deposit output pays. Sui gives the bridge address of the
-    /// claimed derivation path, Bitcoin the paid script.
-    pub script_pubkey: ScriptBuf,
-}
-
-impl MonitorDepositEvent {
-    /// E2 from Hashi's `DepositConfirmed`. Its Move payload has no
-    /// timestamp, so the containing checkpoint's time is used. The claim's
-    /// derivation path becomes the bridge script the state machine compares
-    /// with the paid output.
-    pub fn from_sui(
-        event: DepositConfirmed,
-        checkpoint_timestamp_secs: UnixSeconds,
-        keys: &HashiBTCKeys,
-    ) -> Self {
-        Self {
-            event_type: DepositEventType::E2HashiDeposited,
-            timestamp_secs: checkpoint_timestamp_secs,
-            deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
-            amount: event.utxo.amount,
-            script_pubkey: keys.script_pubkey(event.utxo.derivation_path.as_ref()),
-        }
-    }
-
-    /// E1 from Bitcoin's confirmation: the output at `deposit_id`'s vout, or
-    /// `None` if the transaction has no output there.
-    pub fn from_btc(confirmation: &TxConfirmation, deposit_id: DepositId) -> Option<Self> {
-        let output = confirmation.outputs.get(deposit_id.vout() as usize)?;
-        Some(Self {
-            event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: confirmation.confirmed_time,
-            deposit_id,
-            amount: output.value.to_sat(),
-            script_pubkey: output.script_pubkey.clone(),
-        })
-    }
-}
-
-/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
-#[derive(Clone, Debug)]
-pub struct TxConfirmation {
-    /// The time of the block that holds the transaction. The recovery leaf's
-    /// clock starts at this block, so a coin's age counts from here.
-    pub block_time: UnixSeconds,
-    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
-    /// The bridge acts on that block, so the Bitcoin events carry this time.
-    pub confirmed_time: UnixSeconds,
-    /// The transaction's outputs, in order.
-    pub outputs: Vec<TxOut>,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
-pub enum DepositEventType {
-    /// deposit confirmed event on btc
-    E1BtcConfirmed,
-    /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
-    /// timestamp, supplied with the transaction by Sui gRPC.
-    E2HashiDeposited,
-}
-
 impl WithdrawalEventType {
     pub const NON_TERMINAL_EVENTS: [WithdrawalEventType; 2] =
         [Self::E1HashiApproved, Self::E2GuardianApproved];
@@ -467,39 +302,6 @@ impl WithdrawalEventType {
             WithdrawalEventType::E3BtcConfirmed => Some(WithdrawalEventType::E2GuardianApproved),
         }
     }
-}
-
-/// Per-source cursors tracking how far we've read from each data source.
-#[derive(Clone, Copy, Debug)]
-pub struct Cursors {
-    pub sui: UnixSeconds,
-    pub guardian: UnixSeconds,
-}
-
-impl Cursors {
-    pub fn for_event_type(&self, et: WithdrawalEventType) -> UnixSeconds {
-        match et {
-            WithdrawalEventType::E1HashiApproved => self.sui,
-            WithdrawalEventType::E2GuardianApproved => self.guardian,
-            WithdrawalEventType::E3BtcConfirmed => {
-                unreachable!("E3 cursor is tracked per-withdrawal via btc_checked_at")
-            }
-        }
-    }
-
-    pub fn min(&self) -> UnixSeconds {
-        self.sui.min(self.guardian)
-    }
-}
-
-/// Outcome of a Guardian or Sui poll
-pub enum PollOutcome {
-    /// The events of the newly scanned range, and the findings of events that failed a check.
-    CursorAdvanced {
-        events: Vec<MonitorEvent>,
-        findings: Vec<MonitorFinding>,
-    },
-    CursorUnmoved,
 }
 
 #[cfg(test)]

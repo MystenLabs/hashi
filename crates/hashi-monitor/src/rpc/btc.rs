@@ -23,7 +23,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::domain::TxConfirmation;
+use crate::domain::BtcConfirmation;
 
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
@@ -32,7 +32,7 @@ const MIN_CONFIRMATIONS: u64 = 6;
 
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
-    confirmation_cache: RefCell<HashMap<Txid, Option<TxConfirmation>>>,
+    confirmation_cache: RefCell<HashMap<Txid, Option<BtcConfirmation>>>,
 }
 
 struct HttpJsonRpcTransport {
@@ -169,7 +169,7 @@ impl BtcRpcClient {
     /// - `Ok(Some(confirmation))` if txid is confirmed,
     /// - `Ok(None)` if txid is not seen or txid is seen but not confirmed,
     /// - `Err(...)` for all other errors
-    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
+    pub fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<BtcConfirmation>> {
         if let Some(result) = self.confirmation_cache.borrow().get(&txid) {
             return Ok(result.clone());
         }
@@ -256,7 +256,7 @@ impl HttpJsonRpcTransport {
         Ok(())
     }
 
-    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<TxConfirmation>> {
+    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<BtcConfirmation>> {
         let response = self.call(
             "getrawtransaction",
             serde_json::json!([txid.to_string(), true]),
@@ -287,7 +287,7 @@ impl HttpJsonRpcTransport {
             .get(&block_hash)
             .copied()
             .with_context(|| format!("missing block times for {block_hash}"))?;
-        Ok(Some(TxConfirmation {
+        Ok(Some(BtcConfirmation {
             block_time,
             confirmed_time,
             outputs,
@@ -297,7 +297,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmations(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
         let mut confirmations = HashMap::with_capacity(txids.len());
         for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
             confirmations.extend(self.lookup_confirmation_batch(chunk)?);
@@ -316,7 +316,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmation_batch(
         &self,
         txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<TxConfirmation>>> {
+    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
         let requests = txids
             .iter()
             .enumerate()
@@ -384,7 +384,7 @@ impl HttpJsonRpcTransport {
                             .get(&hash)
                             .copied()
                             .with_context(|| format!("missing block times for {hash}"))?;
-                        Ok::<_, anyhow::Error>(TxConfirmation {
+                        Ok::<_, anyhow::Error>(BtcConfirmation {
                             block_time,
                             confirmed_time,
                             outputs,
@@ -591,10 +591,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::BlockchainInfo;
+    use super::BtcConfirmation;
     use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
-    use super::TxConfirmation;
     use crate::config::BtcConfig;
     use crate::config::Config;
     use crate::domain::DepositEventType;
@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn a_confirmation_builds_the_deposit_event_of_its_output() {
         let script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-        let confirmation = TxConfirmation {
+        let confirmation = BtcConfirmation {
             block_time: 30,
             confirmed_time: 90,
             outputs: vec![

@@ -4,13 +4,13 @@
 //! Deposit state machine: Hashi's claim checked against Bitcoin.
 
 use crate::config::Config;
+use crate::domain::BtcConfirmation;
 use crate::domain::DepositEventType;
 use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
-use crate::domain::TxConfirmation;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
@@ -83,7 +83,7 @@ impl DepositStateMachine {
     }
 
     /// Complete the flow with the confirmed transaction and return its findings.
-    fn resolve(&mut self, confirmation: &TxConfirmation) -> Vec<MonitorFinding> {
+    fn resolve(&mut self, confirmation: &BtcConfirmation) -> Vec<MonitorFinding> {
         self.btc_resolved = true;
         let deposit_id = self.deposit_id();
         let Some(e_btc) = MonitorDepositEvent::from_btc(confirmation, deposit_id) else {
@@ -195,8 +195,8 @@ mod tests {
     }
 
     /// A confirmed transaction that pays `paid` sats to `script_pubkey` at vout 1.
-    fn confirmation(paid: u64, script_pubkey: ScriptBuf) -> TxConfirmation {
-        TxConfirmation {
+    fn confirmation(paid: u64, script_pubkey: ScriptBuf) -> BtcConfirmation {
+        BtcConfirmation {
             block_time: 30,
             confirmed_time: 90,
             outputs: vec![
