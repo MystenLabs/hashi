@@ -48,17 +48,27 @@ pub fn select_restore_decryptor(
 ) -> Result<RestoreDecryptor> {
     match backup::archive_format(archive)? {
         backup::BackupArchiveFormat::Unencrypted => Ok(RestoreDecryptor::Unencrypted),
-        backup::BackupArchiveFormat::Encrypted => match (secret_key_path, use_gpg_agent) {
-            (Some(path), false) => Ok(RestoreDecryptor::LocalSecretKey {
-                secret_key_path: path.to_owned(),
-            }),
-            (None, true) => Ok(RestoreDecryptor::GpgAgent {
-                homedir: homedir.map(Path::to_owned),
-            }),
-            _ => anyhow::bail!(
-                "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
-            ),
-        },
+        backup::BackupArchiveFormat::Encrypted => {
+            select_encrypted_decryptor(secret_key_path, use_gpg_agent, homedir)
+        }
+    }
+}
+
+fn select_encrypted_decryptor(
+    secret_key_path: Option<&Path>,
+    use_gpg_agent: bool,
+    homedir: Option<&Path>,
+) -> Result<RestoreDecryptor> {
+    match (secret_key_path, use_gpg_agent) {
+        (Some(path), false) => Ok(RestoreDecryptor::LocalSecretKey {
+            secret_key_path: path.to_owned(),
+        }),
+        (None, true) => Ok(RestoreDecryptor::GpgAgent {
+            homedir: homedir.map(Path::to_owned),
+        }),
+        _ => anyhow::bail!(
+            "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+        ),
     }
 }
 
@@ -158,6 +168,28 @@ pub async fn export_mpc_public_key(config: &CliConfig, output: &Path) -> Result<
     Ok(())
 }
 
+/// Export only the recovery record, encrypted directly to the coordinator.
+pub fn export_mpc_recovery_record(
+    archive: &Path,
+    decryptor: RestoreDecryptor,
+    output: &Path,
+    output_recipient: &PgpPublicCert,
+) -> Result<()> {
+    anyhow::ensure!(
+        !archive
+            .to_str()
+            .is_some_and(|path| path.starts_with("s3://")),
+        "MPC recovery accepts local inputs only; restore S3 backups locally first"
+    );
+    let record = backup::read_mpc_recovery_record(open_backup_stream(archive, &decryptor)?)?;
+    write_encrypted_bcs(output, &record, output_recipient)?;
+    print_success(&format!(
+        "MPC recovery record exported: {}",
+        output.display()
+    ));
+    Ok(())
+}
+
 /// Recover locally without consulting CLI network configuration or constructing a client.
 pub fn recover_mpc_key(
     inputs: &[PathBuf],
@@ -188,13 +220,27 @@ pub fn recover_mpc_key(
             "MPC recovery accepts local inputs only; restore S3 backups locally first"
         );
         let record = (|| -> Result<backup::MpcRecoveryRecord> {
-            if input
-                .extension()
-                .is_some_and(|extension| extension == "bcs")
+            let encrypted_record = input
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().ends_with(b".bcs.asc"));
+            if encrypted_record
+                || input
+                    .extension()
+                    .is_some_and(|extension| extension == "bcs")
             {
-                let record: backup::MpcRecoveryRecord =
-                    bcs::from_bytes(&fs::read(input).context("Failed to read recovery record")?)
-                        .map_err(|_| anyhow::anyhow!("Invalid MPC recovery-record BCS"))?;
+                let decryptor = if encrypted_record {
+                    select_encrypted_decryptor(secret_key_path, use_gpg_agent, homedir)?
+                } else {
+                    RestoreDecryptor::Unencrypted
+                };
+                let mut bytes = Vec::new();
+                // Authenticate the complete message (including gpg's exit status)
+                // before decoding or using any private recovery material.
+                open_backup_stream(input, &decryptor)?
+                    .read_to_end(&mut bytes)
+                    .context("Failed to read complete MPC recovery record")?;
+                let record: backup::MpcRecoveryRecord = bcs::from_bytes(&bytes)
+                    .map_err(|_| anyhow::anyhow!("Invalid MPC recovery-record BCS"))?;
                 record.validate()?;
                 Ok(record)
             } else {

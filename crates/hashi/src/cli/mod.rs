@@ -546,9 +546,35 @@ pub enum BackupCommands {
         output: std::path::PathBuf,
     },
 
+    /// Export a backup's recovery record encrypted to an offline recovery coordinator
+    ExportMpcRecoveryRecord {
+        /// Local .tar or .tar.asc backup archive
+        backup: std::path::PathBuf,
+
+        /// New encrypted recovery-record file (recommended: record.bcs.asc; never overwritten)
+        #[clap(long)]
+        output: std::path::PathBuf,
+
+        /// Public OpenPGP certificate (inline armor or path) for encrypting the record
+        #[clap(long, value_name = "ARMORED-CERT-OR-PATH", allow_hyphen_values = true)]
+        output_pgp_cert: String,
+
+        /// OpenPGP secret key for the encrypted backup
+        #[clap(long, conflicts_with = "use_gpg_agent")]
+        backup_pgp_secret_key: Option<std::path::PathBuf>,
+
+        /// Decrypt the backup using the local or forwarded gpg-agent
+        #[clap(long)]
+        use_gpg_agent: bool,
+
+        /// GNUPGHOME to use with --use-gpg-agent
+        #[clap(long, requires = "use_gpg_agent")]
+        gpg_homedir: Option<std::path::PathBuf>,
+    },
+
     /// Recover the root MPC key on a trusted offline machine (contains private key material)
     RecoverMpcKey {
-        /// Local .tar, .tar.asc, or extracted recovery-record .bcs files
+        /// Local .tar, .tar.asc, or standalone recovery-record .bcs / .bcs.asc files
         #[clap(required = true, num_args = 1..)]
         inputs: Vec<std::path::PathBuf>,
 
@@ -564,11 +590,11 @@ pub enum BackupCommands {
         #[clap(long, value_name = "ARMORED-CERT-OR-PATH", allow_hyphen_values = true)]
         output_pgp_cert: String,
 
-        /// OpenPGP secret key for encrypted archives
+        /// OpenPGP secret key for encrypted archives or recovery records
         #[clap(long, conflicts_with = "use_gpg_agent")]
         backup_pgp_secret_key: Option<std::path::PathBuf>,
 
-        /// Decrypt encrypted archives using the local or forwarded gpg-agent
+        /// Decrypt encrypted inputs using the local or forwarded gpg-agent
         #[clap(long)]
         use_gpg_agent: bool,
 
@@ -1417,6 +1443,28 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             BackupCommands::ExportMpcPublicKey { output } => {
                 commands::backup::export_mpc_public_key(&config, &output).await?;
+            }
+            BackupCommands::ExportMpcRecoveryRecord {
+                backup,
+                output,
+                output_pgp_cert,
+                backup_pgp_secret_key,
+                use_gpg_agent,
+                gpg_homedir,
+            } => {
+                let output_recipient = commands::backup::resolve_pgp_recipient(output_pgp_cert)?;
+                let decryptor = commands::backup::select_restore_decryptor(
+                    &backup,
+                    backup_pgp_secret_key.as_deref(),
+                    use_gpg_agent,
+                    gpg_homedir.as_deref(),
+                )?;
+                commands::backup::export_mpc_recovery_record(
+                    &backup,
+                    decryptor,
+                    &output,
+                    &output_recipient,
+                )?;
             }
             BackupCommands::RecoverMpcKey {
                 inputs,

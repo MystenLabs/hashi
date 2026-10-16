@@ -259,6 +259,38 @@ impl Fixture {
             command.arg("--output-pgp-cert").arg(recipient);
         }
         let result = command.output().unwrap();
+        self.assert_safe(&result);
+        result
+    }
+
+    fn export(
+        &self,
+        archive: &Path,
+        output: &Path,
+        backend: &[&std::ffi::OsStr],
+        recipient: Option<&std::ffi::OsStr>,
+    ) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hashi"));
+        command
+            .env_clear()
+            .env("HOME", self.dir.path())
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .current_dir(self.dir.path())
+            .args(["backup", "export-mpc-recovery-record", "--config"])
+            .arg(self.dir.path().join("cli.toml"))
+            .args(["--sui-rpc-url", OFFLINE_RPC, "--output"])
+            .arg(output)
+            .args(backend)
+            .arg(archive);
+        if let Some(recipient) = recipient {
+            command.arg("--output-pgp-cert").arg(recipient);
+        }
+        let result = command.output().unwrap();
+        self.assert_safe(&result);
+        result
+    }
+
+    fn assert_safe(&self, result: &Output) {
         for stream in [&result.stdout, &result.stderr] {
             for secret in &self.forbidden {
                 assert!(
@@ -273,7 +305,6 @@ impl Fixture {
                 "CLI modified a recovery input"
             );
         }
-        result
     }
 
     fn local_backend(&self) -> [&std::ffi::OsStr; 2] {
@@ -531,24 +562,7 @@ fn rejects_damaged_archives_missing_records_and_decryption_failures() {
         &["--backup-pgp-secret-key".as_ref(), wrong_key.as_os_str()],
     );
     let encrypted = fs::read(&fixture.encrypted[3]).unwrap();
-    // Preserve valid armor but corrupt the encrypted packet's authentication trailer.
-    // Omitting the optional armor CRC ensures rejection is not merely a CRC failure.
-    let armor = std::str::from_utf8(&encrypted).unwrap();
-    let payload: String = armor
-        .lines()
-        .skip_while(|line| !line.is_empty())
-        .skip(1)
-        .take_while(|line| !line.starts_with('=') && !line.starts_with("-----"))
-        .collect();
-    let mut packet = Base64::decode_vec(&payload).unwrap();
-    *packet.last_mut().unwrap() ^= 1;
-    let encoded = Base64::encode_string(&packet);
-    let mut tampered = b"-----BEGIN PGP MESSAGE-----\n\n".to_vec();
-    for line in encoded.as_bytes().chunks(64) {
-        tampered.extend_from_slice(line);
-        tampered.push(b'\n');
-    }
-    tampered.extend_from_slice(b"-----END PGP MESSAGE-----\n");
+    let tampered = tamper_authentication_trailer(&encrypted);
     let raw = fs::read(&fixture.raw[3]).unwrap();
     for (name, bytes) in [
         ("tampered.tar.asc", tampered),
@@ -587,10 +601,230 @@ fn rejects_damaged_archives_missing_records_and_decryption_failures() {
     let empty = fixture.dir.path().join("no-record.tar");
     fs::write(&empty, tar).unwrap();
     fixture.rejects(
-        &[fixture.raw[0].clone(), fixture.raw[1].clone(), empty],
+        &[
+            fixture.raw[0].clone(),
+            fixture.raw[1].clone(),
+            empty.clone(),
+        ],
         &fixture.public,
         &[],
     );
+    let output_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+    assert!(
+        !fixture
+            .export(
+                &empty,
+                &output_dir.path().join("record.bcs.asc"),
+                &[],
+                Some(fixture.output_cert.as_os_str()),
+            )
+            .status
+            .success()
+    );
+    assert!(fs::read_dir(output_dir.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn exports_distinct_operator_backups_for_coordinator_only_recovery() {
+    let mut fixture = Fixture::new();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Database::open(db_dir.path()).unwrap();
+    let mut manifest = build_backup_manifest(&[], db_dir.path()).unwrap();
+    manifest.recovery = Some(MPC_RECOVERY_FILE_NAME.into());
+    let coordinator_secret = fixture.dir.path().join("coordinator-secret.asc");
+    fs::write(&coordinator_secret, &fixture.output_secret).unwrap();
+    let coordinator_backend = [
+        "--backup-pgp-secret-key".as_ref(),
+        coordinator_secret.as_os_str(),
+    ];
+    let output_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+    let mut exports = Vec::new();
+    for id in 0..2 {
+        let (cert, secret) = test_utils::mock_pgp_keypair();
+        let archive = fixture.dir.path().join(format!("operator-{id}.tar.asc"));
+        let key = fixture.dir.path().join(format!("operator-{id}-secret.asc"));
+        fs::write(&key, secret).unwrap();
+        encrypt_files_to_pgp_archive(
+            &manifest,
+            &db,
+            &PgpPublicCert::new(cert).unwrap(),
+            &archive,
+            Some(&fixture.records[id]),
+        )
+        .unwrap();
+        fixture
+            .originals
+            .push((archive.clone(), fs::read(&archive).unwrap()));
+        fixture
+            .originals
+            .push((key.clone(), fs::read(&key).unwrap()));
+        let output = output_dir.path().join(format!("operator-{id}.bcs.asc"));
+        let backend = ["--backup-pgp-secret-key".as_ref(), key.as_os_str()];
+        // Operators need their own key, not the coordinator's key, to export.
+        for wrong_backend in [&coordinator_backend[..], &[][..]] {
+            assert!(
+                !fixture
+                    .export(
+                        &archive,
+                        &output,
+                        wrong_backend,
+                        Some(fixture.output_cert.as_os_str()),
+                    )
+                    .status
+                    .success()
+            );
+            assert!(!output.exists());
+        }
+        let armor = fs::read_to_string(&fixture.output_cert).unwrap();
+        let recipient = if id == 0 {
+            fixture.output_cert.as_os_str()
+        } else {
+            std::ffi::OsStr::new(&armor)
+        };
+        assert!(
+            fixture
+                .export(&archive, &output, &backend, Some(recipient))
+                .status
+                .success()
+        );
+        let ciphertext = fs::read(&output).unwrap();
+        assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        let mut plaintext = Vec::new();
+        decrypt_with_secret_key(
+            Cursor::new(ciphertext.clone()),
+            fixture.output_secret.as_bytes(),
+        )
+        .unwrap()
+        .read_to_end(&mut plaintext)
+        .unwrap();
+        assert!(plaintext == bcs::to_bytes(&fixture.records[id]).unwrap());
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fixture.originals.push((output.clone(), ciphertext));
+        exports.push(output);
+    }
+    fixture.succeeds(&exports, &coordinator_backend);
+    fixture.succeeds(
+        &[exports[0].clone(), fixture.raw[1].clone()],
+        &coordinator_backend,
+    );
+    fixture.rejects(&exports, &fixture.public, &fixture.local_backend());
+    fixture.rejects(&exports, &fixture.public, &[]);
+    assert_eq!(
+        fs::read_dir(output_dir.path()).unwrap().count(),
+        exports.len()
+    );
+
+    let failed_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+    let output = failed_dir.path().join("record.bcs.asc");
+    for recipient in [None, Some(std::ffi::OsStr::new("not a certificate"))] {
+        assert!(
+            !fixture
+                .export(&fixture.plain[0], &output, &[], recipient)
+                .status
+                .success()
+        );
+    }
+    assert!(fs::read_dir(failed_dir.path()).unwrap().next().is_none());
+    assert!(
+        fixture
+            .export(
+                &fixture.plain[0],
+                &output,
+                &[],
+                Some(fixture.output_cert.as_os_str()),
+            )
+            .status
+            .success()
+    );
+    fixture.succeeds(&[output, exports[1].clone()], &coordinator_backend);
+
+    let ciphertext = fs::read(&exports[0]).unwrap();
+    for (name, bytes) in [
+        (
+            "tampered.bcs.asc",
+            tamper_authentication_trailer(&ciphertext),
+        ),
+        (
+            "truncated.bcs.asc",
+            ciphertext[..ciphertext.len() / 2].to_vec(),
+        ),
+    ] {
+        let path = fixture.dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        // Authenticate surplus records even after a complete good quorum.
+        fixture.rejects(
+            &[exports[0].clone(), exports[1].clone(), path],
+            &fixture.public,
+            &coordinator_backend,
+        );
+    }
+    let mut invalid_record = fixture.records[0].clone();
+    let MpcRecoveryRecord::V1(inner) = &mut invalid_record;
+    inner.key_shares.shares[0].value += S::from(1u128);
+    let recipient = PgpPublicCert::new(fs::read_to_string(&fixture.output_cert).unwrap()).unwrap();
+    for (name, bytes) in [
+        (
+            "invalid-share.bcs.asc",
+            bcs::to_bytes(&invalid_record).unwrap(),
+        ),
+        ("invalid-bcs.bcs.asc", vec![255]),
+    ] {
+        let path = fixture.dir.path().join(name);
+        let mut writer =
+            hashi_types::pgp::armored_encrypt_writer(fs::File::create(&path).unwrap(), &recipient)
+                .unwrap();
+        std::io::Write::write_all(&mut writer, &bytes).unwrap();
+        writer.finalize().unwrap();
+        fixture.rejects(
+            &[exports[0].clone(), exports[1].clone(), path],
+            &fixture.public,
+            &coordinator_backend,
+        );
+    }
+    let damaged = fixture.dir.path().join("export-tampered.tar.asc");
+    fs::write(
+        &damaged,
+        tamper_authentication_trailer(&fs::read(&fixture.encrypted[0]).unwrap()),
+    )
+    .unwrap();
+    let failed_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+    assert!(
+        !fixture
+            .export(
+                &damaged,
+                &failed_dir.path().join("record.bcs.asc"),
+                &fixture.local_backend(),
+                Some(fixture.output_cert.as_os_str()),
+            )
+            .status
+            .success()
+    );
+    assert!(fs::read_dir(failed_dir.path()).unwrap().next().is_none());
+}
+
+fn tamper_authentication_trailer(encrypted: &[u8]) -> Vec<u8> {
+    // Preserve valid armor but corrupt the authentication trailer. Omit the
+    // optional CRC so rejection cannot be merely an armor checksum failure.
+    let armor = std::str::from_utf8(encrypted).unwrap();
+    let payload: String = armor
+        .lines()
+        .skip_while(|line| !line.is_empty())
+        .skip(1)
+        .take_while(|line| !line.starts_with('=') && !line.starts_with("-----"))
+        .collect();
+    let mut packet = Base64::decode_vec(&payload).unwrap();
+    *packet.last_mut().unwrap() ^= 1;
+    let encoded = Base64::encode_string(&packet);
+    let mut tampered = b"-----BEGIN PGP MESSAGE-----\n\n".to_vec();
+    for line in encoded.as_bytes().chunks(64) {
+        tampered.extend_from_slice(line);
+        tampered.push(b'\n');
+    }
+    tampered.extend_from_slice(b"-----END PGP MESSAGE-----\n");
+    tampered
 }
 
 #[test]
@@ -605,6 +839,17 @@ fn refuses_existing_outputs_and_symlinks_without_modifying_inputs() {
             .status
             .success()
     );
+    assert!(
+        !fixture
+            .export(
+                &fixture.encrypted[0],
+                &output,
+                &fixture.local_backend(),
+                Some(fixture.output_cert.as_os_str()),
+            )
+            .status
+            .success()
+    );
     assert_eq!(fs::read(&output).unwrap(), b"do not overwrite");
     let target = dir.path().join("absent.bcs");
     let link = dir.path().join("dangling.bcs");
@@ -612,6 +857,17 @@ fn refuses_existing_outputs_and_symlinks_without_modifying_inputs() {
     assert!(
         !fixture
             .run(&fixture.raw[..2], &link, &fixture.public, &[])
+            .status
+            .success()
+    );
+    assert!(
+        !fixture
+            .export(
+                &fixture.plain[0],
+                &link,
+                &[],
+                Some(fixture.output_cert.as_os_str()),
+            )
             .status
             .success()
     );
@@ -681,6 +937,34 @@ fn recovers_distinct_recipients_through_an_isolated_gpg_agent() {
         home.0.path().as_os_str(),
     ];
     fixture.succeeds(&archives[..2], &backend);
+    let exports_dir = tempfile::tempdir_in(fixture.dir.path()).unwrap();
+    let mut exports = Vec::new();
+    for (id, archive) in archives[..2].iter().enumerate() {
+        let output = exports_dir.path().join(format!("agent-{id}.bcs.asc"));
+        assert!(
+            fixture
+                .export(
+                    archive,
+                    &output,
+                    &backend,
+                    Some(fixture.output_cert.as_os_str())
+                )
+                .status
+                .success()
+        );
+        exports.push(output);
+    }
+    let coordinator_home = GpgHome(tempfile::tempdir().unwrap());
+    test_utils::prepare_gnupg_home(coordinator_home.0.path());
+    test_utils::gpg_import_secret_key(coordinator_home.0.path(), &fixture.output_secret);
+    fixture.succeeds(
+        &exports,
+        &[
+            "--use-gpg-agent".as_ref(),
+            "--gpg-homedir".as_ref(),
+            coordinator_home.0.path().as_os_str(),
+        ],
+    );
     archives.reverse();
     fixture.succeeds(&archives, &backend);
     fixture.rejects(&archives, &fixture.public, &fixture.local_backend());

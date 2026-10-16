@@ -506,3 +506,21 @@ Recovery assembles the full MPC private key and writes it PGP-encrypted. It must
 still be handled as a highly sensitive secret. Recovering it does not invalidate
 a copy already stolen by an attacker.
 
+### Sharing recovery records
+
+For a coordinated recovery, use `hashi backup export-mpc-recovery-record` to
+decrypt your backup locally and export only its recovery information, encrypted
+to the coordinator's public PGP certificate. Verify that certificate's fingerprint
+through a trusted channel first.
+
+```bash
+hashi backup export-mpc-recovery-record backup.tar.asc \
+  --backup-pgp-secret-key /secure/operator-secret.asc \
+  --output-pgp-cert coordinator.asc --output recovery-record.bcs.asc
+```
+
+Use `--use-gpg-agent` instead of `--backup-pgp-secret-key` for agent-backed keys.
+Send only the encrypted `.bcs.asc` file; neither your backup decryption key nor
+the full backup needs to be shared. The command never writes a plaintext record.
+The coordinator can pass these files to `hashi backup recover-mpc-key` and decrypt
+them with their own key.
