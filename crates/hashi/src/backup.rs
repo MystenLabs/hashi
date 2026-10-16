@@ -13,6 +13,8 @@ mod recovery;
 use anyhow::Context;
 use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
+use fastcrypto::hash::HashFunction;
+use fastcrypto::hash::Sha256;
 use fjall::KeyspaceCreateOptions;
 use fjall::Readable;
 use hashi_types::pgp::PgpPublicCert;
@@ -489,7 +491,7 @@ pub fn save(
         Some(MpcRecoveryRecord::V1(record)) => BackupKind::Mpc(record.epoch),
         None => epoch.map_or(BackupKind::Manual, BackupKind::Node),
     };
-    let output_path = output_dir.join(encrypted_backup_file_name(kind));
+    let output_path = output_dir.join(encrypted_backup_file_name(kind, recipient));
     encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path, recovery)?;
 
     Ok(output_path)
@@ -550,7 +552,11 @@ enum BackupKind {
     Mpc(u64),
 }
 
-fn encrypted_backup_file_name(kind: BackupKind) -> PathBuf {
+fn backup_recipient_hash(recipient: &PgpPublicCert) -> String {
+    hex::encode(Sha256::digest(recipient.armored().as_bytes()).digest)
+}
+
+fn encrypted_backup_file_name(kind: BackupKind, recipient: &PgpPublicCert) -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
     // common filesystem.
@@ -559,14 +565,17 @@ fn encrypted_backup_file_name(kind: BackupKind) -> PathBuf {
     match kind {
         BackupKind::Manual => format!("{BACKUP_FILE_NAME_PREFIX}{timestamp}"),
         BackupKind::Node(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}{timestamp}"),
-        BackupKind::Mpc(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}-mpc{timestamp}"),
+        BackupKind::Mpc(epoch) => {
+            let hash = backup_recipient_hash(recipient);
+            format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}-mpc-{hash}{timestamp}")
+        }
     }
     .into()
 }
 
-fn parse_backup_file_name(name: &str) -> Option<(BackupKind, jiff::Timestamp)> {
+fn parse_backup_file_name(name: &str) -> Option<(BackupKind, Option<&str>, jiff::Timestamp)> {
     let suffix = name.strip_prefix(BACKUP_FILE_NAME_PREFIX)?;
-    let (kind, suffix) = if let Some(rest) = suffix.strip_prefix("-epoch-") {
+    let (kind, hash, suffix) = if let Some(rest) = suffix.strip_prefix("-epoch-") {
         let (epoch, rest) = rest.split_once('-')?;
         if epoch.is_empty()
             || !epoch.bytes().all(|byte| byte.is_ascii_digit())
@@ -576,11 +585,26 @@ fn parse_backup_file_name(name: &str) -> Option<(BackupKind, jiff::Timestamp)> {
         }
         let epoch = epoch.parse().ok()?;
         match rest.strip_prefix("mpc-") {
-            Some(timestamp) => (BackupKind::Mpc(epoch), timestamp),
-            None => (BackupKind::Node(epoch), rest),
+            Some(rest) => {
+                let (hash, timestamp) = match rest.split_once('-') {
+                    Some((hash, timestamp)) => {
+                        if hash.len() != 64
+                            || !hash
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        {
+                            return None;
+                        }
+                        (Some(hash), timestamp)
+                    }
+                    None => (None, rest),
+                };
+                (BackupKind::Mpc(epoch), hash, timestamp)
+            }
+            None => (BackupKind::Node(epoch), None, rest),
         }
     } else {
-        (BackupKind::Manual, suffix.strip_prefix('-')?)
+        (BackupKind::Manual, None, suffix.strip_prefix('-')?)
     };
     let timestamp = suffix.strip_suffix(".tar.asc")?;
     if timestamp.len() != 16
@@ -598,23 +622,31 @@ fn parse_backup_file_name(name: &str) -> Option<(BackupKind, jiff::Timestamp)> {
         .to_zoned(jiff::tz::TimeZone::UTC)
         .ok()?
         .timestamp();
-    Some((kind, created_at))
+    Some((kind, hash, created_at))
 }
 
-pub(crate) fn find_mpc_backup(output_dir: &Path, epoch: u64) -> Result<Option<PathBuf>> {
+pub(crate) fn find_mpc_backup(
+    output_dir: &Path,
+    epoch: u64,
+    recipient: &PgpPublicCert,
+) -> Result<Option<PathBuf>> {
     let entries = match fs::read_dir(output_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    let recipient_hash = backup_recipient_hash(recipient);
     let mut newest = None;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        let Some((kind, timestamp)) = name.to_str().and_then(parse_backup_file_name) else {
+        let Some((kind, hash, timestamp)) = name.to_str().and_then(parse_backup_file_name) else {
             continue;
         };
-        if kind != BackupKind::Mpc(epoch) || !entry.file_type()?.is_file() {
+        if kind != BackupKind::Mpc(epoch)
+            || hash != Some(recipient_hash.as_str())
+            || !entry.file_type()?.is_file()
+        {
             continue;
         }
         if newest
@@ -707,7 +739,7 @@ pub(crate) fn cleanup_old_backups(
             }
             continue;
         }
-        let Some((_, created_at)) = std::str::from_utf8(file_name)
+        let Some((_, _, created_at)) = std::str::from_utf8(file_name)
             .ok()
             .and_then(parse_backup_file_name)
         else {
@@ -1519,31 +1551,45 @@ mod tests {
     fn recovery_discovery_ignores_non_root_and_non_mpc_archives() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("backups");
-        assert_eq!(find_mpc_backup(&root, 42).unwrap(), None);
+        let recipient = mock_pgp_cert();
+        let hash = backup_recipient_hash(&recipient);
+        assert_eq!(find_mpc_backup(&root, 42, &recipient).unwrap(), None);
         fs::create_dir(&root).unwrap();
         for name in [
-            "hashi-backup-20260101T000000Z.tar.asc",
-            "hashi-backup-epoch-42-20260101T000000Z.tar.asc",
-            "hashi-backup-epoch-43-mpc-20260101T000000Z.tar.asc",
-            "hashi-backup-epoch-042-mpc-20260101T000000Z.tar.asc",
-            "hashi-backup-epoch-42-mpc-20260230T000000Z.tar.asc",
-            "hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc.partial",
-            ".hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc",
+            "hashi-backup-20260101T000000Z.tar.asc".to_owned(),
+            "hashi-backup-epoch-42-20260101T000000Z.tar.asc".to_owned(),
+            "hashi-backup-epoch-42-mpc-20260105T000000Z.tar.asc".to_owned(),
+            format!("hashi-backup-epoch-43-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-042-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-42-mpc-{hash}-20260230T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc.partial"),
+            format!(".hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!(
+                "hashi-backup-epoch-42-mpc-{}-20260105T000000Z.tar.asc",
+                backup_recipient_hash(&mock_pgp_cert()),
+            ),
         ] {
             fs::write(root.join(name), b"not a completed matching archive").unwrap();
         }
         let nested = root.join("nested");
         fs::create_dir(&nested).unwrap();
-        let name = "hashi-backup-epoch-42-mpc-20260103T000000Z.tar.asc";
-        fs::write(nested.join(name), b"nested archive").unwrap();
-        std::os::unix::fs::symlink(nested.join(name), root.join(name)).unwrap();
-        fs::create_dir(root.join("hashi-backup-epoch-42-mpc-20260104T000000Z.tar.asc")).unwrap();
-        assert_eq!(find_mpc_backup(&root, 42).unwrap(), None);
-        let older = root.join("hashi-backup-epoch-42-mpc-20260101T000000Z.tar.asc");
-        let newer = root.join("hashi-backup-epoch-42-mpc-20260102T000000Z.tar.asc");
+        let name = format!("hashi-backup-epoch-42-mpc-{hash}-20260103T000000Z.tar.asc");
+        fs::write(nested.join(&name), b"nested archive").unwrap();
+        std::os::unix::fs::symlink(nested.join(&name), root.join(&name)).unwrap();
+        fs::create_dir(root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260104T000000Z.tar.asc"
+        )))
+        .unwrap();
+        assert_eq!(find_mpc_backup(&root, 42, &recipient).unwrap(), None);
+        let older = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let newer = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260102T000000Z.tar.asc"
+        ));
         fs::write(&newer, b"newer").unwrap();
         fs::write(&older, b"older").unwrap();
-        assert_eq!(find_mpc_backup(&root, 42).unwrap(), Some(newer));
+        assert_eq!(find_mpc_backup(&root, 42, &recipient).unwrap(), Some(newer));
     }
 
     #[test]
@@ -1574,6 +1620,43 @@ mod tests {
             service.inner.metrics.backup_scheduled_local_successes.get(),
             2
         );
+        let original_archive = archive;
+        let original_bytes = bytes;
+        let (cert, secret_key) = mock_pgp_keypair();
+        let mut config = service.inner.config.clone();
+        config.backup_pgp_cert = PgpPublicCert::new(cert).unwrap();
+        let config_path = service.inner.config_path.clone();
+        config.save(config_path.as_ref().unwrap()).unwrap();
+        drop(service);
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            config_path,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        let service = BackupService::new(hashi).0;
+        let archive = service
+            .inner
+            .maintain_backups_after_epoch_change(42, &action)
+            .unwrap()
+            .unwrap();
+        assert_ne!(archive, original_archive);
+        let homedir = temp_gnupg_home();
+        test_utils::gpg_import_secret_key(homedir.path(), &secret_key);
+        let decrypted = Command::new("gpg")
+            .env("GNUPGHOME", homedir.path())
+            .arg("--decrypt")
+            .arg(&archive)
+            .output()
+            .unwrap();
+        test_utils::assert_command_success(&decrypted, "gpg --decrypt");
+        let recovered = read_mpc_recovery_record(decrypted.stdout.as_slice()).unwrap();
+        assert_eq!(
+            bcs::to_bytes(&recovered).unwrap(),
+            bcs::to_bytes(&recovery::test_record()).unwrap(),
+        );
+        let bytes = fs::read(&archive).unwrap();
         let service = restart_backup_service(service);
         assert_eq!(
             service
@@ -1591,7 +1674,7 @@ mod tests {
             fs::read_dir(&service.inner.config.backup_dir)
                 .unwrap()
                 .count(),
-            2
+            3
         );
         let mut invalid = recovery::test_record();
         let MpcRecoveryRecord::V1(record) = &mut invalid;
@@ -1606,6 +1689,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(archive).unwrap(), bytes);
+        assert_eq!(fs::read(original_archive).unwrap(), original_bytes);
     }
 
     #[test]
@@ -1613,9 +1697,13 @@ mod tests {
         let (service, _directory) = backup_service_fixture(false, true);
         let root = &service.inner.config.backup_dir;
         fs::create_dir(root).unwrap();
-        let expired = root.join("hashi-backup-epoch-42-mpc-20000101T000000Z.tar.asc");
+        let recipient = &service.inner.config.backup_pgp_cert;
+        let hash = backup_recipient_hash(recipient);
+        let expired = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20000101T000000Z.tar.asc"
+        ));
         fs::write(&expired, b"expired recovery").unwrap();
-        let newer = root.join(encrypted_backup_file_name(BackupKind::Node(43)));
+        let newer = root.join(encrypted_backup_file_name(BackupKind::Node(43), recipient));
         fs::write(&newer, b"newer node archive").unwrap();
         let archive = service
             .inner
@@ -1628,7 +1716,7 @@ mod tests {
         assert!(!expired.exists());
         assert_ne!(archive, expired);
         assert!(archive.is_file());
-        assert_eq!(find_mpc_backup(root, 42).unwrap(), Some(archive));
+        assert_eq!(find_mpc_backup(root, 42, recipient).unwrap(), Some(archive));
         assert_eq!(
             service.inner.metrics.backup_scheduled_local_successes.get(),
             1
@@ -1683,9 +1771,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        let archive = find_mpc_backup(&service.inner.config.backup_dir, 42)
-            .unwrap()
-            .unwrap();
+        let archive = find_mpc_backup(
+            &service.inner.config.backup_dir,
+            42,
+            &service.inner.config.backup_pgp_cert,
+        )
+        .unwrap()
+        .unwrap();
         let bytes = fs::read(&archive).unwrap();
         assert_eq!(
             service.inner.metrics.backup_scheduled_local_successes.get(),
@@ -1998,9 +2090,10 @@ mod tests {
                 .to_zoned(jiff::tz::TimeZone::UTC)
                 .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
         ));
-        let generated = tmpdir
-            .path()
-            .join(encrypted_backup_file_name(BackupKind::Mpc(42)));
+        let generated = tmpdir.path().join(encrypted_backup_file_name(
+            BackupKind::Mpc(42),
+            &mock_pgp_cert(),
+        ));
         fs::write(&older, b"older archive").unwrap();
         fs::write(&generated, b"generated recovery archive").unwrap();
         let sweep_time = now
@@ -2020,6 +2113,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let cases = [
             ("hashi-backup-epoch-10-20260817T000000Z.tar.asc", false),
+            ("hashi-backup-epoch-10-mpc-20260818T000000Z.tar.asc", false),
             ("hashi-backup-20260819T000000Z.tar.asc", false),
             ("hashi-backup-epoch-2-20260820T000000Z.tar.asc", true),
             ("hashi-backup-epoch-invalid-20260821T000000Z.tar.asc", true),
@@ -2035,7 +2129,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.removed, 2);
+        assert_eq!(stats.removed, 3);
         assert_eq!(stats.failed, 0);
         for (name, retained) in cases {
             assert_eq!(directory.path().join(name).exists(), retained, "{name}");
@@ -2109,8 +2203,13 @@ mod tests {
         let wrong_type = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}regular-file"));
         fs::write(&wrong_type, b"not a staging directory").unwrap();
         File::open(&wrong_type).unwrap().set_times(times).unwrap();
-        let completed =
-            dir.join(extract_dir_name(&encrypted_backup_file_name(BackupKind::Manual)).unwrap());
+        let completed = dir.join(
+            extract_dir_name(&encrypted_backup_file_name(
+                BackupKind::Manual,
+                &mock_pgp_cert(),
+            ))
+            .unwrap(),
+        );
         let db_restore = dir.join(".hashi-db-restore-abandoned");
         for path in [&completed, &db_restore] {
             fs::create_dir(path).unwrap();
@@ -2656,10 +2755,14 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
         let recipient = mock_pgp_cert();
         let recovery = recovery::test_record();
+        let mpc_prefix = format!(
+            "hashi-backup-epoch-42-mpc-{}",
+            backup_recipient_hash(&recipient)
+        );
         for (epoch, recovery, prefix) in [
             (None, None, "hashi-backup"),
             (Some(43), None, "hashi-backup-epoch-43"),
-            (Some(43), Some(&recovery), "hashi-backup-epoch-42-mpc"),
+            (Some(43), Some(&recovery), mpc_prefix.as_str()),
         ] {
             let out = tempfile::tempdir().unwrap();
             let output_path = save(

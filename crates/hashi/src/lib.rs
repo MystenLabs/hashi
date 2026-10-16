@@ -518,7 +518,11 @@ impl Hashi {
         if let Some(recovery) = recovery {
             recovery.validate()?;
             let backup::MpcRecoveryRecord::V1(record) = recovery;
-            match crate::backup::find_mpc_backup(&self.config.backup_dir, record.epoch) {
+            match crate::backup::find_mpc_backup(
+                &self.config.backup_dir,
+                record.epoch,
+                &self.config.backup_pgp_cert,
+            ) {
                 Ok(Some(path)) => {
                     tracing::info!(
                         epoch = record.epoch,
