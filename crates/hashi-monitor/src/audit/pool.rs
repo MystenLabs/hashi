@@ -328,3 +328,377 @@ impl UtxoPool {
         findings
     }
 }
+
+#[cfg(test)]
+impl UtxoPool {
+    pub fn is_empty(&self) -> bool {
+        self.utxos.is_empty()
+    }
+
+    pub fn get(&self, outpoint: &OutPoint) -> Option<&Utxo> {
+        self.utxos.get(outpoint)
+    }
+
+    pub fn get_spent(&self, outpoint: &OutPoint) -> Option<&SpentUtxo> {
+        self.spent.get(outpoint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bitcoin::Amount;
+    use bitcoin::ScriptBuf;
+    use bitcoin::TxOut;
+
+    use crate::domain::BtcConfirmation;
+    use crate::domain::DepositId;
+    use crate::findings::FindingCategory;
+    use crate::test_utils::txid;
+
+    // `Timing::for_tests` values.
+    const WARN: u64 = 100;
+    const CRITICAL: u64 = 200;
+
+    fn outpoint(fill: u8) -> OutPoint {
+        OutPoint {
+            txid: txid(fill),
+            vout: 0,
+        }
+    }
+
+    /// The bridge script every test output pays.
+    fn script() -> ScriptBuf {
+        ScriptBuf::from_bytes(vec![0x51])
+    }
+
+    /// A deposit at `outpoint(fill)`, confirmed in the block at `block_time`.
+    fn deposit(fill: u8, amount: u64, block_time: UnixSeconds) -> ConfirmedDeposit {
+        ConfirmedDeposit {
+            deposit_id: DepositId::new(txid(fill), 0),
+            amount,
+            script_pubkey: script(),
+            block_time,
+        }
+    }
+
+    fn output(amount: u64) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(amount),
+            script_pubkey: script(),
+        }
+    }
+
+    /// A withdrawal `txid(fill)` with one user payout and one change output
+    /// of 550 at vout 1, spending `inputs`.
+    fn withdrawal(fill: u8, inputs: Vec<OutPoint>) -> ConfirmedWithdrawal {
+        ConfirmedWithdrawal {
+            txid: txid(fill),
+            confirmation: BtcConfirmation {
+                block_time: 700,
+                confirmed_time: 760,
+                inputs,
+                outputs: vec![output(400), output(550)],
+            },
+            first_change_vout: 1,
+        }
+    }
+
+    fn change_of(fill: u8) -> OutPoint {
+        OutPoint {
+            txid: txid(fill),
+            vout: 1,
+        }
+    }
+
+    /// A pool holding `outpoint(1)` of 1_000, first seen at 500.
+    fn pool_with_one() -> UtxoPool {
+        pool_seen_at(500)
+    }
+
+    /// A pool holding `outpoint(1)` of 1_000, first seen at `first_seen`.
+    fn pool_seen_at(first_seen: UnixSeconds) -> UtxoPool {
+        let mut pool = UtxoPool::default();
+        assert!(pool.add_deposit(&deposit(1, 1_000, first_seen)).is_none());
+        pool
+    }
+
+    /// The findings of a check with `state` as Bitcoin's answer for
+    /// `outpoint(1)`.
+    fn check_one(
+        pool: &UtxoPool,
+        state: Option<OutpointState>,
+        now: UnixSeconds,
+    ) -> Vec<MonitorFinding> {
+        let states = state
+            .map(|state| HashMap::from([(outpoint(1), state)]))
+            .unwrap_or_default();
+        pool.check(&states, &HashSet::new(), now, &Timing::for_tests())
+    }
+
+    #[test]
+    fn a_confirmed_withdrawal_spends_its_inputs_and_adds_its_change() {
+        let mut pool = pool_with_one();
+        assert!(pool.add_deposit(&deposit(2, 2_000, 500)).is_none());
+
+        let findings = pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(findings.is_empty());
+        assert_eq!(pool.outpoints(), vec![outpoint(2), change_of(7)]);
+        assert_eq!(
+            pool.get(&change_of(7)),
+            Some(&Utxo {
+                amount: 550,
+                script_pubkey: script(),
+                origin: UtxoOrigin::Change,
+                first_seen: 700
+            })
+        );
+        assert_eq!(
+            pool.get_spent(&outpoint(1)),
+            Some(&SpentUtxo {
+                utxo: Utxo {
+                    amount: 1_000,
+                    script_pubkey: script(),
+                    origin: UtxoOrigin::Deposit,
+                    first_seen: 500
+                },
+                spent_by: txid(7),
+            })
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_with_no_change_adds_nothing() {
+        let mut pool = UtxoPool::default();
+        let mut withdrawal = withdrawal(7, vec![]);
+        withdrawal.first_change_vout = withdrawal.confirmation.outputs.len();
+
+        assert!(pool.add_withdrawals(&[withdrawal]).is_empty());
+
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_add_keeps_the_utxo_and_another_amount_is_a_finding() {
+        let mut pool = pool_with_one();
+
+        assert!(pool.add_deposit(&deposit(1, 1_000, 900)).is_none());
+        assert_eq!(pool.get(&outpoint(1)).unwrap().first_seen, 500);
+
+        let finding = pool.add_deposit(&deposit(1, 1_001, 900)).unwrap();
+        assert_eq!(
+            finding,
+            MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoMismatch {
+                outpoint: outpoint(1),
+                held_amount: 1_000,
+                seen_amount: 1_001,
+                held_script: script(),
+                seen_script: script(),
+            })
+        );
+        assert_eq!(finding.category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_repeated_add_with_another_script_is_a_finding() {
+        let mut pool = pool_with_one();
+        let mut deposit = deposit(1, 1_000, 900);
+        deposit.script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
+
+        let finding = pool.add_deposit(&deposit).unwrap();
+
+        assert_eq!(
+            finding,
+            MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoMismatch {
+                outpoint: outpoint(1),
+                held_amount: 1_000,
+                seen_amount: 1_000,
+                held_script: script(),
+                seen_script: ScriptBuf::from_bytes(vec![0x52]),
+            })
+        );
+        assert_eq!(pool.get(&outpoint(1)).unwrap().script_pubkey, script());
+    }
+
+    #[test]
+    fn a_replayed_add_of_a_spent_utxo_is_a_repeat() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(pool.add_deposit(&deposit(1, 1_000, 900)).is_none());
+        assert!(pool.get(&outpoint(1)).is_none());
+        assert_eq!(pool.get_spent(&outpoint(1)).unwrap().spent_by, txid(7));
+
+        assert!(matches!(
+            pool.add_deposit(&deposit(1, 1_001, 900)),
+            Some(MonitorFinding::RpcInconsistency(
+                RpcInconsistency::UtxoMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_replayed_spend_is_a_repeat_and_a_second_spender_is_a_finding() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(
+            pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])])
+                .is_empty()
+        );
+
+        let findings = pool.add_withdrawals(&[withdrawal(8, vec![outpoint(1)])]);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::RpcInconsistency(
+                RpcInconsistency::UtxoSpentTwice {
+                    outpoint: outpoint(1),
+                    first_txid: txid(7),
+                    second_txid: txid(8),
+                }
+            )]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn spending_a_utxo_the_pool_never_held_is_a_finding_and_records_nothing() {
+        let mut pool = UtxoPool::default();
+
+        let findings = pool.add_withdrawals(&[withdrawal(7, vec![outpoint(9)])]);
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoUnknownInputSpent {
+                outpoint: outpoint(9),
+                txid: txid(7),
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Liveness);
+        assert_eq!(pool.outpoints(), vec![change_of(7)]);
+        assert_eq!(pool.get_spent(&outpoint(9)), None);
+    }
+
+    #[test]
+    fn in_one_pass_every_add_comes_before_every_spend() {
+        // Withdrawal 8 spends the change of withdrawal 7, and the pass lists
+        // the spender first.
+        let mut pool = UtxoPool::default();
+
+        let findings =
+            pool.add_withdrawals(&[withdrawal(8, vec![change_of(7)]), withdrawal(7, vec![])]);
+
+        assert!(findings.is_empty());
+        assert_eq!(pool.outpoints(), vec![change_of(8)]);
+        assert_eq!(pool.get_spent(&change_of(7)).unwrap().spent_by, txid(8));
+    }
+
+    #[test]
+    fn a_young_unspent_utxo_is_fine() {
+        let pool = pool_seen_at(0);
+        let state = OutpointState::Unspent { block_time: 1_000 };
+        assert!(check_one(&pool, Some(state), 1_000 + WARN - 1).is_empty());
+    }
+
+    #[test]
+    fn an_unspent_utxo_is_reported_at_the_warn_age_then_the_critical_age() {
+        let pool = pool_seen_at(0);
+        let state = OutpointState::Unspent { block_time: 1_000 };
+
+        let warn = check_one(&pool, Some(state.clone()), 1_000 + WARN);
+        assert_eq!(
+            warn,
+            vec![MonitorFinding::UtxoTooOld {
+                outpoint: outpoint(1),
+                age_secs: WARN,
+                threshold_secs: WARN,
+                critical: false,
+            }]
+        );
+        assert_eq!(warn[0].category(), FindingCategory::Liveness);
+
+        let critical = check_one(&pool, Some(state), 1_000 + CRITICAL);
+        assert_eq!(
+            critical,
+            vec![MonitorFinding::UtxoTooOld {
+                outpoint: outpoint(1),
+                age_secs: CRITICAL,
+                threshold_secs: CRITICAL,
+                critical: true,
+            }]
+        );
+        assert_eq!(critical[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_spent_utxo_is_an_unexpected_spend() {
+        let pool = pool_seen_at(0);
+        let findings = check_one(&pool, Some(OutpointState::Spent), 1);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoUnexpectedSpend {
+                outpoint: outpoint(1),
+                amount: 1_000,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_missing_utxo_is_an_rpc_inconsistency() {
+        let pool = pool_seen_at(1_000);
+        let vanished = MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoVanished {
+            outpoint: outpoint(1),
+            first_seen: 1_000,
+        });
+
+        let findings = check_one(&pool, Some(OutpointState::Missing), 1_000);
+
+        assert_eq!(findings, vec![vanished.clone()]);
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+        // No answer at all counts as missing.
+        assert_eq!(check_one(&pool, None, 1_000), vec![vanished]);
+    }
+
+    #[test]
+    fn a_utxo_a_pending_withdrawal_spends_is_not_checked() {
+        let pool = pool_seen_at(0);
+        let states = HashMap::from([(outpoint(1), OutpointState::Spent)]);
+        let pending_inputs = HashSet::from([outpoint(1)]);
+
+        let findings = pool.check(&states, &pending_inputs, 1_000, &Timing::for_tests());
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn a_spent_utxo_is_not_checked() {
+        let mut pool = pool_seen_at(0);
+        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+        let states = HashMap::from([
+            (outpoint(1), OutpointState::Spent),
+            (change_of(7), OutpointState::Unspent { block_time: 700 }),
+        ]);
+
+        let findings = pool.check(&states, &HashSet::new(), 701, &Timing::for_tests());
+
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn a_pool_round_trips_through_json() {
+        let mut pool = pool_with_one();
+        pool.add_deposit(&deposit(2, 2_000, 1_500));
+        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        let json = serde_json::to_vec(&pool).unwrap();
+        let loaded: UtxoPool = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(loaded.outpoints(), pool.outpoints());
+        assert_eq!(loaded.get(&outpoint(2)), pool.get(&outpoint(2)));
+        assert_eq!(loaded.get(&change_of(7)), pool.get(&change_of(7)));
+        assert_eq!(loaded.get_spent(&outpoint(1)), pool.get_spent(&outpoint(1)));
+    }
+}

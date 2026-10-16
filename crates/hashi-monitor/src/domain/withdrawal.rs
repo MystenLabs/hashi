@@ -384,6 +384,41 @@ mod tests {
     }
 
     #[test]
+    fn an_e2_whose_layout_does_not_hash_to_its_txid_is_a_finding() {
+        let wid = sui_sdk_types::Address::new([0x3d; 32]);
+        let tx = withdrawal_tx(vec![0x54; 20]);
+        let computed = tx.unsigned_tx().unwrap().compute_txid();
+        let claimed = txid(0x99);
+
+        let findings = MonitorWithdrawalEvent::checked(
+            WithdrawalEventType::E2GuardianApproved,
+            wid,
+            claimed,
+            tx.clone(),
+            100,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::WithdrawalTxidMismatch {
+                wid,
+                claimed,
+                computed,
+            }]
+        );
+        let event = MonitorWithdrawalEvent::checked(
+            WithdrawalEventType::E2GuardianApproved,
+            wid,
+            computed,
+            tx,
+            100,
+        )
+        .unwrap();
+        assert_eq!(event.event_type, WithdrawalEventType::E2GuardianApproved);
+    }
+
+    #[test]
     fn an_external_address_for_another_network_is_an_error() {
         let keys = test_hashi_btc_keys();
         let mainnet = BitcoinAddress::from_script(&p2wpkh(0x53), Network::Bitcoin).unwrap();
