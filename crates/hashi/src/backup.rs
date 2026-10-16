@@ -792,6 +792,7 @@ pub(crate) fn cleanup_old_backups(
     output_dir: &Path,
     now: jiff::Timestamp,
     save_may_follow: bool,
+    current_epoch: Option<u64>,
 ) -> Result<CleanupStats> {
     let cutoff = now.checked_sub(BACKUP_RETENTION)?;
     let staging_cutoff: std::time::SystemTime = cutoff.into();
@@ -807,6 +808,7 @@ pub(crate) fn cleanup_old_backups(
     };
     let mut newest: Option<(jiff::Timestamp, PathBuf)> = None;
     let mut newest_mpc: Option<(jiff::Timestamp, PathBuf)> = None;
+    let mut newest_archive = None;
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -886,6 +888,18 @@ pub(crate) fn cleanup_old_backups(
         if !file_type.is_file() {
             continue;
         }
+        newest_archive = Some(
+            newest_archive.map_or(created_at, |latest: jiff::Timestamp| latest.max(created_at)),
+        );
+        if let BackupKind::Mpc(epoch) = kind
+            && Some(epoch) != current_epoch
+        {
+            // Historical recovery material has no last-archive exception.
+            if created_at < cutoff {
+                remove_expired_backup(&mut stats, &path);
+            }
+            continue;
+        }
         let candidate = (created_at, path);
         let newest = if matches!(kind, BackupKind::Mpc(_)) {
             &mut newest_mpc
@@ -905,12 +919,10 @@ pub(crate) fn cleanup_old_backups(
         }
         remove_expired_backup(&mut stats, &path);
     }
-    // Ordinary archives cannot displace the last MPC archive. Once a newer
-    // MPC archive is published, older MPC archives follow normal retention.
+    // Ordinary or pending-epoch archives cannot displace the last current-epoch
+    // MPC archive. Historical MPC archives always follow normal retention.
     if let Some((created_at, path)) = newest.as_ref()
-        && newest_mpc
-            .as_ref()
-            .is_some_and(|(mpc_created_at, _)| mpc_created_at > created_at)
+        && newest_archive.is_some_and(|latest| latest > *created_at)
         && *created_at < cutoff
     {
         remove_expired_backup(&mut stats, path);
@@ -1851,27 +1863,86 @@ mod tests {
         let previous = directory.path().join(format!(
             "hashi-backup-epoch-41-mpc-{hash}-20260101T000000Z.tar.asc"
         ));
+        let older_current = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
         let latest = directory.path().join(format!(
             "hashi-backup-epoch-42-mpc-{hash}-20260102T000000Z.tar.asc"
         ));
         let ordinary = directory
             .path()
             .join("hashi-backup-epoch-43-20260201T000000Z.tar.asc");
-        for path in [&previous, &latest, &ordinary] {
+        for path in [&previous, &older_current, &latest, &ordinary] {
             fs::write(path, b"archive").unwrap();
         }
         cleanup_old_backups(
             directory.path(),
             "2026-03-15T00:00:00Z".parse().unwrap(),
             false,
+            Some(42),
         )
         .unwrap();
         assert!(!previous.exists());
+        assert!(!older_current.exists());
         assert!(!ordinary.exists());
         assert!(
             latest.is_file(),
             "last MPC archive does not expire after 30 days"
         );
+    }
+
+    #[test]
+    fn retention_expires_historical_mpc_even_when_it_is_the_only_archive() {
+        for current_epoch in [Some(43), None] {
+            for save_may_follow in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let hash = backup_recipient_hash(&mock_pgp_cert());
+                let archive = directory.path().join(format!(
+                    "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+                ));
+                fs::write(&archive, b"historical recovery").unwrap();
+                cleanup_old_backups(
+                    directory.path(),
+                    "2026-01-16T00:00:00Z".parse().unwrap(),
+                    save_may_follow,
+                    current_epoch,
+                )
+                .unwrap();
+                assert!(!archive.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn retention_protects_current_mpc_despite_newer_pending_epoch_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let hash = backup_recipient_hash(&mock_pgp_cert());
+        let current = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let pending = directory.path().join(format!(
+            "hashi-backup-epoch-43-mpc-{hash}-20260201T000000Z.tar.asc"
+        ));
+        fs::write(&current, b"current recovery").unwrap();
+        fs::write(&pending, b"pending recovery").unwrap();
+        cleanup_old_backups(
+            directory.path(),
+            "2026-02-02T00:00:00Z".parse().unwrap(),
+            false,
+            Some(42),
+        )
+        .unwrap();
+        assert!(current.exists());
+        assert!(pending.exists());
+        cleanup_old_backups(
+            directory.path(),
+            "2026-02-02T00:00:00Z".parse().unwrap(),
+            false,
+            Some(43),
+        )
+        .unwrap();
+        assert!(!current.exists());
+        assert!(pending.exists());
     }
 
     #[test]
@@ -1975,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_recovery_preserves_expired_match_until_replacement_is_published() {
+    fn retention_preserves_expired_match_until_replacement_is_published() {
         let (service, _directory) = backup_service_fixture(false, true);
         let root = &service.inner.config.backup_dir;
         fs::create_dir(root).unwrap();
@@ -1987,41 +2058,39 @@ mod tests {
         fs::write(&expired, b"expired recovery").unwrap();
         let newer = root.join(encrypted_backup_file_name(BackupKind::Node(43), recipient));
         fs::write(&newer, b"newer node archive").unwrap();
-        cleanup_old_backups(root, jiff::Timestamp::now(), false).unwrap();
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
         assert!(
             expired.is_file(),
             "ordinary archives must not displace MPC recovery"
         );
         let config_path = service.inner.config_path.as_ref().unwrap();
+        // This fixture has no onchain mirror, so exercise the save/cleanup
+        // sequence with an explicit current epoch rather than a housekeeping target.
+        let recovery = recovery::test_record();
+        let save_replacement = || {
+            save(
+                config_path,
+                &service.inner.config,
+                service.inner.db.as_ref(),
+                recipient,
+                root,
+                Some(42),
+                Some(&recovery),
+            )
+        };
         let config = fs::read(config_path).unwrap();
         fs::remove_file(config_path).unwrap();
-        assert!(
-            service
-                .inner
-                .maintain_backups_after_epoch_change(
-                    42,
-                    &BackupAction::SaveWithRecovery(Box::new(recovery::test_record())),
-                )
-                .is_err()
-        );
+        cleanup_old_backups(root, jiff::Timestamp::now(), true, Some(42)).unwrap();
+        assert!(save_replacement().is_err());
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
         assert_eq!(fs::read(&expired).unwrap(), b"expired recovery");
         fs::write(config_path, config).unwrap();
-        let archive = service
-            .inner
-            .maintain_backups_after_epoch_change(
-                42,
-                &BackupAction::SaveWithRecovery(Box::new(recovery::test_record())),
-            )
-            .unwrap()
-            .unwrap();
+        let archive = save_replacement().unwrap();
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
         assert!(!expired.exists());
         assert_ne!(archive, expired);
         assert!(archive.is_file());
         assert_eq!(find_mpc_backup(root, 42, recipient).unwrap(), Some(archive));
-        assert_eq!(
-            service.inner.metrics.backup_scheduled_local_successes.get(),
-            1
-        );
     }
 
     #[tokio::test]
@@ -2372,8 +2441,13 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let missing = tmpdir.path().join("missing");
 
-        let stats =
-            cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        let stats = cleanup_old_backups(
+            &missing,
+            "2026-09-08T12:00:00Z".parse().unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
 
@@ -2403,7 +2477,7 @@ mod tests {
             .checked_add(jiff::SignedDuration::from_hours(24))
             .unwrap();
 
-        cleanup_old_backups(tmpdir.path(), sweep_time, false).unwrap();
+        cleanup_old_backups(tmpdir.path(), sweep_time, false, Some(42)).unwrap();
 
         assert!(!older.exists());
         assert_eq!(fs::read(generated).unwrap(), b"generated recovery archive");
@@ -2427,6 +2501,7 @@ mod tests {
             directory.path(),
             "2026-09-08T12:00:00Z".parse().unwrap(),
             false,
+            Some(10),
         )
         .unwrap();
 
@@ -2470,7 +2545,7 @@ mod tests {
                 .unwrap();
         }
 
-        let stats = cleanup_old_backups(dir, now, false).unwrap();
+        let stats = cleanup_old_backups(dir, now, false, None).unwrap();
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
 
@@ -2518,7 +2593,7 @@ mod tests {
             File::open(path).unwrap().set_times(times).unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert!(!staging.exists());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -2552,7 +2627,7 @@ mod tests {
                 .unwrap();
         }
 
-        cleanup_old_backups(dir, now, false).unwrap();
+        cleanup_old_backups(dir, now, false, None).unwrap();
 
         assert!(!expired.exists());
         assert_eq!(fs::read(boundary).unwrap(), b"staged data");
@@ -2574,7 +2649,7 @@ mod tests {
         let link = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}symlink"));
         std::os::unix::fs::symlink(&nested_file, &link).unwrap();
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(fs::read(nested_file).unwrap(), b"nested data");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -2597,7 +2672,7 @@ mod tests {
             fs::write(dir.join(name), b"keep").unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert!(!expired.exists());
         for name in preserved {
@@ -2641,7 +2716,7 @@ mod tests {
         std::os::unix::fs::symlink(&newest, &link).unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
         assert_eq!(stats.removed, 3);
         assert_eq!(stats.failed, 0);
 
@@ -2665,7 +2740,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
@@ -2682,7 +2757,7 @@ mod tests {
         fs::write(&past_bound, b"past").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
@@ -2698,7 +2773,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), true, None).unwrap();
 
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
@@ -2717,7 +2792,7 @@ mod tests {
         fs::write(&older, b"older").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(fs::read(&real).unwrap(), b"real");
@@ -2732,7 +2807,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
@@ -3019,7 +3094,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![recovery.clone()],
         );
-        cleanup_old_backups(out.path(), "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
+        cleanup_old_backups(
+            out.path(),
+            "2026-09-08T12:00:00Z".parse().unwrap(),
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(fs::read(recovery).unwrap(), b"last recovery archive");
     }
 

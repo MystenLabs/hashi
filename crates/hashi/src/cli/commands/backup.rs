@@ -184,8 +184,9 @@ pub fn export_mpc_recovery_record(
     let record = backup::read_mpc_recovery_record(open_backup_stream(archive, &decryptor)?)?;
     write_encrypted_bcs(output, &record, output_recipient)?;
     print_success(&format!(
-        "MPC recovery record exported: {}",
-        output.display()
+        "MPC recovery record exported: {} (recipient fingerprint: {})",
+        output.display(),
+        output_recipient.fingerprint().to_hex()
     ));
     Ok(())
 }

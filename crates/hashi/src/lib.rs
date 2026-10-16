@@ -499,6 +499,8 @@ impl Hashi {
             &self.config.backup_dir,
             jiff::Timestamp::now(),
             write_backup && self.config_path.is_some(),
+            self.onchain_state_opt()
+                .map(|state| state.state().hashi().committees.epoch()),
         ) {
             Ok(stats) => tracing::info!(
                 epoch,
@@ -559,13 +561,15 @@ impl Hashi {
             recovery,
         )?;
         self.metrics.backup_scheduled_local_successes.inc();
-        // Only a successfully published replacement can make the prior MPC
-        // archive eligible for expiry. The pre-save sweep protects that copy.
+        // Only a successfully published replacement can make the prior current-epoch
+        // MPC archive eligible for expiry. The pre-save sweep protects that copy.
         if recovery.is_some()
             && let Err(error) = crate::backup::cleanup_old_backups(
                 &self.config.backup_dir,
                 jiff::Timestamp::now(),
                 false,
+                self.onchain_state_opt()
+                    .map(|state| state.state().hashi().committees.epoch()),
             )
         {
             tracing::warn!("Cleanup after publishing MPC recovery backup failed: {error:#}");

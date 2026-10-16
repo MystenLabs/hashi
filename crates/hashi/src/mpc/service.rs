@@ -129,6 +129,8 @@ pub struct MpcService {
     /// after a failed one, keyed by epoch; see `restore_current_manager`.
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
+    /// Last epoch whose recovery material was submitted, independently of signing recovery.
+    recovery_backup_epoch: Mutex<Option<u64>>,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
     presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
@@ -195,6 +197,7 @@ impl MpcService {
             next_batch_repair: Mutex::new(None),
             next_manager_restore: Mutex::new(None),
             backup_handle,
+            recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
             presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
@@ -394,10 +397,14 @@ impl MpcService {
         if tombstoned {
             self.run_major_compaction(target_epoch).await;
         }
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
         let action = match backup {
-            Backup::Write if activation_confirmed => {
+            Backup::Write
+                if activation_confirmed && *recovery_backup_epoch != Some(target_epoch) =>
+            {
                 match self.capture_recovery_backup(target_epoch) {
                     Ok(Some(recovery)) => {
+                        *recovery_backup_epoch = Some(target_epoch);
                         crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery))
                     }
                     Ok(None) => crate::backup::BackupAction::SaveNodeState,
@@ -422,16 +429,30 @@ impl MpcService {
             return;
         }
         let epoch = self.inner.onchain_state().epoch();
-        match self.capture_recovery_backup(epoch) {
-            Ok(Some(recovery)) => self.backup_handle.maintain_backups_after_epoch_change(
-                epoch,
-                crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
-            ),
-            Ok(None) => match self.recover_mpc_state().await {
-                Ok((epoch, _)) => self.backup_recovered_epoch(epoch),
-                Err(error) => warn!("Unable to seed current MPC recovery backup: {error:#}"),
-            },
-            Err(error) => warn!("Unable to capture current MPC recovery backup: {error:#}"),
+        {
+            let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+            if *recovery_backup_epoch == Some(epoch) {
+                return;
+            }
+            match self.capture_recovery_backup(epoch) {
+                Ok(Some(recovery)) => {
+                    self.backup_handle.maintain_backups_after_epoch_change(
+                        epoch,
+                        crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+                    );
+                    *recovery_backup_epoch = Some(epoch);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!("Unable to capture current MPC recovery backup: {error:#}");
+                    return;
+                }
+            }
+        }
+        match self.recover_mpc_state().await {
+            Ok((epoch, _)) => self.backup_recovered_epoch(epoch),
+            Err(error) => warn!("Unable to seed current MPC recovery backup: {error:#}"),
         }
     }
 
@@ -450,11 +471,18 @@ impl MpcService {
     }
 
     fn backup_recovered_epoch(&self, epoch: u64) {
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+        if *recovery_backup_epoch == Some(epoch) {
+            return;
+        }
         match self.capture_recovery_backup(epoch) {
-            Ok(Some(recovery)) => self.backup_handle.maintain_backups_after_epoch_change(
-                epoch,
-                crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
-            ),
+            Ok(Some(recovery)) => {
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+                );
+                *recovery_backup_epoch = Some(epoch);
+            }
             Ok(None) => {}
             Err(error) => {
                 warn!(

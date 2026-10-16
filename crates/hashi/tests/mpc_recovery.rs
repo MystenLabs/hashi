@@ -681,12 +681,10 @@ fn exports_distinct_operator_backups_for_coordinator_only_recovery() {
         } else {
             std::ffi::OsStr::new(&armor)
         };
-        assert!(
-            fixture
-                .export(&archive, &output, &backend, Some(recipient))
-                .status
-                .success()
-        );
+        let result = fixture.export(&archive, &output, &backend, Some(recipient));
+        assert!(result.status.success());
+        let recipient_fingerprint = PgpPublicCert::new(armor).unwrap().fingerprint().to_hex();
+        assert!(String::from_utf8_lossy(&result.stderr).contains(&recipient_fingerprint));
         let ciphertext = fs::read(&output).unwrap();
         assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
         let mut plaintext = Vec::new();

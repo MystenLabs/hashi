@@ -302,9 +302,10 @@ Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
 
 Automatic backup maintenance deletes archives older than 14 days by filename
-timestamp, but preserves the newest MPC recovery archive until a newer one is
-successfully saved. Ordinary backups cannot replace that recovery copy. The newest
-ordinary archive is kept while saves are attempted, or up to 30 days otherwise.
+timestamp, but preserves the newest current-epoch MPC recovery archive until a
+newer one is successfully saved or its epoch ends. Ordinary backups cannot replace
+that recovery copy. The newest ordinary archive is kept while saves are attempted,
+or up to 30 days otherwise.
 A powered-off node sweeps nothing; remove decommissioned hosts' archives yourself.
 
 Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`
@@ -531,8 +532,9 @@ a copy already stolen by an attacker.
 
 For a coordinated recovery, use `hashi backup export-mpc-recovery-record` to
 decrypt your backup locally and export only its recovery information, encrypted
-to the coordinator's public PGP certificate. Verify that certificate's fingerprint
-through a trusted channel first.
+to the coordinator's public PGP certificate. The command prints the recipient
+certificate's fingerprint; verify it through a trusted channel before sharing
+the export.
 
 ```bash
 hashi backup export-mpc-recovery-record backup.tar.asc \
