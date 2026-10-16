@@ -723,7 +723,7 @@ impl LeaderService {
     ) -> anyhow::Result<()> {
         // The rate limiter is no longer checked per signing pass — signing is
         // driven unconditionally and the committee re-validates the limit once at
-        // the finalize cert (see `validate_and_sign_withdrawal_tx_signing`).
+        // the finalize cert (see `verify_withdrawal_tx_signing`).
         // `M` (mpc_signing_chunk_size) sizes both the collection unit and the
         // on-chain write batch here. They're separable in principle — the collect
         // is window-bound (how much fits in one signing pass) and the commit is

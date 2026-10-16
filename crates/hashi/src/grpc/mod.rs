@@ -51,6 +51,7 @@ impl Drop for ServerHandleGuard {
 pub struct HttpService {
     inner: Arc<Hashi>,
     signing_tasks: peer_limit::CallerTaskLimiter,
+    signing_work: peer_limit::SigningWorkLimiter,
 }
 
 impl HttpService {
@@ -59,6 +60,7 @@ impl HttpService {
         Self {
             inner: hashi,
             signing_tasks,
+            signing_work: Default::default(),
         }
     }
 

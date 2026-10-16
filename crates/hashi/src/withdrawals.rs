@@ -1054,32 +1054,41 @@ impl Hashi {
 
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
-    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
-    pub async fn validate_and_sign_withdrawal_tx_signing(
+    fn unfinalized_withdrawal_txn(
         &self,
-        message: &WithdrawalTxSigning,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: Option<u64>,
-    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        withdrawal_id: &Address,
+    ) -> anyhow::Result<WithdrawalTransaction> {
         let txn = self
             .onchain_state()
-            .withdrawal_txn(&message.withdrawal_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "WithdrawalTransaction {} not found on-chain",
-                    message.withdrawal_id
-                )
-            })?;
-
+            .withdrawal_txn(withdrawal_id)
+            .ok_or_else(|| anyhow!("WithdrawalTransaction {withdrawal_id} not found on-chain"))?;
         if txn.is_fully_signed() {
-            return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
+            return Err(WithdrawalAlreadyFinalized(*withdrawal_id).into());
         }
+        Ok(txn)
+    }
 
+    pub fn check_withdrawal_tx_signing_request(
+        &self,
+        message: &WithdrawalTxSigning,
+    ) -> anyhow::Result<WithdrawalTransaction> {
+        let txn = self.unfinalized_withdrawal_txn(&message.withdrawal_id)?;
         check_withdrawal_tx_signing_shape(
             &message.signatures,
             &message.guardian_signatures,
             txn.inputs.len(),
         )?;
+        Ok(txn)
+    }
+
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
+    pub fn verify_withdrawal_tx_signing(
+        &self,
+        message: WithdrawalTxSigning,
+        expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
+    ) -> anyhow::Result<VerifiedWithdrawalTxSigning> {
+        let txn = self.check_withdrawal_tx_signing_request(&message)?;
 
         // Single committee-side rate-limit gate: signing is driven unconditionally,
         // so the committee independently re-validates the limit once here, before
@@ -1178,12 +1187,25 @@ impl Hashi {
         }
         ensure_committed_txid(&txn, &tx)?;
         let txid = tx.compute_txid();
-        let verdict = match self.signed_withdrawal_tx(
-            &txn,
-            tx,
-            &message.signatures,
-            &message.guardian_signatures,
-        ) {
+        let signed =
+            self.signed_withdrawal_tx(&txn, tx, &message.signatures, &message.guardian_signatures);
+        Ok(VerifiedWithdrawalTxSigning {
+            message,
+            txid,
+            signed,
+        })
+    }
+
+    pub async fn sign_verified_withdrawal_tx_signing(
+        &self,
+        verified: VerifiedWithdrawalTxSigning,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let VerifiedWithdrawalTxSigning {
+            message,
+            txid,
+            signed,
+        } = verified;
+        let verdict = match signed {
             Ok(signed) => {
                 let monitor = self.btc_monitor().clone();
                 self.finalize_bitcoin_check
@@ -1204,7 +1226,16 @@ impl Hashi {
         {
             return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
         }
-        self.sign_message_proto(message)
+        self.sign_message_proto(&message)
+    }
+
+    pub fn check_mpc_input_signatures_request(
+        &self,
+        message: &MpcInputSignaturesMessage,
+    ) -> anyhow::Result<WithdrawalTransaction> {
+        let txn = self.unfinalized_withdrawal_txn(&message.withdrawal_id)?;
+        check_mpc_input_signatures_shape(&message.indices, &message.signatures, txn.inputs.len())?;
+        Ok(txn)
     }
 
     /// Validate and BLS-sign one incremental chunk of per-input MPC signatures
@@ -1220,20 +1251,7 @@ impl Hashi {
         &self,
         message: &MpcInputSignaturesMessage,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        let txn = self
-            .onchain_state()
-            .withdrawal_txn(&message.withdrawal_id)
-            .ok_or_else(|| {
-                anyhow!(
-                    "WithdrawalTransaction {} not found on-chain",
-                    message.withdrawal_id
-                )
-            })?;
-
-        if txn.is_fully_signed() {
-            return Err(WithdrawalAlreadyFinalized(message.withdrawal_id).into());
-        }
-        check_mpc_input_signatures_shape(&message.indices, &message.signatures, txn.inputs.len())?;
+        let txn = self.check_mpc_input_signatures_request(message)?;
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
@@ -1364,20 +1382,6 @@ impl Hashi {
 
     // --- MPC BTC tx signing ---
 
-    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
-    pub async fn validate_and_sign_withdrawal_tx(
-        &self,
-        withdrawal_txn_id: &Address,
-        requested_input_indices: &[u64],
-        sink: tokio::sync::mpsc::Sender<
-            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
-        >,
-    ) -> anyhow::Result<()> {
-        let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, requested_input_indices, sink)
-            .await
-    }
-
     fn require_signing_manager(
         &self,
         epoch: u64,
@@ -1404,17 +1408,20 @@ impl Hashi {
         let epoch = self.onchain_state().epoch();
         ensure_current_signing_epoch(&txn, epoch)?;
         self.require_signing_manager(epoch)?;
-        check_requested_input_indices(requested_input_indices, txn.signing.num_inputs())?;
+        let selected = select_withdrawal_signing_indices(&txn.signing, requested_input_indices)?;
+        anyhow::ensure!(
+            !selected.is_empty(),
+            "WithdrawalTransaction {withdrawal_txn_id} has no unsigned input to sign"
+        );
         Ok(())
     }
 
-    pub async fn validate_withdrawal_signing(
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
+    pub fn prepare_withdrawal_signing(
         &self,
         withdrawal_txn_id: &Address,
-    ) -> anyhow::Result<(
-        crate::onchain::types::WithdrawalTransaction,
-        bitcoin::Transaction,
-    )> {
+        requested_input_indices: &[u64],
+    ) -> anyhow::Result<PreparedWithdrawalSigning> {
         let txn = self
             .onchain_state()
             .withdrawal_txn(withdrawal_txn_id)
@@ -1423,10 +1430,59 @@ impl Hashi {
             })?;
 
         // Rebuild the unsigned BTC tx and verify the txid matches
-        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        ensure_committed_txid(&txn, &tx)?;
+        let unsigned_tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        ensure_committed_txid(&txn, &unsigned_tx)?;
 
-        Ok((txn.clone(), tx))
+        let epoch = self.onchain_state().epoch();
+        ensure_current_signing_epoch(&txn, epoch)?;
+        let signing_manager = self.require_signing_manager(epoch)?;
+        let randomness: &[u8; 32] = txn
+            .randomness
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Withdrawal {} randomness is not 32 bytes", txn.id))?;
+        let signing_messages = self.withdrawal_signing_messages(&unsigned_tx, &txn.inputs)?;
+        let txn_id = txn.id;
+        // Presig indices come from the current on-chain slots, so signing can resume in any order.
+        let signing = &txn.signing;
+        let inputs = &txn.inputs;
+        let selected_input_indices =
+            select_withdrawal_signing_indices(signing, requested_input_indices)?;
+        let mut requests = Vec::with_capacity(selected_input_indices.len());
+        let mut index_by_id: HashMap<Address, usize> =
+            HashMap::with_capacity(selected_input_indices.len());
+        for input_index in selected_input_indices {
+            let message = signing_messages
+                .get(input_index)
+                .expect("validated input_index is in range for signing_messages");
+            let global_presig_index = signing
+                .pending_index(input_index)
+                .expect("validated input_index is pending");
+            let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
+            let derivation_address = inputs
+                .get(input_index)
+                .map(withdrawal_input_derivation_address)
+                .expect("validated input_index is in range for txn.inputs");
+            index_by_id.insert(signing_id, input_index);
+            requests.push(crate::mpc::SignInput {
+                signing_id,
+                message: message.to_vec(),
+                global_presig_index,
+                derivation_address: Some(derivation_address),
+                message_delta: crate::mpc::types::message_delta(
+                    randomness,
+                    input_index as u32,
+                    message,
+                ),
+            });
+        }
+        Ok(PreparedWithdrawalSigning {
+            txn_id,
+            epoch,
+            signing_manager,
+            requests,
+            index_by_id,
+        })
     }
 
     pub(crate) fn signed_withdrawal_tx(
@@ -1492,71 +1548,33 @@ impl Hashi {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(withdrawal_txn_id = %txn.id, input_count = txn.inputs.len()),
+        fields(withdrawal_txn_id = %prepared.txn_id, selected_inputs = prepared.requests.len()),
     )]
-    async fn mpc_sign_withdrawal_tx(
+    pub async fn mpc_sign_withdrawal_tx(
         &self,
-        txn: &WithdrawalTransaction,
-        unsigned_tx: &bitcoin::Transaction,
-        requested_input_indices: &[u64],
+        prepared: PreparedWithdrawalSigning,
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
-        let onchain_state = self.onchain_state().clone();
-        let epoch = onchain_state.epoch();
-        ensure_current_signing_epoch(txn, epoch)?;
-        let signing_manager = self.require_signing_manager(epoch)?;
-        let p2p_channel =
-            RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
-                .with_max_owned_shares(signing_manager.max_owned_count());
+        let PreparedWithdrawalSigning {
+            epoch,
+            signing_manager,
+            requests,
+            index_by_id,
+            ..
+        } = prepared;
+        let p2p_channel = RpcP2PChannel::new(
+            self.onchain_state().clone(),
+            epoch,
+            crate::metrics::MPC_LABEL_SIGNING,
+        )
+        .with_max_owned_shares(signing_manager.max_owned_count());
         let seals = self.onchain_state().presig_seals(epoch);
-        let randomness: &[u8; 32] = txn
-            .randomness
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Withdrawal {} randomness is not 32 bytes", txn.id))?;
-        let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
         let metrics_ref = &*self.metrics;
-        let txn_id = txn.id;
-        // Per-input presig index is read off the on-chain signing batch slot, so
-        // out-of-order / resume works and the index is always the current-epoch
-        // one assigned by `commit`/`reallocate`. Already-signed inputs are skipped.
-        let signing = &txn.signing;
-        let inputs = &txn.inputs;
         let sink_ref = &sink;
-        let selected_input_indices =
-            select_withdrawal_signing_indices(signing, requested_input_indices)?;
-        let mut requests = Vec::with_capacity(selected_input_indices.len());
-        let mut index_by_id: HashMap<Address, usize> =
-            HashMap::with_capacity(selected_input_indices.len());
-        for input_index in selected_input_indices {
-            let message = signing_messages
-                .get(input_index)
-                .expect("validated input_index is in range for signing_messages");
-            let global_presig_index = signing
-                .pending_index(input_index)
-                .expect("validated input_index is pending");
-            let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
-            let derivation_address = inputs
-                .get(input_index)
-                .map(withdrawal_input_derivation_address)
-                .expect("validated input_index is in range for txn.inputs");
-            index_by_id.insert(signing_id, input_index);
-            requests.push(crate::mpc::SignInput {
-                signing_id,
-                message: message.to_vec(),
-                global_presig_index,
-                derivation_address: Some(derivation_address),
-                message_delta: crate::mpc::types::message_delta(
-                    randomness,
-                    input_index as u32,
-                    message,
-                ),
-            });
-        }
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let batch_start = std::time::Instant::now();
         let collect = signing_manager_ref.sign(
@@ -2017,6 +2035,20 @@ pub struct WithdrawalAlreadyFinalized(pub Address);
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct MalformedSigningRequest(String);
+
+pub struct VerifiedWithdrawalTxSigning {
+    message: WithdrawalTxSigning,
+    txid: bitcoin::Txid,
+    signed: anyhow::Result<bitcoin::Transaction>,
+}
+
+pub struct PreparedWithdrawalSigning {
+    txn_id: Address,
+    epoch: u64,
+    signing_manager: Arc<crate::mpc::SigningManager>,
+    requests: Vec<crate::mpc::SignInput>,
+    index_by_id: HashMap<Address, usize>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
