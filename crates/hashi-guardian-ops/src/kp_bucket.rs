@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The key provisioners' bucket: KPs upload their public keys to it with a shared upload key, and the operator
-//! publishes the guardian configuration to its `_config/` prefix, which the upload key may read but never write. The
-//! signers of a KP-set rotation upload their submissions to its `_rotate-kp-set/` prefix.
+//! publishes the guardian configuration to its `_config/` prefix, which the upload key may read but never write. From
+//! hashi #1464 on, the signers of a KP-set rotation upload their submissions to its `_rotate-kp-set/` prefix.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -15,7 +15,7 @@ use crate::exec::read;
 
 /// Uploads go under a user ID, which never starts with an underscore.
 pub const CONFIG_PREFIX: &str = "_config";
-/// `key-provisioner rotate-kp-set` uploads under this, then the session it signs for.
+/// `key-provisioner rotate-kp-set` uploads under this, then the session it signs for, in builds with hashi #1464.
 pub const ROTATION_PREFIX: &str = "_rotate-kp-set";
 
 /// The bucket a key provisioner collection's name implies.

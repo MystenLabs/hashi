@@ -50,7 +50,7 @@ impl Cmd {
         }
     }
 
-    /// Captures stderr too, for a step that reports it itself, as `2>&1` does.
+    /// Captures stderr too, apart from stdout, for a step that reports it itself.
     pub fn capture_stderr(mut self) -> Self {
         self.capture_stderr = true;
         self
@@ -126,7 +126,8 @@ pub struct Output {
 }
 
 pub trait Exec {
-    /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does.
+    /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does, unless the
+    /// command captures stderr too.
     fn output(&self, cmd: &Cmd) -> io::Result<Output>;
 
     /// Replaces this process with `cmd`, as bash's `exec` does. Returns only if that fails.

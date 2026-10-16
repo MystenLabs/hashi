@@ -26,6 +26,8 @@ use crate::kp_bucket::identity;
 use crate::say;
 use crate::stack::Stack;
 
+const ROSTER: &str = "roster.txt";
+
 const KP_FILE_SUFFIXES: [&str; 5] = [
     "kp-pubkey.asc",
     "kp-fingerprint.txt",
@@ -93,10 +95,12 @@ impl Uploads {
     }
 }
 
-/// The user ID a key provisioner file belongs to, if `key` is one: `<id>/<id>-<suffix>`.
+/// The user ID a key provisioner file belongs to, if `key` is one: `<id>/<id>-<suffix>`. The download writes the roster
+/// beside the user IDs' directories, so none may take its name.
 fn kp_file_owner(key: &str) -> Option<String> {
     let (id, file) = key.split_once('/')?;
-    let valid_id = id.starts_with(|c: char| c.is_ascii_alphanumeric())
+    let valid_id = id != ROSTER
+        && id.starts_with(|c: char| c.is_ascii_alphanumeric())
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
@@ -149,6 +153,13 @@ pub fn download_kp_pubkeys(ctx: &Ctx, out: Option<PathBuf>) -> Result<()> {
         &format!("the commit slot {}'s guardian runs", view.slot),
     )?;
     let guardian_init = tree.guardian_init(ctx)?;
+    if !guardian_init.has_tool(ctx, "verify-kp-cert")? {
+        bail!(
+            "hashi-guardian-init at {}, slot {}'s commit, has no tools verify-kp-cert, so it cannot verify uploads.",
+            view.commit,
+            view.slot
+        );
+    }
     println!(
         "Verifying with hashi-guardian-init at {}, slot {}'s commit.",
         view.commit, view.slot
@@ -188,7 +199,9 @@ pub fn download_kp_pubkeys(ctx: &Ctx, out: Option<PathBuf>) -> Result<()> {
         })?;
         let mut count = 0;
         for (id, files) in &uploads.latest {
-            std::fs::create_dir_all(out.join(id))?;
+            let dir = out.join(id);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("Could not create {}.", dir.display()))?;
             for (key, version_id) in files {
                 read(
                     ctx.exec,
@@ -308,7 +321,9 @@ pub fn download_kp_pubkeys(ctx: &Ctx, out: Option<PathBuf>) -> Result<()> {
             )
         })
         .collect();
-    std::fs::write(out.join("roster.txt"), &roster)?;
+    let roster_path = out.join(ROSTER);
+    std::fs::write(&roster_path, &roster)
+        .with_context(|| format!("Could not write {}.", roster_path.display()))?;
     print!("{roster}");
     println!(
         "\nKey provisioners: {}\nRoster and files: {}",
@@ -343,13 +358,16 @@ fn verify_upload(
             None,
         ));
     }
-    let output = ctx.exec.output(
-        &guardian_init
-            .cmd()
-            .args(["tools", "verify-kp-cert", "--kp-pgp-cert-path"])
-            .arg(out.join(id).join(format!("{id}-kp-pubkey.asc")))
-            .capture_stderr(),
-    )?;
+    let output = ctx
+        .exec
+        .output(
+            &guardian_init
+                .cmd()
+                .args(["tools", "verify-kp-cert", "--kp-pgp-cert-path"])
+                .arg(out.join(id).join(format!("{id}-kp-pubkey.asc")))
+                .capture_stderr(),
+        )
+        .context("Could not run the guardian's tools.")?;
     if !output.success {
         return Ok(Status::Invalid(
             "certificate verification failed:".to_owned(),
@@ -369,7 +387,9 @@ fn verify_upload(
     }
     let recorded_path = out.join(id).join(format!("{id}-kp-fingerprint.txt"));
     // Anything the upload holds is checked against the certificate, so bytes that aren't UTF-8 just don't match.
-    let recorded_text = String::from_utf8_lossy(&std::fs::read(&recorded_path)?).into_owned();
+    let recorded_bytes = std::fs::read(&recorded_path)
+        .with_context(|| format!("Could not read {}.", recorded_path.display()))?;
+    let recorded_text = String::from_utf8_lossy(&recorded_bytes).into_owned();
     let recorded = recorded_text.lines().next().unwrap_or("");
     if recorded != fingerprint {
         return Ok(Status::Invalid(
@@ -413,6 +433,138 @@ mod tests {
         assert_eq!(
             uploads.unexpected,
             ["bob/notes.txt", "bob/alice-kp-pubkey.asc", "stray.txt"]
+        );
+    }
+
+    fn bundle(id: &str) -> Vec<serde_json::Value> {
+        KP_FILE_SUFFIXES
+            .iter()
+            .map(|suffix| {
+                serde_json::json!({ "Key": format!("{id}/{id}-{suffix}"), "VersionId": "1", "IsLatest": true })
+            })
+            .collect()
+    }
+
+    /// A one-slot stack, and a bucket holding `versions` whose certificates verify to `fingerprints`, by user ID.
+    fn bucket_world(
+        versions: Vec<serde_json::Value>,
+        fingerprints: &[(&str, String)],
+        verifier: bool,
+    ) -> crate::exec::fake::Fake {
+        let stack = crate::stack::tests::one_slot();
+        let fingerprints: BTreeMap<String, String> = fingerprints
+            .iter()
+            .map(|(id, fingerprint)| ((*id).to_owned(), fingerprint.clone()))
+            .collect();
+        crate::exec::fake::Fake::new(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            match w.as_slice() {
+                ["aws", "sts", "get-caller-identity", ..] => {
+                    Some((true, "111122223333\tarn:aws:iam::111122223333:user/op\n".to_owned()))
+                }
+                ["pulumi", ..] => {
+                    crate::exec::Exec::output(&stack, &Cmd::new("pulumi").args(&words[1..]))
+                        .ok()
+                        .map(|output| (output.success, output.stdout))
+                }
+                ["cargo", "build", ..] => Some((
+                    true,
+                    r#"{"reason":"compiler-artifact","target":{"name":"hashi-guardian-init"},"executable":"/x/hashi-guardian-init"}"#
+                        .to_owned(),
+                )),
+                ["/x/hashi-guardian-init", "tools", "--help"] => Some((
+                    true,
+                    if verifier { "  verify-kp-cert  Verify a certificate\n" } else { "" }.to_owned(),
+                )),
+                ["aws", "s3api", "list-object-versions", ..] => Some((
+                    true,
+                    serde_json::json!({ "Versions": versions }).to_string(),
+                )),
+                ["aws", "s3api", "get-object", ..] => {
+                    let key = w[w.iter().position(|word| *word == "--key")? + 1];
+                    let id = key.split('/').next()?;
+                    let body = if key.ends_with("kp-fingerprint.txt") {
+                        format!("{}\n", fingerprints.get(id).cloned().unwrap_or_default())
+                    } else {
+                        key.to_owned()
+                    };
+                    std::fs::write(w.last()?, body).ok()?;
+                    Some((true, "{}".to_owned()))
+                }
+                ["/x/hashi-guardian-init", "tools", "verify-kp-cert", "--kp-pgp-cert-path", path] => {
+                    let name = std::path::Path::new(path).file_name()?.to_str()?;
+                    let id = name.strip_suffix("-kp-pubkey.asc")?;
+                    Some(match fingerprints.get(id) {
+                        Some(fingerprint) => (true, format!("{fingerprint}\n")),
+                        None => (false, String::new()),
+                    })
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn download(exec: &crate::exec::fake::Fake) -> (tempfile::TempDir, Result<()>) {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            repo.path()
+                .join(".hashi/guardian-init")
+                .join(crate::stack::tests::COMMIT),
+        )
+        .unwrap();
+        let mut env = crate::stack::tests::stack_env();
+        env.push(("KP_NAME", "testnet"));
+        let out = repo.path().join("out");
+        let result = download_kp_pubkeys(&Ctx::for_test(repo.path(), exec, &env), Some(out));
+        (repo, result)
+    }
+
+    #[test]
+    fn writes_the_roster_in_share_order_and_never_writes_to_the_bucket() {
+        let mut versions = bundle("alice");
+        versions.extend(bundle("bob"));
+        let exec = bucket_world(
+            versions,
+            &[("alice", "B".repeat(40)), ("bob", "A".repeat(40))],
+            true,
+        );
+        let (repo, result) = download(&exec);
+        result.unwrap();
+        let roster = std::fs::read_to_string(repo.path().join("out/roster.txt")).unwrap();
+        assert!(roster.starts_with("1  bob"), "{roster}");
+        assert!(roster.contains("\n2  alice"), "{roster}");
+        for words in exec.log.borrow().iter().filter(|words| words[0] == "aws") {
+            assert!(
+                ["get-caller-identity", "list-object-versions", "get-object"]
+                    .contains(&words[2].as_str()),
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_no_roster_unless_every_upload_verifies() {
+        let mut versions = bundle("alice");
+        versions.extend(bundle("roster.txt"));
+        versions.extend(bundle("bob"));
+        // bob's certificate fails to verify, and a user ID can't take the roster's name.
+        let exec = bucket_world(versions, &[("alice", "B".repeat(40))], true);
+        let (repo, result) = download(&exec);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Not every upload verified")
+        );
+        assert!(!repo.path().join("out/roster.txt").exists());
+
+        let exec = bucket_world(bundle("alice"), &[("alice", "B".repeat(40))], false);
+        let (_, result) = download(&exec);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .ends_with("has no tools verify-kp-cert, so it cannot verify uploads.")
         );
     }
 
