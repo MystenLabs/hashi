@@ -329,9 +329,10 @@ Operators must remove these plaintext copies when no longer needed.
 
 ### Backup expiry
 
-Use a **14-day retention policy**, measured from the archive's original creation,
+Use a **14-day retention target**, measured from the archive's original creation,
 for every backup copy: local archives (including the newest), off-machine copies,
-and all S3 object versions. Copying or re-uploading must not reset this period.
+and all S3 object versions. Copying or re-uploading must not reset this target;
+S3's versioning and deletion timing are described [below](#cloud-backup).
 Old shares can still reconstruct the active MPC key after resharing. Keeping
 backups indefinitely gives an attacker more time to collect enough decryptable
 backups from the same epoch to recover that key. Expiry limits this opportunity
@@ -341,6 +342,13 @@ Operators must configure deletion for each storage location; Hashi's
 newest-backup exception alone does not enforce this policy. Account for Object
 Lock and monitor deletion failures or delays. Remove temporary decrypted copies
 immediately after use.
+
+During an incident, pause expiry for backups needed for recovery: disable the
+applicable S3 lifecycle rules and other off-machine deletion jobs. Hashi's local
+cleanup still runs, so preserve encrypted copies outside `backup-dir` in a
+restricted location exempt from deletion. Confirm the copies are accessible;
+changing lifecycle rules is not instantaneous. Resume expiry and remove incident
+copies when recovery no longer needs them.
 
 ## Restoring from a backup
 
@@ -376,12 +384,18 @@ requires operators to configure:
   retained in an independent audit store outside backup writers' permissions.
   Use per-node credentials for attribution: events identify the credential
   principal, not a trusted archive creator.
-- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
-  for current **and noncurrent** versions, coordinated with Object Lock.
-  Expiring only current objects can leave historical versions behind. This is
-  an operational default, not guaranteed deletion on day 14 or a guaranteed
-  recovery window: Object Lock sets a minimum protected period, expiration is
-  asynchronous.
+- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html):
+  - Expire current objects after **14 days** (`Expiration.Days: 14`).
+  - Delete noncurrent versions after **1 day** (`NoncurrentVersionExpiration.NoncurrentDays: 1`),
+    without retaining a minimum number of newer versions.
+  - Remove expired delete markers with a separate rule
+    (`Expiration.ExpiredObjectDeleteMarker: true`).
+  Apply these rules to the backup prefix (or the whole dedicated backup bucket).
+  Current expiry creates a delete marker; the data becomes noncurrent and is
+  eligible for deletion 1 day later, not another 14 days later. Lifecycle uses S3
+  upload time, so late uploads need separate expiry tracking. Object Lock can delay
+  deletion, and lifecycle processing is asynchronous: this is not a hard deadline
+  or a guaranteed recovery window.
 
 Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
 configuration defines the bucket and audit safeguards, but leaves read access
