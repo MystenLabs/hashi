@@ -110,9 +110,9 @@ pub fn assemble_public_cert(
         let fingerprint = key.key().fingerprint();
         let recipient_features = key.valid_cert().features().unwrap_or_else(Features::empty);
         ensure!(
-            recipient_features.normalized_eq(&primary_features),
-            "recipient encryption subkey {fingerprint} has effective features \
-             {recipient_features:?} differing from certifier {} features {primary_features:?}",
+            !primary_features.supports_seipdv2() || recipient_features.supports_seipdv2(),
+            "recipient encryption subkey {fingerprint} does not support SEIPDv2 \
+             required by certifier {}",
             primary.fingerprint()
         );
         let attestation = attestations.get(&fingerprint);
@@ -743,74 +743,70 @@ mod tests {
     }
 
     #[test]
-    fn assembly_rejects_mismatched_effective_features_before_signing() {
+    fn assembly_rejects_v1_only_recipients_for_v2_certifier_before_signing() {
         let modern = Features::empty().set_seipdv1().set_seipdv2();
         let legacy = Features::empty().set_seipdv1();
         for primary_userid in [false, true] {
             for recipient_userid in [false, true] {
-                for primary_features in [legacy.clone(), modern.clone()] {
-                    let other_features = if primary_features.supports_seipdv2() {
-                        legacy.clone()
-                    } else {
-                        modern.clone()
-                    };
-                    let primary = feature_cert(primary_features.clone(), primary_userid, false);
-                    let mut certifier = CountingSigner {
-                        inner: signer(&primary),
-                        calls: 0,
-                    };
-                    let primary = primary.strip_secret_key_material();
-                    let matching = feature_cert(primary_features, recipient_userid, true)
-                        .strip_secret_key_material();
-                    let mismatched = feature_cert(other_features, recipient_userid, true)
-                        .strip_secret_key_material();
-                    let offending = mismatched
-                        .keys()
-                        .subkeys()
-                        .next()
-                        .unwrap()
-                        .key()
-                        .fingerprint();
-                    // Both a single mismatched recipient and a mixed group
-                    // must fail without certifying even the matching subkey.
-                    for sources in [vec![&mismatched], vec![&matching, &mismatched]] {
-                        let selections: Vec<_> = sources
-                            .into_iter()
-                            .map(|cert| EncryptionRecipient { cert, subkey: None })
-                            .collect();
-                        let error = assemble_public_cert(
-                            &primary,
-                            &selections,
-                            &BTreeMap::new(),
-                            false,
-                            &mut certifier,
-                        )
-                        .unwrap_err()
-                        .to_string();
-                        assert!(error.contains("effective features"), "{error}");
-                        assert!(error.contains(&offending.to_string()), "{error}");
-                        assert!(
-                            error.contains(&primary.fingerprint().to_string()),
-                            "{error}"
-                        );
-                        assert_eq!(certifier.calls, 0);
-                    }
+                let primary = feature_cert(modern.clone(), primary_userid, false);
+                let mut certifier = CountingSigner {
+                    inner: signer(&primary),
+                    calls: 0,
+                };
+                let primary = primary.strip_secret_key_material();
+                let matching = feature_cert(modern.clone(), recipient_userid, true)
+                    .strip_secret_key_material();
+                let mismatched = feature_cert(legacy.clone(), recipient_userid, true)
+                    .strip_secret_key_material();
+                let offending = mismatched
+                    .keys()
+                    .subkeys()
+                    .next()
+                    .unwrap()
+                    .key()
+                    .fingerprint();
+                // Both a single v1-only recipient and a mixed group
+                // must fail without certifying even the matching subkey.
+                for sources in [vec![&mismatched], vec![&matching, &mismatched]] {
+                    let selections: Vec<_> = sources
+                        .into_iter()
+                        .map(|cert| EncryptionRecipient { cert, subkey: None })
+                        .collect();
+                    let error = assemble_public_cert(
+                        &primary,
+                        &selections,
+                        &BTreeMap::new(),
+                        false,
+                        &mut certifier,
+                    )
+                    .unwrap_err()
+                    .to_string();
+                    assert!(error.contains("does not support SEIPDv2"), "{error}");
+                    assert!(error.contains(&offending.to_string()), "{error}");
+                    assert!(
+                        error.contains(&primary.fingerprint().to_string()),
+                        "{error}"
+                    );
+                    assert_eq!(certifier.calls, 0);
                 }
             }
         }
     }
 
     #[test]
-    fn assembly_preserves_homogeneous_v1_and_v2_features_and_decryptability() {
+    fn assembly_preserves_compatible_feature_matrix_and_decryptability() {
         use openpgp::parse::PacketParser;
         use openpgp::parse::PacketParserResult;
         use openpgp::parse::Parse;
         use std::io::Cursor;
         use std::io::Read;
 
-        for (features, pkesk_version, seip_version) in [
-            (Features::empty().set_seipdv1(), 3, 1),
-            (Features::empty().set_seipdv1().set_seipdv2(), 6, 2),
+        let legacy = Features::empty().set_seipdv1();
+        let modern = Features::empty().set_seipdv1().set_seipdv2();
+        for (features, second_recipient_features, pkesk_version, seip_version) in [
+            (legacy.clone(), legacy.clone(), 3, 1),
+            (legacy, modern.clone(), 3, 1),
+            (modern.clone(), modern, 6, 2),
         ] {
             for with_userid in [false, true] {
                 let primary = feature_cert(features.clone(), with_userid, false);
@@ -821,15 +817,15 @@ mod tests {
                 let primary = primary.strip_secret_key_material();
                 // Padding is not a capability difference.
                 let padded_features = Features::new([
-                    if features.supports_seipdv2() {
+                    if second_recipient_features.supports_seipdv2() {
                         0x09
                     } else {
                         0x01
                     },
                     0,
                 ]);
-                assert_ne!(features, padded_features);
-                assert!(features.normalized_eq(&padded_features));
+                assert_ne!(second_recipient_features, padded_features);
+                assert!(second_recipient_features.normalized_eq(&padded_features));
                 let recipients = [
                     feature_cert(features.clone(), false, true),
                     feature_cert(padded_features, true, true),

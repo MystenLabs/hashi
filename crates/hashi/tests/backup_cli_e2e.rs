@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::time::Duration;
 
 use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
@@ -27,6 +28,7 @@ use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::pgp::PgpPublicCert;
 use sequoia_openpgp::cert::prelude::*;
 use sequoia_openpgp::parse::Parse;
+use sequoia_openpgp::policy::StandardPolicy;
 use sequoia_openpgp::serialize::Serialize;
 use sequoia_openpgp::types::KeyFlags;
 use sui_sdk_types::Address;
@@ -130,12 +132,27 @@ struct Identity {
 
 impl Identity {
     fn new(root: &Path, name: &str, subkeys: usize) -> Self {
+        Self::with_validity(root, name, subkeys, None, None)
+    }
+
+    fn with_validity(
+        root: &Path,
+        name: &str,
+        subkeys: usize,
+        primary_validity: Option<Duration>,
+        subkey_validity: Option<Duration>,
+    ) -> Self {
         let mut builder = CertBuilder::new()
             .set_cipher_suite(CipherSuite::Cv25519)
             .set_primary_key_flags(KeyFlags::empty().set_certification().set_signing())
+            .set_validity_period(primary_validity)
             .add_userid(name);
         for _ in 0..subkeys {
-            builder = builder.add_transport_encryption_subkey();
+            builder = builder.add_subkey(
+                KeyFlags::empty().set_transport_encryption(),
+                subkey_validity,
+                None,
+            );
         }
         let cert = builder.generate().unwrap().0;
         let mut secret = Vec::new();
@@ -191,9 +208,16 @@ struct AssemblyFixture {
 
 impl AssemblyFixture {
     fn new() -> Self {
+        Self::with_validity(None, [None; 3])
+    }
+
+    fn with_validity(
+        primary_validity: Option<Duration>,
+        recipient_validities: [Option<Duration>; 3],
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = GpgHome::new();
-        let primary = Identity::new(root.path(), "certifier", 0);
+        let primary = Identity::with_validity(root.path(), "certifier", 0, primary_validity, None);
         let primary_secret = root.path().join("certifier-secret.asc");
         fs::write(&primary_secret, &primary.secret).unwrap();
         success(
@@ -204,10 +228,12 @@ impl AssemblyFixture {
         fs::remove_file(primary_secret).unwrap();
         let recipients = (0..3)
             .map(|i| {
-                Identity::new(
+                Identity::with_validity(
                     root.path(),
                     &format!("recipient-{i}"),
                     if i == 1 { 2 } else { 1 },
+                    None,
+                    recipient_validities[i],
                 )
             })
             .collect();
@@ -232,6 +258,84 @@ impl AssemblyFixture {
             .arg(output);
         command
     }
+}
+
+#[test]
+fn assembly_reports_finite_certifier_and_recipient_own_expiries() {
+    let day = Duration::from_secs(24 * 60 * 60);
+    let fixture = AssemblyFixture::with_validity(Some(day * 2), [Some(day), Some(day * 3), None]);
+    let certificate_path = fixture.root.path().join("expiry.asc");
+    let output = success(
+        fixture
+            .assemble(&certificate_path)
+            .arg("--recipient")
+            .arg(&fixture.recipients[0].public_path)
+            .arg("--recipient")
+            .arg(fixture.recipients[1].selected(1))
+            .arg("--recipient")
+            .arg(&fixture.recipients[2].public_path),
+    );
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy = StandardPolicy::new();
+    let primary_expiry = fixture
+        .primary
+        .cert
+        .primary_key()
+        .with_policy(&policy, None)
+        .unwrap()
+        .key_expiration_time()
+        .unwrap();
+    let primary_expiry = jiff::Timestamp::try_from(primary_expiry)
+        .unwrap()
+        .to_string();
+    assert!(primary_expiry.ends_with('Z'));
+    assert!(diagnostics.contains(&format!(
+        "Certifier primary key expiry (UTC): {primary_expiry}"
+    )));
+    for (recipient, selected) in fixture.recipients.iter().zip([0, 1, 0]) {
+        let key = recipient
+            .cert
+            .keys()
+            .with_policy(&policy, None)
+            .subkeys()
+            .nth(selected)
+            .unwrap();
+        let expiry = key
+            .key_expiration_time()
+            .map(|expiry| jiff::Timestamp::try_from(expiry).unwrap().to_string())
+            .unwrap_or_else(|| "never".to_owned());
+        let fingerprint = key.key().fingerprint().to_hex();
+        let line = diagnostics
+            .lines()
+            .find(|line| line.contains(&fingerprint))
+            .unwrap_or_else(|| panic!("missing recipient {fingerprint}: {diagnostics}"));
+        assert!(line.contains(&format!("own key expiry (UTC): {expiry}")));
+    }
+    assert!(diagnostics.contains(&format!("Certifier key expires at {primary_expiry}")));
+}
+
+#[test]
+fn assembly_reports_nonexpiring_certifier_without_expiry_warning() {
+    let fixture = AssemblyFixture::new();
+    let certificate_path = fixture.root.path().join("no-expiry.asc");
+    let output = success(
+        fixture
+            .assemble(&certificate_path)
+            .arg("--recipient")
+            .arg(&fixture.recipients[0].public_path),
+    );
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostics.contains("Certifier primary key expiry (UTC): never"));
+    assert!(diagnostics.contains("own key expiry (UTC): never"));
+    assert!(!diagnostics.contains("Certifier key expires"));
 }
 
 #[test]

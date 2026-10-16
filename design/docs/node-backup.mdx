@@ -274,6 +274,11 @@ The certifier is not automatically a recipient; list it explicitly if needed.
 Use `--gpg-homedir PATH` to select a different GnuPG home. The output must not
 already exist; configure it as `backup-pgp-cert` below.
 
+The command reports each key's expiry. A finite certifier expiry limits the whole
+certificate: replace it before then to avoid backup and node-startup failures.
+If the certifier advertises SEIPDv2, every recipient must support it; a v1-only
+certifier can include recipients that also support v2.
+
 To verify a recipient's YubiKey provenance, add
 `--recipient-attestation SUBKEY_FINGERPRINT DEVICE_PEM DEC_PEM`, supplying the
 device attestation certificate and DEC statement. Repeat for each attested

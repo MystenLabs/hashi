@@ -9,6 +9,7 @@ use hashi_types::pgp::assemble_public_cert;
 use sequoia_openpgp::Cert;
 use sequoia_openpgp::Fingerprint;
 use sequoia_openpgp::parse::Parse;
+use sequoia_openpgp::policy::StandardPolicy;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -18,6 +19,7 @@ use std::str::FromStr;
 
 use crate::cli::print_info;
 use crate::cli::print_success;
+use crate::cli::print_warning;
 
 #[derive(Clone, Debug)]
 pub struct RecipientInput {
@@ -169,6 +171,28 @@ pub fn run(
     .context("Failed to assemble backup certificate")?;
     let cert = Cert::from_bytes(assembled.armored().as_bytes())
         .context("Failed to parse assembled public certificate")?;
+    let policy = StandardPolicy::new();
+    let valid_cert = cert
+        .with_policy(&policy, None)
+        .context("Failed to validate assembled public certificate for expiry reporting")?;
+    let primary_expiry = valid_cert.primary_key().key_expiration_time();
+    let format_expiry = |expiry: Option<std::time::SystemTime>| -> Result<String> {
+        match expiry {
+            Some(expiry) => Ok(jiff::Timestamp::try_from(expiry)?.to_string()),
+            None => Ok("never".to_owned()),
+        }
+    };
+    let primary_expiry_display = format_expiry(primary_expiry)?;
+    let recipient_expiries = valid_cert
+        .keys()
+        .subkeys()
+        .map(|key| {
+            Ok((
+                key.key().fingerprint(),
+                format_expiry(key.key_expiration_time())?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let parent = output
         .parent()
@@ -205,10 +229,21 @@ pub fn run(
         output.display()
     ));
     print_info(&format!("Primary fingerprint: {}", cert.fingerprint()));
-    for key in cert.keys().subkeys() {
+    print_info(&format!(
+        "Certifier primary key expiry (UTC): {primary_expiry_display}"
+    ));
+    for (fingerprint, expiry) in recipient_expiries {
         print_info(&format!(
-            "Recipient encryption subkey fingerprint: {}",
-            key.key().fingerprint()
+            "Recipient encryption subkey fingerprint: {fingerprint}; own key expiry (UTC): {expiry}"
+        ));
+    }
+    if primary_expiry.is_some() {
+        print_warning(&format!(
+            "Certifier key expires at {primary_expiry_display}. This limits the whole certificate, \
+             even recipients whose own key expiry is later or never. After certifier expiry, \
+             new backups fail and node startup rejects the expired configured certificate. \
+             Replace the certificate before expiry. Expiry does not make existing backups \
+             cryptographically undecryptable."
         ));
     }
     Ok(())
