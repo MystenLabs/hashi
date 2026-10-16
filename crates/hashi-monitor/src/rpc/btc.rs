@@ -23,42 +23,12 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::domain::DepositEventType;
-use crate::domain::DepositId;
-use crate::domain::MonitorDepositEvent;
+use crate::domain::TxConfirmation;
 
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
-
-/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
-#[derive(Clone, Debug)]
-pub struct TxConfirmation {
-    /// The time of the block that holds the transaction. The recovery leaf's
-    /// clock starts at this block, so a coin's age counts from here.
-    pub block_time: UnixSeconds,
-    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
-    /// The bridge acts on that block, so the Bitcoin events carry this time.
-    pub confirmed_time: UnixSeconds,
-    /// The transaction's outputs, in order.
-    pub outputs: Vec<TxOut>,
-}
-
-impl TxConfirmation {
-    /// The deposit this transaction confirms at `deposit_id`, or `None` if it
-    /// has no output at that vout.
-    pub fn deposit_event(&self, deposit_id: DepositId) -> Option<MonitorDepositEvent> {
-        let output = self.outputs.get(deposit_id.vout() as usize)?;
-        Some(MonitorDepositEvent {
-            event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: self.confirmed_time,
-            deposit_id,
-            amount: output.value.to_sat(),
-            script_pubkey: output.script_pubkey.clone(),
-        })
-    }
-}
 
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
@@ -748,7 +718,7 @@ mod tests {
         let txid = Txid::from_slice(&[9u8; 32]).unwrap();
 
         assert_eq!(
-            confirmation.deposit_event(DepositId::new(txid, 1)),
+            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 1)),
             Some(MonitorDepositEvent {
                 event_type: DepositEventType::E1BtcConfirmed,
                 timestamp_secs: 90,
@@ -757,7 +727,10 @@ mod tests {
                 script_pubkey,
             })
         );
-        assert_eq!(confirmation.deposit_event(DepositId::new(txid, 2)), None);
+        assert_eq!(
+            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 2)),
+            None
+        );
     }
 
     #[test]

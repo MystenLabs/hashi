@@ -13,12 +13,12 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::TxConfirmation;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
-use crate::rpc::btc::TxConfirmation;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
@@ -250,13 +250,8 @@ impl WithdrawalStateMachine {
         match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(confirmation)) => {
                 self.btc_checked_at = Some(cur_time);
-                let e_btc = MonitorWithdrawalEvent {
-                    event_type: WithdrawalEventType::E3BtcConfirmed,
-                    wid,
-                    btc_txid,
-                    timestamp_secs: confirmation.confirmed_time,
-                    tx: self.tx.clone(),
-                };
+                let e_btc =
+                    MonitorWithdrawalEvent::from_btc(&confirmation, wid, btc_txid, self.tx.clone());
                 Ok(BtcFetchOutcome::Confirmed(self.add_event(e_btc, cfg)))
             }
             Ok(None) => {
@@ -393,7 +388,7 @@ impl DepositStateMachine {
     fn resolve(&mut self, confirmation: &TxConfirmation) -> Vec<MonitorFinding> {
         self.btc_resolved = true;
         let deposit_id = self.deposit_id();
-        let Some(e_btc) = confirmation.deposit_event(deposit_id) else {
+        let Some(e_btc) = MonitorDepositEvent::from_btc(confirmation, deposit_id) else {
             return vec![MonitorFinding::DepositOutputMissing {
                 deposit_id,
                 output_count: confirmation.outputs.len(),
@@ -1004,9 +999,11 @@ mod tests {
         let keys = test_hashi_btc_keys();
         let path = DerivationPath::new([0x42; 32]);
         let sui = sui_deposit(50_000, keys.script_pubkey(Some(&path)));
-        let btc = confirmation(50_000, keys.script_pubkey(Some(&path)))
-            .deposit_event(sui.deposit_id)
-            .unwrap();
+        let btc = MonitorDepositEvent::from_btc(
+            &confirmation(50_000, keys.script_pubkey(Some(&path))),
+            sui.deposit_id,
+        )
+        .unwrap();
 
         assert_eq!(deposit_mismatch(&sui, &btc), None);
     }
@@ -1014,9 +1011,9 @@ mod tests {
     #[test]
     fn a_claimed_amount_above_the_paid_amount_is_a_mismatch() {
         let sui = sui_deposit(50_000, p2wpkh(0x54));
-        let btc = confirmation(40_000, p2wpkh(0x54))
-            .deposit_event(sui.deposit_id)
-            .unwrap();
+        let btc =
+            MonitorDepositEvent::from_btc(&confirmation(40_000, p2wpkh(0x54)), sui.deposit_id)
+                .unwrap();
 
         let finding = deposit_mismatch(&sui, &btc).unwrap();
         assert_eq!(
@@ -1032,9 +1029,9 @@ mod tests {
     #[test]
     fn a_payment_to_another_address_is_a_mismatch() {
         let sui = sui_deposit(50_000, p2wpkh(0x54));
-        let btc = confirmation(50_000, p2wpkh(0x55))
-            .deposit_event(sui.deposit_id)
-            .unwrap();
+        let btc =
+            MonitorDepositEvent::from_btc(&confirmation(50_000, p2wpkh(0x55)), sui.deposit_id)
+                .unwrap();
 
         assert!(deposit_mismatch(&sui, &btc).is_some());
     }
@@ -1067,9 +1064,11 @@ mod tests {
         let paid_path = DerivationPath::new([0x42; 32]);
         let claimed_path = DerivationPath::new([0x43; 32]);
         let sui = sui_deposit(50_000, keys.script_pubkey(Some(&claimed_path)));
-        let btc = confirmation(50_000, keys.script_pubkey(Some(&paid_path)))
-            .deposit_event(sui.deposit_id)
-            .unwrap();
+        let btc = MonitorDepositEvent::from_btc(
+            &confirmation(50_000, keys.script_pubkey(Some(&paid_path))),
+            sui.deposit_id,
+        )
+        .unwrap();
 
         assert!(deposit_mismatch(&sui, &btc).is_some());
     }

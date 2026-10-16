@@ -17,21 +17,32 @@
 
 use std::fmt;
 
+use anyhow::Context as _;
 use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
+use bitcoin::TxOut;
 use bitcoin::Txid;
+use hashi_guardian::s3_reader::VerifiedLogEntry;
 use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::DerivationPath;
 use hashi_types::bitcoin::HashiMasterG;
+use hashi_types::bitcoin::OutputUTXOWire;
+use hashi_types::bitcoin::TxUTXOsWire;
 use hashi_types::bitcoin::taproot_address;
 use hashi_types::bitcoin::unsigned_withdrawal_tx;
+use hashi_types::bitcoin::witness_program_from_address;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::unix_millis_to_seconds;
+use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
+use hashi_types::move_types::UtxoId;
+use hashi_types::move_types::WithdrawalPickedForProcessing;
+use hashi_types::move_types::WithdrawalTransaction;
 use serde::Deserialize;
 
 use crate::findings::MonitorFinding;
@@ -237,6 +248,106 @@ pub struct MonitorWithdrawalEvent {
     pub tx: WithdrawalTx,
 }
 
+impl MonitorWithdrawalEvent {
+    /// E1 from the `WithdrawalTransaction` object at `wid`.
+    pub fn from_sui_object(
+        wid: WithdrawalID,
+        txn: WithdrawalTransaction,
+    ) -> Result<Self, Vec<MonitorFinding>> {
+        Self::checked_approval(
+            wid,
+            txn.txid.into(),
+            WithdrawalTx::new(txn.inputs, txn.withdrawal_outputs, txn.change_outputs),
+            unix_millis_to_seconds(txn.created_timestamp_ms),
+        )
+    }
+
+    /// E1 from the `WithdrawalPickedForProcessing` event.
+    pub fn from_sui_event(
+        event: WithdrawalPickedForProcessing,
+    ) -> Result<Self, Vec<MonitorFinding>> {
+        Self::checked_approval(
+            event.withdrawal_txn_id,
+            event.txid.into(),
+            WithdrawalTx::new(event.inputs, event.withdrawal_outputs, event.change_outputs),
+            unix_millis_to_seconds(event.timestamp_ms),
+        )
+    }
+
+    /// Check what Move does not on the Hashi approval of `wid`: the claimed
+    /// txid must be the txid of the transaction `tx` builds. Otherwise a
+    /// committee can commit a user's outputs under the txid of a transaction
+    /// that pays itself. A failed check is returned as findings, and the
+    /// approval is not ingested. The event carries `tx` for the state
+    /// machine to compare with the guardian's once E2 arrives.
+    fn checked_approval(
+        wid: WithdrawalID,
+        claimed_txid: Txid,
+        tx: WithdrawalTx,
+        timestamp_secs: UnixSeconds,
+    ) -> Result<Self, Vec<MonitorFinding>> {
+        match tx.unsigned_tx() {
+            Ok(built) if built.compute_txid() == claimed_txid => {}
+            Ok(built) => {
+                return Err(vec![MonitorFinding::WithdrawalTxidMismatch {
+                    wid,
+                    claimed: claimed_txid,
+                    computed: built.compute_txid(),
+                }]);
+            }
+            Err(error) => {
+                return Err(vec![MonitorFinding::WithdrawalTxUnbuildable {
+                    wid,
+                    claimed: claimed_txid,
+                    reason: format!("{error:#}"),
+                }]);
+            }
+        }
+        Ok(Self {
+            event_type: WithdrawalEventType::E1HashiApproved,
+            wid,
+            timestamp_secs,
+            btc_txid: claimed_txid,
+            tx,
+        })
+    }
+
+    /// E2 from a verified guardian withdrawal log. The log labels every
+    /// output it signed; `keys` turn its change paths into addresses.
+    pub fn from_guardian(log: VerifiedLogEntry, keys: &HashiBTCKeys) -> anyhow::Result<Self> {
+        let entry = log.into_entry();
+        let timestamp_ms = entry.timestamp_ms();
+        let withdrawal = entry
+            .into_message()
+            .into_withdrawal()
+            .ok_or_else(|| anyhow::anyhow!("non-withdrawal logs found"))?;
+        Ok(Self {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            wid: withdrawal.request_data.wid,
+            timestamp_secs: unix_millis_to_seconds(timestamp_ms),
+            btc_txid: withdrawal.txid,
+            tx: WithdrawalTx::from_guardian(keys, &withdrawal.request_data.utxos)?,
+        })
+    }
+
+    /// E3 from Bitcoin's confirmation of the withdrawal `wid` and `btc_txid`.
+    /// It repeats `tx`, which the state machine already holds.
+    pub fn from_btc(
+        confirmation: &TxConfirmation,
+        wid: WithdrawalID,
+        btc_txid: Txid,
+        tx: WithdrawalTx,
+    ) -> Self {
+        Self {
+            event_type: WithdrawalEventType::E3BtcConfirmed,
+            wid,
+            btc_txid,
+            timestamp_secs: confirmation.confirmed_time,
+            tx,
+        }
+    }
+}
+
 /// A withdrawal transaction in Move's shape: the inputs, the user payouts, then
 /// the change back to the bridge. Sui records it so, and the guardian's log is
 /// converted into it, so the two can be compared as a whole.
@@ -268,6 +379,50 @@ impl WithdrawalTx {
             withdrawal_outputs,
             change_outputs,
         }
+    }
+
+    /// The UTXOs the guardian signed, in Move's shape. The guardian labels
+    /// each output external, to a user address, or internal, to the bridge
+    /// address of a derivation path. The external outputs are Move's user
+    /// payouts and the internal ones its change, each with the address as a
+    /// witness program.
+    pub fn from_guardian(keys: &HashiBTCKeys, utxos: &TxUTXOsWire) -> anyhow::Result<Self> {
+        let inputs = utxos
+            .inputs
+            .iter()
+            .map(|input| Utxo {
+                id: UtxoId {
+                    txid: input.outpoint.txid.into(),
+                    vout: input.outpoint.vout,
+                },
+                amount: input.amount.to_sat(),
+                derivation_path: Some(input.derivation_path),
+            })
+            .collect();
+        let mut withdrawal_outputs = Vec::new();
+        let mut change_outputs = Vec::new();
+        for output in &utxos.outputs {
+            match output {
+                OutputUTXOWire::External(external) => {
+                    let address = external
+                        .address
+                        .clone()
+                        .require_network(keys.network())
+                        .context("guardian external output address is for another network")?;
+                    withdrawal_outputs.push(OutputUtxo {
+                        amount: external.amount.to_sat(),
+                        bitcoin_address: witness_program_from_address(&address)?,
+                    });
+                }
+                OutputUTXOWire::Internal(internal) => change_outputs.push(OutputUtxo {
+                    amount: internal.amount.to_sat(),
+                    bitcoin_address: witness_program_from_address(
+                        &keys.address(Some(&internal.derivation_path)),
+                    )?,
+                }),
+            }
+        }
+        Ok(Self::new(inputs, withdrawal_outputs, change_outputs))
     }
 
     /// The unsigned Bitcoin transaction these inputs and outputs build.
@@ -332,6 +487,52 @@ pub struct MonitorDepositEvent {
     /// Script the deposit output pays. Sui gives the bridge address of the
     /// claimed derivation path, Bitcoin the paid script.
     pub script_pubkey: ScriptBuf,
+}
+
+impl MonitorDepositEvent {
+    /// E2 from Hashi's `DepositConfirmed`. Its Move payload has no
+    /// timestamp, so the containing checkpoint's time is used. The claim's
+    /// derivation path becomes the bridge script the state machine compares
+    /// with the paid output.
+    pub fn from_sui(
+        event: DepositConfirmed,
+        checkpoint_timestamp_secs: UnixSeconds,
+        keys: &HashiBTCKeys,
+    ) -> Self {
+        Self {
+            event_type: DepositEventType::E2HashiDeposited,
+            timestamp_secs: checkpoint_timestamp_secs,
+            deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
+            amount: event.utxo.amount,
+            script_pubkey: keys.script_pubkey(event.utxo.derivation_path.as_ref()),
+        }
+    }
+
+    /// E1 from Bitcoin's confirmation: the output at `deposit_id`'s vout, or
+    /// `None` if the transaction has no output there.
+    pub fn from_btc(confirmation: &TxConfirmation, deposit_id: DepositId) -> Option<Self> {
+        let output = confirmation.outputs.get(deposit_id.vout() as usize)?;
+        Some(Self {
+            event_type: DepositEventType::E1BtcConfirmed,
+            timestamp_secs: confirmation.confirmed_time,
+            deposit_id,
+            amount: output.value.to_sat(),
+            script_pubkey: output.script_pubkey.clone(),
+        })
+    }
+}
+
+/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
+#[derive(Clone, Debug)]
+pub struct TxConfirmation {
+    /// The time of the block that holds the transaction. The recovery leaf's
+    /// clock starts at this block, so a coin's age counts from here.
+    pub block_time: UnixSeconds,
+    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
+    /// The bridge acts on that block, so the Bitcoin events carry this time.
+    pub confirmed_time: UnixSeconds,
+    /// The transaction's outputs, in order.
+    pub outputs: Vec<TxOut>,
 }
 
 /// The two fixed keys that every bridge address derives from.
@@ -447,6 +648,92 @@ pub enum PollOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
+    use bitcoin::Amount;
+    use bitcoin::Network;
+    use bitcoin::OutPoint;
+    use bitcoin::ScriptBuf;
+    use bitcoin::WPubkeyHash;
+    use bitcoin::hashes::Hash as _;
+    use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::bitcoin::DerivationPath;
+    use hashi_types::bitcoin::InputUTXO;
+    use hashi_types::bitcoin::OutputUTXOWire;
+    use hashi_types::bitcoin::TxUTXOsWire;
+    use hashi_types::bitcoin::witness_program_from_address;
+    use hashi_types::move_types::UtxoId;
+
+    #[test]
+    fn the_guardians_utxos_convert_to_moves_shape() {
+        let keys = test_hashi_btc_keys();
+        let input_path = DerivationPath::new([0x52; 32]);
+        let change_path = DerivationPath::new([0x42; 32]);
+        let outpoint = OutPoint {
+            txid: bitcoin::Txid::from_slice(&[0x51; 32]).unwrap(),
+            vout: 1,
+        };
+        let user_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20]));
+        let user_address = BitcoinAddress::from_script(&user_script, keys.network()).unwrap();
+        let utxos = TxUTXOsWire {
+            inputs: vec![InputUTXO::new(
+                outpoint,
+                Amount::from_sat(120_000),
+                input_path,
+            )],
+            outputs: vec![
+                OutputUTXOWire::external(user_address.into_unchecked(), Amount::from_sat(100_000)),
+                OutputUTXOWire::internal(change_path, Amount::from_sat(19_000)),
+            ],
+        };
+
+        assert_eq!(
+            WithdrawalTx::from_guardian(&keys, &utxos).unwrap(),
+            WithdrawalTx {
+                inputs: vec![Utxo {
+                    id: UtxoId {
+                        txid: outpoint.txid.into(),
+                        vout: 1,
+                    },
+                    amount: 120_000,
+                    derivation_path: Some(input_path),
+                }],
+                withdrawal_outputs: vec![OutputUtxo {
+                    amount: 100_000,
+                    bitcoin_address: vec![0x53; 20],
+                }],
+                change_outputs: vec![OutputUtxo {
+                    amount: 19_000,
+                    bitcoin_address: witness_program_from_address(
+                        &keys.address(Some(&change_path))
+                    )
+                    .unwrap(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn an_external_address_for_another_network_is_an_error() {
+        let keys = test_hashi_btc_keys();
+        let mainnet = BitcoinAddress::from_script(
+            &ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20])),
+            Network::Bitcoin,
+        )
+        .unwrap();
+        let utxos = TxUTXOsWire {
+            inputs: vec![InputUTXO::new(
+                OutPoint::null(),
+                Amount::from_sat(1),
+                DerivationPath::ZERO,
+            )],
+            outputs: vec![OutputUTXOWire::external(
+                mainnet.into_unchecked(),
+                Amount::from_sat(1),
+            )],
+        };
+
+        assert!(WithdrawalTx::from_guardian(&keys, &utxos).is_err());
+    }
 
     #[test]
     fn utc_timestamp_round_trip() {
