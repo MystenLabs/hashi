@@ -9,6 +9,7 @@ use anyhow::bail;
 
 use crate::Ctx;
 use crate::commit::Tree;
+use crate::render::Rendered;
 use crate::render::SlotRender;
 use crate::say;
 use crate::stack::Slot;
@@ -22,19 +23,19 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
         "Render slot {}'s guardian configuration",
         view.slot
     ));
+    let render = SlotRender::new(ctx, &stack, &view)?;
     let tree = Tree::at(
         ctx,
         &view.commit,
         &format!("the commit slot {}'s guardian runs", view.slot),
     )?;
     let guardian_init = tree.guardian_init(ctx)?;
-    let render = SlotRender::new(ctx, &stack, &view)?;
     let check = guardian_init.has_tool(ctx, "check-config")?;
     std::fs::create_dir_all(&view.dir)?;
-    render.rendered.write(&view.dir)?;
+    render.rendered.write_unchecked(&view.dir)?;
     if check {
         for config in render.rendered.configs() {
-            let path = view.dir.join(config);
+            let path = view.dir.join(Rendered::written(config));
             // The configuration lists certificates relative to its own directory.
             let checked = ctx.exec.output(
                 &guardian_init
@@ -59,6 +60,7 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
             "This guardian's build has no tools check-config, so its tools have not checked the rendered files.",
         );
     }
+    render.rendered.place_operator_configs(&view.dir)?;
 
     let settings = &render.settings;
     println!("Guardian commit:  {}", settings.commit);
@@ -105,14 +107,12 @@ mod tests {
                 "standby_instance_id": "",
                 "s3_bucket_name": "guardian-bucket",
                 "s3_bucket_region": "us-west-2",
+                "s3_access_key_id": "test-access-key",
             }),
         );
         Fake::new(move |words| {
             let w: Vec<&str> = words.iter().map(String::as_str).collect();
             match w.as_slice() {
-                ["pulumi", "-C", _, "stack", "output", "s3_access_key_id", ..] => {
-                    Some((true, "test-access-key\n".to_owned()))
-                }
                 ["pulumi", "-C", _, "stack", "output", "s3_secret_access_key", ..] => {
                     Some((true, "test-secret-key\n".to_owned()))
                 }
@@ -166,6 +166,7 @@ mod tests {
         let dir = repo.path().join(".hashi/guardian/testnet/a");
         assert!(dir.join("guardian-init.yaml").is_file());
         assert!(!dir.join("operator.yaml").exists());
+        assert!(!dir.join("operator.yaml.unchecked").exists());
 
         // Tools that cannot run stop the step before it writes anything.
         let (repo, result) = render_slot_a(&render_world(false, true));

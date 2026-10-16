@@ -72,40 +72,48 @@ impl Settings {
         };
         let refill_rate = sats("refill-rate-sats-per-sec")?;
         let max_bucket_capacity = sats("max-bucket-capacity-sats")?;
-        // Every reader must allowlist each build that wrote the log, and this configuration lists one.
+        // Every reader must allowlist each build that wrote the log, and this configuration lists only its own. The
+        // other slot's keys name its build after its teardown too.
         let other = view.slot.other();
-        if stack.slots()?.contains(&other) {
-            let suffix = other.suffix();
-            if stack.config(&format!("hashi-commit{suffix}")) != Some(&view.commit)
-                || stack.config(&format!("eif-pcr0{suffix}")) != Some(pcr0)
-            {
-                bail!(
-                    "Slots a and b of stack {} have different builds. Both write one log bucket, so give slot {} the same hashi-commit and eif-pcr0 as slot {other}.",
-                    stack.name,
-                    view.slot
-                );
-            }
+        let suffix = other.suffix();
+        if let Some(commit) = stack.config(&format!("hashi-commit{suffix}"))
+            && (commit != view.commit || stack.config(&format!("eif-pcr0{suffix}")) != Some(pcr0))
+        {
+            bail!(
+                "Slots a and b of stack {} name different builds. A guardian must allowlist every build that wrote its log, and slot {}'s configurations can list only its own.",
+                stack.name,
+                view.slot
+            );
         }
         // The enclave keeps the key it is initialized with, so this must be the stack's long-lived one.
         let access_key = stack
-            .output_value(ctx, "s3_access_key_id", false)
-            .context("Could not read the guardian's S3 access key.")?;
+            .output("s3_access_key_id")
+            .ok_or_else(|| anyhow!("Stack {} has no s3_access_key_id output.", stack.name))?
+            .to_owned();
         let secret_key = stack
             .output_value(ctx, "s3_secret_access_key", true)
             .context("Could not read the guardian's S3 secret key.")?;
         let env = &ctx.env;
+        // The files quote every value as JSON does, which YAML reads the same only for printable ASCII.
+        let plain = |key: &str| -> Result<String> {
+            let value = env.require(key)?;
+            if !value.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+                bail!("{key} holds characters other than printable ASCII.");
+            }
+            Ok(value.to_owned())
+        };
         Ok(Self {
             proxy_url: env.proxy_url()?.url,
             tunnel_endpoint: view.endpoint.clone(),
             bucket: bucket.name,
             region: bucket.region,
-            retention_environment: env.require("RETENTION_ENVIRONMENT")?.to_owned(),
-            bitcoin_network: env.require("BITCOIN_NETWORK")?.to_owned(),
+            retention_environment: plain("RETENTION_ENVIRONMENT")?,
+            bitcoin_network: plain("BITCOIN_NETWORK")?,
             commit: view.commit.clone(),
             pcr0: pcr0.to_owned(),
-            sui_rpc: env.require("SUI_RPC")?.to_owned(),
-            package_id: env.require("HASHI_PACKAGE_ID")?.to_owned(),
-            object_id: env.require("HASHI_OBJECT_ID")?.to_owned(),
+            sui_rpc: plain("SUI_RPC")?,
+            package_id: plain("HASHI_PACKAGE_ID")?,
+            object_id: plain("HASHI_OBJECT_ID")?,
             refill_rate,
             max_bucket_capacity,
             access_key,
@@ -243,36 +251,54 @@ impl Rendered {
             .filter(|path| path.ends_with(".yaml"))
     }
 
+    fn operator_configs(&self) -> impl Iterator<Item = &str> {
+        self.configs()
+            .filter(|path| path.ends_with("operator.yaml"))
+    }
+
+    /// Where [`Rendered::write_unchecked`] puts a file, relative to the slot's directory: each operator configuration
+    /// waits under another name until the guardian's tools have checked it, so no step finds one they never passed.
+    pub fn written(path: &str) -> String {
+        if path.ends_with("operator.yaml") {
+            format!("{path}.unchecked")
+        } else {
+            path.to_owned()
+        }
+    }
+
     /// Removes the operator's files, so no step runs with a configuration the guardian's tools refused.
     pub fn remove_operator_configs(&self, dir: &Path) -> Result<()> {
-        for path in self
-            .configs()
-            .filter(|path| path.ends_with("operator.yaml"))
-        {
-            let path = dir.join(path);
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("Could not remove {}.", path.display()))?;
+        for config in self.operator_configs() {
+            for path in [dir.join(config), dir.join(Self::written(config))] {
+                if path.exists() {
+                    std::fs::remove_file(&path)
+                        .with_context(|| format!("Could not remove {}.", path.display()))?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Writes the files into `dir`, replacing the certificates an earlier render left. Other files there, such as a
-    /// ceremony's records, stay.
+    /// Writes the files into `dir`, replacing the certificates and configurations an earlier render left. Other files
+    /// there, such as a ceremony's records, stay.
     pub fn write(&self, dir: &Path) -> Result<()> {
+        self.write_unchecked(dir)?;
+        self.place_operator_configs(dir)
+    }
+
+    /// Writes the files as [`Rendered::write`] does, with the operator's configurations where
+    /// [`Rendered::written`] says until [`Rendered::place_operator_configs`].
+    pub fn write_unchecked(&self, dir: &Path) -> Result<()> {
+        self.remove_operator_configs(dir)?;
         let certs = dir.join("certs");
         if certs.exists() {
             std::fs::remove_dir_all(&certs)
                 .with_context(|| format!("Could not remove {}.", certs.display()))?;
         }
         for (relative, bytes) in &self.files {
-            let path = dir.join(relative);
+            let path = dir.join(Self::written(relative));
             std::fs::create_dir_all(path.parent().unwrap_or(dir))?;
             if relative.ends_with("operator.yaml") {
-                if path.exists() {
-                    std::fs::remove_file(&path)?;
-                }
                 OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -283,6 +309,17 @@ impl Rendered {
                 std::fs::write(&path, bytes)
             }
             .with_context(|| format!("Could not write {}.", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Moves the operator's configurations into place, once checked.
+    pub fn place_operator_configs(&self, dir: &Path) -> Result<()> {
+        for config in self.operator_configs() {
+            let (from, to) = (dir.join(Self::written(config)), dir.join(config));
+            std::fs::rename(&from, &to).with_context(|| {
+                format!("Could not move {} to {}.", from.display(), to.display())
+            })?;
         }
         Ok(())
     }
@@ -498,5 +535,85 @@ pub mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+        // Until the guardian's tools pass it, the operator's file waits under another name.
+        rendered.write_unchecked(&slot).unwrap();
+        assert!(!slot.join("operator.yaml").exists());
+        assert!(slot.join("operator.yaml.unchecked").is_file());
+        rendered.place_operator_configs(&slot).unwrap();
+        assert!(slot.join("operator.yaml").is_file());
+        assert!(!slot.join("operator.yaml.unchecked").exists());
+    }
+
+    /// Slot `slot`'s settings, from a stack with `config` whose slot a serves.
+    fn read_settings(
+        config: serde_json::Value,
+        slot: crate::stack::Slot,
+        network: &str,
+    ) -> Result<Settings> {
+        let stack = crate::stack::tests::stack_world(
+            config,
+            serde_json::json!({
+                "active_slot": "a",
+                "enclave_instance_id": "i-0aaa",
+                "standby_instance_id": "",
+                "s3_bucket_name": "guardian-bucket",
+                "s3_bucket_region": "us-west-2",
+                "s3_access_key_id": "test-access-key",
+            }),
+        );
+        let exec = crate::exec::fake::Fake::new(move |words| {
+            if words.iter().any(|word| word == "s3_secret_access_key") {
+                return Some((true, "test-secret-key\n".to_owned()));
+            }
+            crate::exec::Exec::output(&stack, &crate::exec::Cmd::new("pulumi").args(&words[1..]))
+                .ok()
+                .map(|output| (output.success, output.stdout))
+        });
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = crate::stack::tests::stack_env();
+        env.extend([
+            ("SUI_RPC", "https://fullnode.testnet.sui.io:443"),
+            ("HASHI_PACKAGE_ID", "0x1"),
+            ("HASHI_OBJECT_ID", "0x2"),
+            ("BITCOIN_NETWORK", network),
+            ("RETENTION_ENVIRONMENT", "testnet"),
+        ]);
+        let ctx = Ctx::for_test(repo.path(), &exec, &env);
+        let stack = Stack::load(&ctx)?;
+        let view = stack.slot(&ctx, slot)?;
+        Settings::read(&ctx, &stack, &view)
+    }
+
+    #[test]
+    fn refuses_a_stack_whose_other_slot_names_another_build() {
+        use crate::stack::Slot;
+        use crate::stack::tests::COMMIT;
+        let config = |other: &str| {
+            serde_json::json!({
+                "hashi-commit": COMMIT,
+                "eif-pcr0": "0c".repeat(48),
+                "hashi-commit-b": other,
+                "eif-pcr0-b": "0c".repeat(48),
+                "slot-b-enabled": "false",
+                "refill-rate-sats-per-sec": "11574",
+                "max-bucket-capacity-sats": "1000000000",
+            })
+        };
+        read_settings(config(COMMIT), Slot::A, "signet").unwrap();
+        // A torn-down slot's keys still name a build that wrote the log.
+        assert_eq!(
+            read_settings(config(&"c4".repeat(20)), Slot::A, "signet")
+                .err()
+                .unwrap()
+                .to_string(),
+            "Slots a and b of stack mysten/testnet name different builds. A guardian must allowlist every build that wrote its log, and slot a's configurations can list only its own."
+        );
+        assert_eq!(
+            read_settings(config(COMMIT), Slot::A, "sig\u{85}net")
+                .err()
+                .unwrap()
+                .to_string(),
+            "BITCOIN_NETWORK holds characters other than printable ASCII."
+        );
     }
 }

@@ -71,7 +71,6 @@ impl Tree {
                 .into_string()
                 .map_err(|_| anyhow!("The tree's path is not UTF-8."))
         };
-        // Without its own manifest, cargo would walk up to this checkout's and build that CLI instead.
         let messages = read(
             ctx.exec,
             &cargo(&[
