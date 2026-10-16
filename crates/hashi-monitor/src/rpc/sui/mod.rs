@@ -328,12 +328,7 @@ impl SuiEventsPoller {
             .await
             .with_context(|| format!("Sui lookup of withdrawal transaction {wid} timed out"))??;
         match object {
-            Some(object) => approval::parse_withdrawal_object(
-                &self.package_versions,
-                &self.hashi_btc_keys,
-                wid,
-                &object,
-            ),
+            Some(object) => approval::parse_withdrawal_object(&self.package_versions, wid, &object),
             None => Ok(None),
         }
     }
@@ -627,6 +622,7 @@ impl SuiEventsPoller {
 pub mod tests {
     use super::approval::tests::PACKAGE_ID;
     use super::approval::tests::WID;
+    use super::approval::tests::approval_tx;
     use super::approval::tests::object_at_wid;
     use super::approval::tests::test_hashi_btc_keys;
     use super::approval::tests::withdrawal_transaction;
@@ -789,6 +785,7 @@ pub mod tests {
             wid: WID,
             timestamp_secs: unix_millis_to_seconds(txn.created_timestamp_ms),
             btc_txid: txn.txid.into(),
+            tx: approval_tx(&txn),
         }
     }
 
@@ -837,6 +834,7 @@ pub mod tests {
                 wid: WID,
                 timestamp_secs: 1_789_805_327,
                 btc_txid: txn.txid.into(),
+                tx: approval_tx(&txn),
             })
         );
     }

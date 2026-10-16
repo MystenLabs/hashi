@@ -7,6 +7,7 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
+use crate::domain::WithdrawalTx;
 use crate::domain::utc_timestamp;
 use crate::findings::MonitorFinding;
 use anyhow::Context;
@@ -14,16 +15,48 @@ use bitcoin::Network;
 use hashi_guardian::MAX_EXPECTED_LOG_CLOCK_SKEW;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogEntry;
+use hashi_types::bitcoin::OutputUTXOWire;
+use hashi_types::bitcoin::TxUTXOsWire;
+use hashi_types::bitcoin::witness_program_from_address;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
+use hashi_types::move_types::OutputUtxo;
+use hashi_types::move_types::Utxo;
+use hashi_types::move_types::UtxoId;
 use tracing::debug;
 
-impl TryFrom<VerifiedLogEntry> for MonitorWithdrawalEvent {
-    type Error = anyhow::Error;
+// Note: current design does not check if multiple concurrent sessions are running.
+//       one way to impl this: store the first & last observed session timestamp & ensure no overlap between time ranges.
+pub struct GuardianWithdrawalsPoller {
+    /// Owns the S3 client + the trusted-key cache, so a session's attestation is
+    /// verified once for the poller's lifetime.
+    reader: GuardianReader,
+    cursor: S3HourDirectory,
+    /// Set by `read_hashi_btc_keys`. The guardian's internal outputs state a
+    /// derivation path, and the keys turn it into the address they pay.
+    hashi_btc_keys: Option<HashiBTCKeys>,
+}
 
-    fn try_from(log: VerifiedLogEntry) -> Result<Self, Self::Error> {
+impl GuardianWithdrawalsPoller {
+    // Note: Throws an error if there is a S3 connectivity issue
+    pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+        let s3_credentials =
+            hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
+        Ok(Self {
+            reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
+            cursor: S3HourDirectory::withdraw(start)?,
+            hashi_btc_keys: None,
+        })
+    }
+
+    /// The E2 event of a verified guardian withdrawal log.
+    fn withdrawal_event(&self, log: VerifiedLogEntry) -> anyhow::Result<MonitorWithdrawalEvent> {
+        let keys = self
+            .hashi_btc_keys
+            .as_ref()
+            .context("the bridge keys must be read before polling guardian logs")?;
         let entry = log.into_entry();
         let timestamp_ms = entry.timestamp_ms();
         let withdrawal = entry
@@ -41,27 +74,7 @@ impl TryFrom<VerifiedLogEntry> for MonitorWithdrawalEvent {
             wid: withdrawal.request_data.wid,
             timestamp_secs: unix_millis_to_seconds(timestamp_ms),
             btc_txid: withdrawal.txid,
-        })
-    }
-}
-
-// Note: current design does not check if multiple concurrent sessions are running.
-//       one way to impl this: store the first & last observed session timestamp & ensure no overlap between time ranges.
-pub struct GuardianWithdrawalsPoller {
-    /// Owns the S3 client + the trusted-key cache, so a session's attestation is
-    /// verified once for the poller's lifetime.
-    reader: GuardianReader,
-    cursor: S3HourDirectory,
-}
-
-impl GuardianWithdrawalsPoller {
-    // Note: Throws an error if there is a S3 connectivity issue
-    pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
-        let s3_credentials =
-            hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
-        Ok(Self {
-            reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
-            cursor: S3HourDirectory::withdraw(start)?,
+            tx: withdrawal_tx(keys, &withdrawal.request_data.utxos)?,
         })
     }
 
@@ -90,6 +103,7 @@ impl GuardianWithdrawalsPoller {
             change_script = %keys.script_pubkey(None),
             "read the bridge keys from the guardian records"
         );
+        self.hashi_btc_keys = Some(keys.clone());
         Ok(keys)
     }
 
@@ -125,9 +139,7 @@ impl GuardianWithdrawalsPoller {
                     stored_at_ms: log.stored_at_ms(),
                 });
             }
-            withdrawal_events.push(MonitorEvent::Withdrawal(MonitorWithdrawalEvent::try_from(
-                log,
-            )?));
+            withdrawal_events.push(MonitorEvent::Withdrawal(self.withdrawal_event(log)?));
         }
 
         self.cursor = next_cursor;
@@ -145,6 +157,53 @@ impl GuardianWithdrawalsPoller {
     }
 }
 
+/// The UTXOs the guardian signed, in Move's shape. The guardian labels each
+/// output external, to a user address, or internal, to the bridge address of
+/// a derivation path. The external outputs are Move's user payouts and the
+/// internal ones its change, each with the address as a witness program.
+fn withdrawal_tx(keys: &HashiBTCKeys, utxos: &TxUTXOsWire) -> anyhow::Result<WithdrawalTx> {
+    let inputs = utxos
+        .inputs
+        .iter()
+        .map(|input| Utxo {
+            id: UtxoId {
+                txid: input.outpoint.txid.into(),
+                vout: input.outpoint.vout,
+            },
+            amount: input.amount.to_sat(),
+            derivation_path: Some(input.derivation_path),
+        })
+        .collect();
+    let mut withdrawal_outputs = Vec::new();
+    let mut change_outputs = Vec::new();
+    for output in &utxos.outputs {
+        match output {
+            OutputUTXOWire::External(external) => {
+                let address = external
+                    .address
+                    .clone()
+                    .require_network(keys.network())
+                    .context("guardian external output address is for another network")?;
+                withdrawal_outputs.push(OutputUtxo {
+                    amount: external.amount.to_sat(),
+                    bitcoin_address: witness_program_from_address(&address)?,
+                });
+            }
+            OutputUTXOWire::Internal(internal) => change_outputs.push(OutputUtxo {
+                amount: internal.amount.to_sat(),
+                bitcoin_address: witness_program_from_address(
+                    &keys.address(Some(&internal.derivation_path)),
+                )?,
+            }),
+        }
+    }
+    Ok(WithdrawalTx::new(
+        inputs,
+        withdrawal_outputs,
+        change_outputs,
+    ))
+}
+
 #[cfg(test)]
 impl GuardianWithdrawalsPoller {
     /// A poller over a mock S3 client, for tests that never poll it.
@@ -152,6 +211,93 @@ impl GuardianWithdrawalsPoller {
         Self {
             reader: hashi_guardian::test_utils::mock_reader(config.deployment.clone()),
             cursor: S3HourDirectory::withdraw(start).expect("valid test timestamp"),
+            hashi_btc_keys: Some(crate::rpc::sui::approval::tests::test_hashi_btc_keys()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::sui::approval::tests::test_hashi_btc_keys;
+    use bitcoin::Amount;
+    use bitcoin::OutPoint;
+    use bitcoin::ScriptBuf;
+    use bitcoin::WPubkeyHash;
+    use bitcoin::hashes::Hash as _;
+    use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::bitcoin::DerivationPath;
+    use hashi_types::bitcoin::InputUTXO;
+
+    #[test]
+    fn the_guardians_utxos_convert_to_moves_shape() {
+        let keys = test_hashi_btc_keys();
+        let input_path = DerivationPath::new([0x52; 32]);
+        let change_path = DerivationPath::new([0x42; 32]);
+        let outpoint = OutPoint {
+            txid: bitcoin::Txid::from_slice(&[0x51; 32]).unwrap(),
+            vout: 1,
+        };
+        let user_script = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20]));
+        let user_address = BitcoinAddress::from_script(&user_script, keys.network()).unwrap();
+        let utxos = TxUTXOsWire {
+            inputs: vec![InputUTXO::new(
+                outpoint,
+                Amount::from_sat(120_000),
+                input_path,
+            )],
+            outputs: vec![
+                OutputUTXOWire::external(user_address.into_unchecked(), Amount::from_sat(100_000)),
+                OutputUTXOWire::internal(change_path, Amount::from_sat(19_000)),
+            ],
+        };
+
+        assert_eq!(
+            withdrawal_tx(&keys, &utxos).unwrap(),
+            WithdrawalTx {
+                inputs: vec![Utxo {
+                    id: UtxoId {
+                        txid: outpoint.txid.into(),
+                        vout: 1,
+                    },
+                    amount: 120_000,
+                    derivation_path: Some(input_path),
+                }],
+                withdrawal_outputs: vec![OutputUtxo {
+                    amount: 100_000,
+                    bitcoin_address: vec![0x53; 20],
+                }],
+                change_outputs: vec![OutputUtxo {
+                    amount: 19_000,
+                    bitcoin_address: witness_program_from_address(
+                        &keys.address(Some(&change_path))
+                    )
+                    .unwrap(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn an_external_address_for_another_network_is_an_error() {
+        let keys = test_hashi_btc_keys();
+        let mainnet = BitcoinAddress::from_script(
+            &ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x53; 20])),
+            Network::Bitcoin,
+        )
+        .unwrap();
+        let utxos = TxUTXOsWire {
+            inputs: vec![InputUTXO::new(
+                OutPoint::null(),
+                Amount::from_sat(1),
+                DerivationPath::ZERO,
+            )],
+            outputs: vec![OutputUTXOWire::external(
+                mainnet.into_unchecked(),
+                Amount::from_sat(1),
+            )],
+        };
+
+        assert!(withdrawal_tx(&keys, &utxos).is_err());
     }
 }

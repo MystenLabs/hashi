@@ -25,17 +25,24 @@ Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
 - **safety** for a contradictory event, a late predecessor, a predecessor
   still missing after its source cursor passes the deadline, an event the
-  Sui scan covered but never returned, a Hashi approval whose txid or
-  change outputs do not match its inputs and outputs, a confirmed deposit
+  Sui scan covered but never returned, a Hashi approval whose txid does not
+  match its inputs and outputs or whose inputs and outputs differ from the
+  guardian's, a confirmed deposit
   whose Bitcoin output does not match the Sui request, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
 
-Move does not validate a Hashi approval's txid or change outputs, so the
-monitor rebuilds the Bitcoin transaction from the approval and checks that the
-txid matches and that every change output pays the bridge change address. An
-approval that fails is reported at once and not ingested. The address is
-derived once at startup from the guardian's genesis and ceremony records.
+Move does not validate a Hashi approval's txid or change outputs. The monitor
+rebuilds the Bitcoin transaction from the approval and checks that the txid
+matches; an approval that fails is reported at once and not ingested. Each
+withdrawal event carries the inputs, user payouts and change in Move's shape.
+The guardian's log, which labels every output it signs as a user payout or
+as change to a derivation path, is converted into that shape with the change
+addresses the paths derive. Sui's and the guardian's statements must be
+equal, in either ingestion order; otherwise a committee can label a payout to
+itself as change. The monitor assumes no fixed change path. The bridge keys
+that derive the change addresses are read once at startup from the
+guardian's genesis and ceremony records.
 
 Move does not see Bitcoin, so the monitor compares a confirmed deposit's
 output with the Sui request: the same amount, and the same script as the bridge
