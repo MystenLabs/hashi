@@ -11,8 +11,9 @@
 //!    checkpoint before the cursor by probing checkpoint timestamps, or
 //!    starts at the oldest checkpoint a pruning node serves.
 //! 2. Each poll lists the transactions that emit a monitored event, from the
-//!    next checkpoint through the one that covers the poll end. A failed
-//!    range is retried, then split.
+//!    next checkpoint through the one that covers the poll end, but at most
+//!    `MAX_CHECKPOINTS_PER_POLL` checkpoints. A failed range is retried,
+//!    then split.
 //! 3. The cursor advances through the last checkpoint the node declared
 //!    complete. The transactions of later checkpoints wait for the next poll,
 //!    so a checkpoint is ingested whole.
@@ -41,6 +42,7 @@ use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+use sui_rpc::proto::sui::rpc::v2::GetTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ListTransactionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_rpc::proto::sui::rpc::v2::Ordering;
@@ -49,6 +51,7 @@ use sui_rpc::proto::sui::rpc::v2::QueryOptions;
 use sui_rpc::proto::sui::rpc::v2::TransactionFilter;
 use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 use sui_sdk_types::Address;
+use sui_sdk_types::Digest;
 
 use crate::config::SuiConfig;
 use crate::domain::MonitorEvent;
@@ -63,6 +66,10 @@ use approval::HashiApproval;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
+/// Checkpoints one poll scans at most. A backlog, such as a first run from
+/// genesis, is walked in ranges of this size: each range fits one request
+/// timeout, and its events are released before the next range is read.
+const MAX_CHECKPOINTS_PER_POLL: u64 = 10_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 const MAX_RANGE_ATTEMPTS: u32 = 3;
 const MAX_LOOKUP_ATTEMPTS: u32 = 3;
@@ -114,6 +121,62 @@ fn is_transient(status: &tonic::Status) -> bool {
     )
 }
 
+/// A Sui v2 gRPC client for `config`, with `REQUEST_TIMEOUT` on every request.
+fn connect(config: &SuiConfig) -> anyhow::Result<sui_rpc::Client> {
+    let client = sui_rpc::Client::new(&config.rpc_url)
+        .with_context(|| format!("invalid Sui RPC URL {}", config.rpc_url))?
+        .request_layer(tower::timeout::TimeoutLayer::new(REQUEST_TIMEOUT));
+    Ok(client)
+}
+
+/// The time the original Hashi package was published: the bridge's genesis
+/// on Sui, since no Hashi event precedes it.
+pub async fn package_publish_time(config: &SuiConfig) -> anyhow::Result<UnixSeconds> {
+    let mut client = connect(config)?;
+    publish_time(&mut client, &config.package_id).await
+}
+
+/// The checkpoint time of the transaction that published `package_id`. The
+/// package object is immutable, so its previous transaction is its publish.
+async fn publish_time(
+    client: &mut sui_rpc::Client,
+    package_id: &str,
+) -> anyhow::Result<UnixSeconds> {
+    let address = Address::from_str(package_id)
+        .with_context(|| format!("invalid Hashi package ID {package_id}"))?;
+    let request = GetObjectRequest::new(&address)
+        .with_read_mask(FieldMask::from_paths(["previous_transaction"]));
+    let publish_digest = client
+        .ledger_client()
+        .get_object(request)
+        .await
+        .with_context(|| format!("failed to fetch Hashi package {package_id}"))?
+        .into_inner()
+        .object
+        .with_context(|| format!("Sui GetObject response is missing package {package_id}"))?
+        .previous_transaction
+        .with_context(|| format!("Hashi package {package_id} is missing previous_transaction"))?;
+    let digest = Digest::from_str(&publish_digest).with_context(|| {
+        format!("invalid publish transaction digest {publish_digest} of Hashi package {package_id}")
+    })?;
+    let request =
+        GetTransactionRequest::new(&digest).with_read_mask(FieldMask::from_paths(["timestamp"]));
+    let timestamp = client
+        .ledger_client()
+        .get_transaction(request)
+        .await
+        .with_context(|| format!("failed to fetch the publish transaction of Hashi package {package_id}"))?
+        .into_inner()
+        .transaction
+        .with_context(|| format!("Sui GetTransaction response is missing the publish transaction of Hashi package {package_id}"))?
+        .timestamp
+        .with_context(|| format!("publish transaction of Hashi package {package_id} is missing timestamp"))?;
+    let timestamp_ms = proto_to_timestamp_ms(timestamp).with_context(|| {
+        format!("invalid publish transaction timestamp of Hashi package {package_id}")
+    })?;
+    Ok(unix_millis_to_seconds(timestamp_ms))
+}
+
 pub struct SuiEventsPoller {
     /// Sui v2 gRPC client used for checkpoint, transaction and object requests.
     client: sui_rpc::Client,
@@ -147,12 +210,9 @@ impl SuiEventsPoller {
             .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
 
         let package_versions = PackageVersions::new(BTreeMap::from([(1, package_id)]));
-        let client = sui_rpc::Client::new(&config.rpc_url)
-            .with_context(|| format!("invalid Sui RPC URL {}", config.rpc_url))?
-            .request_layer(tower::timeout::TimeoutLayer::new(REQUEST_TIMEOUT));
 
         Ok(Self {
-            client,
+            client: connect(config)?,
             package_versions,
             hashi_btc_keys,
             package_id: config.package_id.clone(),
@@ -179,7 +239,8 @@ impl SuiEventsPoller {
         (self.start_seconds..self.cursor_seconds).contains(&timestamp_secs)
     }
 
-    /// Scan through the checkpoint covering `up_to`, or the observed chain head.
+    /// Scan through the checkpoint covering `up_to`, or the observed chain head,
+    /// but at most `MAX_CHECKPOINTS_PER_POLL` checkpoints.
     ///
     /// The timestamp cursor advances only through `watermark.checkpoint`, which
     /// is the inclusive boundary that `ListTransactions` reports as fully
@@ -207,7 +268,7 @@ impl SuiEventsPoller {
             }
         }
 
-        let mut end_checkpoint = if latest_timestamp < up_to {
+        let end_checkpoint = if latest_timestamp < up_to {
             latest_sequence.saturating_add(1)
         } else {
             let (_, boundary) = self
@@ -219,6 +280,10 @@ impl SuiEventsPoller {
         if end_checkpoint <= start_checkpoint {
             return Ok(PollOutcome::CursorUnmoved);
         }
+        // A backlog is scanned in bounded ranges. The caller polls again while
+        // the cursor advances, so the rest follows in the next polls.
+        let mut end_checkpoint =
+            end_checkpoint.min(start_checkpoint.saturating_add(MAX_CHECKPOINTS_PER_POLL));
 
         let mut range_attempt = 0u32;
         let scan = loop {
@@ -352,6 +417,21 @@ impl SuiEventsPoller {
             Some(object) => approval::parse_withdrawal_object(&self.package_versions, wid, &object),
             None => Ok(None),
         }
+    }
+
+    /// Fail unless the node still serves the start. A pruned start would
+    /// leave the UTXO pool incomplete for good. On success the first poll
+    /// does not probe again.
+    pub async fn ensure_start_is_served(&mut self) -> anyhow::Result<()> {
+        let first_checkpoint = self.first_checkpoint_to_scan().await?;
+        anyhow::ensure!(
+            self.start_seconds == self.cursor_seconds,
+            "the Sui node has pruned the start {}: its scan would begin at {}. Use a Sui node that keeps the history from the bridge's genesis",
+            utc_timestamp(self.cursor_seconds),
+            utc_timestamp(self.start_seconds),
+        );
+        self.next_checkpoint_to_scan = Some(first_checkpoint);
+        Ok(())
     }
 
     /// The checkpoint before the cursor or, once the node has pruned that far, the oldest
@@ -643,6 +723,10 @@ pub mod tests {
     use sui_rpc::proto::sui::rpc::v2::GetCheckpointResponse;
     use sui_rpc::proto::sui::rpc::v2::GetObjectResponse;
     use sui_rpc::proto::sui::rpc::v2::GetServiceInfoResponse;
+    use sui_rpc::proto::sui::rpc::v2::GetTransactionResponse;
+    use sui_rpc::proto::sui::rpc::v2::ListTransactionsResponse;
+    use sui_rpc::proto::sui::rpc::v2::QueryEnd;
+    use sui_rpc::proto::sui::rpc::v2::Watermark;
     use sui_rpc::proto::sui::rpc::v2::get_checkpoint_request::CheckpointId;
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerService;
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerServiceServer;
@@ -762,7 +846,50 @@ pub mod tests {
         }
     }
 
-    async fn poller_for(ledger: impl LedgerService) -> SuiEventsPoller {
+    /// A ledger holding the package `PACKAGE_ID`, published by the transaction
+    /// `PUBLISH_DIGEST` at `PUBLISH_SECS`. Each `None` leaves that field out.
+    #[derive(Clone)]
+    struct PublishedPackageLedger {
+        previous_transaction: Option<String>,
+        timestamp: Option<UnixSeconds>,
+    }
+
+    const PUBLISH_DIGEST: &str = "11111111111111111111111111111111";
+    const PUBLISH_SECS: UnixSeconds = 1_690_000_000;
+
+    #[tonic::async_trait]
+    impl LedgerService for PublishedPackageLedger {
+        async fn get_object(
+            &self,
+            request: tonic::Request<GetObjectRequest>,
+        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
+            if request.into_inner().object_id != Some(PACKAGE_ID.to_string()) {
+                return Err(tonic::Status::not_found("no such object"));
+            }
+            let mut object = Object::default();
+            object.previous_transaction = self.previous_transaction.clone();
+            Ok(tonic::Response::new(GetObjectResponse::new(object)))
+        }
+
+        async fn get_transaction(
+            &self,
+            request: tonic::Request<GetTransactionRequest>,
+        ) -> Result<tonic::Response<GetTransactionResponse>, tonic::Status> {
+            if request.into_inner().digest.as_deref() != Some(PUBLISH_DIGEST) {
+                return Err(tonic::Status::not_found("no such transaction"));
+            }
+            let mut transaction = ExecutedTransaction::default();
+            transaction.timestamp = self
+                .timestamp
+                .map(|seconds| timestamp_ms_to_proto(seconds * 1_000));
+            Ok(tonic::Response::new(GetTransactionResponse::new(
+                transaction,
+            )))
+        }
+    }
+
+    /// Serve `ledger` on a local port and return the config that reaches it.
+    async fn serve(ledger: impl LedgerService) -> SuiConfig {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = futures::stream::unfold(listener, |listener| async move {
@@ -774,11 +901,44 @@ pub mod tests {
                 .add_service(LedgerServiceServer::new(ledger))
                 .serve_with_incoming(incoming),
         );
-        let config = SuiConfig {
+        SuiConfig {
             rpc_url: format!("http://{addr}"),
             package_id: PACKAGE_ID.to_string(),
-        };
+        }
+    }
+
+    async fn poller_for(ledger: impl LedgerService) -> SuiEventsPoller {
+        let config = serve(ledger).await;
         SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_publish_time_is_the_package_previous_transaction_time() {
+        let config = serve(PublishedPackageLedger {
+            previous_transaction: Some(PUBLISH_DIGEST.to_string()),
+            timestamp: Some(PUBLISH_SECS),
+        })
+        .await;
+
+        assert_eq!(package_publish_time(&config).await.unwrap(), PUBLISH_SECS);
+    }
+
+    #[tokio::test]
+    async fn a_package_without_a_previous_transaction_is_an_error() {
+        let config = serve(PublishedPackageLedger {
+            previous_transaction: None,
+            timestamp: Some(PUBLISH_SECS),
+        })
+        .await;
+
+        let error = format!("{:#}", package_publish_time(&config).await.unwrap_err());
+
+        assert!(
+            error.contains(&format!(
+                "Hashi package {PACKAGE_ID} is missing previous_transaction"
+            )),
+            "{error}"
+        );
     }
 
     /// The approval a lookup of `WID` returns from `poller_scanned`'s ledger.
@@ -1022,11 +1182,119 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn a_start_the_node_has_pruned_fails_the_guard() {
+        let mut poller = pruned_poller_starting_at(50_000).await;
+
+        let error = format!("{:#}", poller.ensure_start_is_served().await.unwrap_err());
+
+        assert!(error.contains("pruned the start"), "{error}");
+        assert_eq!(poller.next_checkpoint_to_scan, None);
+    }
+
+    #[tokio::test]
+    async fn a_start_the_node_serves_passes_the_guard_and_sets_the_first_checkpoint() {
+        let mut poller = pruned_poller_starting_at(130_000).await;
+
+        poller.ensure_start_is_served().await.unwrap();
+
+        assert_eq!(poller.start_seconds(), GENESIS_SECS + 130_000);
+        assert_eq!(poller.next_checkpoint_to_scan, Some(129_999));
+    }
+
+    #[tokio::test]
     async fn a_start_the_probe_would_overshoot_resolves_without_pruned_checkpoints() {
         let mut poller = pruned_poller_starting_at(130_000).await;
 
         assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), 129_999);
         assert_eq!(poller.start_seconds(), GENESIS_SECS + 130_000);
+    }
+
+    /// `PrunedLedger`'s checkpoints, plus a `ListTransactions` that records each
+    /// requested range and answers it with no transactions, up to its bound.
+    #[derive(Clone)]
+    struct ScanningLedger {
+        checkpoints: PrunedLedger,
+        ranges: Arc<Mutex<Vec<(u64, u64)>>>,
+    }
+
+    #[tonic::async_trait]
+    impl LedgerService for ScanningLedger {
+        async fn get_service_info(
+            &self,
+            request: tonic::Request<GetServiceInfoRequest>,
+        ) -> Result<tonic::Response<GetServiceInfoResponse>, tonic::Status> {
+            self.checkpoints.get_service_info(request).await
+        }
+
+        async fn get_checkpoint(
+            &self,
+            request: tonic::Request<GetCheckpointRequest>,
+        ) -> Result<tonic::Response<GetCheckpointResponse>, tonic::Status> {
+            self.checkpoints.get_checkpoint(request).await
+        }
+
+        async fn list_transactions(
+            &self,
+            request: tonic::Request<ListTransactionsRequest>,
+        ) -> Result<
+            tonic::Response<tonic::codegen::BoxStream<ListTransactionsResponse>>,
+            tonic::Status,
+        > {
+            let request = request.into_inner();
+            let (start, end) = (
+                request.start_checkpoint.unwrap_or(0),
+                request.end_checkpoint.unwrap_or(0),
+            );
+            self.ranges.lock().unwrap().push((start, end));
+            let mut watermark = Watermark::default();
+            watermark.cursor = Some(b"bound".to_vec().into());
+            watermark.checkpoint = Some(end - 1);
+            let mut query_end = QueryEnd::default();
+            query_end.reason = Some(QueryEndReason::CheckpointBound as i32);
+            let mut frame = ListTransactionsResponse::default();
+            frame.watermark = Some(watermark);
+            frame.end = Some(query_end);
+            Ok(tonic::Response::new(Box::pin(futures::stream::once(
+                async { Ok(frame) },
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poll_scans_at_most_the_range_cap_and_the_next_poll_continues() {
+        let ledger = ScanningLedger {
+            checkpoints: PrunedLedger {
+                lowest: 0,
+                head: 3 * MAX_CHECKPOINTS_PER_POLL,
+            },
+            ranges: Arc::default(),
+        };
+        let mut poller = poller_for(ledger.clone()).await;
+        poller.start_seconds = GENESIS_SECS - 10;
+        poller.cursor_seconds = GENESIS_SECS - 10;
+        let head_time = GENESIS_SECS + 3 * MAX_CHECKPOINTS_PER_POLL;
+
+        for expected_cursor_checkpoint in [MAX_CHECKPOINTS_PER_POLL, 2 * MAX_CHECKPOINTS_PER_POLL] {
+            assert!(matches!(
+                poller.poll(head_time).await.unwrap(),
+                PollOutcome::CursorAdvanced { .. }
+            ));
+            assert_eq!(
+                poller.next_checkpoint_to_scan,
+                Some(expected_cursor_checkpoint)
+            );
+            assert_eq!(
+                poller.cursor_seconds(),
+                GENESIS_SECS + expected_cursor_checkpoint - 1
+            );
+        }
+        assert_eq!(
+            *ledger.ranges.lock().unwrap(),
+            vec![
+                (0, MAX_CHECKPOINTS_PER_POLL),
+                (MAX_CHECKPOINTS_PER_POLL, 2 * MAX_CHECKPOINTS_PER_POLL),
+            ]
+        );
     }
 
     #[tokio::test]

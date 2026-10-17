@@ -24,8 +24,9 @@
 //!
 //! How it works:
 //! 1. The pool starts empty, at the bridge's genesis. Move's records are
-//!    never read for it. Keeping it between runs follows in a later change.
-//! 2. A UTXO is added when Bitcoin confirms a deposit request's output at
+//!    never read for it. The continuous auditor keeps it in its snapshot,
+//!    so a restart resumes with the pool the last run built.
+//! 2. A coin is added when Bitcoin confirms a deposit request's output at
 //!    the bridge script of the claimed path. The committee is not needed.
 //! 3. When a withdrawal flow is complete, E1, E2 and E3 seen, its change
 //!    outputs are added and its inputs move to the spent record, with the
@@ -105,7 +106,7 @@ pub struct SpentUtxo {
 }
 
 /// The UTXOs the bridge holds and the UTXOs it spent, by Bitcoin's account.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(from = "UtxoPoolWire", into = "UtxoPoolWire")]
 pub struct UtxoPool {
     utxos: BTreeMap<OutPoint, Utxo>,
@@ -168,6 +169,21 @@ impl From<UtxoPool> for UtxoPoolWire {
 }
 
 impl UtxoPool {
+    /// The number of UTXOs held.
+    pub fn len(&self) -> usize {
+        self.utxos.len()
+    }
+
+    /// Whether no UTXO is held.
+    pub fn is_empty(&self) -> bool {
+        self.utxos.is_empty()
+    }
+
+    /// The number of UTXOs in the spent record.
+    pub fn spent_len(&self) -> usize {
+        self.spent.len()
+    }
+
     /// The outpoints held, in order.
     pub fn outpoints(&self) -> Vec<OutPoint> {
         self.utxos.keys().copied().collect()
@@ -331,10 +347,6 @@ impl UtxoPool {
 
 #[cfg(test)]
 impl UtxoPool {
-    pub fn is_empty(&self) -> bool {
-        self.utxos.is_empty()
-    }
-
     pub fn get(&self, outpoint: &OutPoint) -> Option<&Utxo> {
         self.utxos.get(outpoint)
     }

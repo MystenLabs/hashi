@@ -99,11 +99,11 @@ that answers a deposit and the withdrawal that spends it is right in any
 order.
 
 Move's records are never read for the pool. The pool starts empty on the
-first run, which must start at the bridge's genesis on a fullnode that still
+first run, which starts at the bridge's genesis on a fullnode that still
 serves the history, so every UTXO is seen enter. The spent record is never
-pruned; a spent UTXO is a few dozen bytes. Keeping the pool between runs, in
-the monitor's snapshot, follows in a later change. Until then no pool is
-kept.
+pruned; a spent UTXO is a few dozen bytes. The pool is kept between runs in
+the monitor's snapshot, so a restart resumes with the pool the last run
+built. See "Continuous monitoring" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
 held:
@@ -167,26 +167,41 @@ pruned the start of its Sui range.
 ```bash
 cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
-  --start 2026-08-04T19:00:00Z
+  --snapshot-bucket my-hashi-monitor-snapshot
 ```
-Without `--start` or a snapshot, the audit starts far enough back to cover a
-monitor outage of up to a week, including checks that were still pending when
-it began. Findings from that period are reported again after a restart. If the
-Sui node has pruned part of that range (the public testnet fullnode keeps under
-six days), the Sui scan starts near its oldest checkpoint: withdrawal approvals
-from before it are still read by withdrawal id if the guardian signed them, but
-deposits and unsigned approvals from before it are not audited.
+The monitor keeps a snapshot at `gs://<BUCKET>/snapshot.json` and saves it
+after every state check: the `restart_start` its previous state check logged,
+the UTXO pool as it is now, and the deployment it audits. The monitor needs
+read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
+or, on GKE, its workload identity, and fails to start without it. It must be
+the bucket's only writer.
 
-With `--snapshot-bucket <BUCKET>`, the monitor saves a snapshot to
-`gs://<BUCKET>/snapshot.json` after every state check: the `restart_start` its
-previous state check logged, and the deployment it audits. A restart resumes
-from the snapshot, or from `--start` if that is earlier, and ignores another
-deployment's snapshot; delete the object to start over. A flow that never
-completes holds the restart start back, so a restart replays everything since
-that flow began, subject to the Sui pruning above. The monitor needs read and
-write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS` or, on
-GKE, its workload identity, and fails to start without it. It must be the
-bucket's only writer.
+The first run has no snapshot. It starts at the bridge's genesis on Sui, the
+checkpoint time of the transaction that published the Hashi package in the
+config, with an empty pool, so every UTXO is seen enter. That needs a Sui
+node that keeps the history from genesis; the public testnet fullnode keeps
+about ten days, and `archive.<network>.sui.io` keeps everything. The monitor
+fails to start on a node that has pruned the start, on a first run or a
+restart, since a pruned start would leave the pool incomplete for good.
+
+The scan from genesis runs in ranges of 10,000 checkpoints, about an hour of
+Sui each, and the state checks wait for it. On a busy network it takes hours.
+
+A restart resumes from the snapshot: the audit from `restart_start`, and the
+pool as saved. The replay changes nothing in the pool, since the pool skips
+every operation it already applied. Findings since `restart_start` are
+reported again. A snapshot of another deployment, or one saved by a monitor
+before the pool existed, is ignored and the run is a first run. Delete the
+object to start over from genesis.
+
+A flow that never completes holds `restart_start` back, so every restart
+replays everything since that flow began. To move the restart point past it,
+edit `restart_start` in the object by hand while the monitor is stopped; the
+flow is then no longer audited. The field is a UTC timestamp such as
+`2026-10-05T23:30:36Z`.
+
+The snapshot is a durable asset, not a cache. Losing it means a new first run
+from genesis, on a node that still serves it.
 
 ## Config
 The config file holds the identity of one deployment. See `audit.sample.yaml`
@@ -235,8 +250,8 @@ deployment:
       pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until a restart no longer re-audits its records: a week
-    # and 1 hour 25 minutes plus the longest next-event delay and clock skew.
+    # replaced build until the snapshot's restart start, logged at every state
+    # check, passes its last record: a restart re-audits everything from there.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

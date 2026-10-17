@@ -165,8 +165,8 @@ pub struct AuditorCore {
     /// own.
     pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
     /// The UTXOs the bridge holds, by Bitcoin's account. See `pool`. `None`
-    /// keeps no pool. Keeping it between runs, and so turning it on, follows
-    /// in a later change.
+    /// keeps no pool: batch mode has none, and continuous mode keeps one in
+    /// its snapshot.
     utxo_pool: Option<UtxoPool>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
@@ -609,6 +609,17 @@ impl AuditorCore {
 
     pub async fn poll_sui(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
         self.sui_poller.poll(up_to).await
+    }
+
+    /// Fail unless the Sui node still serves the start. See
+    /// `SuiEventsPoller::ensure_start_is_served`.
+    pub async fn ensure_sui_serves_start(&mut self) -> anyhow::Result<()> {
+        self.sui_poller.ensure_start_is_served().await
+    }
+
+    /// The UTXO pool, if one is kept.
+    pub fn utxo_pool(&self) -> Option<&UtxoPool> {
+        self.utxo_pool.as_ref()
     }
 
     fn cursors(&self) -> Cursors {

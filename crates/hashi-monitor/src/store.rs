@@ -3,19 +3,23 @@
 
 //! The continuous auditor's snapshot: what survives a restart.
 //!
-//! Why it exists: without it, every restart re-audits the last week and
-//! reports that week's findings again.
+//! Why it exists: without it, every restart would re-audit from the bridge's
+//! genesis to rebuild the UTXO pool, and report every old finding again.
 //!
 //! How it works:
 //! 1. After each state check, the auditor saves a `Snapshot` as JSON under
-//!    `SNAPSHOT_KEY` in a GCS bucket: the previous check's restart start, and
-//!    the deployment it audits.
-//! 2. At startup it loads the snapshot, resumes from the restart start
-//!    unless another deployment saved it, and saves its own start.
+//!    `SNAPSHOT_KEY` in a GCS bucket: the previous check's restart start,
+//!    the UTXO pool as it is now, and the deployment it audits. The pool is
+//!    ahead of the restart start. That is safe: the pool skips every
+//!    operation it already applied, so the replay changes nothing in it.
+//! 2. At startup it loads the snapshot, resumes from the restart start with
+//!    the pool unless another deployment saved it, and saves its own start.
 //!
 //! Assumptions:
 //! - Only the monitor writes the bucket. A later restart start skips the
 //!   audit of everything before it.
+//! - The snapshot is durable. Without it, the next start is a first run from
+//!   genesis, which needs a Sui node that keeps the history.
 
 use anyhow::Context;
 use hashi_types::guardian::time::UnixSeconds;
@@ -26,6 +30,7 @@ use object_store::path::Path;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::audit::pool::UtxoPool;
 use crate::config::Config;
 
 /// The object that holds the snapshot.
@@ -41,15 +46,22 @@ pub struct Snapshot {
     pub guardian_bucket: String,
     pub package_id: String,
     /// Where a restart resumes: at or before every flow not yet verified.
+    /// Kept as a UTC timestamp string, so an operator can read and edit it.
+    #[serde(with = "crate::time::utc_timestamp_serde")]
     pub restart_start: UnixSeconds,
+    /// The UTXO pool. Absent in a snapshot saved before the pool existed;
+    /// a restart from one is a first run.
+    #[serde(default)]
+    pub pool: Option<UtxoPool>,
 }
 
 impl Snapshot {
-    pub fn new(cfg: &Config, restart_start: UnixSeconds) -> Self {
+    pub fn new(cfg: &Config, restart_start: UnixSeconds, pool: Option<UtxoPool>) -> Self {
         Self {
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
             package_id: cfg.sui.package_id.clone(),
             restart_start,
+            pool,
         }
     }
 
@@ -113,6 +125,36 @@ impl SnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ConfirmedDeposit;
+    use crate::domain::DepositId;
+    use crate::test_utils::txid;
+    use bitcoin::ScriptBuf;
+
+    /// A pool that holds one UTXO.
+    fn pool_with_a_utxo() -> UtxoPool {
+        let mut pool = UtxoPool::default();
+        let deposit = ConfirmedDeposit {
+            deposit_id: DepositId::new(txid(1), 0),
+            amount: 1_000,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            block_time: 1_699_999_000,
+        };
+        assert!(pool.add_deposit(&deposit).is_none());
+        pool
+    }
+
+    async fn store_holding(json: serde_json::Value) -> SnapshotStore {
+        let store = SnapshotStore::in_memory();
+        store
+            .store
+            .put(
+                &Path::from(SNAPSHOT_KEY),
+                PutPayload::from(json.to_string().into_bytes()),
+            )
+            .await
+            .unwrap();
+        store
+    }
 
     #[tokio::test]
     async fn a_snapshot_round_trips_through_the_store() {
@@ -120,7 +162,7 @@ mod tests {
         let store = SnapshotStore::in_memory();
         assert_eq!(store.load().await.unwrap(), None);
 
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000);
+        let snapshot = Snapshot::new(&cfg, 1_700_000_000, Some(pool_with_a_utxo()));
         store.save(&snapshot).await.unwrap();
 
         assert_eq!(store.load().await.unwrap(), Some(snapshot));
@@ -128,25 +170,33 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_with_fields_this_monitor_does_not_know_still_loads() {
-        let store = SnapshotStore::in_memory();
-        let newer = serde_json::json!({
+        let store = store_holding(serde_json::json!({
             "guardian_bucket": "bucket",
             "package_id": "0x1",
-            "restart_start": 1_700_000_000,
-            "pool": [],
-        });
-        store
-            .store
-            .put(
-                &Path::from(SNAPSHOT_KEY),
-                PutPayload::from(newer.to_string().into_bytes()),
-            )
-            .await
-            .unwrap();
+            "restart_start": "2023-11-14T22:13:20Z",
+            "pool": null,
+            "guardian_cursor": 1_700_000_000,
+        }))
+        .await;
 
         let loaded = store.load().await.unwrap().unwrap();
 
         assert_eq!(loaded.restart_start, 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_saved_before_the_pool_existed_loads_without_one() {
+        let store = store_holding(serde_json::json!({
+            "guardian_bucket": "bucket",
+            "package_id": "0x1",
+            "restart_start": "2023-11-14T22:13:20Z",
+        }))
+        .await;
+
+        let loaded = store.load().await.unwrap().unwrap();
+
+        assert_eq!(loaded.restart_start, 1_700_000_000);
+        assert_eq!(loaded.pool, None);
     }
 
     #[tokio::test]
@@ -166,7 +216,7 @@ mod tests {
     #[test]
     fn a_snapshot_is_only_for_the_deployment_that_saved_it() {
         let cfg = Config::for_tests();
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000);
+        let snapshot = Snapshot::new(&cfg, 1_700_000_000, None);
         assert!(snapshot.is_for(&cfg));
 
         let mut redeployed = cfg.clone();
