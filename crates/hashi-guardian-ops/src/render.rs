@@ -138,7 +138,7 @@ impl Roster {
     pub fn load(dir: &str, threshold: u32) -> Result<Self> {
         let root = Path::new(dir);
         if !root.join("roster.txt").is_file() {
-            bail!("No verified roster in {dir}. Run download-kp-pubkeys.sh first.");
+            bail!("No verified roster in {dir}. Run the download-kp-pubkeys step first.");
         }
         let mut found = Vec::new();
         for id in entries(root)? {
@@ -524,7 +524,7 @@ pub mod tests {
         std::fs::remove_file(scratch.path().join("r/roster.txt")).unwrap();
         assert_eq!(
             Roster::load(&dir, 2).err().unwrap().to_string(),
-            format!("No verified roster in {dir}. Run download-kp-pubkeys.sh first.")
+            format!("No verified roster in {dir}. Run the download-kp-pubkeys step first.")
         );
     }
 

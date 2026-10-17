@@ -36,6 +36,7 @@ pub struct Cmd {
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
     env_remove: Vec<OsString>,
+    capture_stderr: bool,
 }
 
 impl Cmd {
@@ -45,7 +46,14 @@ impl Cmd {
             args: Vec::new(),
             cwd: None,
             env_remove: Vec::new(),
+            capture_stderr: false,
         }
+    }
+
+    /// Captures stderr too, apart from stdout, for a step that reports it itself.
+    pub fn capture_stderr(mut self) -> Self {
+        self.capture_stderr = true;
+        self
     }
 
     /// Leaves `name` out of the command's environment.
@@ -113,10 +121,13 @@ impl Cmd {
 pub struct Output {
     pub success: bool,
     pub stdout: String,
+    /// Empty unless the command captures stderr.
+    pub stderr: String,
 }
 
 pub trait Exec {
-    /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does.
+    /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does, unless the
+    /// command captures stderr too.
     fn output(&self, cmd: &Cmd) -> io::Result<Output>;
 
     /// Replaces this process with `cmd`, as bash's `exec` does. Returns only if that fails.
@@ -131,17 +142,22 @@ pub struct System;
 
 impl Exec for System {
     fn output(&self, cmd: &Cmd) -> io::Result<Output> {
+        let stderr = if cmd.capture_stderr {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        };
         // Without the terminal, a command can neither take an answer typed ahead for a step's prompt nor hang on a
         // prompt of its own that nobody sees.
-        let output = cmd
-            .command()
-            .stdin(Stdio::null())
-            .stderr(Stdio::inherit())
-            .output()?;
+        let output = cmd.command().stdin(Stdio::null()).stderr(stderr).output()?;
+        let text = |bytes: Vec<u8>| {
+            String::from_utf8(bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        };
         Ok(Output {
             success: output.status.success(),
-            stdout: String::from_utf8(output.stdout)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            stdout: text(output.stdout)?,
+            stderr: text(output.stderr)?,
         })
     }
 
@@ -249,10 +265,19 @@ pub mod fake {
         /// A world answering each command with `handler`'s (success, stdout); `None` means the command is unknown,
         /// which fails the test.
         pub fn new(handler: impl Fn(&[String]) -> Option<(bool, String)> + 'static) -> Self {
+            Self::with_stderr(move |words| {
+                handler(words).map(|(success, stdout)| Output {
+                    success,
+                    stdout,
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        /// A world whose answers include what each command prints on stderr.
+        pub fn with_stderr(handler: impl Fn(&[String]) -> Option<Output> + 'static) -> Self {
             Self {
-                handler: Box::new(move |words| {
-                    handler(words).map(|(success, stdout)| Output { success, stdout })
-                }),
+                handler: Box::new(handler),
                 log: RefCell::default(),
                 removed_env: RefCell::default(),
             }
