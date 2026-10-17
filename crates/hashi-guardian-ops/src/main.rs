@@ -17,6 +17,8 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::session;
+use hashi_guardian_ops::steps::session::OperatorStep;
 
 /// Runs one operator step against the guardian stack an environment file names. With two guardian slots, name the
 /// slot.
@@ -52,6 +54,25 @@ enum Step {
     Deploy,
     /// Build the proxy at the active slot's commit and roll it, through the workflow GUARDIAN_PROXY_WORKFLOW names.
     Proxy,
+    /// Run the key ceremony on a slot's fresh guardian.
+    Ceremony { slot: Option<Slot> },
+    /// Restart a slot's enclave, so its guardian starts a fresh session.
+    NewSession {
+        slot: Option<Slot>,
+        /// Restart even a guardian that holds the key or is in a round with key provisioners, or one in a stage this tool
+        /// doesn't know.
+        #[arg(long)]
+        abandon: bool,
+    },
+    /// Initialize a slot's guardian for the key provisioners to provision.
+    Provision {
+        slot: Option<Slot>,
+        /// For the guardian's first deployment only.
+        #[arg(long)]
+        do_genesis: bool,
+    },
+    /// Activate a slot's provisioned guardian.
+    Activate { slot: Option<Slot> },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -93,6 +114,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Step::Deploy => deploy::deploy(&ctx),
         Step::Proxy => deploy::proxy(&ctx),
+        Step::Ceremony { slot } => session::operator(&ctx, slot, OperatorStep::Ceremony),
+        Step::NewSession { slot, abandon } => session::new_session(&ctx, slot, abandon),
+        Step::Provision { slot, do_genesis } => {
+            session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
+        }
+        Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
