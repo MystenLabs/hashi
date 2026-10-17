@@ -11,6 +11,7 @@ use crate::stack::Slot;
 use crate::stack::SlotView;
 use crate::stack::Stack;
 
+pub mod configs;
 pub mod inspect;
 
 /// Loads the stack and the slot a step names, or the stack's only one.

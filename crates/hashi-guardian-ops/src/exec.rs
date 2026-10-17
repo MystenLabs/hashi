@@ -9,6 +9,8 @@ use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -18,8 +20,9 @@ use anyhow::anyhow;
 use serde::de::DeserializeOwned;
 
 /// The external programs the steps run.
-pub const REQUIRED: [(&str, &str); 6] = [
+pub const REQUIRED: [(&str, &str); 7] = [
     ("aws", "AWS CLI v2"),
+    ("cargo", "Rust toolchain (rustup)"),
     ("curl", "standard system utilities"),
     ("git", "git"),
     ("grpcurl", "grpcurl"),
@@ -31,6 +34,8 @@ pub const REQUIRED: [(&str, &str); 6] = [
 pub struct Cmd {
     program: OsString,
     args: Vec<OsString>,
+    cwd: Option<PathBuf>,
+    env_remove: Vec<OsString>,
 }
 
 impl Cmd {
@@ -38,7 +43,19 @@ impl Cmd {
         Self {
             program: program.as_ref().to_owned(),
             args: Vec::new(),
+            cwd: None,
+            env_remove: Vec::new(),
         }
+    }
+
+    /// Leaves `name` out of the command's environment.
+    pub fn env_remove(mut self, name: impl AsRef<OsStr>) -> Self {
+        self.env_remove.push(name.as_ref().to_owned());
+        self
+    }
+
+    pub fn removed_env(&self) -> &[OsString] {
+        &self.env_remove
     }
 
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
@@ -49,6 +66,11 @@ impl Cmd {
     pub fn args<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(mut self, args: I) -> Self {
         self.args
             .extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        self
+    }
+
+    pub fn cwd(mut self, dir: impl AsRef<Path>) -> Self {
+        self.cwd = Some(dir.as_ref().to_owned());
         self
     }
 
@@ -69,6 +91,12 @@ impl Cmd {
             .env("LC_ALL", "C")
             .env("AWS_PAGER", "")
             .env("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true");
+        if let Some(dir) = &self.cwd {
+            command.current_dir(dir);
+        }
+        for name in &self.env_remove {
+            command.env_remove(name);
+        }
         command
     }
 
@@ -176,7 +204,7 @@ mod tests {
 
     #[test]
     fn runs_commands_in_the_scripts_environment() {
-        let command = Cmd::new("aws").command();
+        let command = Cmd::new("aws").env_remove("RUSTUP_TOOLCHAIN").command();
         let envs: Vec<(String, Option<String>)> = command
             .get_envs()
             .map(|(key, value)| {
@@ -190,6 +218,7 @@ mod tests {
             ("LC_ALL", Some("C")),
             ("AWS_PAGER", Some("")),
             ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", Some("true")),
+            ("RUSTUP_TOOLCHAIN", None),
         ] {
             assert!(
                 envs.contains(&(key.to_owned(), value.map(str::to_owned))),
@@ -212,6 +241,8 @@ pub mod fake {
     pub struct Fake {
         handler: Handler,
         pub log: RefCell<Vec<Vec<String>>>,
+        /// The variables each logged command leaves out of its environment.
+        pub removed_env: RefCell<Vec<Vec<String>>>,
     }
 
     impl Fake {
@@ -223,6 +254,7 @@ pub mod fake {
                     handler(words).map(|(success, stdout)| Output { success, stdout })
                 }),
                 log: RefCell::default(),
+                removed_env: RefCell::default(),
             }
         }
 
@@ -237,6 +269,12 @@ pub mod fake {
         fn output(&self, cmd: &Cmd) -> io::Result<Output> {
             let words = cmd.words();
             self.log.borrow_mut().push(words.clone());
+            self.removed_env.borrow_mut().push(
+                cmd.removed_env()
+                    .iter()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .collect(),
+            );
             Ok((self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}")))
         }
 
