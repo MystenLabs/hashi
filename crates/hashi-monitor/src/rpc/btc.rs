@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bitcoin::BlockHash;
+use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -54,6 +55,23 @@ const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
+
+/// What Bitcoin holds at an outpoint. `Missing` and `Spent` differ by the
+/// transaction lookup, `Spent` and `Unspent` by the UTXO set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutpointState {
+    /// The transaction is unknown or not confirmed deep enough, or it has no
+    /// output at that vout.
+    Missing,
+    /// The output exists, and a confirmed transaction has spent it.
+    Spent,
+    /// The output exists and is in the UTXO set. A mempool spend does not
+    /// change this.
+    Unspent {
+        /// The time of the block that holds the output.
+        block_time: UnixSeconds,
+    },
+}
 
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
@@ -203,6 +221,50 @@ impl BtcRpcClient {
             .borrow_mut()
             .insert(txid, result.clone());
         Ok(result)
+    }
+
+    /// The state of each outpoint on Bitcoin. The transactions are fetched
+    /// fresh, so the result does not depend on the confirmation cache.
+    pub fn lookup_outpoint_states(
+        &self,
+        outpoints: &[OutPoint],
+    ) -> anyhow::Result<HashMap<OutPoint, OutpointState>> {
+        let txids = outpoints
+            .iter()
+            .map(|outpoint| outpoint.txid)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.prefetch_confirmations(&txids)?;
+
+        // Only an output that exists can be in the UTXO set.
+        let mut states = HashMap::with_capacity(outpoints.len());
+        let mut existing = Vec::new();
+        for outpoint in outpoints {
+            match self.lookup_confirmation(outpoint.txid)? {
+                Some(confirmation) if (outpoint.vout as usize) < confirmation.outputs.len() => {
+                    existing.push((*outpoint, confirmation.block_time));
+                }
+                _ => {
+                    states.insert(*outpoint, OutpointState::Missing);
+                }
+            }
+        }
+
+        let existing_outpoints = existing
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect::<Vec<_>>();
+        let unspent = self.transport.lookup_unspent(&existing_outpoints)?;
+        for (outpoint, block_time) in existing {
+            let state = match unspent.get(&outpoint) {
+                Some(true) => OutpointState::Unspent { block_time },
+                Some(false) => OutpointState::Spent,
+                None => anyhow::bail!("missing bitcoin gettxout result for {outpoint}"),
+            };
+            states.insert(outpoint, state);
+        }
+        Ok(states)
     }
 }
 
@@ -565,6 +627,55 @@ impl HttpJsonRpcTransport {
     }
 }
 
+impl HttpJsonRpcTransport {
+    /// Whether each outpoint is in the UTXO set, with the mempool excluded.
+    /// Callers pass outpoints that exist: `gettxout` answers null for a spent
+    /// output and for one that never existed alike.
+    fn lookup_unspent(&self, outpoints: &[OutPoint]) -> anyhow::Result<HashMap<OutPoint, bool>> {
+        let mut unspent = HashMap::with_capacity(outpoints.len());
+        for chunk in outpoints.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
+            let requests = chunk
+                .iter()
+                .enumerate()
+                .map(|(id, outpoint)| {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "gettxout",
+                        "params": [outpoint.txid.to_string(), outpoint.vout, false],
+                    })
+                })
+                .collect::<Vec<_>>();
+            let responses = self.call_batch(&requests)?;
+            let mut seen = HashSet::with_capacity(chunk.len());
+            for response in responses {
+                let index = response_index(&response, chunk.len())?;
+                anyhow::ensure!(
+                    seen.insert(index),
+                    "duplicate bitcoin gettxout batch response ID {index}"
+                );
+                let outpoint = chunk[index];
+                if let Some(error) = response.error {
+                    anyhow::bail!(
+                        "bitcoin gettxout failed for {outpoint}: {} ({})",
+                        error.message,
+                        error.code
+                    );
+                }
+                let is_unspent = !matches!(response.result, None | Some(Value::Null));
+                unspent.insert(outpoint, is_unspent);
+            }
+            anyhow::ensure!(
+                seen.len() == chunk.len(),
+                "bitcoin gettxout batch returned {}/{} responses",
+                seen.len(),
+                chunk.len()
+            );
+        }
+        Ok(unspent)
+    }
+}
+
 fn json_rpc_rate_limited(response: &Value) -> bool {
     let is_rate_limited = |envelope: &Value| {
         envelope
@@ -608,6 +719,9 @@ mod tests {
     use base64ct::Base64;
     use base64ct::Encoding as _;
     use bitcoin::Amount;
+    use bitcoin::OutPoint;
+    use bitcoin::Txid;
+    use bitcoin::hashes::Hash as _;
     use e2e_tests::BitcoinNodeBuilder;
     use e2e_tests::bitcoin_node::RPC_PASSWORD;
     use e2e_tests::bitcoin_node::RPC_USER;
@@ -617,6 +731,7 @@ mod tests {
     use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
+    use super::OutpointState;
     use crate::config::BtcConfig;
     use crate::config::Config;
     use crate::domain::DepositEventType;
@@ -718,6 +833,78 @@ mod tests {
             tip_header["time"].as_u64().unwrap()
         );
         assert!(confirmed.block_time <= confirmed.confirmed_time);
+
+        Ok(())
+    }
+
+    /// Spend `outpoint` from the node's wallet to a fresh address, and mine it.
+    fn spend_outpoint(
+        node: &e2e_tests::bitcoin_node::BitcoinNodeHandle,
+        outpoint: OutPoint,
+    ) -> Result<()> {
+        let rpc = node.rpc_client();
+        let destination = node.get_new_address()?;
+        let inputs =
+            serde_json::json!([{ "txid": outpoint.txid.to_string(), "vout": outpoint.vout }]);
+        let outputs = serde_json::json!({ destination.to_string(): 0.0004 });
+        let unsigned: serde_json::Value = rpc.call("createrawtransaction", &[inputs, outputs])?;
+        let signed: serde_json::Value = rpc.call("signrawtransactionwithwallet", &[unsigned])?;
+        let signed_hex = signed["hex"].clone();
+        let _txid: serde_json::Value = rpc.call("sendrawtransaction", &[signed_hex])?;
+        node.generate_blocks(MIN_CONFIRMATIONS)?;
+        Ok(())
+    }
+
+    // Note that this test requires local bitcoind running.
+    #[tokio::test]
+    async fn lookup_outpoint_states_with_local_regtest() -> Result<()> {
+        init_test_tracing();
+
+        let temp_dir = TempDir::new()?;
+        let node = BitcoinNodeBuilder::new()
+            .dir(temp_dir.path())
+            .build()
+            .await?;
+        let cfg = test_config(node.rpc_url().to_string());
+        let btc_rpc_client = BtcRpcClient::new(&cfg)?;
+        btc_rpc_client.ensure_synced()?;
+
+        // Pay the wallet's own address so the test can spend the output later.
+        let destination = node.get_new_address()?;
+        let txid = node.send_to_address(&destination, Amount::from_sat(50_000))?;
+        node.generate_blocks(MIN_CONFIRMATIONS)?;
+        let paid = btc_rpc_client
+            .lookup_confirmation(txid)?
+            .expect("expected confirmed transaction");
+        let vout = paid
+            .outputs
+            .iter()
+            .position(|output| output.script_pubkey == destination.script_pubkey())
+            .expect("the paid output") as u32;
+        let outpoint = OutPoint { txid, vout };
+        let out_of_range = OutPoint {
+            txid,
+            vout: paid.outputs.len() as u32,
+        };
+        let unknown = OutPoint {
+            txid: Txid::from_slice(&[7u8; 32])?,
+            vout: 0,
+        };
+
+        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint, out_of_range, unknown])?;
+        assert_eq!(
+            states[&outpoint],
+            OutpointState::Unspent {
+                block_time: paid.block_time
+            }
+        );
+        assert_eq!(states[&out_of_range], OutpointState::Missing);
+        assert_eq!(states[&unknown], OutpointState::Missing);
+
+        spend_outpoint(&node, outpoint)?;
+
+        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint])?;
+        assert_eq!(states[&outpoint], OutpointState::Spent);
 
         Ok(())
     }
