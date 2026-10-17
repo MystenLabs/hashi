@@ -1,0 +1,146 @@
+# Governance Actions
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
+
+Governance actions are each defined by a unique `Proposal<T>` type. Proposals
+adjust protocol parameters, pause or unpause operations, or perform sensitive
+operations like package upgrades.
+
+## How does the committee vote on a proposal?
+
+Each proposal type has its own threshold, which a quorum of validators must
+reach by voting in support of the proposal. A proposal moves through these
+steps:
+
+1. A member of the current Hashi committee creates the proposal. Only members
+   of the current committee can create proposals, and creating a proposal casts
+   the creator's vote.
+2. Committee members vote in support of the proposal until it reaches the
+   threshold for its proposal type.
+3. The proposal executes. Quorum is counted against the committee in office
+   when the proposal executes, so votes from members who left at a
+   [reconfiguration](reconfiguration.mdx) no longer count. Executed proposals
+   stay onchain.
+4. A proposal expires 7 days after it is created; it can then no longer be
+   voted on or executed, and anyone can delete it.
+
+## What proposal types are available?
+
+The following is the current set of available proposal types.
+
+| Proposal | Effect | Abort codes |
+| --- | --- | --- |
+| `Upgrade` | Authorizes a package upgrade and records whether it is exclusive | None |
+| `EnableVersion` | Re-enables a previously disabled package version | None |
+| `DisableVersion` | Disables a package version | `EDisableCurrentVersion` |
+| `UpdateConfig` | Updates existing keys in the instant config | `EInvalidConfigEntry`, `EProtectedConfigKey` |
+| `UpdateEpochConfig` | Updates existing keys in the epoch config, including the MPC parameters | `EInvalidConfigEntry`, `EInconsistentMpcConfig` |
+| `AddConfig` | Introduces new keys into the instant or epoch config | None |
+| `IgnoreMember` | Flags a registered member as ignored, or clears the flag | None |
+| `EmergencyPause` | Pauses or unpauses the bridge | None |
+
+Configuration proposals target one of 2 stores: the instant config, where
+new values apply when the proposal executes, and the epoch config, where new
+values are copied onto the next committee formed after execution while the
+active committee keeps its pinned copy.
+
+## `Upgrade`
+
+Authorizes a package upgrade and records whether it is exclusive. An exclusive
+upgrade atomically disables all previous versions as the new package is
+committed; a non-exclusive upgrade deliberately leaves them callable. Every
+upgrade must make this classification explicitly. See
+[Move Package Upgrades](move-upgrades.mdx) for the decision criteria and
+validator rollout contract.
+
+## `EnableVersion`
+
+Re-enables a previously disabled package version, allowing the protocol to use
+it again.
+
+## `DisableVersion`
+
+Disables a package version, preventing it from being used. A version cannot
+disable itself: executing the proposal through package version N refuses to
+disable N (`EDisableCurrentVersion`). To disable a broken new version N:
+
+1. Pick an older version that is still enabled.
+2. Execute the `DisableVersion` proposal through that older version.
+
+## `UpdateConfig`
+
+Updates existing parameters in the instant config by key; the new values apply
+when the proposal executes. Every entry is validated when the proposal is
+created and again when it executes, and the whole proposal aborts if any entry
+fails: the key must already exist in the store with a value of the same type
+(`EInvalidConfigEntry`), and the key must be governable. The guardian BTC
+public key and the Bitcoin chain id are pinned for the deployment's lifetime
+and cannot be written through any config proposal (`EProtectedConfigKey`).
+Values themselves are otherwise not bounded onchain: a proposal needs a
+supermajority of committee weight, and reviewing the proposed value is part of
+voting. See [Configuration](config.mdx) for the keys and defaults.
+
+The guardian's URLs are changed through this proposal as well, with entries
+that set `guardian_url` (the public endpoint) or `guardian_node_url` (the
+endpoint nodes call) to a new string value. The URLs are the only guardian
+settings governance can change: the guardian's BTC public key is immutable
+once set, because rotating it would invalidate derived deposit addresses.
+Executing the proposal changes the onchain value, but a running node keeps the
+guardian client it already resolved from `guardian_node_url`, so each node must
+be restarted before it calls a new node URL. Nodes do not read
+`guardian_url`.
+
+## `UpdateEpochConfig`
+
+Updates existing parameters in the epoch config by key, including the MPC
+parameters, which must pass their range check (`EInvalidConfigEntry`). At
+execution, `mpc_weight_reduction_allowed_delta` must also end up below
+`mpc_max_faulty_in_basis_points` (`EInconsistentMpcConfig`). The new
+values are copied onto the next committee formed after execution; the active
+committee keeps its pinned copy. The pinned keys (the guardian BTC public key
+and the Bitcoin chain id) are refused here as well.
+
+## `AddConfig`
+
+Introduces new keys into the instant or epoch config, which is how a node-side
+setting becomes governable without a package upgrade. The proposal is
+insert-only: a key already present in the target store aborts, and the first
+value fixes the key's type for later updates. The pinned key names cannot be
+introduced into either store.
+
+## `IgnoreMember`
+
+Flags a registered member as ignored, or clears the flag. The next committee
+formed leaves an ignored member out, so its weight drops out of every
+threshold from then on; the current committee is never altered, and if a
+reconfiguration is already pending the change lands one epoch later. The
+member stays registered (an ignored member cannot be removed as inactive), and
+the same proposal type with the flag cleared re-admits it.
+
+## `EmergencyPause`
+
+Pauses or unpauses the bridge by setting the `paused` config flag. While
+paused, the chain refuses new deposit and withdrawal requests and every
+committee step that processes them; users can still cancel withdrawal
+requests, and reconfiguration and governance keep running. The two directions
+use different vote thresholds:
+
+- Pause: `governance_emergency_pause_threshold_bps`, default 5% of committee
+  weight. Pausing is deliberately cheap so a small fraction of the committee
+  can quickly halt the system.
+- Unpause: `governance_emergency_unpause_threshold_bps`, default two thirds.
+  Unpausing requires a supermajority.
+
+See [Configuration](config.mdx) for the keys and defaults. `paused` is also an
+ordinary config key, so an `UpdateConfig` proposal can set or clear it at the
+two-thirds threshold.
+
+Aborting a stuck reconfiguration is deliberately **not** a proposal: the
+committees that could vote on one are the parties a stalled reconfiguration
+puts in doubt. It is a permissionless entry function gated on onchain state
+instead; see [Abort Reconfig](reconfiguration.mdx#abort-reconfig). Holding
+off the replacement that would otherwise follow is an `UpdateConfig` setting
+[`reconfig_hold`](config.mdx#reconfig_hold), passed by the committee that is
+still in service.

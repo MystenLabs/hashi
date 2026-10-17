@@ -1,0 +1,46 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Withdrawal-side checks on the Hashi approvals that the monitor reads from Sui."><title>hashi_monitor::rpc::sui::approval - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module approval</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../hashi_monitor/index.html">hashi_<wbr>monitor</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module approval</a></h2><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In hashi_<wbr>monitor::<wbr>rpc::<wbr>sui</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">hashi_monitor</a>::<wbr><a href="../../index.html">rpc</a>::<wbr><a href="../index.html">sui</a></div><h1>Module <span>approval</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/hashi_monitor/rpc/sui/approval.rs.html#4-433">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Withdrawal-side checks on the Hashi approvals that the monitor reads from Sui.</p>
+<p>Why it exists: Move validates a withdrawal’s user outputs against the user
+requests, but not its txid or its change outputs. A compromised committee
+controls both, so the monitor checks them here before an approval enters
+the state machine.</p>
+<p>Goals of the approval checks, together with Move and the state machine:</p>
+<ol>
+<li>The transaction the guardian signs is the one posted on Sui: the same
+input UTXOs and the same output UTXOs.</li>
+<li>Every output is either a user-requested payout, with the requested
+amount less the fee share, or change to a Hashi address.</li>
+</ol>
+<p>Chain of trust, from the user’s request to the guardian’s signature:</p>
+<ol>
+<li>Move builds the <code>WithdrawalTransaction</code> object in <code>new_withdrawal_txn</code>
+(<code>withdrawal_queue.move</code>). It asserts that each user output pays the
+request’s address and the request’s amount less the per-user miner fee,
+and it caps that fee. The inputs are copied from the UTXO pool by id in
+<code>commit_withdrawal_tx</code> (<code>withdraw.move</code>). Change outputs are not checked.</li>
+<li><code>commit_withdrawal_tx</code> then calls <code>emit_withdrawal_picked_for_processing</code>,
+which emits <code>WithdrawalPickedForProcessing</code> from that object’s own
+fields. So the event and the object carry the same txid, inputs and
+outputs, and both reach this file.</li>
+<li>This file rebuilds the transaction from those inputs and outputs and
+rejects the approval if the claimed txid differs.</li>
+<li>The guardian computes its own txid from the outputs it signs, and the
+state machine requires the guardian’s txid to equal the approval’s.
+Together: the guardian signed exactly the outputs that Move validated.</li>
+<li>A txid does not commit to which outputs Sui calls change, so the event
+carries the inputs and outputs in Move’s shape, and the state machine
+requires the guardian’s log, converted into that shape, to be equal.
+The guardian derives every change address from a path it logs, so
+equality means each change output pays the bridge, which completes
+both goals.</li>
+</ol>
+<p>Assumptions:</p>
+<ul>
+<li>The two keys every bridge address derives from never change. The caller
+reads them once.</li>
+<li>An approval comes from a <code>WithdrawalPickedForProcessing</code> event or from the
+<code>WithdrawalTransaction</code> object created with it. Both carry the same txid,
+inputs, outputs and timestamp.</li>
+</ul>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.HashiApproval.html" title="enum hashi_monitor::rpc::sui::approval::HashiApproval">Hashi<wbr>Approval</a></dt><dd>A Hashi approval read from Sui.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.parse_event.html" title="fn hashi_monitor::rpc::sui::approval::parse_event">parse_<wbr>event</a></dt><dd>Parse the monitored event a Sui event carries into <code>events</code>, or its
+findings into <code>findings</code> if it fails a check.</dd><dt><a class="fn" href="fn.parse_withdrawal_object.html" title="fn hashi_monitor::rpc::sui::approval::parse_withdrawal_object">parse_<wbr>withdrawal_<wbr>object</a></dt><dd>The Hashi approval recorded by the object at <code>wid</code>, or <code>None</code> if that object
+is not a Hashi <code>WithdrawalTransaction</code>.</dd></dl></section></div></main></body></html>

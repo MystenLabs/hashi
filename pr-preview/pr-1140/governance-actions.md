@@ -1,0 +1,83 @@
+# Governance Actions
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
+
+Governance actions are each defined by a unique `Proposal<T>` type. Proposals
+adjust protocol parameters, pause or unpause operations, or perform sensitive
+operations like package upgrades. Only members of the current Hashi committee
+can create proposals. Each proposal type has its own threshold, which a quorum
+of validators must reach by voting in support of the proposal.
+
+The following is the current set of available proposal types.
+
+## `Upgrade`
+
+Authorizes a package upgrade and records whether it is exclusive. An exclusive
+upgrade atomically disables all previous versions as the new package is
+committed; a non-exclusive upgrade deliberately leaves them callable. Every
+upgrade must make this classification explicitly. See
+[Move Package Upgrades](move-upgrades.mdx) for the decision criteria and
+validator rollout contract.
+
+## `EnableVersion`
+
+Re-enables a previously disabled package version, allowing the protocol to use
+it again.
+
+## `DisableVersion`
+
+Disables a package version, preventing it from being used. The currently
+active version cannot be disabled, to avoid bricking the protocol.
+
+## `UpdateConfig`
+
+Updates existing parameters in the instant config by key; the new values apply
+when the proposal executes. Every entry is validated when the proposal
+executes, and the whole proposal aborts if any entry fails: the key must
+already exist in the store with a value of the same type
+(`EInvalidConfigEntry`), and the key must be governable. The guardian BTC
+public key and the Bitcoin chain id are pinned for the deployment's lifetime
+and cannot be written through any config proposal (`EProtectedConfigKey`).
+Values themselves are otherwise not bounded onchain: a proposal needs a
+supermajority of committee weight, and reviewing the proposed value is part of
+voting. See [Configuration](config.mdx) for the keys and defaults.
+
+## `UpdateEpochConfig`
+
+Updates existing parameters in the epoch config by key, including the MPC
+parameters, which must pass their range check (`EInvalidConfigEntry`). The new
+values are copied onto the next committee formed after execution; the active
+committee keeps its pinned copy. The pinned keys are refused here as well.
+
+## `AddConfig`
+
+Introduces new keys into the instant or epoch config, which is how a node-side
+setting becomes governable without a package upgrade. The proposal is
+insert-only: a key already present in the target store aborts, and the first
+value fixes the key's type for later updates. The pinned key names cannot be
+introduced into either store.
+
+## `EmergencyPause`
+
+Pauses or unpauses deposit and withdrawal processing by setting the `paused`
+config flag. The two directions use different vote thresholds: pausing is
+deliberately cheap (`governance_emergency_pause_threshold_bps`, default 5% of
+committee weight) so a small fraction of the committee can quickly halt the
+system, while unpausing requires a supermajority
+(`governance_emergency_unpause_threshold_bps`, default two thirds).
+
+## `UpdateGuardian`
+
+Updates the guardian's URL in the global config. Only the URL is governable:
+the guardian's BTC public key is immutable once set, because rotating it would
+invalidate derived deposit addresses.
+
+## `AbortReconfig`
+
+Aborts a pending reconfiguration for a specific epoch, clearing the pending
+epoch change and removing the pending committee. Voted on by the **current**
+committed committee, which is the only committee with stable onchain voting
+power if the pending committee cannot complete DKG or key rotation. See
+[Reconfiguration](reconfiguration.mdx) for when and how this is used.

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DepositEventType"],"struct":["DepositId","MonitorDepositEvent"]};

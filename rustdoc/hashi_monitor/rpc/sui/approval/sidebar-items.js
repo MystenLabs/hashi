@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["HashiApproval"],"fn":["parse_event","parse_withdrawal_object"]};

@@ -1,0 +1,223 @@
+# Hashi Node Backups
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> How node operators encrypt and restore essential node data with armored PGP backups, including YubiKey restore paths.
+
+Hashi automatically backs up the data a node needs to rejoin the committee after
+data loss. Every epoch, Hashi writes the node config, referenced key files,
+and database snapshot to a tar archive, then compresses and encrypts it as an
+ASCII-armored PGP message. The backup files use the suffix `.tar.asc`.
+
+Encryption only needs the public PGP certificate, so the backup key does not
+need to be present on the server during normal operation. Restore needs access
+to the matching private key, either as a local PGP secret-key file or through
+`gpg-agent` for YubiKey-backed keys. Because `gpg-agent` can be forwarded over
+SSH, you can restore on a remote server using a YubiKey plugged into your laptop
+instead of plugging the YubiKey into the server itself.
+
+## Create a backup Key
+
+### Option 1: Create a private key on a YubiKey (recommended)
+
+We recommend generating a PGP private key entirely on a YubiKey, and using its
+public key to encrypt the node backup. This makes it practically impossible for
+anyone to decrypt the backup without physical access to the YubiKey. The risk
+is that you will also be unable to decrypt the backup if you lose access to the
+YubiKey. To minimize this risk, we recommend obtaining at least two YubiKeys and
+repeating the procedure for each.
+
+For the initial YubiKey setup, you must use a machine with a physical USB port.
+After initial setup, you can encrypt the share to the public key of the YubiKey
+on any machine, including a cloud server without a USB port.
+
+1. Obtain a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/).
+   There are six models: the YubiKey 5C NFC, 5 NFC, 5C, 5 Nano, 5C Nano, and
+   5CI. Any of these models works, though avoid the Nano models because they are
+   smaller and easier to lose.
+
+2. Install tools on the USB-capable machine:
+   - [oct](https://codeberg.org/openpgp-card/openpgp-card-tools), OpenPGP card tools.
+   - [gpg](https://gnupg.org/), for testing decryption.
+
+3. Insert a YubiKey and confirm it is visible. **Make sure no other YubiKeys or
+   smartcards are plugged into the machine.**
+
+```sh
+$ oct list
+```
+
+You will see something like this:
+
+```
+Available OpenPGP cards:
+0006:26883270
+```
+
+4. Save the card id and a filename for the public key:
+
+```sh
+CARD=$(oct list --idents-only | head -n1)
+CARD_FILE="yubikey-public-$(echo "$CARD" | tr ':' '-').asc"
+echo "$CARD"
+echo "$CARD_FILE"
+```
+
+5. Change default PINs
+
+The User PIN is used for daily cryptographic operations like decryption; the
+Admin PIN is used for card configuration such as generating/importing keys.
+
+The default PINs for new YubiKeys are:
+User PIN:  123456
+Admin PIN: 12345678
+
+PINs can contain numbers, letters, and symbols (despite the name), and must be
+6, 7, or 8 characters long.
+
+Determine a new user and admin key for the YubiKey. These PINs are essential. If
+you lose them, you cannot decrypt the node backups. Back up the PINs in a safe
+place, such as a company password manager. Do not use the default PINs.
+
+Change the PINs with the following commands. You will first be prompted to enter
+the current (default) PIN, then prompted to enter the new PIN twice.
+
+```sh
+oct pin --card "$CARD" set-user
+oct pin --card "$CARD" set-admin
+```
+
+6. Confirm the YubiKey does not already contain keys:
+
+```sh
+oct status --card "$CARD"
+```
+
+Confirm the Signature, Decryption, and Authentication key slots do not show
+fingerprints. **If the card already has keys, stop here!**
+
+7. Generate the PGP key on the YubiKey.
+
+**This overwrites any existing keys on the YubiKey. Existing keys cannot be
+recovered after they are overwritten. Any files encrypted to the old public
+key will become permanently undecryptable!**
+
+You will be prompted to enter both the new user and new admin PINs. Be sure to
+update the name and email to real values. The public key will be saved to the
+output file.
+
+```sh
+oct admin --card "$CARD" generate \
+  --userid "Your Name <you@example.com>" \
+  --output "$CARD_FILE" \
+  curve25519
+```
+
+8. Repeat the above steps for any additional YubiKeys.
+
+9. Test encrypting a file to each YubiKey's public key. Import the public key,
+   then encrypt a test file:
+
+```sh
+gpg --import "$CARD_FILE"
+```
+
+```sh
+echo "test message" > test.txt
+gpg --encrypt --armor \
+  --trust-model always \
+  --recipient "you@example.com" \
+  --output test.txt.asc \
+  test.txt
+```
+
+10. Test decrypting the file with the YubiKey. With the YubiKey plugged in,
+   link the card to gpg, then decrypt. You will be prompted for the User PIN,
+   and to tap the YubiKey.
+
+```sh
+gpg --card-status
+```
+
+```sh
+gpg --decrypt test.txt.asc
+```
+
+You may see a warning like `cipher algorithm AES not found in recipient
+preferences`. You can ignore this. It happens because the public key exported by
+`oct` does not include the cipher preferences that `gpg` expects, so `gpg` warns
+even though encryption and decryption still work.
+
+Confirm the output matches the original file contents, then delete the test
+files.
+
+11. Store the YubiKeys in a secure location, such as a company safe. Also save
+   the public key files in a secure location.
+
+### Option 2: Create a local private key file
+
+If you do not want to use a YubiKey, you can generate a PGP private key locally
+and encrypt with it. Because the private key is stored in a normal file instead
+of on a YubiKey, there is a greater risk of unauthorized use of the private key.
+Store the file carefully.
+
+1. Install tools:
+   - [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq), Sequoia PGP.
+
+2. Generate a new key pair. Be sure to update the name and email to real
+values.
+
+```sh
+sq key generate \
+  --own-key \
+  --name "Your Name" \
+  --email "you@example.com" \
+  --expiration never \
+  --without-password \
+  --output private-key.asc \
+  --rev-cert revocation-cert.asc
+```
+
+3. Export the public key to a file. Note that despite the name, this doesn't
+   actually delete the private key, it just extracts the public key.
+
+```sh
+sq key delete \
+  --cert-file private-key.asc \
+  --output public-key.asc
+```
+
+4. Test encrypting a file to the public key:
+
+```sh
+echo "test message" > test.txt
+sq encrypt \
+  --for-file public-key.asc \
+  --without-signature \
+  --output test.txt.asc \
+  test.txt
+```
+
+5. Test decrypting the file with the private key:
+
+```sh
+sq decrypt --recipient-file private-key.asc test.txt.asc
+```
+
+Confirm the output matches the original file contents, then delete the test
+files.
+
+6. Save the revocation, public key, and private key files in a secure location.
+
+## Configuring hashi
+
+To enable automatic backups using the new PGP public key, add the public cert to
+the node config file under the field `backup-pgp-cert`.
+
+You can also configure the location where Hashi saves backups with the field
+`backup-dir`.
+
+## Cloud backup
+
+In the future, we will likely add support for automatically uploading backups
+to cloud storage such as s3.
