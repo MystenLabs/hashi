@@ -10,6 +10,7 @@ use hashi::onchain::OnchainState;
 use hashi::onchain::ScrapeScope;
 use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::LimiterConfig;
+use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Credentials;
 use serde::Deserialize;
 
@@ -22,6 +23,9 @@ pub struct Config {
     pub deployment: DeploymentConfig,
     /// Omit to use AWS's default credential chain.
     pub s3_credentials: Option<S3Credentials>,
+    /// The bucket the operator published this config in, which
+    /// `key-provisioner rotate-kp-set` uploads its submission to.
+    pub kp_bucket: Option<S3BucketInfo>,
     pub kp_roster: KpRosterConfig,
     /// The KP set a `rotate-kp-set` proposes; `kp_roster` stays the dealt set.
     /// Required by the rotate-kp-set commands only.
@@ -133,5 +137,25 @@ mod tests {
 
         let incomplete = format!("{sample}\ns3_credentials:\n  access_key: key\n");
         assert!(serde_yaml::from_str::<Config>(&incomplete).is_err());
+    }
+
+    #[test]
+    fn reads_the_kp_bucket_download_config_sh_writes() {
+        let sample = include_str!("../guardian-init.sample.yaml")
+            .replace("<PCR0_HEX_FROM_VERIFIED_BUILD>", &"11".repeat(48));
+        assert!(
+            serde_yaml::from_str::<Config>(&sample)
+                .unwrap()
+                .kp_bucket
+                .is_none()
+        );
+        let downloaded =
+            format!("kp_bucket:\n  name: \"kp-bucket\"\n  region: \"us-west-2\"\n\n{sample}");
+        let bucket = serde_yaml::from_str::<Config>(&downloaded)
+            .unwrap()
+            .kp_bucket
+            .unwrap();
+        assert_eq!(bucket.name, "kp-bucket");
+        assert_eq!(bucket.region, "us-west-2");
     }
 }

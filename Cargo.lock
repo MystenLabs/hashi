@@ -3246,6 +3246,9 @@ name = "hashi-guardian-init"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "aws-smithy-mocks",
  "bitcoin",
  "clap",
  "hashi",
