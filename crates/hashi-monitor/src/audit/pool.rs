@@ -338,3 +338,358 @@ impl UtxoPool {
         findings
     }
 }
+
+#[cfg(test)]
+impl UtxoPool {
+    pub fn is_empty(&self) -> bool {
+        self.coins.is_empty()
+    }
+
+    pub fn get(&self, outpoint: &OutPoint) -> Option<&PoolCoin> {
+        self.coins.get(outpoint)
+    }
+
+    pub fn get_spent(&self, outpoint: &OutPoint) -> Option<&SpentCoin> {
+        self.spent.get(outpoint)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bitcoin::Amount;
+    use bitcoin::ScriptBuf;
+    use bitcoin::TxOut;
+    use hashi_types::move_types::OutputUtxo;
+    use hashi_types::move_types::Utxo;
+    use hashi_types::move_types::UtxoId;
+
+    use crate::findings::FindingCategory;
+    use crate::test_utils::txid;
+
+    // `Timing::for_tests` values.
+    const WARN: u64 = 100;
+    const CRITICAL: u64 = 200;
+    const GRACE: u64 = 50;
+
+    fn outpoint(fill: u8) -> OutPoint {
+        OutPoint {
+            txid: txid(fill),
+            vout: 0,
+        }
+    }
+
+    fn output(amount: u64) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(amount),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }
+    }
+
+    /// A withdrawal `txid(fill)` with one user payout and one change output
+    /// of 550 at vout 1, spending `inputs`. E2 states each input at 1_000.
+    fn withdrawal(fill: u8, inputs: Vec<OutPoint>) -> ConfirmedWithdrawal {
+        let stated_inputs = inputs
+            .iter()
+            .map(|input| Utxo {
+                id: UtxoId {
+                    txid: input.txid.into(),
+                    vout: input.vout,
+                },
+                amount: 1_000,
+                derivation_path: None,
+            })
+            .collect();
+        ConfirmedWithdrawal {
+            txid: txid(fill),
+            confirmation: BtcConfirmation {
+                block_time: 700,
+                confirmed_time: 760,
+                inputs,
+                outputs: vec![output(400), output(550)],
+            },
+            tx: WithdrawalTx::new(
+                stated_inputs,
+                vec![OutputUtxo {
+                    amount: 400,
+                    bitcoin_address: vec![0x53; 20],
+                }],
+                vec![OutputUtxo {
+                    amount: 550,
+                    bitcoin_address: vec![0x54; 20],
+                }],
+            ),
+        }
+    }
+
+    fn change_of(fill: u8) -> OutPoint {
+        OutPoint {
+            txid: txid(fill),
+            vout: 1,
+        }
+    }
+
+    /// A pool holding `outpoint(1)` of 1_000, first seen at 500.
+    fn pool_with_one() -> UtxoPool {
+        pool_seen_at(500)
+    }
+
+    /// A pool holding `outpoint(1)` of 1_000, first seen at `first_seen`.
+    fn pool_seen_at(first_seen: UnixSeconds) -> UtxoPool {
+        let mut pool = UtxoPool::default();
+        assert!(pool.add_deposit(outpoint(1), 1_000, first_seen).is_none());
+        pool
+    }
+
+    /// The findings of a check with `state` as Bitcoin's answer for
+    /// `outpoint(1)`.
+    fn check_one(
+        pool: &UtxoPool,
+        state: Option<OutpointState>,
+        now: UnixSeconds,
+    ) -> Vec<MonitorFinding> {
+        let states = state
+            .map(|state| HashMap::from([(outpoint(1), state)]))
+            .unwrap_or_default();
+        pool.check(&states, now, &Timing::for_tests())
+    }
+
+    #[test]
+    fn a_confirmed_withdrawal_spends_its_inputs_and_adds_its_change() {
+        let mut pool = pool_with_one();
+        assert!(pool.add_deposit(outpoint(2), 2_000, 500).is_none());
+
+        let findings = pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(findings.is_empty());
+        assert_eq!(pool.outpoints(), vec![outpoint(2), change_of(7)]);
+        assert_eq!(
+            pool.get(&change_of(7)),
+            Some(&PoolCoin {
+                amount: 550,
+                origin: CoinOrigin::Change,
+                first_seen: 700
+            })
+        );
+        assert_eq!(
+            pool.get_spent(&outpoint(1)),
+            Some(&SpentCoin {
+                coin: PoolCoin {
+                    amount: 1_000,
+                    origin: CoinOrigin::Deposit,
+                    first_seen: 500
+                },
+                spent_by: txid(7),
+            })
+        );
+    }
+
+    #[test]
+    fn a_change_vout_the_transaction_lacks_is_ignored() {
+        let mut pool = UtxoPool::default();
+        let mut withdrawal = withdrawal(7, vec![]);
+        withdrawal.confirmation.outputs.pop();
+
+        assert!(pool.apply_confirmed_withdrawals(&[withdrawal]).is_empty());
+
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_add_keeps_the_coin_and_another_amount_is_a_finding() {
+        let mut pool = pool_with_one();
+
+        assert!(pool.add_deposit(outpoint(1), 1_000, 900).is_none());
+        assert_eq!(pool.get(&outpoint(1)).unwrap().first_seen, 500);
+
+        let finding = pool.add_deposit(outpoint(1), 1_001, 900).unwrap();
+        assert_eq!(
+            finding,
+            MonitorFinding::UtxoAmountMismatch {
+                outpoint: outpoint(1),
+                held_amount: 1_000,
+                seen_amount: 1_001,
+            }
+        );
+        assert_eq!(finding.category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_replayed_add_of_a_spent_coin_is_a_repeat() {
+        let mut pool = pool_with_one();
+        pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(pool.add_deposit(outpoint(1), 1_000, 900).is_none());
+        assert!(pool.get(&outpoint(1)).is_none());
+        assert_eq!(pool.get_spent(&outpoint(1)).unwrap().spent_by, txid(7));
+
+        assert!(matches!(
+            pool.add_deposit(outpoint(1), 1_001, 900),
+            Some(MonitorFinding::UtxoAmountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_replayed_spend_is_a_repeat_and_a_second_spender_is_a_finding() {
+        let mut pool = pool_with_one();
+        pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(
+            pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])])
+                .is_empty()
+        );
+
+        let findings = pool.apply_confirmed_withdrawals(&[withdrawal(8, vec![outpoint(1)])]);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoSpentTwice {
+                outpoint: outpoint(1),
+                first_txid: txid(7),
+                second_txid: txid(8),
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn spending_a_coin_the_pool_never_held_is_a_finding_and_is_recorded() {
+        let mut pool = UtxoPool::default();
+
+        let findings = pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(9)])]);
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoUnknownInputSpent {
+                outpoint: outpoint(9),
+                txid: txid(7),
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Liveness);
+        assert_eq!(pool.outpoints(), vec![change_of(7)]);
+        assert_eq!(
+            pool.get_spent(&outpoint(9)),
+            Some(&SpentCoin {
+                coin: PoolCoin {
+                    amount: 1_000,
+                    origin: CoinOrigin::Unknown,
+                    first_seen: 700,
+                },
+                spent_by: txid(7),
+            })
+        );
+
+        // The coin's deposit arrives late: a repeat, not a held coin.
+        assert!(pool.add_deposit(outpoint(9), 1_000, 600).is_none());
+        assert_eq!(pool.outpoints(), vec![change_of(7)]);
+    }
+
+    #[test]
+    fn in_one_pass_every_add_comes_before_every_spend() {
+        // Withdrawal 8 spends the change of withdrawal 7, and the pass lists
+        // the spender first.
+        let mut pool = UtxoPool::default();
+
+        let findings = pool.apply_confirmed_withdrawals(&[
+            withdrawal(8, vec![change_of(7)]),
+            withdrawal(7, vec![]),
+        ]);
+
+        assert!(findings.is_empty());
+        assert_eq!(pool.outpoints(), vec![change_of(8)]);
+        assert_eq!(pool.get_spent(&change_of(7)).unwrap().spent_by, txid(8));
+    }
+
+    #[test]
+    fn a_young_unspent_coin_is_fine() {
+        let pool = pool_seen_at(0);
+        let state = OutpointState::Unspent { block_time: 1_000 };
+        assert!(check_one(&pool, Some(state), 1_000 + WARN - 1).is_empty());
+    }
+
+    #[test]
+    fn an_unspent_coin_is_reported_at_the_warn_age_then_the_critical_age() {
+        let pool = pool_seen_at(0);
+        let state = OutpointState::Unspent { block_time: 1_000 };
+
+        let warn = check_one(&pool, Some(state.clone()), 1_000 + WARN);
+        assert_eq!(
+            warn,
+            vec![MonitorFinding::UtxoTooOld {
+                outpoint: outpoint(1),
+                age_secs: WARN,
+                threshold_secs: WARN,
+                critical: false,
+            }]
+        );
+        assert_eq!(warn[0].category(), FindingCategory::Liveness);
+
+        let critical = check_one(&pool, Some(state), 1_000 + CRITICAL);
+        assert_eq!(
+            critical,
+            vec![MonitorFinding::UtxoTooOld {
+                outpoint: outpoint(1),
+                age_secs: CRITICAL,
+                threshold_secs: CRITICAL,
+                critical: true,
+            }]
+        );
+        assert_eq!(critical[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_spent_coin_is_an_unexpected_spend() {
+        let pool = pool_seen_at(0);
+        let findings = check_one(&pool, Some(OutpointState::Spent), 1);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoUnexpectedSpend {
+                outpoint: outpoint(1),
+                amount: 1_000,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_missing_coin_is_reported_only_after_the_grace_period() {
+        let pool = pool_seen_at(1_000);
+
+        assert!(check_one(&pool, Some(OutpointState::Missing), 1_000 + GRACE - 1).is_empty());
+        // No answer at all counts as missing.
+        assert!(check_one(&pool, None, 1_000 + GRACE - 1).is_empty());
+
+        let findings = check_one(&pool, Some(OutpointState::Missing), 1_000 + GRACE);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoVanished {
+                outpoint: outpoint(1),
+                first_seen: 1_000,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_spent_coin_is_not_checked() {
+        let mut pool = pool_seen_at(0);
+        pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        assert!(check_one(&pool, Some(OutpointState::Spent), 1).is_empty());
+    }
+
+    #[test]
+    fn a_pool_round_trips_through_json() {
+        let mut pool = pool_with_one();
+        pool.add_deposit(outpoint(2), 2_000, 1_500);
+        pool.apply_confirmed_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
+
+        let json = serde_json::to_vec(&pool).unwrap();
+        let loaded: UtxoPool = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(loaded.outpoints(), pool.outpoints());
+        assert_eq!(loaded.get(&outpoint(2)), pool.get(&outpoint(2)));
+        assert_eq!(loaded.get(&change_of(7)), pool.get(&change_of(7)));
+        assert_eq!(loaded.get_spent(&outpoint(1)), pool.get_spent(&outpoint(1)));
+    }
+}
