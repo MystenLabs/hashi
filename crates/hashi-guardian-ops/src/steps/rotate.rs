@@ -20,6 +20,7 @@ use crate::ask::Unchanged;
 use crate::ask::confirm;
 use crate::ask::confirm_typed;
 use crate::commit::Tree;
+use crate::commit::require_same_formats;
 use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
@@ -40,7 +41,9 @@ use crate::plan::preview_slot;
 use crate::plan::require_pulumi_version;
 use crate::plan::up_slot;
 use crate::plan::urn_type;
+use crate::proxy::image_commit;
 use crate::proxy::update_proxy;
+use crate::render::Build;
 use crate::render::Settings;
 use crate::render::require_fresh;
 use crate::say;
@@ -50,6 +53,9 @@ use crate::stack::Role;
 use crate::stack::Slot;
 use crate::stack::SlotView;
 use crate::stack::Stack;
+use crate::stack::is_hex;
+use crate::stack::project_name;
+use crate::stack::pulumi;
 use crate::steps::session::activate;
 use crate::steps::slot;
 use crate::sui;
@@ -216,20 +222,18 @@ fn arm_checks(ctx: &Ctx, slot: Slot, announce: bool) -> Result<(Stack, Arming)> 
             stack.name
         );
     }
-    // Both slots write one log, whose readers must allowlist every build that wrote it, and a slot's configurations
-    // allowlist only its own build.
-    let (suffix, active_suffix) = (slot.suffix(), active.suffix());
-    let build = |suffix: &str| {
-        (
-            stack.config(&format!("hashi-commit{suffix}")),
-            stack.config(&format!("eif-pcr0{suffix}")),
-        )
-    };
-    if build(suffix) != build(active_suffix) {
+    let pcr0 = stack.config(&view.pcr0_key).unwrap_or("");
+    if !is_hex(pcr0, 96) {
         bail!(
-            "Slot {slot}'s hashi-commit{suffix} and eif-pcr0{suffix} name another build than slot {active}'s, and this step arms a standby only on the serving guardian's build. Change them only if that build never wrote the stack's log: renders allowlist it through them."
+            "Stack {}'s {} is not a PCR0 measurement: {}. Measure slot {slot}'s build with measure {slot}, and set it to the PCR0 that prints.",
+            stack.name,
+            view.pcr0_key,
+            if pcr0.is_empty() { "unset" } else { pcr0 }
         );
     }
+    let settings = Settings::read(ctx, &stack, &view)?;
+    require_proxy_decodes(ctx, &stack, &view)?;
+    let (suffix, active_suffix) = (slot.suffix(), active.suffix());
     for key in ["eif-features", "eif-ceremony-mode"] {
         if stack.config(&format!("{key}{suffix}")).is_some()
             || stack.config(&format!("{key}{active_suffix}")).is_some()
@@ -249,6 +253,7 @@ fn arm_checks(ctx: &Ctx, slot: Slot, announce: bool) -> Result<(Stack, Arming)> 
         );
     }
     serving_info(ctx).context("Arm a standby only next to a serving guardian.")?;
+    require_keeps_serving(ctx, &stack, &view, &settings)?;
     let urn = instance_to_create(ctx, &stack, slot)?;
     let serving = serving.to_owned();
     Ok((
@@ -294,6 +299,21 @@ fn instance_to_create(ctx: &Ctx, stack: &Stack, slot: Slot) -> Result<String> {
     Ok(urn.to_owned())
 }
 
+/// Stops unless the proxy's build decodes what the slot's guardian sends, as it must to relay or front it. A guardian
+/// on the active slot's build needs no check: the proxy already serves that one.
+fn require_proxy_decodes(ctx: &Ctx, stack: &Stack, view: &SlotView) -> Result<()> {
+    let active = stack.active()?;
+    if stack.config(&format!("hashi-commit{}", active.suffix())) != Some(view.commit.as_str()) {
+        require_same_formats(
+            ctx,
+            &view.commit,
+            &image_commit(ctx, stack)?,
+            "the proxy's build",
+        )?;
+    }
+    Ok(())
+}
+
 /// Applies the proxy stack so the proxy follows the enclave stack's slots.
 pub fn proxy_update(ctx: &Ctx) -> Result<()> {
     let stack = Stack::load(ctx)?;
@@ -302,6 +322,10 @@ pub fn proxy_update(ctx: &Ctx) -> Result<()> {
         stack.name
     ));
     require_no_guardian_runs(ctx)?;
+    let other = stack.active()?.other();
+    if stack.role(other)? == Role::Standby {
+        require_proxy_decodes(ctx, &stack, &stack.slot(ctx, other)?)?;
+    }
     let view = stack.slot(ctx, stack.active()?)?;
     update_proxy(
         ctx,
@@ -362,15 +386,25 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
             .as_deref()
             .filter(|key| crate::stack::is_hex(key, 64))
             .ok_or_else(|| anyhow!("The proxy's /info names no serving guardian's signing key."))?;
-        let serving_config = OperatorInit::read(ctx, &bucket, serving_key)?.config_hash;
+        let serving_init = OperatorInit::read(ctx, &bucket, serving_key)?;
         let standby_config = reached.info.config_hash.as_deref();
-        if standby_config != Some(serving_config.as_str()) {
-            bail!(
-                "Slot {slot}'s guardian has config hash {}, but the serving guardian has {serving_config}. Their limiter or deployment block differ, and switching over would change them.",
-                standby_config.unwrap_or("none")
-            );
+        if standby_config != Some(serving_init.config_hash.as_str()) {
+            // The hash covers the PCR allowlist too, which a rotation onto another build extends.
+            let standby_init = OperatorInit::read(ctx, &bucket, &reached.signing_key)?;
+            if standby_config != Some(standby_init.config_hash.as_str())
+                || !standby_init.keeps(&serving_init)
+            {
+                bail!(
+                    "Slot {slot}'s guardian has config hash {}, but the serving guardian has {}. Their limiter or deployment block differ, and switching over would change them.",
+                    standby_config.unwrap_or("none"),
+                    serving_init.config_hash
+                );
+            }
         }
         require_initialized_as_rendered(ctx, &stack, &view, &bucket, &reached.signing_key)?;
+        // The monitor reads both builds' records: the serving one's through the switchover and its re-audits after.
+        require_monitor_allows(ctx, &stack, &[&view, &stack.slot(ctx, other)?])?;
+        require_proxy_decodes(ctx, &stack, &view)?;
         require_pulumi_version(ctx)?;
         require_no_guardian_runs(ctx)?;
         require_epoch_window(&window, serving.committee_epoch.as_deref())?;
@@ -480,6 +514,7 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
                 if !activated {
                     require_fresh(ctx, &stack, &view)?;
                 }
+                require_monitor_allows(ctx, &stack, &[&view, &stack.slot(ctx, other)?])?;
                 let now = slot_info(ctx, &tree, &view)?;
                 if now.signing_key.as_deref() != Some(signing_key.as_str())
                     || now.lifecycle != info.lifecycle
@@ -609,6 +644,14 @@ pub fn switchover(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
     Ok(())
 }
 
+/// `BITCOIN_NETWORK` as a guardian logs it: it reads mainnet as bitcoin, in any case, and writes it lowercase.
+fn logged_network(settings: &Settings) -> String {
+    match settings.bitcoin_network.to_ascii_lowercase().as_str() {
+        "mainnet" => "bitcoin".to_owned(),
+        network => network.to_owned(),
+    }
+}
+
 /// Stops unless the slot's rendered files, which activation reads, hold what its guardian was initialized with.
 fn require_initialized_as_rendered(
     ctx: &Ctx,
@@ -621,7 +664,8 @@ fn require_initialized_as_rendered(
         .require_rendered(&Settings::read(ctx, stack, view)?, view.slot)
 }
 
-/// A session's operator-init record, which its guardian wrote to the log bucket.
+/// A withdraw session's configuration, from its operator-init record. Activation drops the configuration hash from a
+/// guardian's own report, so a serving session's is read here.
 struct OperatorInit {
     config_hash: String,
     limiter: Value,
@@ -686,21 +730,23 @@ impl OperatorInit {
     /// Stops unless `settings` give this session's limiter and deployment exactly: activation recomputes its
     /// configuration hash from them, the allowlist's order included.
     fn require_rendered(&self, settings: &Settings, slot: Slot) -> Result<()> {
-        // The guardian reads mainnet as bitcoin, in any case, and writes it back lowercase.
-        let network = match settings.bitcoin_network.to_ascii_lowercase().as_str() {
-            "mainnet" => "bitcoin".to_owned(),
-            network => network.to_owned(),
-        };
         let deployment = json!({
             "bucket_info": { "name": settings.bucket, "region": settings.region },
             "retention_environment": settings.retention_environment,
-            "bitcoin_network": network,
+            "bitcoin_network": logged_network(settings),
             "pcr_allowlist": {
                 "current_build": {
                     "git_revision": settings.commit,
                     "pcr0": settings.pcr0.to_ascii_lowercase(),
                 },
-                "prev_builds": [],
+                "prev_builds": settings
+                    .prev_builds
+                    .iter()
+                    .map(|build| json!({
+                        "git_revision": build.commit,
+                        "pcr0": build.pcr0.to_ascii_lowercase(),
+                    }))
+                    .collect::<Vec<_>>(),
             },
         });
         let limiter = json!({
@@ -716,6 +762,260 @@ impl OperatorInit {
         }
         Ok(())
     }
+
+    /// Whether this session keeps `serving`'s limiter and deployment, its PCR allowlist only adding builds to
+    /// `serving`'s.
+    fn keeps(&self, serving: &Self) -> bool {
+        let split = |deployment: &Value| -> Option<(Value, Vec<Value>)> {
+            let mut rest = deployment.as_object()?.clone();
+            let allowlist = rest.remove("pcr_allowlist")?;
+            let mut builds = vec![allowlist.get("current_build")?.clone()];
+            builds.extend(allowlist.get("prev_builds")?.as_array()?.iter().cloned());
+            Some((Value::Object(rest), builds))
+        };
+        let (Some((rest, builds)), Some((serving_rest, serving_builds))) =
+            (split(&self.deployment), split(&serving.deployment))
+        else {
+            return false;
+        };
+        self.limiter == serving.limiter
+            && rest == serving_rest
+            && serving_builds.iter().all(|build| builds.contains(build))
+    }
+
+    fn prev_builds(&self) -> Option<Vec<Build>> {
+        self.deployment
+            .pointer("/pcr_allowlist/prev_builds")?
+            .as_array()?
+            .iter()
+            .map(build_of)
+            .collect()
+    }
+}
+
+fn build_of(value: &Value) -> Option<Build> {
+    Some(Build {
+        commit: value.get("git_revision")?.as_str()?.to_owned(),
+        pcr0: value.get("pcr0")?.as_str()?.to_owned(),
+    })
+}
+
+/// The build each session of the log ran, from its operator-init record.
+fn session_builds(ctx: &Ctx, bucket: &Bucket) -> Result<Vec<(String, Build)>> {
+    let keys: Vec<String> = read_json(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["s3api", "list-objects-v2", "--region", &bucket.region])
+            .args(["--bucket", &bucket.name, "--prefix", "init/"])
+            .args(["--query", "Contents[].Key || `[]`", "--output", "json"]),
+    )
+    .with_context(|| format!("Could not list s3://{}/init/.", bucket.name))?;
+    let mut builds = Vec::new();
+    for key in keys {
+        let Some(session) = key
+            .strip_prefix("init/")
+            .and_then(|rest| rest.strip_suffix("/02-oi-guardian-info.json"))
+        else {
+            continue;
+        };
+        let record: Value = read_json(
+            ctx.exec,
+            &Cmd::new("aws")
+                .args(["s3", "cp", "--only-show-errors", "--region", &bucket.region])
+                .arg(format!("s3://{}/{key}", bucket.name))
+                .arg("-"),
+        )
+        .with_context(|| format!("Could not read s3://{}/{key}.", bucket.name))?;
+        let build = record
+            .pointer("/message/Init/OIGuardianInfo/deployment/pcr_allowlist/current_build")
+            .and_then(build_of)
+            .ok_or_else(|| anyhow!("s3://{}/{key} names no build.", bucket.name))?;
+        builds.push((session.to_owned(), build));
+    }
+    Ok(builds)
+}
+
+/// Stops unless a standby's settings keep the serving guardian's limiter and deployment, and allowlist every build that
+/// ran a session in the log and every one the serving guardian allowlists. Guardians and key provisioners verify the
+/// records of every recent session, and switchover refuses less, but only once the standby is provisioned.
+pub(crate) fn require_keeps_serving(
+    ctx: &Ctx,
+    stack: &Stack,
+    view: &SlotView,
+    settings: &Settings,
+) -> Result<()> {
+    let bucket = stack.bucket()?;
+    let serving_key = proxy_info(ctx)?
+        .signing_pub_key
+        .filter(|key| is_hex(key, 64))
+        .ok_or_else(|| anyhow!("The proxy's /info names no serving guardian's signing key."))?;
+    let serving = OperatorInit::read(ctx, &bucket, &serving_key)?;
+    for (name, theirs, ours) in [
+        (
+            "refill-rate-sats-per-sec",
+            serving.limiter.get("refill_rate"),
+            Value::from(settings.refill_rate),
+        ),
+        (
+            "max-bucket-capacity-sats",
+            serving.limiter.get("max_bucket_capacity"),
+            Value::from(settings.max_bucket_capacity),
+        ),
+        (
+            "the log bucket",
+            serving.deployment.pointer("/bucket_info/name"),
+            Value::from(settings.bucket.as_str()),
+        ),
+        (
+            "the log bucket's region",
+            serving.deployment.pointer("/bucket_info/region"),
+            Value::from(settings.region.as_str()),
+        ),
+        (
+            "RETENTION_ENVIRONMENT",
+            serving.deployment.get("retention_environment"),
+            Value::from(settings.retention_environment.as_str()),
+        ),
+        (
+            "BITCOIN_NETWORK",
+            serving.deployment.get("bitcoin_network"),
+            Value::from(logged_network(settings)),
+        ),
+    ] {
+        if theirs != Some(&ours) {
+            bail!(
+                "Slot {}'s configurations give {name} as {ours}, but the serving guardian's give {}. A switchover keeps the serving guardian's limiter and deployment block: set it back.",
+                view.slot,
+                theirs.map_or("none".to_owned(), Value::to_string)
+            );
+        }
+    }
+    let serving_prev = serving.prev_builds().ok_or_else(|| {
+        anyhow!(
+            "Could not read the builds the serving guardian {} allowlists.",
+            &serving_key[..16]
+        )
+    })?;
+    require_lists_log_builds(
+        ctx,
+        stack,
+        view,
+        settings,
+        serving_prev
+            .into_iter()
+            .map(|build| (build, "the serving guardian allowlists it".to_owned()))
+            .collect(),
+    )
+}
+
+/// Stops unless `settings` allowlist each build that wrote the stack's log, and each of `also`: a reader resolves a
+/// record's writer by that session's own build, so a guardian that leaves one out can't read what it wrote.
+pub(crate) fn require_lists_log_builds(
+    ctx: &Ctx,
+    stack: &Stack,
+    view: &SlotView,
+    settings: &Settings,
+    also: Vec<(Build, String)>,
+) -> Result<()> {
+    let required = session_builds(ctx, &stack.bucket()?)?
+        .into_iter()
+        .map(|(session, build)| (build, format!("session {session} ran it")))
+        .chain(also);
+    let own = Build {
+        commit: settings.commit.clone(),
+        pcr0: settings.pcr0.clone(),
+    };
+    let mut missing: Vec<(Build, String)> = Vec::new();
+    for (build, why) in required {
+        match std::iter::once(&own)
+            .chain(&settings.prev_builds)
+            .find(|listed| listed.commit == build.commit)
+        {
+            Some(listed) if listed.pcr0 == build.pcr0 => {}
+            Some(listed) => bail!(
+                "Slot {}'s configurations measure {} as {}, but {why} as {}.",
+                view.slot,
+                build.commit,
+                listed.pcr0,
+                build.pcr0
+            ),
+            None if missing.iter().any(|(seen, _)| seen.commit == build.commit) => {}
+            None => missing.push((build, why)),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "Slot {}'s configurations leave out {}. Every guardian of the log must allowlist those builds: add each to prev-builds in stack {}'s Pulumi.<stack>.yaml, as its git_revision and the pcr0 its own measurement gave, never one read from the log bucket.",
+            view.slot,
+            missing
+                .iter()
+                .map(|(build, why)| format!("{} ({why})", build.commit))
+                .collect::<Vec<_>>()
+                .join("; "),
+            stack.name
+        );
+    }
+    Ok(())
+}
+
+/// Stops unless hashi-monitor, where `HASHI_MONITOR_PULUMI_DIR` names its program, allowlists each of these slots'
+/// builds: it rejects every record from a build it doesn't.
+fn require_monitor_allows(ctx: &Ctx, stack: &Stack, views: &[&SlotView]) -> Result<()> {
+    let Some(dir) = ctx.env.get("HASHI_MONITOR_PULUMI_DIR") else {
+        warn(
+            "HASHI_MONITOR_PULUMI_DIR is unset, so this step did not check that hashi-monitor allowlists the guardians' builds.",
+        );
+        return Ok(());
+    };
+    project_name(dir)?;
+    let entry: Value = read_json(
+        ctx.exec,
+        &pulumi(dir).args(["config", "get", "audit", "--json", "--stack", &stack.name]),
+    )
+    .with_context(|| {
+        format!(
+            "Could not read the audit configuration of hashi-monitor's stack {} in {dir}.",
+            stack.name
+        )
+    })?;
+    let audit = entry
+        .get("objectValue")
+        .cloned()
+        .or_else(|| serde_json::from_str(entry.get("value")?.as_str()?).ok());
+    let allowlist = audit
+        .as_ref()
+        .and_then(|audit| audit.pointer("/deployment/pcr_allowlist"));
+    let builds: Vec<&Value> = allowlist
+        .and_then(|allowlist| allowlist.get("current_build"))
+        .into_iter()
+        .chain(
+            allowlist
+                .and_then(|allowlist| allowlist.get("prev_builds"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .collect();
+    for view in views {
+        let pcr0 = stack.config(&view.pcr0_key).unwrap_or("");
+        let listed = builds
+            .iter()
+            .filter_map(|build| build_of(build))
+            .any(|build| {
+                build.commit == view.commit
+                    && !pcr0.is_empty()
+                    && build.pcr0.eq_ignore_ascii_case(pcr0)
+            });
+        if !listed {
+            bail!(
+                "hashi-monitor does not allowlist {} with PCR0 {}. Add it to deployment.pcr_allowlist in the audit configuration of stack {} in {dir}, keeping every build already there, deploy that stack, then run this step again.",
+                view.commit,
+                if pcr0.is_empty() { "unset" } else { pcr0 },
+                stack.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Destroys a standby slot's host: the retired guardian after a switchover, or a standby that never served.
@@ -833,6 +1133,14 @@ pub fn teardown(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
         );
     }
     println!("\nTore down slot {slot}. Run proxy-update, so the relay stops pointing at it.");
+    if stack.config(&format!("hashi-commit{}", active.suffix())) != Some(view.commit.as_str()) {
+        println!(
+            "Slot {slot}'s build {} may have written the log, so every later guardian allowlists it. Before you point hashi-commit{} at another build, add this one to prev-builds in stack {}'s Pulumi.<stack>.yaml, unless it lists it already.",
+            view.commit,
+            slot.suffix(),
+            stack.name
+        );
+    }
     next("proxy-update");
     Ok(())
 }
@@ -840,6 +1148,8 @@ pub fn teardown(ctx: &Ctx, slot_arg: Slot) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use serde_json::json;
 
     use super::*;
     use crate::world;
@@ -866,6 +1176,33 @@ mod tests {
                 .unwrap()
                 .session
                 .lifecycle = lifecycle.to_owned();
+        }
+
+        /// Gives slot b a later, measured build, beside a proxy built at slot a's.
+        fn on_next_build(&self) {
+            std::fs::create_dir_all(
+                self.repo
+                    .path()
+                    .join(".hashi/guardian-init")
+                    .join(world::NEXT),
+            )
+            .unwrap();
+            self.set("hashi-commit-b", world::NEXT);
+            self.set("eif-pcr0-b", &"0d".repeat(48));
+            let mut state = self.state.borrow_mut();
+            state.configured_tag = world::COMMIT[..9].to_owned();
+            state.running_tag = state.configured_tag.clone();
+        }
+
+        /// A hashi-monitor that audits the guardian, allowlisting `builds`.
+        fn monitor_config(&mut self, builds: &[(&str, &str)]) {
+            world::monitor(&mut self.env);
+            self.state.borrow_mut().monitor_builds = Some(
+                builds
+                    .iter()
+                    .map(|(commit, pcr0)| ((*commit).to_owned(), (*pcr0).to_owned()))
+                    .collect(),
+            );
         }
 
         /// Arms slot b, points the relay at it and has the key provisioners provision it.
@@ -936,6 +1273,277 @@ mod tests {
     }
 
     #[test]
+    fn moves_the_key_onto_another_build() {
+        let mut run = Run::new();
+        run.on_next_build();
+        run.armed_and_provisioned();
+        let operator = std::fs::read_to_string(
+            run.repo
+                .path()
+                .join(".hashi/guardian/testnet/b/operator.yaml"),
+        )
+        .unwrap();
+        assert!(operator.contains(&format!(
+            "    prev_builds:\n      - git_revision: \"{}\"\n",
+            world::COMMIT
+        )));
+        run.set("active-slot", "b");
+
+        // hashi-monitor rejects every record from a build it does not allowlist.
+        let serving_pcr0 = "0c".repeat(48);
+        run.monitor_config(&[(world::COMMIT, &serving_pcr0)]);
+        assert!(
+            error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B))).starts_with(&format!(
+                "hashi-monitor does not allowlist {} with PCR0 {}.",
+                world::NEXT,
+                "0d".repeat(48)
+            ))
+        );
+        // Nor from the serving build, whose records it reads through the switchover and re-audits after.
+        run.monitor_config(&[(world::NEXT, &"0d".repeat(48))]);
+        assert!(
+            error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B))).starts_with(&format!(
+                "hashi-monitor does not allowlist {} with PCR0 {}.",
+                world::COMMIT,
+                serving_pcr0
+            ))
+        );
+        // Each entry pairs a revision with its own PCR0.
+        run.monitor_config(&[
+            (world::COMMIT, &"0d".repeat(48)),
+            (world::NEXT, &"0e".repeat(48)),
+        ]);
+        assert!(
+            error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B)))
+                .contains("does not allowlist")
+        );
+        assert_eq!(run.state.borrow().outputs_active, Slot::A);
+
+        run.monitor_config(&[
+            (world::COMMIT, &serving_pcr0),
+            (world::NEXT, &"0d".repeat(48)),
+        ]);
+        let old = run.instance("a");
+        ok(run.step(&["yes", "yes", &old], |ctx| switchover(ctx, Slot::B)));
+        let standby = run.instance("b");
+        assert_eq!(
+            run.state.borrow().hosts[&standby].session.lifecycle,
+            "withdraw/ACTIVATED"
+        );
+        run.set("slot-a-enabled", "false");
+        ok(run.step(&[&old], |ctx| teardown(ctx, Slot::A)));
+    }
+
+    #[test]
+    fn keeps_every_build_of_the_log_on_later_rotations() {
+        let mut run = Run::new();
+        run.on_next_build();
+        run.monitor_config(&[
+            (world::COMMIT, &"0c".repeat(48)),
+            (world::NEXT, &"0d".repeat(48)),
+        ]);
+        run.armed_and_provisioned();
+        run.set("active-slot", "b");
+        let old = run.instance("a");
+        ok(run.step(&["yes", "yes", &old], |ctx| switchover(ctx, Slot::B)));
+        run.set("slot-a-enabled", "false");
+        let notes = run.step(&[&old], |ctx| teardown(ctx, Slot::A));
+        ok(notes);
+        ok(run.step(&["yes"], proxy_update));
+
+        // Slot b serves the later build, and allowlists slot a's, which wrote the log first.
+        run.set("slot-a-enabled", "true");
+        run.set("hashi-commit", world::NEXT);
+        run.set("eif-pcr0", &"0d".repeat(48));
+        // The serving slot's own render would leave it out too, and a session it starts couldn't read the log.
+        let refused = error(run.step(&[], |ctx| crate::steps::configs::render(ctx, Some(Slot::B))));
+        assert!(
+            refused.starts_with(&format!(
+                "Slot b's configurations leave out {}",
+                world::COMMIT
+            )),
+            "{refused}"
+        );
+        let refused = error(run.step(&["yes"], |ctx| arm(ctx, Slot::A)));
+        assert!(
+            refused.starts_with(&format!(
+                "Slot a's configurations leave out {} (session {} ran it). Every guardian of the log must allowlist those builds: add each to prev-builds",
+                world::COMMIT,
+                "aa".repeat(8)
+            )),
+            "{refused}"
+        );
+        assert!(!run.state.borrow().deployed.contains_key("a"));
+        run.set(
+            "prev-builds",
+            &json!([{ "git_revision": world::COMMIT, "pcr0": "0c".repeat(48) }]).to_string(),
+        );
+        ok(run.step(&["yes"], |ctx| arm(ctx, Slot::A)));
+        ok(run.step(&["yes"], proxy_update));
+        world::provision(&run.state, Slot::A);
+        run.render(Slot::A);
+        let operator = std::fs::read_to_string(
+            run.repo
+                .path()
+                .join(".hashi/guardian/testnet/a/operator.yaml"),
+        )
+        .unwrap();
+        assert!(operator.contains(&format!(
+            "    prev_builds:\n      - git_revision: \"{}\"\n",
+            world::COMMIT
+        )));
+        run.set("active-slot", "a");
+        let old = run.instance("b");
+        ok(run.step(&["yes", "yes", &old], |ctx| switchover(ctx, Slot::A)));
+        let promoted = run.instance("a");
+        assert_eq!(
+            run.state.borrow().hosts[&promoted].session.lifecycle,
+            "withdraw/ACTIVATED"
+        );
+    }
+
+    #[test]
+    fn arms_only_a_standby_that_keeps_the_serving_configuration() {
+        let run = Run::new();
+        // A standby on another build ran a session before it was abandoned, so it wrote the log too.
+        let abandoned = "f1".repeat(8);
+        run.state.borrow_mut().init_records.insert(
+            abandoned.clone(),
+            world::init_record("", &[(world::NEXT.to_owned(), "0d".repeat(48))]),
+        );
+        let refused = error(run.step(&["yes"], |ctx| arm(ctx, Slot::B)));
+        assert!(
+            refused.starts_with(&format!(
+                "Slot b's configurations leave out {} (session {abandoned} ran it).",
+                world::NEXT
+            )),
+            "{refused}"
+        );
+        let listed = |pcr0: &str| {
+            json!([{ "git_revision": world::NEXT, "pcr0": pcr0.repeat(48) }]).to_string()
+        };
+        run.set("prev-builds", &listed("0e"));
+        assert_eq!(
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B))),
+            format!(
+                "Slot b's configurations measure {} as {}, but session {abandoned} ran it as {}.",
+                world::NEXT,
+                "0e".repeat(48),
+                "0d".repeat(48)
+            )
+        );
+        run.set("prev-builds", &listed("0d"));
+        run.set("refill-rate-sats-per-sec", "1");
+        assert_eq!(
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B))),
+            "Slot b's configurations give refill-rate-sats-per-sec as 1, but the serving guardian's give 11574. A switchover keeps the serving guardian's limiter and deployment block: set it back."
+        );
+        run.set("refill-rate-sats-per-sec", "11574");
+        assert!(!run.state.borrow().deployed.contains_key("b"));
+        ok(run.step(&["yes"], |ctx| arm(ctx, Slot::B)));
+        // render refuses the same, before any key provisioner downloads what it writes.
+        run.set("prev-builds", "[]");
+        let refused = error(run.step(&[], |ctx| crate::steps::configs::render(ctx, Some(Slot::B))));
+        assert!(
+            refused.starts_with("Slot b's configurations leave out"),
+            "{refused}"
+        );
+        assert!(
+            !run.repo
+                .path()
+                .join(".hashi/guardian/testnet/b/operator.yaml")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn arms_another_build_only_if_it_speaks_and_logs_as_the_serving_one() {
+        let run = Run::new();
+        run.on_next_build();
+        run.state.borrow_mut().format_changes =
+            vec!["crates/hashi-types/src/guardian/s3/log_messages/init.rs".to_owned()];
+        let refused = error(run.step(&["yes"], |ctx| arm(ctx, Slot::B)));
+        assert!(
+            refused.starts_with(&format!(
+                "{} changes the guardian's protos or log records from slot a's build",
+                world::NEXT
+            )),
+            "{refused}"
+        );
+        run.state.borrow_mut().format_changes.clear();
+
+        run.state.borrow_mut().configured_tag = "v1".to_owned();
+        assert!(
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B)))
+                .starts_with("The proxy's image tag v1 names no commit")
+        );
+        run.state.borrow_mut().configured_tag = format!("{}-dev", world::COMMIT);
+        run.set("eif-pcr0-b", "");
+        assert!(
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B))).starts_with(
+                "Stack org/testnet's eif-pcr0-b is not a PCR0 measurement: unset. Measure slot b's build"
+            )
+        );
+        run.set("eif-pcr0-b", &"0d".repeat(48));
+        assert!(!run.state.borrow().deployed.contains_key("b"));
+        ok(run.step(&["yes"], |ctx| arm(ctx, Slot::B)));
+        // The render step allowlists slot a's build for it, as the serving guardian's.
+        ok(run.step(&[], |ctx| crate::steps::configs::render(ctx, Some(Slot::B))));
+        let operator = std::fs::read_to_string(
+            run.repo
+                .path()
+                .join(".hashi/guardian/testnet/b/operator.yaml"),
+        )
+        .unwrap();
+        assert!(operator.contains(world::COMMIT), "{operator}");
+        // A proxy built since then must decode slot b's guardian too.
+        run.state.borrow_mut().format_changes =
+            vec!["crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto".to_owned()];
+        assert!(
+            error(run.step(&["yes"], proxy_update)).starts_with(&format!(
+                "{} changes the guardian's protos or log records from the proxy's build",
+                world::NEXT
+            ))
+        );
+        run.state.borrow_mut().format_changes.clear();
+        assert!(run.state.borrow().deployed.contains_key("b"));
+    }
+
+    #[test]
+    fn switches_onto_another_build_only_with_the_same_configuration() {
+        let run = Run::new();
+        run.on_next_build();
+        run.armed_and_provisioned();
+        run.set("active-slot", "b");
+        let standby = run.instance("b");
+        let session = run.state.borrow().hosts[&standby].session.key[..16].to_owned();
+        let edit_record = |change: &dyn Fn(&mut Value)| {
+            let mut state = run.state.borrow_mut();
+            change(state.init_records.get_mut(&session).unwrap());
+        };
+        let refused = || {
+            assert!(
+                error(run.step(&["yes"], |ctx| switchover(ctx, Slot::B)))
+                    .contains("Their limiter or deployment block differ")
+            );
+            assert_eq!(run.state.borrow().outputs_active, Slot::A);
+        };
+
+        edit_record(&|record| {
+            record["mode"]["Withdraw"]["limiter_config"]["refill_rate"] = 1.into()
+        });
+        refused();
+        edit_record(&|record| {
+            record["mode"]["Withdraw"]["limiter_config"]["refill_rate"] = 11574.into()
+        });
+        // Every build the serving guardian allowlists wrote the log, so the new one must allowlist it too.
+        edit_record(&|record| {
+            record["deployment"]["pcr_allowlist"]["prev_builds"] = Value::Array(Vec::new())
+        });
+        refused();
+    }
+
+    #[test]
     fn arms_only_next_to_a_serving_guardian() {
         let run = Run::new();
         assert_eq!(
@@ -953,13 +1561,16 @@ mod tests {
                 .contains("sets eif-features for a slot")
         );
         run.state.borrow_mut().config.remove("eif-features-b");
-        run.set("hashi-commit-b", &"1".repeat(40));
+        let unfetched = "1".repeat(40);
+        run.set("hashi-commit-b", &unfetched);
         assert!(
-            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B))).starts_with(
-                "Slot b's hashi-commit-b and eif-pcr0-b name another build than slot a's, and"
-            )
+            error(run.step(&["yes"], |ctx| arm(ctx, Slot::B)))
+                .starts_with(&format!("This checkout does not have {unfetched}"))
         );
         run.set("hashi-commit-b", world::COMMIT);
+        run.set("eif-pcr0-b", &"0d".repeat(48));
+        assert!(error(run.step(&["yes"], |ctx| arm(ctx, Slot::B))).contains("but eif-pcr0 is 0c"));
+        run.set("eif-pcr0-b", &"0c".repeat(48));
         // A resource the host needs but doesn't depend on in the plan stays out of a targeted one.
         let alarm = "urn:pulumi:testnet::enclave::aws:cloudwatch/metricAlarm:MetricAlarm::alarm";
         run.state.borrow_mut().other_creates = vec![alarm.to_owned()];
@@ -1039,6 +1650,13 @@ mod tests {
 
     #[test]
     fn updates_the_proxy_only_to_follow_the_slots() {
+        // A one-slot stack names no other build to check.
+        let single = Run::new();
+        for key in ["hashi-commit-b", "eif-pcr0-b", "slot-b-enabled"] {
+            single.state.borrow_mut().config.remove(key);
+        }
+        assert!(ok(single.step(&[], proxy_update)).is_empty());
+
         let run = Run::new();
         let prompts = ok(run.step(&[], proxy_update));
         assert!(prompts.is_empty(), "nothing to change, so nothing asked");
@@ -1477,6 +2095,70 @@ mod tests {
             "{refusal}"
         );
         assert!(run.state.borrow().hosts[&run.instance("a")].running);
+    }
+
+    #[test]
+    fn reads_a_record_as_a_guardian_writes_it() {
+        // The shape of testnet's records, with made-up values.
+        let record = json!({
+            "schema_version": 1,
+            "object_key": "init/abababababababab/02-oi-guardian-info.json",
+            "session_id": "abababababababab",
+            "timestamp_ms": 1791481146340u64,
+            "message": { "Init": { "OIGuardianInfo": {
+                "deployment": {
+                    "bucket_info": { "name": "guardian-bucket", "region": "us-west-2" },
+                    "retention_environment": "testnet",
+                    "bitcoin_network": "signet",
+                    "pcr_allowlist": {
+                        "current_build": { "git_revision": world::NEXT, "pcr0": "0d".repeat(48) },
+                        "prev_builds": [{ "git_revision": world::COMMIT, "pcr0": "0c".repeat(48) }],
+                    },
+                },
+                "encryption_pubkey": [1, 2, 3],
+                "mode": { "Withdraw": {
+                    "secret_sharing_instance": { "threshold": 2 },
+                    "config_hash": "95".repeat(32),
+                    "limiter_config": { "refill_rate": 11574, "max_bucket_capacity": 1000000000 },
+                    "hashi_object_id": "0x2",
+                    "mpc_master_g": [4, 5, 6],
+                    "genesis_state_hash": [7, 8, 9],
+                } },
+            } } },
+            "signature": "c2lnbmF0dXJl",
+        })
+        .to_string();
+        let exec = crate::exec::fake::Fake::new(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            match w.as_slice() {
+                ["aws", "s3api", "list-object-versions", ..] => Some((true, "1\t0\n".to_owned())),
+                [
+                    "aws",
+                    "s3",
+                    "cp",
+                    ..,
+                    "s3://guardian-bucket/init/abababababababab/02-oi-guardian-info.json",
+                    "-",
+                ] => Some((true, record.clone())),
+                _ => None,
+            }
+        });
+        let repo = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        let bucket = Bucket {
+            name: "guardian-bucket".to_owned(),
+            region: "us-west-2".to_owned(),
+        };
+        let init = OperatorInit::read(&ctx, &bucket, &"ab".repeat(32)).unwrap();
+        assert_eq!(init.config_hash, "95".repeat(32));
+        assert_eq!(init.limiter["max_bucket_capacity"], 1000000000);
+        assert_eq!(
+            init.prev_builds().unwrap(),
+            [Build {
+                commit: world::COMMIT.to_owned(),
+                pcr0: "0c".repeat(48),
+            }]
+        );
     }
 
     #[test]
