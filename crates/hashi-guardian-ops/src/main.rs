@@ -17,6 +17,7 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::rotate;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -73,6 +74,12 @@ enum Step {
     },
     /// Activate a slot's provisioned guardian.
     Activate { slot: Option<Slot> },
+    /// Create a standby guardian host in a slot, next to the serving guardian in the other.
+    Arm { slot: Slot },
+    /// Apply the proxy stack so the proxy follows the enclave stack's slots.
+    ProxyUpdate,
+    /// Destroy a standby slot's host.
+    Teardown { slot: Slot },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -120,6 +127,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
         }
         Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
+        Step::Arm { slot } => rotate::arm(&ctx, slot),
+        Step::ProxyUpdate => rotate::proxy_update(&ctx),
+        Step::Teardown { slot } => rotate::teardown(&ctx, slot),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
