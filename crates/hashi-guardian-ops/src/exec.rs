@@ -1,0 +1,235 @@
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+//! External commands. Every step reaches Pulumi, AWS, GitHub, git, cargo and the guardian only through [`Exec`], so
+//! tests can stand in for all of them at once.
+
+use std::ffi::OsStr;
+use std::ffi::OsString;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use std::process::Stdio;
+
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use serde::de::DeserializeOwned;
+
+/// The external programs the steps run.
+pub const REQUIRED: [(&str, &str); 2] = [
+    ("curl", "standard system utilities"),
+    ("pulumi", "Pulumi CLI"),
+];
+
+#[derive(Clone, Debug)]
+pub struct Cmd {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl Cmd {
+    pub fn new(program: impl AsRef<OsStr>) -> Self {
+        Self {
+            program: program.as_ref().to_owned(),
+            args: Vec::new(),
+        }
+    }
+
+    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
+        self.args.push(arg.as_ref().to_owned());
+        self
+    }
+
+    pub fn args<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(mut self, args: I) -> Self {
+        self.args
+            .extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        self
+    }
+
+    /// The program and its arguments as text, for tests and messages.
+    pub fn words(&self) -> Vec<String> {
+        std::iter::once(&self.program)
+            .chain(&self.args)
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        // Keeps parsed output stable regardless of the operator's locale, and the AWS CLI on its default endpoints
+        // and out of a pager.
+        command
+            .env("LC_ALL", "C")
+            .env("AWS_PAGER", "")
+            .env("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true");
+        command
+    }
+
+    fn describe(&self) -> String {
+        const LIMIT: usize = 160;
+        let text = self.words().join(" ");
+        match text.char_indices().nth(LIMIT) {
+            Some((end, _)) => format!("`{}…`", &text[..end]),
+            None => format!("`{text}`"),
+        }
+    }
+}
+
+pub struct Output {
+    pub success: bool,
+    pub stdout: String,
+}
+
+pub trait Exec {
+    /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does.
+    fn output(&self, cmd: &Cmd) -> io::Result<Output>;
+
+    /// Whether `program` is on PATH.
+    fn has(&self, program: &str) -> bool;
+}
+
+/// The real world.
+pub struct System;
+
+impl Exec for System {
+    fn output(&self, cmd: &Cmd) -> io::Result<Output> {
+        // Without the terminal, a command can neither take an answer typed ahead for a step's prompt nor hang on a
+        // prompt of its own that nobody sees.
+        let output = cmd
+            .command()
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()?;
+        Ok(Output {
+            success: output.status.success(),
+            stdout: String::from_utf8(output.stdout)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        })
+    }
+
+    fn has(&self, program: &str) -> bool {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                dir.join(program)
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
+        })
+    }
+}
+
+/// Runs `cmd` and returns its stdout, failing unless it exits successfully.
+pub fn read(exec: &dyn Exec, cmd: &Cmd) -> Result<String> {
+    let output = exec
+        .output(cmd)
+        .with_context(|| format!("Could not run {}.", cmd.describe()))?;
+    if !output.success {
+        return Err(anyhow!("{} failed.", cmd.describe()));
+    }
+    Ok(output.stdout)
+}
+
+/// Runs `cmd` and decodes its stdout as JSON.
+pub fn read_json<T: DeserializeOwned>(exec: &dyn Exec, cmd: &Cmd) -> Result<T> {
+    let stdout = read(exec, cmd)?;
+    serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "{} printed something other than the JSON expected.",
+            cmd.describe()
+        )
+    })
+}
+
+/// Stops unless every program the steps run is on PATH.
+pub fn require_programs(exec: &dyn Exec) -> Result<()> {
+    let missing: Vec<String> = REQUIRED
+        .iter()
+        .filter(|(program, _)| !exec.has(program))
+        .map(|(program, package)| format!("  - {program} ({package})"))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "The following required CLI tools are not installed or not on PATH:\n{}\n\nInstall the listed tools, then run this step again.",
+        missing.join("\n")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runs_commands_in_the_scripts_environment() {
+        let command = Cmd::new("aws").command();
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (key, value) in [
+            ("LC_ALL", Some("C")),
+            ("AWS_PAGER", Some("")),
+            ("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", Some("true")),
+        ] {
+            assert!(
+                envs.contains(&(key.to_owned(), value.map(str::to_owned))),
+                "{key}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod fake {
+    //! A stand-in world: each command is answered by a handler, and every command is recorded.
+
+    use std::cell::RefCell;
+
+    use super::*;
+
+    pub type Handler = Box<dyn Fn(&[String]) -> Option<Output>>;
+
+    pub struct Fake {
+        handler: Handler,
+        pub log: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl Fake {
+        /// A world answering each command with `handler`'s (success, stdout); `None` means the command is unknown,
+        /// which fails the test.
+        pub fn new(handler: impl Fn(&[String]) -> Option<(bool, String)> + 'static) -> Self {
+            Self {
+                handler: Box::new(move |words| {
+                    handler(words).map(|(success, stdout)| Output { success, stdout })
+                }),
+                log: RefCell::default(),
+            }
+        }
+
+        pub fn ran(&self, prefix: &[&str]) -> bool {
+            self.log.borrow().iter().any(|words| {
+                words.len() >= prefix.len() && words.iter().zip(prefix).all(|(w, p)| w == p)
+            })
+        }
+    }
+
+    impl Exec for Fake {
+        fn output(&self, cmd: &Cmd) -> io::Result<Output> {
+            let words = cmd.words();
+            self.log.borrow_mut().push(words.clone());
+            Ok((self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}")))
+        }
+
+        fn has(&self, _program: &str) -> bool {
+            true
+        }
+    }
+}
