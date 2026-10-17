@@ -20,10 +20,11 @@ use anyhow::anyhow;
 use serde::de::DeserializeOwned;
 
 /// The external programs the steps run.
-pub const REQUIRED: [(&str, &str); 7] = [
+pub const REQUIRED: [(&str, &str); 8] = [
     ("aws", "AWS CLI v2"),
     ("cargo", "Rust toolchain (rustup)"),
     ("curl", "standard system utilities"),
+    ("gh", "GitHub CLI"),
     ("git", "git"),
     ("grpcurl", "grpcurl"),
     ("pulumi", "Pulumi CLI"),
@@ -130,6 +131,9 @@ pub trait Exec {
     /// command captures stderr too.
     fn output(&self, cmd: &Cmd) -> io::Result<Output>;
 
+    /// Runs `cmd` on the terminal, as a plain command line in a script does, and returns whether it succeeded.
+    fn run(&self, cmd: &Cmd) -> io::Result<bool>;
+
     /// Replaces this process with `cmd`, as bash's `exec` does. Returns only if that fails.
     fn exec(&self, cmd: &Cmd) -> io::Error;
 
@@ -159,6 +163,18 @@ impl Exec for System {
             stdout: text(output.stdout)?,
             stderr: text(output.stderr)?,
         })
+    }
+
+    fn run(&self, cmd: &Cmd) -> io::Result<bool> {
+        let mut child = cmd.command().spawn()?;
+        // Ctrl-C still reaches the child, which shares the terminal, but this waits for it to stop, as bash does: an
+        // interrupted `pulumi up` must finish its own cleanup before the operator gets the prompt back.
+        // SAFETY: `signal` only swaps this process's SIGINT disposition, and nothing else here touches it.
+        let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        let status = child.wait();
+        // SAFETY: as above, restoring the disposition `signal` returned.
+        unsafe { libc::signal(libc::SIGINT, previous) };
+        Ok(status?.success())
     }
 
     fn exec(&self, cmd: &Cmd) -> io::Error {
@@ -301,6 +317,10 @@ pub mod fake {
                     .collect(),
             );
             Ok((self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}")))
+        }
+
+        fn run(&self, cmd: &Cmd) -> io::Result<bool> {
+            self.output(cmd).map(|output| output.success)
         }
 
         fn exec(&self, cmd: &Cmd) -> io::Error {

@@ -4,14 +4,17 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::bail;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 use hashi_guardian_ops::Ctx;
 use hashi_guardian_ops::ask::Terminal;
 use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::configs;
+use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 
@@ -40,6 +43,15 @@ enum Step {
     Render { slot: Option<Slot> },
     /// Publish a slot's configuration to the key provisioners' bucket.
     Publish { slot: Option<Slot> },
+    /// Measure a slot's build on GitHub's two runners, or check a run: `measure [slot] [run-id]`.
+    Measure {
+        #[arg(value_name = "SLOT] [RUN_ID")]
+        args: Vec<String>,
+    },
+    /// Apply the whole enclave stack, for a guardian's first deployment.
+    Deploy,
+    /// Build the proxy at the active slot's commit and roll it, through the workflow GUARDIAN_PROXY_WORKFLOW names.
+    Proxy,
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -71,6 +83,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Step::Render { slot } => configs::render(&ctx, slot),
         Step::Publish { slot } => configs::publish(&ctx, slot),
+        Step::Measure { args } => {
+            let (slot, rest) = leading_slot(&args);
+            match rest {
+                [] => deploy::measure(&ctx, slot, None),
+                [run_id] => deploy::measure(&ctx, slot, Some(run_id.clone())),
+                _ => bail!("Usage: measure [slot] [run-id]"),
+            }
+        }
+        Step::Deploy => deploy::deploy(&ctx),
+        Step::Proxy => deploy::proxy(&ctx),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
+    }
+}
+
+/// A step's optional leading slot, which clap can't tell from the positional arguments after it.
+fn leading_slot(args: &[String]) -> (Option<Slot>, &[String]) {
+    match args.split_first() {
+        Some((first, rest)) => match Slot::from_str(first, false) {
+            Ok(slot) => (Some(slot), rest),
+            Err(_) => (None, args),
+        },
+        None => (None, args),
     }
 }

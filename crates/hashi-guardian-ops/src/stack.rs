@@ -21,6 +21,9 @@ use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
 
+/// The type of a guardian's host in the stack's state and plans.
+pub const INSTANCE: &str = "aws:ec2/instance:Instance";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Slot {
     #[value(name = "a")]
@@ -211,7 +214,7 @@ impl Stack {
                 region: region.to_owned(),
             }),
             _ => bail!(
-                "Stack {} in {} has no deployed guardian.",
+                "Stack {} in {} has no deployed guardian. Run the deploy step first.",
                 self.name,
                 self.dir
             ),
@@ -295,6 +298,16 @@ impl Stack {
             .manifest
             .version)
     }
+
+    /// The guardian instances in the stack's state, by URN and ID.
+    pub fn instances(&self, ctx: &Ctx) -> Result<Vec<Resource>> {
+        Ok(export(ctx, &self.dir, &self.name)?
+            .deployment
+            .resources
+            .into_iter()
+            .filter(|resource| resource.kind == INSTANCE)
+            .collect())
+    }
 }
 
 /// The project a Pulumi program's own directory declares, whose name prefixes the program's configuration keys. `pulumi
@@ -337,12 +350,22 @@ pub struct Export {
 #[derive(Deserialize)]
 pub struct Deployment {
     pub manifest: Manifest,
+    #[serde(default)]
+    pub resources: Vec<Resource>,
 }
 
 #[derive(Deserialize)]
 pub struct Manifest {
     #[serde(default)]
     pub version: String,
+}
+
+#[derive(Deserialize)]
+pub struct Resource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub urn: String,
+    pub id: Option<String>,
 }
 
 /// A stack's state, as `pulumi stack export` prints it.
@@ -553,7 +576,9 @@ pub mod tests {
         );
         assert_eq!(
             stack.bucket().err().unwrap().to_string(),
-            format!("Stack org/testnet in {ENCLAVE} has no deployed guardian.")
+            format!(
+                "Stack org/testnet in {ENCLAVE} has no deployed guardian. Run the deploy step first."
+            )
         );
     }
 
