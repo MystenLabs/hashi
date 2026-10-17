@@ -1,0 +1,38 @@
+guardian_endpoint: "http://127.0.0.1:3001"
+relay_endpoint: "https://guardian.testnet.hashi.sui.io"
+
+deployment:
+  bucket_info:
+    name: "guardian-bucket"
+    region: "us-west-2"
+  retention_environment: "testnet"
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    current_build:
+      git_revision: "0873917ea0000000000000000000000000000000"
+      pcr0: "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+    prev_builds: []
+
+hashi:
+  sui_rpc: "https://fullnode.testnet.sui.io:443"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000001"
+  hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+
+kp_roster:
+  num_shares: 2
+  threshold: 2
+  kp_pgp_cert_paths:
+    - certs/alice-kp-pubkey.asc
+    - certs/bob-kp-pubkey.asc
+
+new_kp_roster:
+  num_shares: 3
+  threshold: 3
+  kp_pgp_cert_paths:
+    - certs/alice-kp-pubkey.asc
+    - certs/bob-kp-pubkey.asc
+    - certs/carol-kp-pubkey.asc
+
+limiter_config:
+  refill_rate: 11574
+  max_bucket_capacity: 1000000000

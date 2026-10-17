@@ -91,6 +91,10 @@ impl Cmd {
             .collect()
     }
 
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
@@ -275,6 +279,8 @@ pub mod fake {
         pub log: RefCell<Vec<Vec<String>>>,
         /// The variables each logged command leaves out of its environment.
         pub removed_env: RefCell<Vec<Vec<String>>>,
+        /// The working directory of each command exec'd in place of this tool.
+        pub exec_dirs: RefCell<Vec<Option<PathBuf>>>,
     }
 
     impl Fake {
@@ -296,6 +302,7 @@ pub mod fake {
                 handler: Box::new(handler),
                 log: RefCell::default(),
                 removed_env: RefCell::default(),
+                exec_dirs: RefCell::default(),
             }
         }
 
@@ -325,6 +332,9 @@ pub mod fake {
 
         fn exec(&self, cmd: &Cmd) -> io::Error {
             self.log.borrow_mut().push(cmd.words());
+            self.exec_dirs
+                .borrow_mut()
+                .push(cmd.working_dir().map(Path::to_owned));
             io::Error::other("exec in a test")
         }
 
