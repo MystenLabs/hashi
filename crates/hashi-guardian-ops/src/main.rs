@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use clap::Subcommand;
 use hashi_guardian_ops::Ctx;
+use hashi_guardian_ops::ask::Terminal;
 use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
@@ -37,6 +38,8 @@ enum Step {
     Tunnel { slot: Option<Slot> },
     /// Write a slot's configuration for the operator and the key provisioners, and check it with the guardian's tools.
     Render { slot: Option<Slot> },
+    /// Publish a slot's configuration to the key provisioners' bucket.
+    Publish { slot: Option<Slot> },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -59,7 +62,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let ctx = Ctx::new(&cli.env_file, &System)?;
+    let ctx = Ctx::new(&cli.env_file, &System, &Terminal)?;
     require_programs(&System)?;
     match cli.step {
         Step::Status => inspect::status(&ctx),
@@ -67,6 +70,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::Host { slot } => inspect::host(&ctx, slot),
         Step::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Step::Render { slot } => configs::render(&ctx, slot),
+        Step::Publish { slot } => configs::publish(&ctx, slot),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
