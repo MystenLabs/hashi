@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The guardian operator's steps. It drives the guardian's infrastructure (Pulumi, AWS, the proxy) from the latest
-//! checkout.
+//! checkout, and takes everything that must match the guardian from the guardian's own commit: see [`commit`].
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 
+pub mod commit;
 pub mod env;
 pub mod exec;
 pub mod guardian;
+pub mod host;
 pub mod stack;
 pub mod steps;
 
@@ -53,4 +55,8 @@ impl<'a> Ctx<'a> {
 
 pub fn say(title: &str) {
     println!("\n== {title} ==");
+}
+
+pub fn warn(message: &str) {
+    eprintln!("\nWARNING: {message}");
 }
