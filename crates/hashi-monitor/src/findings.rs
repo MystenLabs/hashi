@@ -108,6 +108,27 @@ pub enum MonitorFinding {
         sui: MonitorDepositEvent,
         btc: MonitorDepositEvent,
     },
+    /// A coin in the monitor's UTXO pool has sat unspent on Bitcoin past the
+    /// warn age, or past the critical age. The committee can spend a coin
+    /// alone 60 days after it confirms.
+    UtxoTooOld {
+        outpoint: OutPoint,
+        age_secs: u64,
+        threshold_secs: u64,
+        critical: bool,
+    },
+    /// A coin in the monitor's UTXO pool was spent on Bitcoin, and no Hashi
+    /// withdrawal confirmed on Bitcoin spent it.
+    UtxoUnexpectedSpend {
+        outpoint: OutPoint,
+        amount: u64,
+    },
+    /// A coin in the monitor's UTXO pool does not exist on Bitcoin, and its
+    /// grace period has passed.
+    UtxoVanished {
+        outpoint: OutPoint,
+        first_seen: UnixSeconds,
+    },
     /// Bitcoin confirmed an outpoint the monitor's UTXO pool knows with a
     /// second amount. An outpoint has one amount, so this is a monitor bug.
     UtxoAmountMismatch {
@@ -158,6 +179,15 @@ impl MonitorFinding {
             Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
             Self::DepositOutputMissing { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
+            Self::UtxoTooOld { critical, .. } => {
+                if *critical {
+                    FindingCategory::Safety
+                } else {
+                    FindingCategory::Liveness
+                }
+            }
+            Self::UtxoUnexpectedSpend { .. } => FindingCategory::Safety,
+            Self::UtxoVanished { .. } => FindingCategory::Safety,
             Self::UtxoAmountMismatch { .. } => FindingCategory::Safety,
             Self::UtxoSpentTwice { .. } => FindingCategory::Safety,
             Self::UtxoUnknownInputSpent { .. } => FindingCategory::Liveness,
@@ -232,6 +262,29 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
                 sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
+            ),
+            Self::UtxoTooOld {
+                outpoint,
+                age_secs,
+                threshold_secs,
+                critical,
+            } => write!(
+                f,
+                "UtxoTooOld(outpoint={outpoint}, age={}, threshold={}, critical={critical})",
+                human_duration(*age_secs),
+                human_duration(*threshold_secs),
+            ),
+            Self::UtxoUnexpectedSpend { outpoint, amount } => write!(
+                f,
+                "UtxoUnexpectedSpend(outpoint={outpoint}, amount={amount})"
+            ),
+            Self::UtxoVanished {
+                outpoint,
+                first_seen,
+            } => write!(
+                f,
+                "UtxoVanished(outpoint={outpoint}, first_seen={})",
+                utc_timestamp(*first_seen),
             ),
             Self::UtxoAmountMismatch {
                 outpoint,

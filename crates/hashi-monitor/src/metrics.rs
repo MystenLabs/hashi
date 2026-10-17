@@ -19,6 +19,8 @@ use crate::findings::MonitorFinding;
 pub const SOURCE_SUI: &str = "sui";
 pub const SOURCE_GUARDIAN: &str = "guardian";
 pub const SOURCE_BTC: &str = "btc";
+/// The daily check of every coin in the UTXO pool against Bitcoin.
+pub const SOURCE_UTXO: &str = "utxo";
 
 pub struct MonitorMetrics {
     registry: Registry,
@@ -69,7 +71,7 @@ impl MonitorMetrics {
                 .with_label_values(&[category.to_string().as_str()])
                 .set(0);
         }
-        for source in [SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC] {
+        for source in [SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC, SOURCE_UTXO] {
             checked_through_timestamp_seconds
                 .with_label_values(&[source])
                 .set(0);

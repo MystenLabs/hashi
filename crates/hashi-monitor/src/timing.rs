@@ -23,6 +23,8 @@
 //! - Deposit requests: Bitcoin is asked about a request's transaction for
 //!   the watch period. The monitor assumes an honest deposit confirms on
 //!   Bitcoin within it.
+//! - The UTXO pool: a coin the bridge holds is reported by its age on
+//!   Bitcoin, and by its absence from Bitcoin after a grace period.
 //!
 //! A Bitcoin event is timed by the block that gave the transaction
 //! `MIN_CONFIRMATIONS` in `rpc::btc`, not by the block that holds it.
@@ -66,6 +68,22 @@ pub const DEPOSIT_CONFIRMATION_SKEW: u64 = 2 * 60 * 60;
 /// after the watch is seen only when the committee confirms it.
 pub const DEPOSIT_REQUEST_WATCH: u64 = 2 * 24 * 60 * 60;
 
+/// Age of an unspent bridge coin that is a liveness finding. Honest coin
+/// selection refreshes a coin older than 30 days
+/// (`RECOVERY_PRIORITY_AGE_BLOCKS` in the `hashi` crate), so a coin a day
+/// older than that was not refreshed.
+pub const UTXO_AGE_WARN: u64 = 31 * 24 * 60 * 60;
+
+/// Age of an unspent bridge coin that is a safety finding. The committee
+/// can spend a coin alone 60 days after it confirms, through the recovery
+/// leaf. Fifteen days before that leaves time to act.
+pub const UTXO_AGE_CRITICAL: u64 = 45 * 24 * 60 * 60;
+
+/// How long a coin in the monitor's pool may be absent from Bitcoin before
+/// it is reported. A change output exists only once its withdrawal
+/// confirms, and a reorg can move a confirmation.
+pub const UTXO_MISSING_GRACE: u64 = 7 * 24 * 60 * 60;
+
 /// The bounds in force. `Default` is the protocol set above. Tests build
 /// their own with small numbers.
 #[derive(Clone, Debug)]
@@ -81,6 +99,12 @@ pub struct Timing {
     pub deposit_confirmation_skew: u64,
     /// How long Bitcoin is asked about a deposit request's transaction.
     pub deposit_request_watch: u64,
+    /// Age of an unspent bridge coin that is a liveness finding.
+    pub utxo_age_warn: u64,
+    /// Age of an unspent bridge coin that is a safety finding.
+    pub utxo_age_critical: u64,
+    /// How long a pool coin may be absent from Bitcoin before it is reported.
+    pub utxo_missing_grace: u64,
 }
 
 impl Default for Timing {
@@ -110,6 +134,9 @@ impl Default for Timing {
             .expect("one bound per non-terminal event"),
             deposit_confirmation_skew: DEPOSIT_CONFIRMATION_SKEW,
             deposit_request_watch: DEPOSIT_REQUEST_WATCH,
+            utxo_age_warn: UTXO_AGE_WARN,
+            utxo_age_critical: UTXO_AGE_CRITICAL,
+            utxo_missing_grace: UTXO_MISSING_GRACE,
         }
     }
 }
@@ -178,6 +205,9 @@ impl Timing {
             .expect("valid predecessor skews"),
             deposit_confirmation_skew: 10,
             deposit_request_watch: 1_000,
+            utxo_age_warn: 100,
+            utxo_age_critical: 200,
+            utxo_missing_grace: 50,
         }
     }
 }

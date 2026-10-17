@@ -31,6 +31,10 @@
 //! 5. In one pass, every add comes before every spend. A pass can answer a
 //!    deposit and the withdrawal that spends it, or a withdrawal and the one
 //!    that spends its change, in any order.
+//! 6. Once a day the monitor asks Bitcoin about every coin held. `check`
+//!    turns the answers into findings. An unspent coin is reported by age.
+//!    A spent coin is a spend outside Hashi. A missing coin is a phantom,
+//!    after a grace period.
 //!
 //! Invariants:
 //! - An outpoint is held or spent, never both.
@@ -44,8 +48,11 @@
 //!   address with no `DepositRequested`, or with a wrong derivation path, is
 //!   invisible to the monitor and out of scope. A withdrawal that spends such
 //!   a coin is reported as a spend of an unknown coin.
+//! - A change output exists on Bitcoin only once its withdrawal confirms, so
+//!   a coin may be missing for `UTXO_MISSING_GRACE` after it is first seen.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use bitcoin::OutPoint;
 use bitcoin::Txid;
@@ -57,6 +64,8 @@ use crate::domain::BtcConfirmation;
 use crate::domain::CoinOrigin;
 use crate::domain::WithdrawalTx;
 use crate::findings::MonitorFinding;
+use crate::rpc::btc::OutpointState;
+use crate::timing::Timing;
 
 /// A coin the bridge holds, by Bitcoin's account.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -279,5 +288,53 @@ impl UtxoPool {
                 Some(MonitorFinding::UtxoUnknownInputSpent { outpoint, txid })
             }
         }
+    }
+
+    /// The findings of one pass over Bitcoin's answer for every coin held.
+    /// A coin with no answer counts as missing.
+    pub fn check(
+        &self,
+        states: &HashMap<OutPoint, OutpointState>,
+        now: UnixSeconds,
+        timing: &Timing,
+    ) -> Vec<MonitorFinding> {
+        let mut findings = Vec::new();
+        for (outpoint, coin) in &self.coins {
+            match states.get(outpoint) {
+                Some(OutpointState::Unspent { block_time }) => {
+                    let age_secs = now.saturating_sub(*block_time);
+                    if age_secs >= timing.utxo_age_critical {
+                        findings.push(MonitorFinding::UtxoTooOld {
+                            outpoint: *outpoint,
+                            age_secs,
+                            threshold_secs: timing.utxo_age_critical,
+                            critical: true,
+                        });
+                    } else if age_secs >= timing.utxo_age_warn {
+                        findings.push(MonitorFinding::UtxoTooOld {
+                            outpoint: *outpoint,
+                            age_secs,
+                            threshold_secs: timing.utxo_age_warn,
+                            critical: false,
+                        });
+                    }
+                }
+                Some(OutpointState::Spent) => {
+                    findings.push(MonitorFinding::UtxoUnexpectedSpend {
+                        outpoint: *outpoint,
+                        amount: coin.amount,
+                    });
+                }
+                Some(OutpointState::Missing) | None => {
+                    if now.saturating_sub(coin.first_seen) >= timing.utxo_missing_grace {
+                        findings.push(MonitorFinding::UtxoVanished {
+                            outpoint: *outpoint,
+                            first_seen: coin.first_seen,
+                        });
+                    }
+                }
+            }
+        }
+        findings
     }
 }
