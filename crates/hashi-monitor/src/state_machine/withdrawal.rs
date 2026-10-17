@@ -27,6 +27,7 @@
 //!   may have reported findings earlier.
 
 use crate::audit::AuditWindow;
+use crate::domain::BtcConfirmation;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
@@ -55,6 +56,8 @@ pub struct WithdrawalStateMachine {
     expected_events: Vec<(WithdrawalEventType, UnixSeconds, EventRelation)>,
     /// The time of the last Bitcoin lookup of the transaction.
     btc_checked_at: Option<UnixSeconds>,
+    /// The transaction as Bitcoin confirmed it, once it did.
+    btc_confirmation: Option<BtcConfirmation>,
     /// The withdrawal id. Every event must carry it.
     wid: WithdrawalID,
     /// The transaction id. Every event must carry it.
@@ -71,6 +74,7 @@ impl WithdrawalStateMachine {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
             btc_checked_at: None,
+            btc_confirmation: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
             tx: event.tx.clone(),
@@ -90,6 +94,16 @@ impl WithdrawalStateMachine {
 
     pub fn btc_txid(&self) -> Txid {
         self.btc_txid
+    }
+
+    /// The withdrawal's inputs and outputs, as every event states them.
+    pub fn tx(&self) -> &WithdrawalTx {
+        &self.tx
+    }
+
+    /// The transaction as Bitcoin confirmed it, or `None` until it did.
+    pub fn btc_confirmation(&self) -> Option<&BtcConfirmation> {
+        self.btc_confirmation.as_ref()
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -260,6 +274,7 @@ impl WithdrawalStateMachine {
                     self.btc_txid,
                     self.tx.clone(),
                 );
+                self.btc_confirmation = Some(confirmation);
                 BtcFetchOutcome::Confirmed(self.add_event(e_btc, timing))
             }
             None => BtcFetchOutcome::Unconfirmed,

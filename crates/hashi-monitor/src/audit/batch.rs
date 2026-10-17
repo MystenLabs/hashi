@@ -136,7 +136,7 @@ impl BatchAuditor {
             utc_timestamp(audit_window.guardian_end),
         );
         Ok(Self {
-            inner: AuditorCore::new(cfg, cursors).await?,
+            inner: AuditorCore::new(cfg, cursors, None).await?,
             audit_window,
             violation_found: false,
         })

@@ -17,8 +17,8 @@
 //!    logged and retried on its next tick.
 //! 3. Then the Sui, guardian and Bitcoin ticks run every `POLL_INTERVAL`,
 //!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
-//!    Sui approvals, report the violations, garbage collect, log the
-//!    progress watermarks, and save the snapshot one state check behind.
+//!    Sui approvals, report the violations, retire the complete flows, log
+//!    the progress watermarks, and save the snapshot one state check behind.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
 //!    checked-through time is exported.
 //!
@@ -162,7 +162,9 @@ impl ContinuousAuditor {
             guardian: audit_window.guardian_start,
         };
 
-        let inner = AuditorCore::new(cfg, cursors).await?;
+        // No UTXO pool yet: keeping it between runs, and so turning it on,
+        // follows in a later change.
+        let inner = AuditorCore::new(cfg, cursors, None).await?;
         metrics.set_checked_through(SOURCE_SUI, inner.sui_cursor());
         metrics.set_checked_through(SOURCE_GUARDIAN, inner.guardian_cursor());
         Ok(Self {
@@ -253,7 +255,8 @@ impl ContinuousAuditor {
         self.report_findings("violations", &violations);
 
         // Garbage collect
-        self.inner.garbage_collect(&self.window);
+        let pool_findings = self.inner.retire_complete_flows(&self.window);
+        self.report_findings("pool", &pool_findings);
 
         let progress = self.inner.progress_watermarks(&self.window);
         tracing::info!(
@@ -420,6 +423,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            utxo_pool: None,
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
             sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -462,6 +466,7 @@ mod tests {
                 pending_withdrawals: HashMap::new(),
                 pending_deposits: HashMap::new(),
                 pending_deposit_requests: HashMap::new(),
+                utxo_pool: None,
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
                 sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
                 btc_client: BtcRpcClient::new(&cfg).unwrap(),

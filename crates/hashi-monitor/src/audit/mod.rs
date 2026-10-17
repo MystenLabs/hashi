@@ -18,7 +18,8 @@
 //!    withdrawal id, since the Sui scan may have started after it.
 //! 4. Each tick, the core reports the violations of every machine in the
 //!    audit window: the expected events whose deadline a cursor has passed.
-//! 5. Completed machines are garbage collected.
+//! 5. Complete flows retire: the UTXO pool takes the coins they moved, then
+//!    they are dropped.
 //! 6. The progress watermarks give the time through which every flow is
 //!    verified, which is where a restart starts.
 //!
@@ -46,6 +47,7 @@ use std::collections::hash_map::Entry;
 
 pub mod batch;
 pub mod continuous;
+pub mod pool;
 
 use crate::config::Config;
 use crate::findings::FindingCategory;
@@ -63,6 +65,8 @@ use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
+use pool::ConfirmedWithdrawal;
+use pool::UtxoPool;
 use std::fmt;
 use sui_sdk_types::Address;
 
@@ -158,13 +162,22 @@ pub struct AuditorCore {
     /// request id, so a replayed event is ignored and each request has its
     /// own.
     pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
+    /// The coins the bridge holds, by Bitcoin's account. See `pool`. `None`
+    /// keeps no pool. Keeping it between runs, and so turning it on, follows
+    /// in a later change.
+    utxo_pool: Option<UtxoPool>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
 }
 
 impl AuditorCore {
-    pub async fn new(cfg: &Config, cursors: Cursors) -> anyhow::Result<Self> {
+    /// `utxo_pool` is the pool to keep, or `None` to keep none.
+    pub async fn new(
+        cfg: &Config,
+        cursors: Cursors,
+        utxo_pool: Option<UtxoPool>,
+    ) -> anyhow::Result<Self> {
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?;
         let hashi_btc_keys = guardian_poller
             .read_hashi_btc_keys(cfg.deployment.bitcoin_network)
@@ -174,6 +187,7 @@ impl AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            utxo_pool,
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
@@ -241,6 +255,12 @@ impl AuditorCore {
         window: &impl AuditWindow,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
         self.btc_client.ensure_synced()?;
+        // The cache dedupes lookups inside one pass. It is cleared because a
+        // "not confirmed yet" answer goes stale.
+        // TODO: keep confirmed answers across passes, and evict an entry at
+        // GC once no machine names its txid. A deposit's transaction is then
+        // looked up once, not once for the request and once for the
+        // confirmation.
         self.btc_client.clear_confirmation_cache();
         let withdrawal_count = self
             .pending_withdrawals
@@ -318,15 +338,6 @@ impl AuditorCore {
                 sm.try_fetch_btc_tx(&self.btc_client)?;
             }
         }
-        for coin in self.take_confirmed_deposits() {
-            // TODO(IOP-747): add the coin to the monitor's UTXO pool.
-            tracing::info!(
-                deposit_id = %coin.deposit_id,
-                amount = coin.amount,
-                block_time = %utc_timestamp(coin.block_time),
-                "deposit request confirmed on Bitcoin at a bridge address"
-            );
-        }
 
         Ok(findings)
     }
@@ -340,10 +351,39 @@ impl AuditorCore {
             .filter(|(_, sm)| sm.coin().is_some())
             .map(|(request_id, _)| *request_id)
             .collect::<Vec<_>>();
-        confirmed
+        let coins = confirmed
             .into_iter()
             .filter_map(|request_id| self.pending_deposit_requests.remove(&request_id))
             .filter_map(DepositRequestStateMachine::into_coin)
+            .collect::<Vec<_>>();
+        for coin in &coins {
+            tracing::info!(
+                deposit_id = %coin.deposit_id,
+                amount = coin.amount,
+                block_time = %utc_timestamp(coin.block_time),
+                "deposit request confirmed on Bitcoin at a bridge address"
+            );
+        }
+        coins
+    }
+
+    /// The complete withdrawals in the window, each with the guardian's
+    /// change layout and Bitcoin's confirmation.
+    fn complete_withdrawals(&self, window: &impl AuditWindow) -> Vec<ConfirmedWithdrawal> {
+        self.pending_withdrawals
+            .values()
+            .filter(|sm| sm.is_in_audit_window(window) && !sm.is_expecting_events())
+            .map(|sm| {
+                let e2 = sm
+                    .get(WithdrawalEventType::E2GuardianApproved)
+                    .expect("completed withdrawal has E2");
+                let confirmation = sm.btc_confirmation().expect("completed withdrawal has E3");
+                ConfirmedWithdrawal {
+                    txid: sm.btc_txid(),
+                    confirmation: confirmation.clone(),
+                    tx: e2.tx.clone(),
+                }
+            })
             .collect()
     }
 
@@ -415,8 +455,28 @@ impl AuditorCore {
         findings
     }
 
-    /// Drop every complete flow in the window, and log each one.
-    pub fn garbage_collect(&mut self, window: &impl AuditWindow) {
+    /// Retire every complete flow in the window: the UTXO pool takes the
+    /// coins it moved, then the flow is dropped and logged. The pool takes
+    /// every deposit before any withdrawal, and a withdrawal's change before
+    /// its inputs, so the order the flows completed in does not matter. A
+    /// withdrawal that never completes never reaches the pool: its inputs
+    /// stay held, and the daily check reports them, on top of the finding
+    /// for its missing event.
+    pub fn retire_complete_flows(&mut self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
+        let mut findings = Vec::new();
+        let confirmed_deposits = self.take_confirmed_deposits();
+        let confirmed_withdrawals = self.complete_withdrawals(window);
+        if let Some(pool) = &mut self.utxo_pool {
+            for coin in &confirmed_deposits {
+                findings.extend(pool.add_deposit(
+                    coin.deposit_id.into(),
+                    coin.amount,
+                    coin.block_time,
+                ));
+            }
+            findings.extend(pool.apply_confirmed_withdrawals(&confirmed_withdrawals));
+        }
+
         self.pending_withdrawals.retain(|wid, sm| {
             if !sm.is_in_audit_window(window) || sm.is_expecting_events() {
                 return true;
@@ -450,8 +510,8 @@ impl AuditorCore {
             false
         });
 
-        // A request Bitcoin answered without a coin, or that lapsed. A coin
-        // never waits here: `fetch_btc_info` takes it in the same call.
+        // A request Bitcoin answered without a coin, or that lapsed. One
+        // with a coin was taken above.
         self.pending_deposit_requests.retain(|request_id, sm| {
             if sm.is_expecting_events() {
                 return true;
@@ -463,6 +523,7 @@ impl AuditorCore {
             );
             false
         });
+        findings
     }
 
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
@@ -578,6 +639,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            utxo_pool: None,
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -737,6 +799,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            utxo_pool: None,
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
