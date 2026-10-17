@@ -22,6 +22,8 @@ use crate::stack::Slot;
 use crate::stack::Stack;
 
 pub const COMMIT: &str = crate::stack::tests::COMMIT;
+/// A later build, for a rotation onto another commit.
+pub const NEXT: &str = "c47991e310000000000000000000000000000000";
 pub const BTC: &str = "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
 pub const URN_PREFIX: &str = "urn:pulumi:testnet::enclave::aws:ec2/instance:Instance::guardian-";
 const STACK_URN: &str = "urn:pulumi:testnet::enclave::pulumi:pulumi:Stack::enclave-testnet";
@@ -39,6 +41,8 @@ pub struct Session {
 
 pub struct Host {
     pub ip: String,
+    /// The commit its guardian is built from.
+    pub commit: String,
     /// Whether the guardian's unit is enabled or active.
     pub running: bool,
     /// Whether an enclave runs, which a failed terminate leaves after the unit stops.
@@ -72,6 +76,12 @@ pub struct State {
     pub workflow_runs: Vec<(String, String, String)>,
     /// Each session's operator-init record, by session.
     pub init_records: BTreeMap<String, Value>,
+    /// The builds hashi-monitor's audit configuration allowlists, its current build first, if it has one.
+    pub monitor_builds: Option<Vec<(String, String)>>,
+    /// The commits this checkout has.
+    pub local_commits: Vec<String>,
+    /// What `git diff` lists between any two commits under the guardian's protos and log types.
+    pub format_changes: Vec<String>,
     pub sui_epoch: u64,
     /// When the epoch began and when the one before it began, as seconds before now.
     pub epoch_age: (i64, i64),
@@ -93,6 +103,17 @@ impl State {
             Some(value) => value == "true",
             None => slot == Slot::A,
         }
+    }
+
+    /// The commit and PCR0 the stack configures for a slot.
+    fn build(&self, slot: Slot) -> (String, String) {
+        let key = |name: &str| {
+            self.config
+                .get(&format!("{name}{}", slot.suffix()))
+                .cloned()
+                .unwrap_or_default()
+        };
+        (key("hashi-commit"), key("eif-pcr0"))
     }
 
     fn configured_active(&self) -> Slot {
@@ -152,7 +173,8 @@ impl State {
     fn new_session(&mut self) -> Session {
         self.counter += 1;
         Session {
-            key: format!("{:064x}", 0xabc0 + self.counter),
+            // The first 16 digits name the session in the log.
+            key: format!("{:016x}", 0xabc0 + self.counter).repeat(4),
             btc: None,
             config_hash: None,
             lifecycle: "none".to_owned(),
@@ -197,10 +219,12 @@ impl State {
                     let id = format!("i-0{slot}{:03}", self.counter);
                     let session = self.new_session();
                     let ip = format!("192.0.2.{}", self.counter);
+                    let commit = self.build(if slot == "b" { Slot::B } else { Slot::A }).0;
                     self.hosts.insert(
                         id.clone(),
                         Host {
                             ip,
+                            commit,
                             running: true,
                             enclave: true,
                             session,
@@ -298,7 +322,10 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         epoch: Some(1253),
     };
     let mut init_records = BTreeMap::new();
-    init_records.insert("aa".repeat(8), init_record(&"cf".repeat(32)));
+    init_records.insert(
+        "aa".repeat(8),
+        init_record(&"cf".repeat(32), &[(COMMIT.to_owned(), "0c".repeat(48))]),
+    );
     Rc::new(RefCell::new(State {
         config,
         deployed: [("a".to_owned(), "i-0aaa".to_owned())]
@@ -309,6 +336,7 @@ pub fn serving_world() -> Rc<RefCell<State>> {
             "i-0aaa".to_owned(),
             Host {
                 ip: "192.0.2.10".to_owned(),
+                commit: COMMIT.to_owned(),
                 running: true,
                 enclave: true,
                 session: serving,
@@ -329,6 +357,9 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         ec2_states: BTreeMap::new(),
         workflow_runs: Vec::new(),
         init_records,
+        monitor_builds: None,
+        local_commits: vec![COMMIT.to_owned(), NEXT.to_owned()],
+        format_changes: Vec::new(),
         sui_epoch: 1253,
         epoch_age: (3 * 3600, 27 * 3600),
         activate_false_failure: false,
@@ -354,6 +385,17 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                 let program = std::path::Path::new(dir).file_name()?.to_str()?;
                 let proxy = program == "proxy";
                 match rest {
+                    ["config", "get", "audit", "--json", "--stack", _] if program == "monitor" => {
+                        let build = |(commit, pcr0): &(String, String)| json!({ "git_revision": commit, "pcr0": pcr0 });
+                        let Some(builds) = &s.monitor_builds else {
+                            return fail();
+                        };
+                        let audit = json!({ "deployment": { "pcr_allowlist": {
+                            "current_build": builds.first().map(build),
+                            "prev_builds": builds.iter().skip(1).map(build).collect::<Vec<_>>(),
+                        } } });
+                        ok(json!({ "value": audit.to_string(), "objectValue": audit, "secret": false }).to_string())
+                    }
                     ["config", "--stack", _, "--json"] => {
                         let mut config: serde_json::Map<String, Value> = s
                             .config
@@ -446,7 +488,7 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                     ok(json!({
                         "signingPubKey": session.key,
                         "btcPubkey": session.btc,
-                        "gitRevision": COMMIT,
+                        "gitRevision": host.commit,
                         "committeeEpoch": session.epoch.map(|epoch| epoch.to_string()),
                         "timestampMs": jiff::Timestamp::now().as_millisecond().to_string(),
                     })
@@ -488,6 +530,25 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                 let session = key.strip_prefix("init/")?.split('/').next()?;
                 ok(if s.init_records.contains_key(session) { "1\t0\n" } else { "0\t0\n" }.to_owned())
             }
+            ["aws", "s3api", "list-objects-v2", .., "--prefix", "init/", "--query", _, "--output", "json"] => {
+                let keys: Vec<String> = s
+                    .init_records
+                    .keys()
+                    .flat_map(|session| {
+                        ["01-oi-attestation.json", "02-oi-guardian-info.json"]
+                            .map(|name| format!("init/{session}/{name}"))
+                    })
+                    .collect();
+                ok(Value::from(keys).to_string())
+            }
+            ["git", "-C", _, "rev-parse", "--verify", "--quiet", rev] => {
+                let rev = rev.strip_suffix("^{commit}")?;
+                match s.local_commits.iter().find(|commit| !rev.is_empty() && commit.starts_with(rev)) {
+                    Some(commit) => ok(format!("{commit}\n")),
+                    None => fail(),
+                }
+            }
+            ["git", "-C", _, "diff", "--name-only", _, _, "--", ..] => ok(s.format_changes.join("\n")),
             ["aws", "ssm", "send-command", .., "--parameters", parameters] => {
                 let instance = w[w.iter().position(|word| *word == "--instance-ids")? + 1];
                 if s.ec2_states.contains_key(instance) {
@@ -529,6 +590,8 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                     .collect())
             }
             ["cargo", "build", ..] => ok(r#"{"reason":"compiler-artifact","target":{"name":"hashi-guardian-init"},"executable":"/x/hashi-guardian-init"}"#.to_owned()),
+            ["/x/hashi-guardian-init", "tools", "--help"] => ok("  check-config  Check a configuration\n".to_owned()),
+            ["/x/hashi-guardian-init", "tools", "check-config", ..] => ok(String::new()),
             ["/x/hashi-guardian-init", "operator", "activate", ..] => {
                 let others_quiet = s.hosts.values().all(|host| {
                     !(host.running || host.enclave)
@@ -555,29 +618,59 @@ fn task_definition(revision: u32) -> String {
     format!("arn:aws:ecs:us-west-2:{ACCOUNT}:task-definition/proxy:{revision}")
 }
 
-/// Has the key provisioners provision `slot`'s guardian with the serving guardian's key and configuration.
+/// Has the key provisioners provision `slot`'s guardian with the serving guardian's key, and the configuration a render
+/// gives it: its own build, the other slot's and the stack's `prev-builds`. A different allowlist has another hash.
 pub fn provision(state: &Rc<RefCell<State>>, slot: Slot) {
     let mut s = state.borrow_mut();
+    let mut builds = vec![s.build(slot)];
+    let listed: Vec<Value> = s
+        .config
+        .get("prev-builds")
+        .map(|text| serde_json::from_str(text).unwrap())
+        .unwrap_or_default();
+    let listed = listed.iter().map(|build| {
+        (
+            build["git_revision"].as_str().unwrap().to_owned(),
+            build["pcr0"].as_str().unwrap().to_owned(),
+        )
+    });
+    for build in std::iter::once(s.build(slot.other()))
+        .filter(|(commit, _)| !commit.is_empty())
+        .chain(listed)
+    {
+        if !builds.iter().any(|(commit, _)| *commit == build.0) {
+            builds.push(build);
+        }
+    }
+    let serving = &s.hosts[&s.deployed[&s.outputs_active.to_string()]].session;
+    let serving_record = &s.init_records[&serving.key[..16]];
+    let hash = if init_record("", &builds)["deployment"] == serving_record["deployment"] {
+        serving.config_hash.clone().unwrap()
+    } else {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&builds, &mut hasher);
+        format!("{:016x}", std::hash::Hasher::finish(&hasher)).repeat(4)
+    };
     let id = s.deployed[&slot.to_string()].clone();
     let host = s.hosts.get_mut(&id).unwrap();
     host.session.btc = Some(BTC.to_owned());
-    host.session.config_hash = Some("cf".repeat(32));
+    host.session.config_hash = Some(hash.clone());
     host.session.lifecycle = "withdraw/PROVISIONER_INITIALIZED".to_owned();
     let session = host.session.key[..16].to_owned();
-    s.init_records
-        .insert(session, init_record(&"cf".repeat(32)));
+    s.init_records.insert(session, init_record(&hash, &builds));
 }
 
-/// A withdraw session's operator-init record, as the serving world's stack renders it.
-pub fn init_record(config_hash: &str) -> Value {
+/// A withdraw session's operator-init record, allowlisting `builds` with the first as its own.
+pub fn init_record(config_hash: &str, builds: &[(String, String)]) -> Value {
+    let build = |(commit, pcr0): &(String, String)| json!({ "git_revision": commit, "pcr0": pcr0 });
     json!({
         "deployment": {
             "bucket_info": { "name": "guardian-bucket", "region": "us-west-2" },
             "retention_environment": "testnet",
             "bitcoin_network": "signet",
             "pcr_allowlist": {
-                "current_build": { "git_revision": COMMIT, "pcr0": "0c".repeat(48) },
-                "prev_builds": [],
+                "current_build": build(&builds[0]),
+                "prev_builds": builds[1..].iter().map(build).collect::<Vec<_>>(),
             },
         },
         "mode": {
@@ -682,4 +775,12 @@ pub fn env(repo: &std::path::Path) -> Vec<(String, String)> {
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
     .collect()
+}
+
+/// Adds the hashi-monitor that audits the guardian to `env`.
+pub fn monitor(env: &mut Vec<(String, String)>) {
+    const MONITOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/programs/monitor");
+    if !env.iter().any(|(key, _)| key == "HASHI_MONITOR_PULUMI_DIR") {
+        env.push(("HASHI_MONITOR_PULUMI_DIR".to_owned(), MONITOR.to_owned()));
+    }
 }
