@@ -57,6 +57,7 @@ impl fmt::Display for Lifecycle {
 pub struct GuardianInfo {
     pub signing_key: Option<String>,
     pub btc_key: Option<String>,
+    pub config_hash: Option<String>,
     pub lifecycle: Lifecycle,
 }
 
@@ -65,6 +66,7 @@ pub struct GuardianInfo {
 struct InfoData {
     signing_pub_key: Option<String>,
     enclave_btc_pubkey: Option<String>,
+    config_hash: Option<String>,
     withdraw: Option<String>,
     ceremony: Option<String>,
 }
@@ -85,6 +87,7 @@ impl InfoData {
         Ok(GuardianInfo {
             signing_key: hex_of(self.signing_pub_key)?,
             btc_key: hex_of(self.enclave_btc_pubkey)?,
+            config_hash: hex_of(self.config_hash)?,
             lifecycle: Lifecycle(lifecycle),
         })
     }
