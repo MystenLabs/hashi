@@ -15,6 +15,7 @@ pub mod env;
 pub mod exec;
 pub mod guardian;
 pub mod host;
+pub mod kp_bucket;
 pub mod render;
 pub mod stack;
 pub mod steps;
