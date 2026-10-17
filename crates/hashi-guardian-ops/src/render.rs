@@ -253,6 +253,13 @@ impl Rendered {
         self.files.get(path).map(Vec::as_slice)
     }
 
+    /// Every file, by its path in the slot's directory.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+    }
+
     /// The configuration files, without the certificates they list.
     pub fn configs(&self) -> impl Iterator<Item = &str> {
         self.files
@@ -328,6 +335,18 @@ impl Rendered {
         }
         Ok(())
     }
+
+    /// The files in `dir` that differ from this render. Only the files a render writes count: Finder, for one, adds
+    /// its own to a directory it has shown.
+    pub fn stale(&self, dir: &Path) -> Vec<&str> {
+        self.files
+            .iter()
+            .filter(|(relative, bytes)| {
+                std::fs::read(dir.join(relative)).ok().as_ref() != Some(*bytes)
+            })
+            .map(|(relative, _)| relative.as_str())
+            .collect()
+    }
 }
 
 /// A slot's files as a render would write them now, with what they were rendered from.
@@ -358,6 +377,30 @@ fn threshold(ctx: &Ctx, key: &str) -> Result<u32> {
     value
         .parse()
         .map_err(|_| anyhow!("{key} is not a number: {value}"))
+}
+
+/// Stops unless the slot's rendered files are what a render would write now: the stack, the environment file and
+/// the rosters can each have changed since the render step ran.
+pub fn require_fresh(ctx: &Ctx, stack: &Stack, view: &SlotView) -> Result<()> {
+    let operator = view.dir.join("operator.yaml");
+    if !operator.is_file() {
+        bail!(
+            "No {}. Run the render step for slot {} first.",
+            operator.display(),
+            view.slot
+        );
+    }
+    let render = SlotRender::new(ctx, stack, view)?;
+    let stale = render.rendered.stale(&view.dir);
+    if !stale.is_empty() {
+        bail!(
+            "Out of date in {}: {}. The stack, {} or the roster changed after the render step. Run it again, then publish again and have every key provisioner download again, unless only operator.yaml is out of date.",
+            view.dir.display(),
+            stale.join(", "),
+            ctx.env.path().display()
+        );
+    }
+    Ok(())
 }
 
 /// A rendered configuration. `endpoint` is how its reader reaches the guardian: the proxy for key provisioners, the
@@ -529,7 +572,7 @@ pub mod tests {
     }
 
     #[test]
-    fn writes_the_operators_file_for_its_eyes_only() {
+    fn writes_and_checks_freshness() {
         use std::os::unix::fs::PermissionsExt;
         let scratch = tempfile::tempdir().unwrap();
         let dealt = Roster::load(
@@ -542,13 +585,16 @@ pub mod tests {
         std::fs::create_dir_all(&slot).unwrap();
         std::fs::write(slot.join("kp-shares.json"), "kept").unwrap();
         rendered.write(&slot).unwrap();
+        assert!(rendered.stale(&slot).is_empty());
         assert!(slot.join("kp-shares.json").exists());
-        assert!(slot.join("certs/alice-kp-pubkey.asc").is_file());
         let mode = std::fs::metadata(slot.join("operator.yaml"))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+        std::fs::write(slot.join(".DS_Store"), "x").unwrap();
+        std::fs::write(slot.join("certs/alice-kp-pubkey.asc"), "changed").unwrap();
+        assert_eq!(rendered.stale(&slot), ["certs/alice-kp-pubkey.asc"]);
         // Until the guardian's tools pass them, the configurations wait under other names.
         rendered.write_unchecked(&slot).unwrap();
         for config in ["operator.yaml", "guardian-init.yaml"] {
