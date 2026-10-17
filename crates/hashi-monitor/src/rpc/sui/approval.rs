@@ -57,6 +57,7 @@ use sui_sdk_types::StructTag;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::SuiDepositRequestedEvent;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
@@ -139,6 +140,11 @@ pub fn parse_event(
                 hashi_btc_keys,
             )));
         }
+        Some(HashiEvent::DepositRequested(event)) => {
+            events.push(MonitorEvent::DepositRequested(
+                SuiDepositRequestedEvent::from_sui(event, hashi_btc_keys),
+            ));
+        }
         Some(_) | None => {}
     }
     Ok(())
@@ -149,6 +155,7 @@ pub mod tests {
     use bitcoin::Txid;
 
     use super::*;
+    use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::domain::WithdrawalTx;
 
@@ -200,6 +207,26 @@ pub mod tests {
     /// The `withdrawal_tx` of one input into one user output and one change
     /// output to the bridge, as a `WithdrawalTransaction` object whose txid is
     /// the one its inputs and outputs build.
+    /// A `DepositRequested` event for `txn`'s first input, claimed at `timestamp_ms`.
+    pub fn deposit_requested_event(txn: &WithdrawalTransaction, timestamp_ms: u64) -> Event {
+        let input = &txn.inputs[0];
+        // `DepositRequested` fields, in declaration order.
+        let mut contents = Bcs::serialize(&(
+            Address::new([0x61; 32]),
+            input.id,
+            input.amount,
+            input.derivation_path,
+            timestamp_ms,
+            Address::new([0x62; 32]),
+            sui_sdk_types::Digest::new([0x63; 32]),
+        ))
+        .unwrap();
+        contents.name = Some(format!("{PACKAGE_ID}::deposit::DepositRequested"));
+        let mut event = Event::default();
+        event.contents = Some(contents);
+        event
+    }
+
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
         let tx = withdrawal_tx(witness_program_from_address(&test_change_address()).unwrap());
         let txn = WithdrawalTransaction {
@@ -429,5 +456,34 @@ pub mod tests {
             .unwrap();
             assert_eq!((events, findings), expected);
         }
+    }
+
+    #[test]
+    fn a_deposit_request_carries_the_claimed_script_and_its_own_time() {
+        let txn = withdrawal_transaction(WID);
+        let input = &txn.inputs[0];
+        let (mut events, mut findings) = (Vec::new(), Vec::new());
+
+        parse_event(
+            &package_versions(),
+            &test_hashi_btc_keys(),
+            deposit_requested_event(&txn, 1_700_000_000_500),
+            9,
+            &mut events,
+            &mut findings,
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![MonitorEvent::DepositRequested(SuiDepositRequestedEvent {
+                request_id: Address::new([0x61; 32]),
+                timestamp_secs: 1_700_000_000,
+                deposit_id: DepositId::new(input.id.txid.into(), input.id.vout),
+                amount: input.amount,
+                script_pubkey: test_hashi_btc_keys().script_pubkey(input.derivation_path.as_ref()),
+            })]
+        );
+        assert!(findings.is_empty());
     }
 }
