@@ -348,6 +348,10 @@ they differ, press Ctrl-C and tell the operator.
 Your YubiKey asks for its User PIN and a touch to decrypt your share, and again
 to sign. Send the operator the file it writes; it holds nothing secret.
 
+If the guardian's commit includes hashi PR #1464, the command also uploads the
+file to the operator's bucket and says there is nothing to send. If that upload
+fails, the file is still written: send it instead.
+
 ### Confirm your share in the new set
 
 Every KP of the new set runs this once the operator publishes the new set's

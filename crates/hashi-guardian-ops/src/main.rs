@@ -87,9 +87,10 @@ enum Step {
     Switchover { slot: Slot },
     /// Destroy a standby slot's host.
     Teardown { slot: Slot },
-    /// Re-deal the key to a new KP set on a standby: `rotate-kp-set [slot] init | submit <file>... | wait`.
+    /// Re-deal the key to a new KP set on a standby: `rotate-kp-set [slot] init | submit [<file>...] | wait`.
+    /// Without files, submit takes what the signers uploaded to the KP bucket.
     RotateKpSet {
-        #[arg(value_name = "SLOT] init | submit <FILE>... | wait")]
+        #[arg(value_name = "SLOT] init | submit [<FILE>...] | wait")]
         args: Vec<String>,
     },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
@@ -161,7 +162,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 [action, _, ..] if action == "init" || action == "wait" => {
                     bail!("rotate-kp-set {action} takes no files.")
                 }
-                _ => bail!("Usage: rotate-kp-set [slot] init | submit <file>... | wait"),
+                _ => bail!("Usage: rotate-kp-set [slot] init | submit [<file>...] | wait"),
             };
             rotate_kp_set::rotate_kp_set(&ctx, slot, action)
         }

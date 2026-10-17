@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Re-dealing the guardian's key to a new set of key provisioners on a standby: `rotate-kp-set init`, `submit` the
-//! signers' files, or `wait` for the new set to confirm.
+//! signers' submissions, or `wait` for the new set to confirm.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,12 +15,21 @@ use crate::Ctx;
 use crate::ask::NOTHING_CHANGED;
 use crate::ask::confirm;
 use crate::commit::Tree;
+use crate::exec::Cmd;
+use crate::exec::read;
 use crate::guardian::Lifecycle;
 use crate::guardian::require_reached;
+use crate::kp_bucket::REGION;
+use crate::kp_bucket::ROTATION_PREFIX;
+use crate::kp_bucket::kp_bucket;
 use crate::next;
 use crate::render::require_fresh;
+use crate::render::threshold;
+use crate::say;
 use crate::stack::Role;
 use crate::stack::Slot;
+use crate::stack::SlotView;
+use crate::steps::kp_keys::shown;
 use crate::steps::rotate::require_monitor_allows;
 use crate::steps::slot;
 use crate::warn;
@@ -92,12 +101,15 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
     }
     let mut submissions = Vec::new();
     match &action {
-        Action::Submit(files) => {
-            if files.is_empty() {
+        Action::Submit(files) if files.is_empty() => {
+            if !uploads_submissions(&tree) {
                 bail!(
-                    "Name the files the key provisioners sent: rotate-kp-set {slot} submit <file>..."
+                    "Slot {slot}'s build doesn't upload the signers' submissions to the KP bucket. Name the files they sent: rotate-kp-set {slot} submit <file>..."
                 );
             }
+            submissions = uploaded_submissions(ctx, &view, &reached.signing_key[..16])?;
+        }
+        Action::Submit(files) => {
             for file in files {
                 if !file.is_file() {
                     bail!("No submission file at {}.", file.display());
@@ -136,6 +148,9 @@ pub fn rotate_kp_set(ctx: &Ctx, arg: Option<Slot>, action: Action) -> Result<()>
         Action::Wait => {}
     }
     next(&match action {
+        Action::Init if uploads_submissions(&tree) => format!(
+            "once the signers have run key-provisioner rotate-kp-set, rotate-kp-set {slot} submit, which collects what they uploaded to the KP bucket"
+        ),
         Action::Init => {
             format!("once the signers have sent their files, rotate-kp-set {slot} submit <file>...")
         }
@@ -174,6 +189,76 @@ pub(crate) fn re_deal_step(lifecycle: &Lifecycle, slot: Slot) -> String {
         }
         _ => format!("new-session {slot}, for a fresh guardian to re-deal on"),
     }
+}
+
+/// Whether the build's key provisioner command uploads its submission to the KP bucket, which it does from hashi #1464
+/// on.
+fn uploads_submissions(tree: &Tree) -> bool {
+    std::fs::read_to_string(
+        tree.dir
+            .join("crates/hashi-guardian-init/src/submission.rs"),
+    )
+    .is_ok_and(|source| source.contains(&format!("\"{ROTATION_PREFIX}\"")))
+}
+
+/// Downloads the submissions the signers uploaded for `session`, in place of an earlier download, and stops unless
+/// they reach the dealt set's threshold.
+fn uploaded_submissions(ctx: &Ctx, view: &SlotView, session: &str) -> Result<Vec<PathBuf>> {
+    let source = format!("s3://{}/{ROTATION_PREFIX}/{session}/", kp_bucket(ctx)?);
+    let dir = view
+        .dir
+        .join("rotate-kp-set")
+        .join("submissions")
+        .join(session);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    say("Collect the signers' submissions");
+    read(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["s3", "cp", "--recursive", "--only-show-errors"])
+            .args(["--region", REGION])
+            .arg(&source)
+            .arg(format!("{}/", dir.display())),
+    )
+    .with_context(|| format!("Could not download the submissions in {source}."))?;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "rotation")
+        {
+            files.push(std::fs::canonicalize(&path)?);
+        }
+    }
+    files.sort();
+    let signers: Vec<String> = files
+        .iter()
+        .filter_map(|file| file.file_stem())
+        .map(|stem| shown(&stem.to_string_lossy()))
+        .collect();
+    let threshold = threshold(ctx, "KP_THRESHOLD")?;
+    if signers.len() < threshold as usize {
+        bail!(
+            "Found {} of the {threshold} submissions the current set's threshold needs in {source}{}. Run this again once more key provisioners have run key-provisioner rotate-kp-set.",
+            signers.len(),
+            if signers.is_empty() {
+                String::new()
+            } else {
+                format!(", from {}", signers.join(", "))
+            }
+        );
+    }
+    println!("Submissions in {source}, by signer:");
+    for signer in &signers {
+        println!("  {signer}");
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -368,14 +453,100 @@ mod tests {
         let last = run.exec.log.borrow().last().unwrap().clone();
         assert_eq!(last[6], "--submission");
         assert!(std::path::Path::new(&last[7]).is_absolute());
+    }
 
+    #[test]
+    fn submits_what_the_signers_uploaded_for_the_session() {
+        let run = armed_for_a_re_deal();
+        standby_at(&run, "ceremony/OPERATOR_INITIALIZED");
+        // A build before the upload has signers send their files instead.
+        let (result, _) = run.step(&[], |ctx| {
+            rotate_kp_set(ctx, Some(Slot::B), Action::Submit(vec![]))
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .ends_with("Name the files they sent: rotate-kp-set b submit <file>...")
+        );
+        let source_dir = run
+            .repo
+            .path()
+            .join(".hashi/guardian-init")
+            .join(world::COMMIT)
+            .join("crates/hashi-guardian-init/src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("submission.rs"),
+            "pub const BUCKET_PREFIX: &str = \"_rotate-kp-set\";\n",
+        )
+        .unwrap();
+        let session = {
+            let state = run.state.borrow();
+            state.hosts[&state.deployed["b"]].session.key[..16].to_owned()
+        };
+        let source = format!("s3://kp-bucket/_rotate-kp-set/{session}/");
+        let upload = |key: String| {
+            run.state
+                .borrow_mut()
+                .kp_uploads
+                .insert(key, b"signed".to_vec());
+        };
+        upload(format!("_rotate-kp-set/{session}/AAAA.rotation"));
+        upload("_rotate-kp-set/ffffffffffffffff/CCCC.rotation".to_owned());
+        // Only a file counts, whatever its name.
+        upload(format!("_rotate-kp-set/{session}/DDDD.rotation/inside"));
         let (result, _) = run.step(&[], |ctx| {
             rotate_kp_set(ctx, Some(Slot::B), Action::Submit(vec![]))
         });
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Name the files the key provisioners sent: rotate-kp-set b submit <file>..."
+            format!(
+                "Found 1 of the 2 submissions the current set's threshold needs in {source}, from AAAA. Run this again once more key provisioners have run key-provisioner rotate-kp-set."
+            )
         );
+        assert!(
+            !run.exec
+                .log
+                .borrow()
+                .iter()
+                .any(|words| words[0] == "/x/hashi-guardian-init")
+        );
+
+        upload(format!("_rotate-kp-set/{session}/BBBB.rotation"));
+        let (result, _) = run.step(&[], |ctx| {
+            rotate_kp_set(ctx, Some(Slot::B), Action::Submit(vec![]))
+        });
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Could not run hashi-guardian-init."
+        );
+        let last = run.exec.log.borrow().last().unwrap().clone();
+        assert_eq!(
+            last[..6],
+            [
+                "/x/hashi-guardian-init",
+                "operator",
+                "rotate-kp-set",
+                "submit",
+                "--config",
+                "operator.yaml"
+            ]
+        );
+        let files: Vec<&str> = last[6..]
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "--submission");
+                pair[1].as_str()
+            })
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].ends_with(&format!(
+            "rotate-kp-set/submissions/{session}/AAAA.rotation"
+        )));
+        assert!(files[1].ends_with(&format!(
+            "rotate-kp-set/submissions/{session}/BBBB.rotation"
+        )));
     }
 
     #[test]
