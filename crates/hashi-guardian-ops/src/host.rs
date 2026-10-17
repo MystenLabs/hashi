@@ -5,6 +5,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 
 use crate::Ctx;
 use crate::exec::Cmd;
@@ -56,6 +57,47 @@ pub fn run(ctx: &Ctx, region: &str, instance: &str, commands: &[&str]) -> Result
     )
     .with_context(|| format!("Could not read what the commands printed on {instance}."))?;
     Ok(HostOutput { text, success })
+}
+
+/// The EC2 state of a host, such as `running` or `terminated`, or `None` once EC2 no longer knows it. EC2 says the
+/// same of an instance in another account, so `None` needs credentials for `account`, the host's.
+pub fn instance_state(
+    ctx: &Ctx,
+    region: &str,
+    instance: &str,
+    account: &str,
+) -> Result<Option<String>> {
+    let output = ctx.exec.output(
+        &Cmd::new("aws")
+            .args(["ec2", "describe-instances", "--region", region])
+            .args(["--instance-ids", instance])
+            .args(["--query", "Reservations[].Instances[].State.Name"])
+            .args(["--output", "text"])
+            .capture_stderr(),
+    )?;
+    if output.success {
+        return Ok(Some(output.stdout.trim().to_owned()));
+    }
+    if !output.stderr.contains("InvalidInstanceID.NotFound") {
+        bail!(
+            "Could not read the state of {instance}: {}",
+            output.stderr.trim()
+        );
+    }
+    let caller = read(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["sts", "get-caller-identity", "--region", region])
+            .args(["--query", "Account", "--output", "text"]),
+    )
+    .context("Could not read which AWS account your credentials are for.")?;
+    if caller.trim() != account {
+        bail!(
+            "EC2 does not know {instance}, but your AWS credentials are for account {}, not {account}, which runs it.",
+            caller.trim()
+        );
+    }
+    Ok(None)
 }
 
 fn aws_ssm(region: &str, action: &str) -> Cmd {
@@ -129,6 +171,42 @@ mod tests {
         assert_eq!(
             log[1][6..],
             ["--command-id", "cmd-1", "--instance-id", "i-0aaa"]
+        );
+    }
+
+    #[test]
+    fn takes_a_host_for_gone_only_in_its_own_account() {
+        let exec = |account: &'static str| {
+            Fake::with_stderr(move |words| {
+                match words[1].as_str() {
+                "ec2" => Some(crate::exec::Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "An error occurred (InvalidInstanceID.NotFound) when calling the DescribeInstances operation".to_owned(),
+                }),
+                "sts" => Some(crate::exec::Output {
+                    success: true,
+                    stdout: format!("{account}\n"),
+                    stderr: String::new(),
+                }),
+                _ => None,
+            }
+            })
+        };
+        let repo = tempfile::tempdir().unwrap();
+        let same = exec("111111111111");
+        let ctx = Ctx::for_test(repo.path(), &same, &[]);
+        assert_eq!(
+            instance_state(&ctx, "us-west-2", "i-0aaa", "111111111111").unwrap(),
+            None
+        );
+        let other = exec("222222222222");
+        let ctx = Ctx::for_test(repo.path(), &other, &[]);
+        assert_eq!(
+            instance_state(&ctx, "us-west-2", "i-0aaa", "111111111111")
+                .unwrap_err()
+                .to_string(),
+            "EC2 does not know i-0aaa, but your AWS credentials are for account 222222222222, not 111111111111, which runs it."
         );
     }
 

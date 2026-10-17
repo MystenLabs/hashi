@@ -194,6 +194,23 @@ pub fn proxy_info(ctx: &Ctx) -> Result<ProxyInfo> {
     .with_context(|| format!("Could not read the proxy's {url}/info."))
 }
 
+/// The proxy's `/info`, once it shows an activated guardian that still answers the proxy.
+pub fn serving_info(ctx: &Ctx) -> Result<ProxyInfo> {
+    let url = ctx.env.proxy_url()?.url;
+    let info = proxy_info(ctx)?;
+    if info.committee_epoch.is_none() {
+        bail!("The proxy at {url} fronts no activated guardian.");
+    }
+    match info.age() {
+        Some(age) if age <= CURRENT_FOR => Ok(info),
+        Some(age) => bail!(
+            "The guardian the proxy at {url} fronts last answered it {}s ago.",
+            age.as_secs()
+        ),
+        None => bail!("The proxy at {url} does not say when its guardian last answered."),
+    }
+}
+
 pub fn proxy_health(ctx: &Ctx) -> Result<()> {
     let url = ctx.env.proxy_url()?.url;
     read(
@@ -251,7 +268,7 @@ pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -
         let fronted = proxy.signing_pub_key.as_deref().unwrap_or("none");
         if fronted != signing_key {
             bail!(
-                "The proxy fronts guardian {fronted}, but {} reaches slot {}'s {signing_key}. The proxy caches its view for 30 seconds: run this step again. If they still differ, check that the tunnel is slot {}'s.",
+                "The proxy fronts guardian {fronted}, but {} reaches slot {}'s {signing_key}. The proxy caches its view for 30 seconds: run this step again. If they still differ, check that the tunnel is slot {}'s, then run the proxy-update step.",
                 view.endpoint,
                 view.slot,
                 view.slot
@@ -267,7 +284,7 @@ pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -
     let target = relay.signing_key.as_deref().unwrap_or("none");
     if target != signing_key {
         bail!(
-            "The proxy's relay sends key provisioners to guardian {target}, but {} reaches slot {}'s {signing_key}. Check that the tunnel is slot {}'s.",
+            "The proxy's relay sends key provisioners to guardian {target}, but {} reaches slot {}'s {signing_key}. Check that the tunnel is slot {}'s, then run the proxy-update step.",
             view.endpoint,
             view.slot,
             view.slot
@@ -363,5 +380,48 @@ pub mod tests {
             ..info
         };
         assert_eq!(unknown.age(), None);
+    }
+
+    #[test]
+    fn serves_only_a_current_activated_view() {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let answered = |age_ms: u128, epoch: Option<&str>| {
+            let mut info = serde_json::json!({ "signingPubKey": "aa".repeat(32), "timestampMs": (now.as_millis() - age_ms).to_string() });
+            if let Some(epoch) = epoch {
+                info["committeeEpoch"] = epoch.into();
+            }
+            info.to_string()
+        };
+        let error = |info: String| {
+            let exec = crate::exec::fake::Fake::new(move |_| Some((true, info.clone())));
+            let repo = tempfile::tempdir().unwrap();
+            let ctx = Ctx::for_test(
+                repo.path(),
+                &exec,
+                &[(
+                    "GUARDIAN_PROXY_URL",
+                    "https://guardian.testnet.hashi.sui.io",
+                )],
+            );
+            serving_info(&ctx).err().map(|error| error.to_string())
+        };
+        assert_eq!(error(answered(5_000, Some("1253"))), None);
+        assert!(
+            error(answered(5_000, None))
+                .unwrap()
+                .ends_with("fronts no activated guardian.")
+        );
+        // The proxy keeps answering from its last view of a guardian that stopped answering it.
+        assert!(
+            error(answered(600_000, Some("1253")))
+                .unwrap()
+                .ends_with("last answered it 600s ago.")
+        );
+        let untimed = serde_json::json!({ "signingPubKey": "aa", "committeeEpoch": "1" });
+        assert!(
+            error(untimed.to_string())
+                .unwrap()
+                .ends_with("does not say when its guardian last answered.")
+        );
     }
 }

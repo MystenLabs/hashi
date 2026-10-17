@@ -308,6 +308,15 @@ impl Stack {
             .filter(|resource| resource.kind == INSTANCE)
             .collect())
     }
+
+    /// The state URN of the guardian instance with this ID.
+    pub fn instance_urn(&self, ctx: &Ctx, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .instances(ctx)?
+            .into_iter()
+            .find(|resource| resource.id.as_deref() == Some(id))
+            .map(|resource| resource.urn))
+    }
 }
 
 /// The project a Pulumi program's own directory declares, whose name prefixes the program's configuration keys. `pulumi
@@ -366,6 +375,10 @@ pub struct Resource {
     pub kind: String,
     pub urn: String,
     pub id: Option<String>,
+    pub outputs: Option<Value>,
+    /// Whether an update that replaced the resource stopped before deleting it.
+    #[serde(default)]
+    pub delete: bool,
 }
 
 /// A stack's state, as `pulumi stack export` prints it.
@@ -454,6 +467,7 @@ pub mod tests {
     pub const COMMIT: &str = "0873917ea0000000000000000000000000000000";
     /// The test programs' directories, each holding only its project file.
     pub const ENCLAVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/programs/enclave");
+    pub const PROXY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/programs/proxy");
 
     /// A world whose pulumi answers with this configuration and these outputs.
     pub fn stack_world(config: Value, outputs: Value) -> Fake {

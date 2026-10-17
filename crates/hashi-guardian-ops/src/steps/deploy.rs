@@ -129,8 +129,12 @@ pub fn measure(ctx: &Ctx, arg: Option<Slot>, run_id: Option<String>) -> Result<(
         "It is the {} stack {} configures.",
         view.pcr0_key, stack.name
     );
-    if view.instance.is_none() && stack.slots()?.len() == 1 {
-        next("deploy");
+    if view.instance.is_none() {
+        next(&if stack.slots()?.len() == 1 {
+            "deploy".to_owned()
+        } else {
+            format!("arm {} next to the serving guardian", view.slot)
+        });
     }
     Ok(())
 }
@@ -241,12 +245,12 @@ pub fn deploy(ctx: &Ctx) -> Result<()> {
     say(&format!("Deploy the guardian enclave stack {}", stack.name));
     if stack.slots()?.len() > 1 {
         bail!(
-            "Stack {} has two guardian slots. The deploy step runs an untargeted pulumi up, which can replace either guardian.",
+            "Stack {} has two guardian slots. The deploy step runs an untargeted pulumi up, which can replace either guardian: use the rotation steps instead.",
             stack.name
         );
     }
     require_pulumi_version(ctx)?;
-    let plan = preview(ctx, &stack.dir, &stack.name)?;
+    let plan = preview(ctx, &stack.dir, &stack.name, None)?;
     let changed = changes(&plan);
     for (op, urn) in &changed {
         let parts: Vec<&str> = urn.split("::").collect();
@@ -290,7 +294,7 @@ pub fn deploy(ctx: &Ctx) -> Result<()> {
     // The prompts can wait any time, and the up plans again from scratch, so the consent must still describe it.
     let reloaded = Stack::load(ctx)?;
     if reloaded.slots()?.len() > 1
-        || changes(&preview(ctx, &reloaded.dir, &reloaded.name)?) != changed
+        || changes(&preview(ctx, &reloaded.dir, &reloaded.name, None)?) != changed
     {
         bail!(
             "Stack {}'s configuration or plan changed while this step waited for you. Nothing was changed: run this step again.",
@@ -307,7 +311,7 @@ pub fn deploy(ctx: &Ctx) -> Result<()> {
             now.join(" ")
         );
     }
-    let applied = up(ctx, &stack.dir, &stack.name)?;
+    let applied = up(ctx, &stack.dir, &stack.name, None)?;
     let outcome = if applied {
         "Deployed, but"
     } else {

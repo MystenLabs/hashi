@@ -4,6 +4,7 @@
 //! GitHub Actions runs: the guardian's PCR0 measurement, which must come from two independent runners, and the proxy
 //! image build.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use anyhow::Context;
@@ -16,7 +17,7 @@ use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
 
-/// A workflow file of a GitHub repository.
+/// A workflow file of a GitHub repository, or with a trailing `*`, every workflow file its name prefixes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Workflow {
     pub repo: String,
@@ -46,6 +47,13 @@ impl Workflow {
         (named(owner) && named(repo) && !file.is_empty() && !file.contains('/'))
             .then_some((workflow, git_ref))
     }
+
+    fn matches(&self, file: &str) -> bool {
+        match self.file.strip_suffix('*') {
+            Some(prefix) => file.starts_with(prefix),
+            None => file == self.file,
+        }
+    }
 }
 
 impl fmt::Display for Workflow {
@@ -71,6 +79,27 @@ pub fn proxy_workflow(ctx: &Ctx) -> Result<(Workflow, String)> {
     }
 }
 
+/// `GUARDIAN_WORKFLOWS`, the workflows that apply the guardian stacks.
+fn guardian_workflows(ctx: &Ctx) -> Result<Vec<Workflow>> {
+    ctx.env
+        .require("GUARDIAN_WORKFLOWS")?
+        .split_whitespace()
+        .map(|entry| match Workflow::parse(entry) {
+            Some((workflow, None))
+                if workflow
+                    .file
+                    .find('*')
+                    .is_none_or(|at| at + 1 == workflow.file.len()) =>
+            {
+                Ok(workflow)
+            }
+            _ => bail!(
+                "GUARDIAN_WORKFLOWS lists {entry}, not <owner>/<repo>/.github/workflows/<file>, where a trailing * matches by prefix."
+            ),
+        })
+        .collect()
+}
+
 /// Stops unless `gh` reports the run a dispatch starts, which it does from 2.87 on.
 pub fn require_run_urls(ctx: &Ctx) -> Result<()> {
     let version = read(ctx.exec, &Cmd::new("gh").arg("--version"))
@@ -89,6 +118,51 @@ pub fn require_run_urls(ctx: &Ctx) -> Result<()> {
             "This step needs GitHub CLI 2.87 or later, which reports the run it dispatches. Found: {first}"
         ),
     }
+}
+
+/// Stops while a workflow that applies the guardian stacks has a run that hasn't completed, since it would race this
+/// step: one `GUARDIAN_WORKFLOWS` lists, or the proxy's. A reusable workflow's runs are listed under its caller's.
+pub fn require_no_guardian_runs(ctx: &Ctx) -> Result<()> {
+    let mut workflows = guardian_workflows(ctx)?;
+    if ctx.env.get("GUARDIAN_PROXY_WORKFLOW").is_some() {
+        workflows.push(proxy_workflow(ctx)?.0);
+    }
+    let repos: BTreeSet<&str> = workflows
+        .iter()
+        .map(|workflow| workflow.repo.as_str())
+        .collect();
+    for repo in repos {
+        // A run that waits for an approval or a concurrency slot starts once it has one.
+        for status in ["requested", "waiting", "pending", "queued", "in_progress"] {
+            let paths = read(
+                ctx.exec,
+                &Cmd::new("gh")
+                    .args(["api", "--paginate"])
+                    .arg(format!(
+                        "repos/{repo}/actions/runs?status={status}&per_page=100"
+                    ))
+                    .args(["--jq", ".workflow_runs[].path"]),
+            )
+            .with_context(|| format!("Could not list {repo}'s {status} workflow runs."))?;
+            // GitHub can name the ref a run's workflow came from after an @.
+            if let Some(path) = paths
+                .lines()
+                .map(|path| path.split('@').next().unwrap_or(path))
+                .find(|path| {
+                    path.strip_prefix(".github/workflows/").is_some_and(|file| {
+                        workflows
+                            .iter()
+                            .any(|workflow| workflow.repo == repo && workflow.matches(file))
+                    })
+                })
+            {
+                bail!(
+                    "{repo}'s {path} has a run {status}, and it applies the guardian stacks too. Wait for it to finish."
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Dispatches a workflow and returns the ID of the run it started.
@@ -251,6 +325,30 @@ mod tests {
                 format!(
                     "GUARDIAN_PROXY_WORKFLOW is not <owner>/<repo>/.github/workflows/<file>@<branch or tag>: {bad}"
                 )
+            );
+        }
+
+        let listed = |text: &str| {
+            let ctx = Ctx::for_test(repo.path(), &exec, &[("GUARDIAN_WORKFLOWS", text)]);
+            guardian_workflows(&ctx).map_err(|error| error.to_string())
+        };
+        let found = listed(
+            "org/infra/.github/workflows/guardian-* org/infra/.github/workflows/deploy.yaml",
+        )
+        .unwrap();
+        assert_eq!(found, [workflow("guardian-*"), workflow("deploy.yaml")]);
+        assert!(found[0].matches("guardian-proxy.yaml"));
+        assert!(!found[0].matches("lint.yml"));
+        assert!(found[1].matches("deploy.yaml"));
+        assert!(!found[1].matches("deploy.yaml.old"));
+        for bad in [
+            "org/infra/.github/workflows/guardian-*@main",
+            "org/infra/.github/workflows/*-guardian.yaml",
+        ] {
+            assert!(
+                listed(bad)
+                    .unwrap_err()
+                    .starts_with(&format!("GUARDIAN_WORKFLOWS lists {bad}"))
             );
         }
     }
