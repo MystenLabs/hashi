@@ -58,7 +58,7 @@ impl<'a> Ctx<'a> {
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect();
         Self {
-            env: Env::new(PathBuf::from("testnet.env"), values),
+            env: Env::new(PathBuf::from("testnet.env"), values).unwrap(),
             exec,
             ask: &ask::scripted::NO_ANSWERS,
             repo: repo.to_owned(),

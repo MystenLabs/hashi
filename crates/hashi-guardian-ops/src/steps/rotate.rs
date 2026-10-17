@@ -959,8 +959,9 @@ pub(crate) fn require_lists_log_builds(
 }
 
 /// Stops unless hashi-monitor, where `HASHI_MONITOR_PULUMI_DIR` names its program, allowlists each of these slots'
-/// builds: it rejects every record from a build it doesn't.
-fn require_monitor_allows(ctx: &Ctx, stack: &Stack, views: &[&SlotView]) -> Result<()> {
+/// builds: it rejects every record from a build it doesn't, and reads the latest ceremony record when it starts, which
+/// a re-deal writes.
+pub(crate) fn require_monitor_allows(ctx: &Ctx, stack: &Stack, views: &[&SlotView]) -> Result<()> {
     let Some(dir) = ctx.env.get("HASHI_MONITOR_PULUMI_DIR") else {
         warn(
             "HASHI_MONITOR_PULUMI_DIR is unset, so this step did not check that hashi-monitor allowlists the guardians' builds.",

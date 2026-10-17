@@ -18,6 +18,8 @@ use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 use hashi_guardian_ops::steps::rotate;
+use hashi_guardian_ops::steps::rotate_kp_set;
+use hashi_guardian_ops::steps::rotate_kp_set::Action;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -44,8 +46,11 @@ enum Step {
     Tunnel { slot: Option<Slot> },
     /// Write a slot's configuration for the operator and the key provisioners, and check it with the guardian's tools.
     Render { slot: Option<Slot> },
-    /// Publish a slot's configuration to the key provisioners' bucket.
-    Publish { slot: Option<Slot> },
+    /// Publish a slot's configuration to the key provisioners' bucket: `publish [slot] [rotate-kp-set]`.
+    Publish {
+        #[arg(value_name = "SLOT] [rotate-kp-set")]
+        args: Vec<String>,
+    },
     /// Measure a slot's build on GitHub's two runners, or check a run: `measure [slot] [run-id]`.
     Measure {
         #[arg(value_name = "SLOT] [RUN_ID")]
@@ -82,6 +87,11 @@ enum Step {
     Switchover { slot: Slot },
     /// Destroy a standby slot's host.
     Teardown { slot: Slot },
+    /// Re-deal the key to a new KP set on a standby: `rotate-kp-set [slot] init | submit <file>... | wait`.
+    RotateKpSet {
+        #[arg(value_name = "SLOT] init | submit <FILE>... | wait")]
+        args: Vec<String>,
+    },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -112,7 +122,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::Host { slot } => inspect::host(&ctx, slot),
         Step::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Step::Render { slot } => configs::render(&ctx, slot),
-        Step::Publish { slot } => configs::publish(&ctx, slot),
+        Step::Publish { args } => {
+            let (slot, rest) = leading_slot(&args);
+            match rest {
+                [] => configs::publish(&ctx, slot, false),
+                [what] if what == "rotate-kp-set" => configs::publish(&ctx, slot, true),
+                _ => bail!("Usage: publish [slot] [rotate-kp-set]"),
+            }
+        }
         Step::Measure { args } => {
             let (slot, rest) = leading_slot(&args);
             match rest {
@@ -133,6 +150,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::ProxyUpdate => rotate::proxy_update(&ctx),
         Step::Switchover { slot } => rotate::switchover(&ctx, slot),
         Step::Teardown { slot } => rotate::teardown(&ctx, slot),
+        Step::RotateKpSet { args } => {
+            let (slot, rest) = leading_slot(&args);
+            let action = match rest {
+                [action, files @ ..] if action == "submit" => {
+                    Action::Submit(files.iter().map(PathBuf::from).collect())
+                }
+                [action] if action == "init" => Action::Init,
+                [action] if action == "wait" => Action::Wait,
+                [action, _, ..] if action == "init" || action == "wait" => {
+                    bail!("rotate-kp-set {action} takes no files.")
+                }
+                _ => bail!("Usage: rotate-kp-set [slot] init | submit <file>... | wait"),
+            };
+            rotate_kp_set::rotate_kp_set(&ctx, slot, action)
+        }
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
 }
