@@ -34,7 +34,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Step {
-    /// Print the stack's slots, the proxy and the relay, changing nothing.
+    /// Print the stack's slots, the proxy, the relay and the Sui epoch, changing nothing.
     Status,
     /// Print a slot's guardian through its tunnel, once the proxy is shown to lead to it.
     Info { slot: Option<Slot> },
@@ -78,6 +78,8 @@ enum Step {
     Arm { slot: Slot },
     /// Apply the proxy stack so the proxy follows the enclave stack's slots.
     ProxyUpdate,
+    /// Make a slot's provisioned standby the serving guardian, and stop the old one for good.
+    Switchover { slot: Slot },
     /// Destroy a standby slot's host.
     Teardown { slot: Slot },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
@@ -129,6 +131,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Step::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
         Step::Arm { slot } => rotate::arm(&ctx, slot),
         Step::ProxyUpdate => rotate::proxy_update(&ctx),
+        Step::Switchover { slot } => rotate::switchover(&ctx, slot),
         Step::Teardown { slot } => rotate::teardown(&ctx, slot),
         Step::DownloadKpPubkeys { out } => kp_keys::download_kp_pubkeys(&ctx, out),
     }
