@@ -19,6 +19,7 @@ const KEYS: &[&str] = &[
     "GUARDIAN_STACK",
     "GUARDIAN_PROXY_URL",
     "PULUMI_VERSION",
+    "GUARDIAN_PROXY_WORKFLOW",
     "KP_BUCKET",
     "KP_ROSTER_DIR",
     "KP_THRESHOLD",
