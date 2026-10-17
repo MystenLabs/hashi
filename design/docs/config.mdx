@@ -60,12 +60,41 @@ keys are introduced with `AddConfig`, which names the store and is insert-only
 (see [Adding a parameter](#adding-a-parameter-without-a-package-upgrade) and
 [Governance Actions](governance-actions.mdx)).
 
+## Configuration keys at a glance
+
+Every key documented below, with its type and default where one exists:
+
+| Key | Type | Default | Section |
+| --- | --- | --- | --- |
+| `bitcoin_deposit_minimum` | `u64` | `30000` | [Parameters](#parameters) |
+| `bitcoin_deposit_time_delay_ms` | `u64` | `600000` | [Parameters](#parameters) |
+| `bitcoin_withdrawal_minimum` | `u64` | `30000` | [Parameters](#parameters) |
+| `bitcoin_confirmation_threshold` | `u64` | `6` | [Parameters](#parameters) |
+| `paused` | `bool` | `false` | [Parameters](#parameters) |
+| `reconfig_hold` | `bool` | `false` | [Parameters](#parameters) |
+| `withdrawal_cancellation_cooldown_ms` | `u64` | `3600000` | [Parameters](#parameters) |
+| `governance_emergency_pause_threshold_bps` | `u64` | `500` | [Parameters](#parameters) |
+| `governance_emergency_unpause_threshold_bps` | `u64` | `6667` | [Parameters](#parameters) |
+| `mpc_max_faulty_in_basis_points` | `u64` | `3333` | [MPC parameters](#mpc-parameters) |
+| `mpc_weight_reduction_allowed_delta` | `u64` | `800` | [MPC parameters](#mpc-parameters) |
+| `mpc_nonce_accumulation_window_ms` | `u64` | `2000` | [MPC parameters](#mpc-parameters) |
+| `guardian_url` | `string` | Set at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `guardian_node_url` | `string` | Set at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `bitcoin_chain_id` | `address` | Pinned at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+| `guardian_btc_public_key` | `bytes` | Pinned at launch | [Read-only or genesis-only parameters](#read-only-or-genesis-only-parameters) |
+
+The epoch config refuses the retired keys `mpc_threshold_in_basis_points` and
+`mpc_nonce_generation_protocol`. `deposit_minimum` and `worst_case_network_fee`
+are [derived values](#derived-values), computed from the keys above rather than
+stored.
+
 ## Parameters
 
 ### `bitcoin_deposit_minimum`
 
 | | |
 |---|---|
+| **Key** | `bitcoin_deposit_minimum` |
 | **Type** | `u64` |
 | **Default** | `30000` |
 | **Unit** | satoshis |
@@ -79,6 +108,7 @@ unspendable UTXOs.
 
 | | |
 |---|---|
+| **Key** | `bitcoin_deposit_time_delay_ms` |
 | **Type** | `u64` |
 | **Default** | `600000` (10 minutes) |
 | **Unit** | milliseconds |
@@ -95,26 +125,30 @@ starting value; on Sui mainnet it refuses one below the default.
 
 | | |
 |---|---|
+| **Key** | `bitcoin_withdrawal_minimum` |
 | **Type** | `u64` |
 | **Default** | `30000` |
 | **Unit** | satoshis |
 | **Floor** | `547` (dust relay minimum + 1) |
 
 The minimum total withdrawal amount in satoshis. The `worst_case_network_fee`
-is derived as `bitcoin_withdrawal_minimum - 546`, which caps the per-user miner
-fee deduction. The floor ensures the worst-case network fee is always at least
-`1 sat`.
+is derived as `max(bitcoin_withdrawal_minimum, 547) - 546`, which caps the
+per-user miner fee deduction. Because the effective withdrawal minimum is never
+below the `547` floor, the worst-case network fee is always at least `1 sat`,
+even if `bitcoin_withdrawal_minimum` is set lower.
 
 ### `bitcoin_confirmation_threshold`
 
 | | |
 |---|---|
+| **Key** | `bitcoin_confirmation_threshold` |
 | **Type** | `u64` |
 | **Default** | `6` |
 | **Unit** | blocks |
 
 The number of Bitcoin block confirmations nodes require before approving a
-deposit (at least 100 for a coinbase output) and before confirming a
+deposit (at least 100 for a coinbase output, matching Bitcoin's own coinbase
+maturity rule rather than a Hashi-specific override) and before confirming a
 withdrawal transaction. Guards against chain reorganizations.
 `hashi launch --bitcoin-confirmation-threshold` can set a different starting
 value; on Sui mainnet it refuses one below the default.
@@ -125,6 +159,7 @@ value; on Sui mainnet it refuses one below the default.
 
 | | |
 |---|---|
+| **Key** | `paused` |
 | **Type** | `bool` |
 | **Default** | `false` |
 
@@ -138,6 +173,7 @@ Reconfiguration and governance actions are not affected.
 
 | | |
 |---|---|
+| **Key** | `reconfig_hold` |
 | **Type** | `bool` |
 | **Default** | `false` |
 
@@ -159,6 +195,7 @@ the next Sui epoch change unless an operator runs
 
 | | |
 |---|---|
+| **Key** | `withdrawal_cancellation_cooldown_ms` |
 | **Type** | `u64` |
 | **Default** | `3600000` (1 hour) |
 | **Unit** | milliseconds |
@@ -171,20 +208,24 @@ interfere with processing.
 
 | | |
 |---|---|
+| **Key** | `governance_emergency_pause_threshold_bps` |
 | **Type** | `u64` |
 | **Default** | `500` (5%) |
 | **Unit** | basis points of committee voting weight |
 
 The vote threshold for an emergency **pause** proposal. Deliberately low so a
 small fraction of the committee can quickly halt deposit and withdrawal
-processing when something looks wrong.
+processing when something looks wrong. One basis point is one hundredth of a
+percent of total committee voting weight, so `500` is 5% of that weight and
+`10000` would be all of it.
 
 ### `governance_emergency_unpause_threshold_bps`
 
 | | |
 |---|---|
+| **Key** | `governance_emergency_unpause_threshold_bps` |
 | **Type** | `u64` |
-| **Default** | `6667` (two thirds) |
+| **Default** | `6667` (66.67%, about two thirds) |
 | **Unit** | basis points of committee voting weight |
 
 The vote threshold for the **unpause** variant of the same proposal. Resuming
@@ -203,10 +244,17 @@ resulting store, so move both keys in one proposal when one would cross the
 other. The epoch config also refuses the retired keys
 `mpc_threshold_in_basis_points` and `mpc_nonce_generation_protocol`.
 
+Invariant checked at execution on the resulting epoch config:
+
+```
+mpc_weight_reduction_allowed_delta < mpc_max_faulty_in_basis_points
+```
+
 ### `mpc_max_faulty_in_basis_points`
 
 | | |
 |---|---|
+| **Key** | `mpc_max_faulty_in_basis_points` |
 | **Type** | `u64` |
 | **Default** | `3333` |
 | **Valid range** | `1` to `3333`, and above `mpc_weight_reduction_allowed_delta` |
@@ -220,6 +268,7 @@ fraction of weight misbehaves.
 
 | | |
 |---|---|
+| **Key** | `mpc_weight_reduction_allowed_delta` |
 | **Type** | `u64` |
 | **Default** | `800` |
 | **Valid range** | `0` up to, but not including, `mpc_max_faulty_in_basis_points` |
@@ -239,6 +288,7 @@ change.
 
 | | |
 |---|---|
+| **Key** | `mpc_nonce_accumulation_window_ms` |
 | **Type** | `u64` |
 | **Default** | `2000` |
 | **Valid range** | `0` to `10000` |
@@ -253,6 +303,7 @@ dealers reach the `W − f` weight floor.
 
 | | |
 |---|---|
+| **Key** | `bitcoin_chain_id` |
 | **Type** | `address` |
 
 The 32-byte Bitcoin chain identifier as defined by
@@ -264,6 +315,7 @@ through the `UpdateConfig` proposal.
 
 | | |
 |---|---|
+| **Key** | `guardian_btc_public_key` |
 | **Type** | `bytes` |
 
 The guardian's x-only BTC public key (32 bytes), pinned at launch
@@ -276,7 +328,8 @@ guardian's URLs remain governable: `guardian_url`, its public endpoint, and
 ## Derived values
 
 Several values are computed from the configurable parameters above rather than
-stored directly.
+stored directly. They are not config keys: read the underlying keys and apply
+the formulas below.
 
 ### `deposit_minimum`
 
