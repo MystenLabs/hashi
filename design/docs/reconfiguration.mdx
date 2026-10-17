@@ -40,7 +40,7 @@ answer: >-
 
 Reconfiguration is one of the most important parts of the Hashi protocol,
 because it is the step where the old committee shares key shares of the MPC
-key with the new committee.
+key with the new committee (see [MPC Protocol](mpc-protocol.mdx)).
 
 The Hashi service monitors the Sui epoch change and immediately starts Hashi
 reconfiguration after Sui's epoch change completes. During reconfiguration,
@@ -52,13 +52,36 @@ graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
 
-### Start Reconfig
+## How does a reconfiguration proceed?
 
-```mermaid
-graph LR
-    A[Start Reconfig]:::active --> B[DKG or Key Rotation] --> C[End Reconfig]
-    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
-```
+On the happy path, a reconfiguration runs these steps in order:
+
+1. A Hashi node detects a new Sui epoch while the Hashi epoch has not yet
+   advanced to match.
+2. Running nodes submit `hashi::reconfig::start_reconfig`; the first
+   transaction to land forms the pending committee and sets the pending epoch
+   change flag, which pauses deposit approval and confirmation, and withdrawal
+   approval, commitment, and signing.
+3. The new committee runs initial DKG (at genesis) or key rotation (in every
+   later epoch), and each member ends with its `MpcOutput`.
+4. Each member signs a `ReconfigCompletionMessage` with its BLS12-381 key, and
+   nodes collect signatures until a quorum (2/3 of committee weight) produces
+   an aggregate signature certificate.
+5. On a key rotation only, nodes also collect the outgoing committee's
+   signatures over a `CommitteeTransitionRequest`.
+6. Within the same Sui epoch, a committee member submits `end_reconfig` (on a
+   key rotation, together with `submit_committee_handoff` in the same
+   transaction).
+7. The chain verifies the certificate, advances the Hashi epoch, and clears
+   the pending epoch change flag; deposits, and withdrawal approval and
+   commitment, resume.
+8. The new committee runs the presigning protocol; signing withdrawal inputs
+   resumes once its presignatures are ready.
+
+If Sui's epoch moves on before step 6 lands, the pending reconfiguration is
+resolved by [abort reconfig](#abort-reconfig) instead.
+
+## Start Reconfig
 
 Each Hashi node monitors Sui for epoch changes. When a new Sui epoch is
 detected and the Hashi epoch has not yet advanced to match, the node knows
@@ -85,7 +108,8 @@ resigned or that governance ignored through an `IgnoreMember` proposal. Each
 member's weight is its Sui voting power, and every threshold is a share of the
 formed committee's total weight.
 
-At genesis (when no MPC public key exists yet), the **launch switch**
+At genesis (the first Hashi epoch, when no MPC public key exists yet and the
+committee must run initial DKG), the **launch switch**
 additionally gates `start_reconfig`: it aborts until the publisher
 has sent `hashi::finish_publish` (the `hashi launch` CLI command), which
 finalizes the deploy configuration and hands the package `UpgradeCap` into
@@ -96,13 +120,7 @@ floor on a normal reconfig would let validators brick reconfiguration by
 withholding registration.
 
 
-### DKG or Key Rotation
-
-```mermaid
-graph LR
-    A[Start Reconfig] --> B[DKG or Key Rotation]:::active --> C[End Reconfig]
-    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
-```
+## DKG or Key Rotation
 
 The MPC key protocol runs among the new committee members. Which protocol
 runs depends on whether this is the first Hashi epoch or a subsequent one:
@@ -131,13 +149,7 @@ collect its signatures over a `CommitteeTransitionRequest` with the
 does not activate a rotation without it. Initial DKG has no outgoing committee
 and skips this step.
 
-### End Reconfig
-
-```mermaid
-graph LR
-    A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]:::active
-    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
-```
+## End Reconfig
 
 A committee member submits the aggregate signature certificate onchain by
 calling `hashi::reconfig::end_reconfig`:
@@ -174,9 +186,17 @@ submission whose own target already activated is reported as
 the node treats as success), whether or not the next reconfiguration is
 already pending; nothing pending otherwise is `ENotReconfiguring` (the target
 was aborted). Handoffs are stored by source epoch, and a replacement can form
-from the same source epoch after an abort, so for a handoff "own target" means
-the stored handoff out of its signing epoch names the submitted `epoch`. Nodes
+from the same source epoch after an abort. So for a handoff, the submission
+counts as its own target only if the handoff stored under the certificate's
+signing epoch (the source epoch) names the submitted `epoch`. Nodes
 key their retry-or-give-up decision on which of these fires.
+
+| Error | Raised by | Condition | What it means for the node |
+| --- | --- | --- | --- |
+| `EReconfigWindowClosed` | `submit_committee_handoff`, `end_reconfig` | Sui's epoch has moved past the pending committee's epoch | Only [abort reconfig](#abort-reconfig) can resolve the pending state |
+| `EWrongReconfigEpoch` | `submit_committee_handoff`, `end_reconfig` | A different epoch is pending (checked before any signature) | The target was aborted and a replacement has formed |
+| `EReconfigAlreadyCompleted` | `submit_committee_handoff`, `end_reconfig` | The submission's own target already activated, whether or not the next reconfiguration is pending | Another node's `end_reconfig` won the race; the node treats this as success |
+| `ENotReconfiguring` | `submit_committee_handoff`, `end_reconfig` | Nothing is pending and the target did not activate | The target was aborted |
 
 After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
@@ -185,7 +205,7 @@ presignatures needed for the threshold Schnorr signing protocol (see
 commitment, resume as soon as `end_reconfig` lands; signing withdrawal inputs
 waits until the new committee's presignatures are ready.
 
-### Abort Reconfig
+## Abort Reconfig
 
 ```mermaid
 graph LR
@@ -274,3 +294,14 @@ metric `hashi_reconfig_aborted_total`. An abort means a reconfiguration
 stalled for an entire Sui epoch with deposits and withdrawals halted, so it is
 worth alerting on and investigating even though the system recovers on its
 own.
+
+## Which CLI commands can operators run?
+
+Nodes normally submit these transactions themselves; `abort-reconfig` and
+`start-reconfig` are fallbacks for when no node is doing so.
+
+| Command | What it does | Refuses when |
+| --- | --- | --- |
+| `hashi launch` | Sends `hashi::finish_publish` at genesis, finalizing the deploy configuration and handing the package `UpgradeCap` into onchain custody, which opens the launch switch | None |
+| `hashi committee abort-reconfig` | Submits the abort for the pending reconfiguration | Nothing is pending, or the pending epoch is still Sui's current epoch |
+| `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | Governance holds reconfiguration (`reconfig_hold` is set), a reconfiguration is already pending, a committee already exists for Sui's current epoch, Hashi is already on Sui's current epoch, or the fullnode's Sui epoch is behind Hashi's |
