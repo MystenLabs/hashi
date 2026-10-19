@@ -146,14 +146,14 @@ impl BackupService {
         (service, handle)
     }
 
-    pub fn start(self) -> Service {
+    pub fn start(mut self) -> Service {
         Service::new().spawn_aborting(async move {
             self.run().await;
             Ok(())
         })
     }
 
-    async fn run(mut self) {
+    async fn run(&mut self) {
         let mut refresh = tokio::time::interval(MPC_RECOVERY_CHECK_INTERVAL);
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -163,19 +163,25 @@ impl BackupService {
             let (epoch, action) = match request {
                 BackupMaintenanceRequest::EpochChange { epoch, action } => (epoch, action),
                 BackupMaintenanceRequest::RefreshRecovery => {
-                    let Some(recovery) = self.recovery.take() else {
-                        continue;
-                    };
-                    match self.recovery_status(&recovery) {
-                        RecoveryRefreshStatus::Active => {}
-                        RecoveryRefreshStatus::AwaitingMirror => {
-                            self.recovery = Some(recovery);
-                            continue;
-                        }
-                        RecoveryRefreshStatus::Obsolete => continue,
+                    let epoch = self
+                        .inner
+                        .onchain_state_opt()
+                        .map(|state| state.state().hashi().committees.epoch())
+                        .unwrap_or_default();
+                    match self.recovery.take() {
+                        Some(recovery) => match self.recovery_status(&recovery) {
+                            RecoveryRefreshStatus::Active => {
+                                let MpcRecoveryRecord::V1(record) = recovery.as_ref();
+                                (record.epoch, BackupAction::SaveWithRecovery(recovery))
+                            }
+                            RecoveryRefreshStatus::AwaitingMirror => {
+                                self.recovery = Some(recovery);
+                                (epoch, BackupAction::CleanupOnly)
+                            }
+                            RecoveryRefreshStatus::Obsolete => (epoch, BackupAction::CleanupOnly),
+                        },
+                        None => (epoch, BackupAction::CleanupOnly),
                     }
-                    let MpcRecoveryRecord::V1(record) = recovery.as_ref();
-                    (record.epoch, BackupAction::SaveWithRecovery(recovery))
                 }
             };
             if self.recovery.as_ref().is_some_and(|record| {
@@ -1708,6 +1714,96 @@ mod tests {
             Some(BackupMaintenanceRequest::RefreshRecovery),
         ));
         drop(handle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_worker_daily_cleanup_without_eligible_recovery() {
+        async fn wait_for_removal(path: &Path) {
+            // Blocking maintenance uses wall-clock time even with Tokio time paused.
+            // Yield rather than advancing the next daily tick while it finishes.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while path.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cleanup did not finish"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+
+        for obsolete_cache in [false, true] {
+            for newest_age_days in [20, 31] {
+                let (fixture, _directory) = backup_service_fixture(true, true);
+                let (mut worker, handle) = BackupService::new(fixture.inner.clone());
+                // This fixture has no on-chain mirror: cached material is obsolete,
+                // and housekeeping must still run without inventing a current epoch.
+                if obsolete_cache {
+                    worker.recovery = Some(Box::new(recovery::test_record()));
+                }
+                let directory = &fixture.inner.config.backup_dir;
+                fs::create_dir_all(directory).unwrap();
+                let hash = backup_recipient_hash(&fixture.inner.config.backup_pgp_cert);
+                let now = jiff::Timestamp::now();
+                let archive_path = |age_days: i64| {
+                    let timestamp = now
+                        .checked_sub(jiff::SignedDuration::from_hours(age_days * 24))
+                        .unwrap()
+                        .to_zoned(jiff::tz::TimeZone::UTC);
+                    directory.join(format!(
+                        "hashi-backup-epoch-42-mpc-{hash}{}",
+                        timestamp.strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
+                    ))
+                };
+                let startup = archive_path(50);
+                fs::write(&startup, b"expired startup archive").unwrap();
+                let task = tokio::spawn(async move {
+                    worker.run().await;
+                    worker
+                });
+                wait_for_removal(&startup).await;
+
+                let older = archive_path(newest_age_days + 1);
+                let newest = archive_path(newest_age_days);
+                fs::write(&older, b"older recovery").unwrap();
+                fs::write(&newest, b"newest recovery").unwrap();
+                tokio::time::advance(
+                    MPC_RECOVERY_CHECK_INTERVAL - std::time::Duration::from_secs(1),
+                )
+                .await;
+                tokio::task::yield_now().await;
+                assert!(older.exists());
+                assert!(newest.exists());
+                tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                wait_for_removal(&older).await;
+                drop(handle);
+                let worker = task.await.unwrap();
+
+                assert_eq!(newest.exists(), newest_age_days < 30);
+                assert_eq!(
+                    fs::read_dir(directory).unwrap().count(),
+                    usize::from(newest_age_days < 30),
+                    "cleanup must not create a replacement archive"
+                );
+                assert!(worker.recovery.is_none());
+                assert!(worker.s3_client.is_none(), "cleanup must not initialize S3");
+                assert_eq!(
+                    fixture.inner.metrics.backup_scheduled_local_successes.get(),
+                    0
+                );
+                assert_eq!(
+                    fixture
+                        .inner
+                        .metrics
+                        .backup_scheduled_remote_successes
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    fixture.inner.metrics.backup_scheduled_remote_failures.get(),
+                    0
+                );
+            }
+        }
     }
 
     #[test]
