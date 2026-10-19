@@ -26,6 +26,8 @@ const KEYS: &[&str] = &[
     "KP_BUCKET",
     "KP_ROSTER_DIR",
     "KP_THRESHOLD",
+    "NEW_KP_ROSTER_DIR",
+    "NEW_KP_THRESHOLD",
     "SUI_RPC",
     "SUI_GRAPHQL_URL",
     "HASHI_PACKAGE_ID",
@@ -67,16 +69,23 @@ impl Env {
         let home = std::env::var("HOME").ok();
         let values = parse(&text, home.as_deref())
             .with_context(|| format!("could not read the environment file {}", path.display()))?;
-        Ok(Self::new(path.to_owned(), values))
+        Self::new(path.to_owned(), values)
     }
 
-    pub fn new(path: PathBuf, values: BTreeMap<String, String>) -> Self {
+    pub fn new(path: PathBuf, values: BTreeMap<String, String>) -> Result<Self> {
         debug_assert!(
             values.keys().all(|key| KEYS.contains(&key.as_str())),
             "values hold a key the file may not set: {:?}",
             values.keys().collect::<Vec<_>>()
         );
-        Self { path, values }
+        let env = Self { path, values };
+        if env.get("NEW_KP_ROSTER_DIR").is_some() != env.get("NEW_KP_THRESHOLD").is_some() {
+            bail!(
+                "{} sets only one of NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD; set both for a KP-set rotation, or neither",
+                env.path.display()
+            );
+        }
+        Ok(env)
     }
 
     /// A key's value. An empty value counts as unset, as `${KEY:-}` reads it.
@@ -228,6 +237,7 @@ mod tests {
         assert_eq!(values["GUARDIAN_PULUMI_DIR"], "/Users/op/infra/enclave");
         assert_eq!(values["GUARDIAN_STACK"], "org/testnet");
         assert_eq!(values["PULUMI_VERSION"], "3.0.0");
+        assert!(!values.contains_key("NEW_KP_ROSTER_DIR"));
     }
 
     /// The sample documents every key, set or commented out, so an operator learns of each from it.
@@ -326,7 +336,7 @@ mod tests {
         );
     }
 
-    fn env(values: &[(&str, &str)]) -> Env {
+    fn env(values: &[(&str, &str)]) -> Result<Env> {
         Env::new(
             PathBuf::from("testnet.env"),
             values
@@ -338,16 +348,26 @@ mod tests {
 
     #[test]
     fn checks_values() {
-        assert_eq!(env(&[]).tunnel_port().unwrap(), 3000);
-        assert_eq!(env(&[("TUNNEL_PORT", "3100")]).tunnel_port().unwrap(), 3100);
+        assert!(env(&[("NEW_KP_ROSTER_DIR", "/x")]).is_err());
+        assert!(env(&[("NEW_KP_ROSTER_DIR", "/x"), ("NEW_KP_THRESHOLD", "4")]).is_ok());
+
+        assert_eq!(env(&[]).unwrap().tunnel_port().unwrap(), 3000);
+        assert_eq!(
+            env(&[("TUNNEL_PORT", "3100")])
+                .unwrap()
+                .tunnel_port()
+                .unwrap(),
+            3100
+        );
         for bad in ["x", "65535", "70000", "-1"] {
-            assert!(env(&[("TUNNEL_PORT", bad)]).tunnel_port().is_err());
+            assert!(env(&[("TUNNEL_PORT", bad)]).unwrap().tunnel_port().is_err());
         }
 
         let proxy = env(&[(
             "GUARDIAN_PROXY_URL",
             "https://guardian.testnet.hashi.sui.io",
         )])
+        .unwrap()
         .proxy_url()
         .unwrap();
         assert_eq!(proxy.authority, "guardian.testnet.hashi.sui.io:443");
@@ -356,10 +376,19 @@ mod tests {
             "https://guardian.testnet.hashi.sui.io/",
             "https://",
         ] {
-            assert!(env(&[("GUARDIAN_PROXY_URL", bad)]).proxy_url().is_err());
+            assert!(
+                env(&[("GUARDIAN_PROXY_URL", bad)])
+                    .unwrap()
+                    .proxy_url()
+                    .is_err()
+            );
         }
         assert_eq!(
-            env(&[]).require("GUARDIAN_STACK").unwrap_err().to_string(),
+            env(&[])
+                .unwrap()
+                .require("GUARDIAN_STACK")
+                .unwrap_err()
+                .to_string(),
             "testnet.env does not set GUARDIAN_STACK"
         );
     }

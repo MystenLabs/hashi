@@ -220,6 +220,7 @@ pub fn prev_builds(ctx: &Ctx, stack: &Stack, view: &SlotView, pcr0: &str) -> Res
 
 /// A verified roster, as `download-kp-pubkeys.sh` wrote it: one directory per key provisioner.
 pub struct Roster {
+    pub dir: String,
     pub threshold: u32,
     certs: Vec<Cert>,
 }
@@ -272,7 +273,11 @@ impl Roster {
         if certs.is_empty() {
             bail!("no certificates in {dir}");
         }
-        Ok(Self { threshold, certs })
+        Ok(Self {
+            dir: dir.to_owned(),
+            threshold,
+            certs,
+        })
     }
 
     pub fn kp_count(&self) -> usize {
@@ -311,38 +316,65 @@ pub struct Rendered {
 }
 
 impl Rendered {
-    /// The slot's files.
-    pub fn new(settings: &Settings, dealt: &Roster) -> Self {
+    /// The slot's files. A KP-set rotation adds `rotate-kp-set/`, whose files list both rosters for the re-deal, while
+    /// the slot's own files list the new roster, which provisions guardians once the re-deal completes.
+    pub fn new(settings: &Settings, dealt: &Roster, new: Option<&Roster>) -> Result<Self> {
         let mut rendered = Self {
             files: BTreeMap::new(),
         };
-        rendered.add_configs(settings, dealt);
-        rendered.add_certs(dealt);
-        rendered
+        let Some(new) = new else {
+            rendered.add_configs("", settings, dealt, None);
+            rendered.add_certs("", dealt, None)?;
+            return Ok(rendered);
+        };
+        rendered.add_configs("", settings, new, None);
+        rendered.add_certs("", new, None)?;
+        rendered.add_configs("rotate-kp-set/", settings, dealt, Some(new));
+        rendered.add_certs("rotate-kp-set/", dealt, None)?;
+        rendered.add_certs("rotate-kp-set/", new, Some(dealt))?;
+        Ok(rendered)
     }
 
-    fn add_configs(&mut self, settings: &Settings, roster: &Roster) {
+    fn add_configs(
+        &mut self,
+        prefix: &str,
+        settings: &Settings,
+        roster: &Roster,
+        new: Option<&Roster>,
+    ) {
         self.files.insert(
-            "guardian-init.yaml".to_owned(),
-            config(settings, &settings.proxy_url, roster).into_bytes(),
+            format!("{prefix}guardian-init.yaml"),
+            config(settings, &settings.proxy_url, roster, new).into_bytes(),
         );
         let operator = format!(
             "{}\ns3_credentials:\n  access_key: {}\n  secret_key: {}\n",
-            config(settings, &settings.tunnel_endpoint, roster),
+            config(settings, &settings.tunnel_endpoint, roster, new),
             quote(&settings.access_key),
             quote(&settings.secret_key)
         );
         self.files
-            .insert("operator.yaml".to_owned(), operator.into_bytes());
+            .insert(format!("{prefix}operator.yaml"), operator.into_bytes());
     }
 
-    /// Adds a roster's files under `certs/`.
-    fn add_certs(&mut self, roster: &Roster) {
+    /// Adds a roster's files under `certs/`. A configuration lists two rosters by file name, so one name must be one
+    /// certificate in both.
+    fn add_certs(&mut self, prefix: &str, roster: &Roster, other: Option<&Roster>) -> Result<()> {
         for cert in &roster.certs {
             for (name, bytes) in &cert.files {
-                self.files.insert(format!("certs/{name}"), bytes.clone());
+                let path = format!("{prefix}certs/{name}");
+                if let Some(existing) = self.files.get(&path)
+                    && existing != bytes
+                {
+                    bail!(
+                        "{name} differs between {} and {}; a key provisioner with a new certificate needs a new user ID",
+                        other.map_or(roster.dir.as_str(), |other| other.dir.as_str()),
+                        roster.dir
+                    );
+                }
+                self.files.insert(path, bytes.clone());
             }
         }
+        Ok(())
     }
 
     pub fn file(&self, path: &str) -> Option<&[u8]> {
@@ -398,10 +430,12 @@ impl Rendered {
     /// [`Rendered::place_configs`].
     pub fn write_unchecked(&self, dir: &Path) -> Result<()> {
         self.remove_configs(dir)?;
-        let certs = dir.join("certs");
-        if certs.exists() {
-            std::fs::remove_dir_all(&certs)
-                .with_context(|| format!("could not remove {}", certs.display()))?;
+        for stale in ["certs", "rotate-kp-set"] {
+            let path = dir.join(stale);
+            if path.exists() {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("could not remove {}", path.display()))?;
+            }
         }
         for (relative, bytes) in &self.files {
             let path = dir.join(Self::written(relative));
@@ -449,6 +483,8 @@ impl Rendered {
 pub struct SlotRender {
     pub settings: Settings,
     pub dealt: Roster,
+    /// The roster a KP-set rotation re-deals to.
+    pub new: Option<Roster>,
     pub rendered: Rendered,
 }
 
@@ -459,10 +495,15 @@ impl SlotRender {
             ctx.env.require("KP_ROSTER_DIR")?,
             threshold(ctx, "KP_THRESHOLD")?,
         )?;
-        let rendered = Rendered::new(&settings, &dealt);
+        let new = match ctx.env.get("NEW_KP_ROSTER_DIR") {
+            Some(dir) => Some(Roster::load(dir, threshold(ctx, "NEW_KP_THRESHOLD")?)?),
+            None => None,
+        };
+        let rendered = Rendered::new(&settings, &dealt, new.as_ref())?;
         Ok(Self {
             settings,
             dealt,
+            new,
             rendered,
         })
     }
@@ -501,7 +542,7 @@ pub fn require_fresh(ctx: &Ctx, stack: &Stack, view: &SlotView) -> Result<()> {
 
 /// A rendered configuration. `endpoint` is how its reader reaches the guardian: the proxy for key provisioners, the
 /// slot's tunnel for the operator.
-fn config(settings: &Settings, endpoint: &str, roster: &Roster) -> String {
+fn config(settings: &Settings, endpoint: &str, roster: &Roster, new: Option<&Roster>) -> String {
     let s = settings;
     let mut lines = vec![
         format!("guardian_endpoint: {}", quote(endpoint)),
@@ -539,6 +580,10 @@ fn config(settings: &Settings, endpoint: &str, roster: &Roster) -> String {
         String::new(),
     ]);
     lines.extend(roster_lines("kp_roster", roster));
+    if let Some(new) = new {
+        lines.push(String::new());
+        lines.extend(roster_lines("new_kp_roster", new));
+    }
     lines.extend([
         String::new(),
         "limiter_config:".to_owned(),
@@ -619,7 +664,8 @@ pub mod tests {
 
     #[test]
     fn matches_guardian_sh_byte_for_byte() {
-        // guardian.sh's write_config rendered these, on main at d732e3717.
+        // guardian.sh's write_config rendered these: the one-roster files on main at d732e3717, and
+        // two-rosters.yaml on the closed bash rotation branch at ec1e041a0.
         let golden = |name: &str| {
             std::fs::read_to_string(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -634,10 +680,26 @@ pub mod tests {
             2,
         )
         .unwrap();
+        let new = Roster::load(
+            &roster_dir(
+                &scratch.path().join("new"),
+                &["alice", "bob", "carol"],
+                "v1",
+            ),
+            3,
+        )
+        .unwrap();
         let mut s = settings();
         s.tunnel_endpoint = s.proxy_url.clone();
-        assert_eq!(config(&s, &s.proxy_url, &dealt), golden("one-roster.yaml"));
-        let rendered = Rendered::new(&settings(), &dealt);
+        assert_eq!(
+            config(&s, &s.proxy_url, &dealt, None),
+            golden("one-roster.yaml")
+        );
+        assert_eq!(
+            config(&s, "http://127.0.0.1:3001", &dealt, Some(&new)),
+            golden("two-rosters.yaml")
+        );
+        let rendered = Rendered::new(&settings(), &dealt, None).unwrap();
         let operator = String::from_utf8(rendered.file("operator.yaml").unwrap().to_vec()).unwrap();
         assert!(operator.ends_with(&golden("credentials.yaml")));
     }
@@ -655,7 +717,7 @@ pub mod tests {
             commit: "1".repeat(40),
             pcr0: "0d".repeat(48),
         }];
-        let text = config(&s, &s.proxy_url, &dealt);
+        let text = config(&s, &s.proxy_url, &dealt, None);
         assert!(text.contains(&format!(
             "      pcr0: \"{}\"\n    prev_builds:\n      - git_revision: \"{}\"\n        pcr0: \"{}\"\n\nhashi:\n",
             "0c".repeat(48),
@@ -813,6 +875,54 @@ pub mod tests {
     }
 
     #[test]
+    fn renders_a_re_deal_beside_the_new_sets_files() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dealt = Roster::load(
+            &roster_dir(&scratch.path().join("dealt"), &["alice", "bob"], "v1"),
+            2,
+        )
+        .unwrap();
+        let new = Roster::load(
+            &roster_dir(&scratch.path().join("new"), &["alice", "carol"], "v1"),
+            2,
+        )
+        .unwrap();
+        let rendered = Rendered::new(&settings(), &dealt, Some(&new)).unwrap();
+        let text = |path: &str| String::from_utf8(rendered.file(path).unwrap().to_vec()).unwrap();
+        assert!(text("guardian-init.yaml").contains("    - certs/carol-kp-pubkey.asc"));
+        assert!(!text("guardian-init.yaml").contains("bob"));
+        assert!(text("rotate-kp-set/guardian-init.yaml").contains("new_kp_roster:"));
+        assert!(rendered.file("certs/bob-kp-pubkey.asc").is_none());
+        for id in ["alice", "bob", "carol"] {
+            assert!(
+                rendered
+                    .file(&format!(
+                        "rotate-kp-set/certs/{id}-kp-pubkey.attestation-dec.pem"
+                    ))
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_one_name_for_two_certificates() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dealt_dir = roster_dir(&scratch.path().join("dealt"), &["alice"], "v1");
+        let new_dir = roster_dir(&scratch.path().join("new"), &["alice"], "v2");
+        let dealt = Roster::load(&dealt_dir, 2).unwrap();
+        let new = Roster::load(&new_dir, 2).unwrap();
+        let error = Rendered::new(&settings(), &dealt, Some(&new))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "alice-kp-pubkey.asc differs between {dealt_dir} and {new_dir}; a key provisioner with a new certificate needs a new user ID"
+            )
+        );
+    }
+
+    #[test]
     fn loads_only_a_verified_roster() {
         let scratch = tempfile::tempdir().unwrap();
         let dir = roster_dir(&scratch.path().join("r"), &["bob", "alice"], "v1");
@@ -862,12 +972,13 @@ pub mod tests {
             2,
         )
         .unwrap();
-        let rendered = Rendered::new(&settings(), &dealt);
+        let rendered = Rendered::new(&settings(), &dealt, None).unwrap();
         let slot = scratch.path().join("slot");
-        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::create_dir_all(slot.join("rotate-kp-set")).unwrap();
         std::fs::write(slot.join("kp-shares.json"), "kept").unwrap();
         rendered.write(&slot).unwrap();
         assert!(rendered.stale(&slot).is_empty());
+        assert!(!slot.join("rotate-kp-set").exists());
         assert!(slot.join("kp-shares.json").exists());
         let mode = std::fs::metadata(slot.join("operator.yaml"))
             .unwrap()
