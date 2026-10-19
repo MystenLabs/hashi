@@ -107,6 +107,15 @@ pub struct SpentUtxo {
     pub spent_by: Txid,
 }
 
+/// A held UTXO that Bitcoin reports spent, which no followed withdrawal
+/// explains. The auditor judges it once the Sui cursor is past `asked_at`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuspectSpend {
+    /// When Bitcoin was asked.
+    pub asked_at: UnixSeconds,
+    pub amount: u64,
+}
+
 /// The UTXOs the bridge holds and the UTXOs it spent, by Bitcoin's account.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(from = "UtxoPoolWire", into = "UtxoPoolWire")]
@@ -305,17 +314,21 @@ impl UtxoPool {
         }
     }
 
-    /// The findings of one pass over Bitcoin's answer for every UTXO held.
-    /// A UTXO with no answer counts as missing. A UTXO in `pending_inputs`,
-    /// one a withdrawal the monitor follows spends, is skipped.
+    /// One pass over Bitcoin's answer for every UTXO held: the findings,
+    /// and the spent UTXOs as suspects. A spend is not a finding yet: a
+    /// withdrawal committed since the last Sui poll can be mined already,
+    /// and only the auditor can tell. A UTXO with no answer counts as
+    /// missing. A UTXO in `pending_inputs`, one a withdrawal the monitor
+    /// follows spends, is skipped.
     pub fn check(
         &self,
         states: &HashMap<OutPoint, OutpointState>,
         pending_inputs: &HashSet<OutPoint>,
         now: UnixSeconds,
         timing: &Timing,
-    ) -> Vec<MonitorFinding> {
+    ) -> (Vec<MonitorFinding>, HashMap<OutPoint, SuspectSpend>) {
         let mut findings = Vec::new();
+        let mut suspects = HashMap::new();
         for (outpoint, utxo) in &self.utxos {
             if pending_inputs.contains(outpoint) {
                 continue;
@@ -340,10 +353,13 @@ impl UtxoPool {
                     }
                 }
                 Some(OutpointState::Spent) => {
-                    findings.push(MonitorFinding::UtxoUnexpectedSpend {
-                        outpoint: *outpoint,
-                        amount: utxo.amount,
-                    });
+                    suspects.insert(
+                        *outpoint,
+                        SuspectSpend {
+                            asked_at: now,
+                            amount: utxo.amount,
+                        },
+                    );
                 }
                 Some(OutpointState::Missing) | None => {
                     findings.push(MonitorFinding::RpcInconsistency(
@@ -355,7 +371,7 @@ impl UtxoPool {
                 }
             }
         }
-        findings
+        (findings, suspects)
     }
 }
 
@@ -456,11 +472,22 @@ mod tests {
         pool: &UtxoPool,
         state: Option<OutpointState>,
         now: UnixSeconds,
-    ) -> Vec<MonitorFinding> {
+    ) -> (Vec<MonitorFinding>, HashMap<OutPoint, SuspectSpend>) {
         let states = state
             .map(|state| HashMap::from([(outpoint(1), state)]))
             .unwrap_or_default();
         pool.check(&states, &HashSet::new(), now, &Timing::for_tests())
+    }
+
+    /// The findings of `check_one`, with no suspects.
+    fn findings_one(
+        pool: &UtxoPool,
+        state: Option<OutpointState>,
+        now: UnixSeconds,
+    ) -> Vec<MonitorFinding> {
+        let (findings, suspects) = check_one(pool, state, now);
+        assert!(suspects.is_empty());
+        findings
     }
 
     #[test]
@@ -625,7 +652,7 @@ mod tests {
     fn a_young_unspent_utxo_is_fine() {
         let pool = pool_seen_at(0);
         let state = OutpointState::Unspent { block_time: 1_000 };
-        assert!(check_one(&pool, Some(state), 1_000 + WARN - 1).is_empty());
+        assert!(findings_one(&pool, Some(state), 1_000 + WARN - 1).is_empty());
     }
 
     #[test]
@@ -633,7 +660,7 @@ mod tests {
         let pool = pool_seen_at(0);
         let state = OutpointState::Unspent { block_time: 1_000 };
 
-        let warn = check_one(&pool, Some(state.clone()), 1_000 + WARN);
+        let warn = findings_one(&pool, Some(state.clone()), 1_000 + WARN);
         assert_eq!(
             warn,
             vec![MonitorFinding::UtxoTooOld {
@@ -645,7 +672,7 @@ mod tests {
         );
         assert_eq!(warn[0].category(), FindingCategory::Liveness);
 
-        let critical = check_one(&pool, Some(state), 1_000 + CRITICAL);
+        let critical = findings_one(&pool, Some(state), 1_000 + CRITICAL);
         assert_eq!(
             critical,
             vec![MonitorFinding::UtxoTooOld {
@@ -659,17 +686,20 @@ mod tests {
     }
 
     #[test]
-    fn a_spent_utxo_is_an_unexpected_spend() {
+    fn a_spent_utxo_is_a_suspect() {
         let pool = pool_seen_at(0);
-        let findings = check_one(&pool, Some(OutpointState::Spent), 1);
+        let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
+        assert!(findings.is_empty());
         assert_eq!(
-            findings,
-            vec![MonitorFinding::UtxoUnexpectedSpend {
-                outpoint: outpoint(1),
-                amount: 1_000,
-            }]
+            suspects,
+            HashMap::from([(
+                outpoint(1),
+                SuspectSpend {
+                    asked_at: 1,
+                    amount: 1_000,
+                }
+            )])
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -680,12 +710,12 @@ mod tests {
             first_seen: 1_000,
         });
 
-        let findings = check_one(&pool, Some(OutpointState::Missing), 1_000);
+        let findings = findings_one(&pool, Some(OutpointState::Missing), 1_000);
 
         assert_eq!(findings, vec![vanished.clone()]);
         assert_eq!(findings[0].category(), FindingCategory::Safety);
         // No answer at all counts as missing.
-        assert_eq!(check_one(&pool, None, 1_000), vec![vanished]);
+        assert_eq!(findings_one(&pool, None, 1_000), vec![vanished]);
     }
 
     #[test]
@@ -694,9 +724,11 @@ mod tests {
         let states = HashMap::from([(outpoint(1), OutpointState::Spent)]);
         let pending_inputs = HashSet::from([outpoint(1)]);
 
-        let findings = pool.check(&states, &pending_inputs, 1_000, &Timing::for_tests());
+        let (findings, suspects) =
+            pool.check(&states, &pending_inputs, 1_000, &Timing::for_tests());
 
         assert!(findings.is_empty());
+        assert!(suspects.is_empty());
     }
 
     #[test]
@@ -708,9 +740,10 @@ mod tests {
             (change_of(7), OutpointState::Unspent { block_time: 700 }),
         ]);
 
-        let findings = pool.check(&states, &HashSet::new(), 701, &Timing::for_tests());
+        let (findings, suspects) = pool.check(&states, &HashSet::new(), 701, &Timing::for_tests());
 
         assert!(findings.is_empty());
+        assert!(suspects.is_empty());
     }
 
     #[test]

@@ -71,6 +71,7 @@ pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
+use pool::SuspectSpend;
 use pool::UtxoPool;
 use std::fmt;
 use sui_sdk_types::Address;
@@ -165,13 +166,6 @@ impl fmt::Display for WithdrawalProgressBlocker {
     }
 }
 
-/// A spend the UTXO pool check saw that no followed withdrawal explained.
-struct SuspectSpend {
-    /// When Bitcoin was asked. Judged once the Sui cursor is past it.
-    asked_at: UnixSeconds,
-    amount: u64,
-}
-
 pub struct AuditorCore {
     // immutable
     cfg: Config,
@@ -232,10 +226,8 @@ impl AuditorCore {
     }
 
     /// Ask Bitcoin about every coin held in the UTXO pool and return the
-    /// findings. Nothing when no pool is kept. A spend that no followed
-    /// withdrawal explains is not a finding yet: a withdrawal committed
-    /// since the last Sui poll can be mined already. It is kept as a
-    /// suspect for `judge_suspect_spends`.
+    /// findings. Nothing when no pool is kept. The spends the pool cannot
+    /// explain are kept as suspects for `judge_suspect_spends`.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
         let Some(pool) = &self.utxo_pool else {
             return Ok(Vec::new());
@@ -271,26 +263,17 @@ impl AuditorCore {
             "the UTXOs held longest, by block time:{oldest_lines}"
         );
         let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
-        let mut findings = Vec::new();
-        let mut suspects = 0usize;
-        for finding in pool.check(&states, &pending_inputs, now, &self.cfg.timing) {
-            match finding {
-                MonitorFinding::UtxoUnexpectedSpend { outpoint, amount } => {
-                    suspects += 1;
-                    self.suspect_spends.entry(outpoint).or_insert(SuspectSpend {
-                        asked_at: now,
-                        amount,
-                    });
-                }
-                other => findings.push(other),
-            }
-        }
+        let (findings, suspects) = pool.check(&states, &pending_inputs, now, &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),
-            suspects,
+            suspects = suspects.len(),
             "finished UTXO pool check"
         );
+        // A suspect already waiting keeps its earlier time.
+        for (outpoint, suspect) in suspects {
+            self.suspect_spends.entry(outpoint).or_insert(suspect);
+        }
         Ok(findings)
     }
 
@@ -1107,13 +1090,16 @@ mod tests {
             },
         );
 
+        let findings = auditor.judge_suspect_spends();
+
         assert_eq!(
-            auditor.judge_suspect_spends(),
+            findings,
             vec![MonitorFinding::UtxoUnexpectedSpend {
                 outpoint,
                 amount: 5_000,
             }]
         );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
         assert!(auditor.suspect_spends.is_empty());
     }
 
