@@ -110,7 +110,7 @@ impl DepositRequestStateMachine {
         Ok(())
     }
 
-    pub(crate) fn record_confirmation(&mut self, confirmation: &BtcConfirmation) {
+    fn record_confirmation(&mut self, confirmation: &BtcConfirmation) {
         self.btc_answered = true;
         let request = &self.request;
         let Some(deposit) = ConfirmedDeposit::from_confirmation(request, confirmation) else {

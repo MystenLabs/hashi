@@ -35,9 +35,9 @@
 //!    labels each output from paths it derives itself, and the committee's
 //!    E1 is not trusted for it. A withdrawal that never completes never
 //!    touches the pool, so its inputs stay held and the daily check reports
-//!    them, on top of the finding for its missing event. The auditor hands
-//!    a complete withdrawal over only once every input's own flow is
-//!    answered, so a spend here is never early.
+//!    them, on top of the finding for its missing event. The auditor feeds
+//!    the pool right after its Bitcoin lookups, so a withdrawal's inputs
+//!    have entered before the withdrawal spends them.
 //! 4. Every operation is strict. An operation the pool already applied is a
 //!    repeat and is skipped, so a restart can replay any range of events.
 //!    An operation that contradicts the pool is a finding. An outpoint

@@ -85,11 +85,12 @@ Bitcoin fact changes it:
   Which outputs are change comes from E2: the guardian labels each output
   from paths it derives itself. A withdrawal that never completes never
   touches the pool.
-- A complete withdrawal waits while an input is still in flight: the
-  outpoint of a deposit request Bitcoin has not answered, or an output of a
-  withdrawal that is not complete or that waits itself. The Sui scan can
-  deliver a request and the withdrawal that spends it in one poll, while the
-  Bitcoin answer comes on a later tick. The next state check tries again.
+- The pool is fed right after the Bitcoin lookups, before any other poll.
+  Bitcoin confirms a withdrawal only after the deposits and withdrawals that
+  made its inputs, and one round of lookups answers them all, so a
+  withdrawal's inputs enter the pool before the withdrawal spends them. The
+  Sui scan can deliver a deposit request and the withdrawal that spends it in
+  one poll; the pool waits for the lookups that follow.
 
 Every operation is strict. One the pool already applied is a repeat and is
 skipped, so a restart can replay any range of events. One that contradicts
