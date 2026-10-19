@@ -35,7 +35,8 @@
 //!    labels each output from paths it derives itself, and the committee's
 //!    E1 is not trusted for it. A withdrawal that never completes never
 //!    touches the pool, so its inputs stay held and the daily check reports
-//!    them, on top of the finding for its missing event. The auditor feeds
+//!    them once they are too old, on top of the finding for its missing
+//!    event. The auditor feeds
 //!    the pool right after its Bitcoin lookups, so a withdrawal's inputs
 //!    have entered before the withdrawal spends them.
 //! 4. Every operation is strict. An operation the pool already applied is a
@@ -71,7 +72,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
 
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
@@ -181,6 +181,11 @@ impl From<UtxoPool> for UtxoPoolWire {
 
 impl UtxoPool {
     /// The number of UTXOs held.
+    /// Whether a withdrawal the pool took spent the UTXO.
+    pub fn is_spent(&self, outpoint: &OutPoint) -> bool {
+        self.spent.contains_key(outpoint)
+    }
+
     pub fn len(&self) -> usize {
         self.utxos.len()
     }
@@ -316,23 +321,18 @@ impl UtxoPool {
 
     /// One pass over Bitcoin's answer for every UTXO held: the findings,
     /// and the spent UTXOs as suspects. A spend is not a finding yet: a
-    /// withdrawal committed since the last Sui poll can be mined already,
-    /// and only the auditor can tell. A UTXO with no answer counts as
-    /// missing. A UTXO in `pending_inputs`, one a withdrawal the monitor
-    /// follows spends, is skipped.
+    /// withdrawal the monitor follows, or one committed since the last Sui
+    /// poll, can have spent the UTXO, and only the auditor can tell. A
+    /// UTXO with no answer counts as missing.
     pub fn check(
         &self,
         states: &HashMap<OutPoint, OutpointState>,
-        pending_inputs: &HashSet<OutPoint>,
         now: UnixSeconds,
         timing: &Timing,
     ) -> (Vec<MonitorFinding>, HashMap<OutPoint, SuspectSpend>) {
         let mut findings = Vec::new();
         let mut suspects = HashMap::new();
         for (outpoint, utxo) in &self.utxos {
-            if pending_inputs.contains(outpoint) {
-                continue;
-            }
             match states.get(outpoint) {
                 Some(OutpointState::Unspent { block_time }) => {
                     let age_secs = now.saturating_sub(*block_time);
@@ -476,7 +476,7 @@ mod tests {
         let states = state
             .map(|state| HashMap::from([(outpoint(1), state)]))
             .unwrap_or_default();
-        pool.check(&states, &HashSet::new(), now, &Timing::for_tests())
+        pool.check(&states, now, &Timing::for_tests())
     }
 
     /// The findings of `check_one`, with no suspects.
@@ -719,19 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn a_utxo_a_pending_withdrawal_spends_is_not_checked() {
-        let pool = pool_seen_at(0);
-        let states = HashMap::from([(outpoint(1), OutpointState::Spent)]);
-        let pending_inputs = HashSet::from([outpoint(1)]);
-
-        let (findings, suspects) =
-            pool.check(&states, &pending_inputs, 1_000, &Timing::for_tests());
-
-        assert!(findings.is_empty());
-        assert!(suspects.is_empty());
-    }
-
-    #[test]
     fn a_spent_utxo_is_not_checked() {
         let mut pool = pool_seen_at(0);
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
@@ -740,10 +727,11 @@ mod tests {
             (change_of(7), OutpointState::Unspent { block_time: 700 }),
         ]);
 
-        let (findings, suspects) = pool.check(&states, &HashSet::new(), 701, &Timing::for_tests());
+        let (findings, suspects) = pool.check(&states, 701, &Timing::for_tests());
 
         assert!(findings.is_empty());
         assert!(suspects.is_empty());
+        assert!(pool.is_spent(&outpoint(1)));
     }
 
     #[test]

@@ -123,7 +123,8 @@ one's age, amount and origin. Then it reports:
   confirmed Hashi withdrawal. This one is not reported at once: a withdrawal
   committed since the last Sui poll can be mined already. The spend waits,
   and a state check reports it once the Sui cursor is past the time Bitcoin
-  was asked and still no followed withdrawal names the UTXO;
+  was asked and still no withdrawal explains it: none the monitor follows
+  names the UTXO, and the pool took none that spent it;
 - **safety** `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
   confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
   entered, so a missing answer is a reorg, a node without the transaction

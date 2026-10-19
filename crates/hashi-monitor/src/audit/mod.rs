@@ -213,7 +213,7 @@ impl AuditorCore {
     }
 
     /// The inputs of every withdrawal the monitor follows. It spends them
-    /// on Bitcoin before its flow completes, so a spend of one is expected.
+    /// on Bitcoin before its flow completes, so a spend of one is explained.
     fn pending_inputs(&self) -> HashSet<OutPoint> {
         self.pending_withdrawals
             .values()
@@ -233,12 +233,7 @@ impl AuditorCore {
             return Ok(Vec::new());
         };
         self.btc_client.ensure_synced()?;
-        let pending_inputs = self.pending_inputs();
-        let outpoints = pool
-            .outpoints()
-            .into_iter()
-            .filter(|outpoint| !pending_inputs.contains(outpoint))
-            .collect::<Vec<_>>();
+        let outpoints = pool.outpoints();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
         // Before the lookups, so a withdrawal committed during them still
         // waits for the Sui cursor.
@@ -263,7 +258,7 @@ impl AuditorCore {
             "the UTXOs held longest, by block time:{oldest_lines}"
         );
         let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
-        let (findings, suspects) = pool.check(&states, &pending_inputs, now, &self.cfg.timing);
+        let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),
@@ -277,12 +272,19 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// Judge the spends the pool check could not explain. One is unexpected
-    /// once the Sui cursor is past the time Bitcoin was asked and still no
-    /// followed withdrawal names the UTXO: every withdrawal committed
-    /// before that time is known by then. Until then it waits.
+    /// Judge the spends the pool check saw. One is unexpected once the Sui
+    /// cursor is past the time Bitcoin was asked and still no withdrawal
+    /// explains it: every withdrawal committed before that time is known
+    /// by then. A withdrawal explains a spend when it names the UTXO as an
+    /// input, or when the pool took it and recorded the UTXO spent since.
+    /// Until the cursor is past, the suspect waits.
     pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let named = self.pending_inputs();
+        let taken = |outpoint: &OutPoint| {
+            self.utxo_pool
+                .as_ref()
+                .is_some_and(|pool| pool.is_spent(outpoint))
+        };
         let sui_cursor = self.sui_cursor();
         let mut findings = Vec::new();
         let mut judged = Vec::new();
@@ -291,7 +293,7 @@ impl AuditorCore {
                 continue;
             }
             judged.push(*outpoint);
-            if named.contains(outpoint) {
+            if named.contains(outpoint) || taken(outpoint) {
                 tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
             } else {
                 findings.push(MonitorFinding::UtxoUnexpectedSpend {
@@ -568,8 +570,8 @@ impl AuditorCore {
     /// only a UTXO an earlier event brought in, and the leader has the
     /// guardian sign withdrawals one at a time, oldest first. A withdrawal that
     /// never completes never reaches the pool: its inputs stay held, and
-    /// the daily check reports them, on top of the finding for its missing
-    /// event.
+    /// the daily check reports them once they are too old, on top of the
+    /// finding for its missing event.
     pub fn add_to_pool(&mut self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_confirmed_deposits();
@@ -1123,6 +1125,45 @@ mod tests {
         auditor.pending_withdrawals.insert(
             WithdrawalID::new([7; 32]),
             complete_withdrawal(7, 7, vec![outpoint], &timing),
+        );
+
+        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.suspect_spends.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_suspect_spend_the_pool_took_a_withdrawal_for_is_cleared_without_a_finding() {
+        let mut auditor = auditor_with_pool().await;
+        let timing = auditor.cfg.timing.clone();
+        let cursor = auditor.sui_cursor();
+        // `withdrawal_tx` spends `txid(0x51):1`.
+        let outpoint = OutPoint {
+            txid: txid(0x51),
+            vout: 1,
+        };
+        auditor.suspect_spends.insert(
+            outpoint,
+            SuspectSpend {
+                asked_at: cursor - 1,
+                amount: 5_000,
+            },
+        );
+        // The withdrawal completed after the check: the pool took it, and
+        // the auditor no longer follows it.
+        let withdrawal = complete_withdrawal(7, 7, vec![outpoint], &timing);
+        let pool = auditor.utxo_pool.as_mut().unwrap();
+        assert!(
+            pool.add_deposit(&ConfirmedDeposit {
+                deposit_id: DepositId::new(txid(0x51), 1),
+                amount: 5_000,
+                script_pubkey: p2wpkh(0x55),
+                block_time: 900,
+            })
+            .is_none()
+        );
+        assert!(
+            pool.add_withdrawals(&[withdrawal.confirmed().cloned().unwrap()])
+                .is_empty()
         );
 
         assert!(auditor.judge_suspect_spends().is_empty());
