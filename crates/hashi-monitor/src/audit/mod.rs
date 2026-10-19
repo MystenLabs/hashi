@@ -302,20 +302,24 @@ impl AuditorCore {
         let named = self.pending_inputs();
         let sui_cursor = self.sui_cursor();
         let mut findings = Vec::new();
-        self.suspect_spends.retain(|outpoint, suspect| {
+        let mut judged = Vec::new();
+        for (outpoint, suspect) in &self.suspect_spends {
+            if sui_cursor <= suspect.asked_at {
+                continue;
+            }
+            judged.push(*outpoint);
             if named.contains(outpoint) {
                 tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
-                return false;
+            } else {
+                findings.push(MonitorFinding::UtxoUnexpectedSpend {
+                    outpoint: *outpoint,
+                    amount: suspect.amount,
+                });
             }
-            if sui_cursor <= suspect.asked_at {
-                return true;
-            }
-            findings.push(MonitorFinding::UtxoUnexpectedSpend {
-                outpoint: *outpoint,
-                amount: suspect.amount,
-            });
-            false
-        });
+        }
+        for outpoint in judged {
+            self.suspect_spends.remove(&outpoint);
+        }
         findings
     }
 
