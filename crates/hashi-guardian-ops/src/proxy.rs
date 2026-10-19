@@ -17,6 +17,7 @@ use crate::Ctx;
 use crate::ask::Unchanged;
 use crate::ask::confirm;
 use crate::commit::Tree;
+use crate::commit::resolve;
 use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
@@ -236,6 +237,17 @@ fn require_no_kp_round(ctx: &Ctx, tree: &Tree, relay_left: bool) -> Result<()> {
             "could not read the guardian the proxy's relay serves, so a key provisioner round may run through it; update the proxy once it answers",
         )),
     }
+}
+
+/// The commit the proxy stack's image is built from: its tag is the commit, then any features.
+pub fn image_commit(ctx: &Ctx, stack: &Stack) -> Result<String> {
+    let dir = proxy_dir(ctx)?;
+    let tag = config(ctx, &dir, stack, "proxy-image-tag")?;
+    resolve(ctx, tag.split('-').next().unwrap_or_default())?.ok_or_else(|| {
+        anyhow!(
+            "the proxy's image tag {tag} names no commit this checkout has, so nothing can check that the proxy decodes the standby's build; fetch it first"
+        )
+    })
 }
 
 fn config(ctx: &Ctx, dir: &str, stack: &Stack, key: &str) -> Result<String> {
