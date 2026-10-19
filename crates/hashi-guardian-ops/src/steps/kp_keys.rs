@@ -406,7 +406,7 @@ fn verify_upload(
 }
 
 /// `text` with its control characters escaped: anyone with the upload key chooses what an upload holds.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() {
