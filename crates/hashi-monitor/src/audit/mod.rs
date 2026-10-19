@@ -511,7 +511,10 @@ impl AuditorCore {
     /// Call it right after the Bitcoin lookups and before any other poll:
     /// Bitcoin confirms a withdrawal only after the flows that made its
     /// inputs, and one round of lookups answers them all, so the inputs
-    /// enter the pool before the withdrawal spends them. A withdrawal that
+    /// enter the pool before the withdrawal spends them. Sui and the
+    /// guardian order the flows the same way: Move lets a withdrawal lock
+    /// only a UTXO an earlier event brought in, and the leader has the
+    /// guardian sign withdrawals one at a time, oldest first. A withdrawal that
     /// never completes never reaches the pool: its inputs stay held, and
     /// the daily check reports them, on top of the finding for its missing
     /// event.
