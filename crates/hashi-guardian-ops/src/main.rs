@@ -31,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print the stack's slots, the proxy and the relay, changing nothing.
+    /// Print the stack's slots, the proxy, the relay and the Sui epoch, changing nothing.
     Status,
     /// Print a slot's guardian through its tunnel, once the proxy is shown to lead to it.
     Info {
@@ -115,6 +115,12 @@ enum Command {
     },
     /// Apply the proxy stack so the proxy follows the enclave stack's slots.
     ProxyUpdate,
+    /// Make a slot's provisioned standby the serving guardian, and stop the old one for good.
+    Switchover {
+        /// The standby's slot.
+        #[arg(long)]
+        slot: Slot,
+    },
     /// Destroy a standby slot's host.
     Teardown {
         /// The standby's slot.
@@ -151,6 +157,7 @@ fn main() -> anyhow::Result<()> {
         Command::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
         Command::Arm { slot } => rotate::arm(&ctx, slot),
         Command::ProxyUpdate => rotate::proxy_update(&ctx),
+        Command::Switchover { slot } => rotate::switchover(&ctx, slot),
         Command::Teardown { slot } => rotate::teardown(&ctx, slot),
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
@@ -214,7 +221,7 @@ mod tests {
 
     #[test]
     fn steps_that_change_one_slot_require_it() {
-        for step in ["arm", "teardown"] {
+        for step in ["arm", "switchover", "teardown"] {
             assert!(Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", step]).is_err());
             assert!(
                 Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", step, "--slot", "b"])

@@ -26,6 +26,7 @@ const KEYS: &[&str] = &[
     "KP_ROSTER_DIR",
     "KP_THRESHOLD",
     "SUI_RPC",
+    "SUI_GRAPHQL_URL",
     "HASHI_PACKAGE_ID",
     "HASHI_OBJECT_ID",
     "BITCOIN_NETWORK",

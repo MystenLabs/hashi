@@ -23,9 +23,10 @@ use crate::stack::Stack;
 use crate::stack::pulumi_pin;
 use crate::stack::pulumi_version;
 use crate::steps::slot;
+use crate::sui;
 
-/// Prints the stack's slots, the proxy and the relay. A read that fails is shown rather than fatal, so it still reports
-/// a partly broken stack.
+/// Prints the stack's slots, the proxy, the relay and the epoch. A read that fails is shown rather than fatal, so it
+/// still reports a partly broken stack.
 pub fn status(ctx: &Ctx) -> Result<()> {
     let stack = Stack::load(ctx)?;
     println!("Stack:         {}", stack.name);
@@ -93,6 +94,23 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         Err(error) => format!("unknown: {error:#}"),
     };
     println!("Relay:         {relay}");
+    if ctx.env.get("SUI_GRAPHQL_URL").is_some() {
+        let epoch = match sui::window(ctx, sui::now()) {
+            Ok(window) => format!(
+                "{}, began {} ago, ends in about {}{}",
+                window.epoch,
+                sui::duration(window.since),
+                sui::duration(window.remaining),
+                if window.refusal().is_none() {
+                    "; the time allows a switchover"
+                } else {
+                    "; too close to the turn for a switchover"
+                }
+            ),
+            Err(error) => format!("unknown: {error:#}"),
+        };
+        println!("Sui epoch:     {epoch}");
+    }
     Ok(())
 }
 
