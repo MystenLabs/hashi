@@ -65,130 +65,56 @@ its public key.
 
 :::
 
-For the initial YubiKey setup, you must use a machine with a physical USB port.
-After initial setup, you can encrypt the share to the public key of the YubiKey
-on any machine, including a cloud server without a USB port.
+Use a USB-capable machine and a new
+[YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/) with
+firmware **5.7 or newer**. Connect only this YubiKey; disconnect other smartcards.
+Normal backups need only its public certificate, not a connected YubiKey.
 
-1. Obtain a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/).
-   There are six models: the YubiKey 5C NFC, 5 NFC, 5C, 5 Nano, 5C Nano, and
-   5CI. Any of these models works, though avoid the Nano models because they are
-   smaller and easier to lose.
-
-2. Install tools on the USB-capable machine:
-   - [oct](https://codeberg.org/openpgp-card/openpgp-card-tools), OpenPGP card tools.
-   - [gpg](https://gnupg.org/), for testing decryption.
-
-3. Insert a YubiKey and confirm it is visible. **Make sure no other YubiKeys or
-   smartcards are plugged into the machine.**
+1. Install [oct](https://codeberg.org/openpgp-card/openpgp-card-tools),
+   [GnuPG](https://gnupg.org/) (`gpg` and `gpgconf`),
+   [YubiKey Manager](https://docs.yubico.com/software/yubikey/tools/ykman/) (`ykman`),
+   and [jq](https://jqlang.org/). Ensure your system's smartcard service is available.
+2. From a checkout of the [Hashi repository](https://github.com/MystenLabs/hashi),
+   run the setup script in an interactive terminal:
 
 ```sh
-$ oct list
+bash scripts/node-operator/provision-yubikey-backup.sh --output-dir ./backup-key
 ```
 
-You will see something like this:
+3. Follow the prompts for an optional User ID (Enter to omit),
+   PIN changes, and physical touches.
+   The script refuses cards that already contain keys, generates the private keys
+   on-device, enables touch for decryption, exports public artifacts, and checks
+   encryption/decryption. Keep the new User and Admin PINs in a secure password
+   manager. Do not replace the factory attestation (ATT) key or certificate.
+4. Save these **4 public files**. `<fingerprint>` is the full encryption subkey
+   fingerprint:
+   - `yubikey-backup-<fingerprint>.asc`
+   - `yubikey-backup-<fingerprint>.attestation-device.pem`
+   - `yubikey-backup-<fingerprint>.attestation-dec.pem`
+   - `yubikey-backup-<fingerprint>.fingerprints.txt`
 
-```
-Available OpenPGP cards:
-0006:26883270
-```
+Use the `.asc` file directly as `backup-pgp-cert` in your node configuration.
+The script also creates YubiKey attestation evidence. If desired, share all 4
+public files to [assemble a multi-recipient backup certificate](#assemble-a-multi-recipient-backup-certificate),
+which can verify the attestations.
 
-4. Save the card id and a filename for the public key:
+For YubiKey restores with `--use-gpg-agent`, import the public certificate and
+link the card in your normal GnuPG home (the script's test keyring is temporary):
 
 ```sh
-CARD=$(oct list --idents-only | head -n1)
-CARD_FILE="yubikey-public-$(echo "$CARD" | tr ':' '-').asc"
-echo "$CARD"
-echo "$CARD_FILE"
-```
-
-5. Change default PINs
-
-The User PIN is used for daily cryptographic operations like decryption; the
-Admin PIN is used for card configuration such as generating/importing keys.
-
-The default PINs for new YubiKeys are:
-User PIN:  123456
-Admin PIN: 12345678
-
-PINs can contain numbers, letters, and symbols (despite the name), and must be
-6, 7, or 8 characters long.
-
-Determine a new user and admin key for the YubiKey. These PINs are essential. If
-you lose them, you cannot decrypt the node backups. Back up the PINs in a safe
-place, such as a company password manager. Do not use the default PINs.
-
-Change the PINs with the following commands. You will first be prompted to enter
-the current (default) PIN, then prompted to enter the new PIN twice.
-
-```sh
-oct pin --card "$CARD" set-user
-oct pin --card "$CARD" set-admin
-```
-
-6. Confirm the YubiKey does not already contain keys:
-
-```sh
-oct status --card "$CARD"
-```
-
-Confirm the Signature, Decryption, and Authentication key slots do not show
-fingerprints. **If the card already has keys, stop here!**
-
-7. Generate the PGP key on the YubiKey.
-
-**This overwrites any existing keys on the YubiKey. Existing keys cannot be
-recovered after they are overwritten. Any files encrypted to the old public
-key will become permanently undecryptable!**
-
-You will be prompted to enter both the new user and new admin PINs. Be sure to
-update the name and email to real values. The public key will be saved to the
-output file.
-
-```sh
-oct admin --card "$CARD" generate \
-  --userid "Your Name <you@example.com>" \
-  --output "$CARD_FILE" \
-  curve25519
-```
-
-8. Test encrypting a file to the YubiKey's public key. Import the public key,
-   then encrypt a test file:
-
-```sh
-gpg --import "$CARD_FILE"
-```
-
-```sh
-echo "test message" > test.txt
-gpg --encrypt --armor \
-  --trust-model always \
-  --recipient "you@example.com" \
-  --output test.txt.asc \
-  test.txt
-```
-
-9. Test decrypting the file with the YubiKey. With the YubiKey plugged in,
-   link the card to gpg, then decrypt. You will be prompted for the User PIN,
-   and to tap the YubiKey.
-
-```sh
+gpg --import "./backup-key/yubikey-backup-<fingerprint>.asc"
 gpg --card-status
 ```
 
-```sh
-gpg --decrypt test.txt.asc
-```
+Replace `<fingerprint>` with the generated filename's fingerprint and keep the
+YubiKey connected; if using a separate recovery GnuPG home, use it for both commands.
 
-You may see a warning like `cipher algorithm AES not found in recipient
-preferences`. You can ignore this. It happens because the public key exported by
-`oct` does not include the cipher preferences that `gpg` expects, so `gpg` warns
-even though encryption and decryption still work.
-
-Confirm the output matches the original file contents, then delete the test
-files.
-
-10. Store the YubiKey in a secure location, such as a company safe. Also save
-    the public key file in a secure location.
+Preserve the filenames. Store the YubiKey securely; do not share it or the PINs.
+If setup fails, retain the public files and inspect the card before retrying.
+You can restart provisioning if no data depends on any newly generated keys.
+Otherwise, preserve the keys and follow the script's public-artifact recovery
+guidance: wiping or regenerating them would destroy access to existing backups.
 
 ### Option 2: Create a local private key file
 
@@ -284,6 +210,32 @@ To verify a recipient's YubiKey provenance, add
 device attestation certificate and DEC statement. Repeat for each attested
 recipient. Supplied evidence is always verified; add
 `--require-recipient-attestation` to require it for every recipient.
+
+For example, using the files exported during YubiKey setup (replace
+`FULL_ENCRYPTION_SUBKEY_FINGERPRINT` with the `[E]` subkey fingerprint from the
+recipient's `.fingerprints.txt` file, without spaces). Replace the recipient
+paths with the matching files produced by the script:
+
+```sh
+hashi backup assemble-cert \
+  --primary-cert certifier-public.asc \
+  --recipient yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.asc \
+  --recipient-attestation FULL_ENCRYPTION_SUBKEY_FINGERPRINT \
+    yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.attestation-device.pem \
+    yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.attestation-dec.pem \
+  --require-recipient-attestation \
+  --output hashi-backup-cert.asc
+```
+
+For multiple YubiKeys, collect each recipient's public certificate, device PEM,
+DEC PEM, and `.fingerprints.txt` file under distinct filenames. Repeat both
+`--recipient` and `--recipient-attestation` for each recipient. With
+`--require-recipient-attestation`, software-generated keys cannot be recipients.
+
+Verification checks the device certificate against pinned Yubico issuers and
+checks that the DEC statement attests on-device generation of the selected key.
+It does not establish current possession of the YubiKey or enforce a touch
+policy, and it does not check X.509 expiry or revocation.
 
 Before relying on the certificate, make a backup and confirm that each recipient
 can restore that same archive independently.
