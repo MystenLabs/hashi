@@ -131,7 +131,8 @@ pub enum MonitorFinding {
         amount: u64,
     },
     /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
-    /// never held. The pool missed the UTXO's entry.
+    /// never held. The bridge spent a coin that no verified deposit or
+    /// change brought in, or the pool missed the UTXO's entry.
     UtxoUnknownInputSpent {
         outpoint: OutPoint,
         txid: Txid,
@@ -237,7 +238,7 @@ impl MonitorFinding {
                 }
             }
             Self::UtxoUnexpectedSpend { .. } => FindingCategory::Safety,
-            Self::UtxoUnknownInputSpent { .. } => FindingCategory::Liveness,
+            Self::UtxoUnknownInputSpent { .. } => FindingCategory::Safety,
             Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
     }

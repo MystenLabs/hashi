@@ -348,6 +348,35 @@ fn neighbor_timing_findings(
 }
 
 #[cfg(test)]
+impl WithdrawalStateMachine {
+    /// A complete machine: `approval` as E1, the same a minute later as
+    /// E2, and `confirmation` as E3, with no timing finding.
+    pub fn complete_for_tests(
+        approval: MonitorWithdrawalEvent,
+        confirmation: crate::domain::BtcConfirmation,
+        timing: &Timing,
+    ) -> Self {
+        let e2 = MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            timestamp_secs: approval.timestamp_secs + 60,
+            ..approval.clone()
+        };
+        let e3 = MonitorWithdrawalEvent::from_btc(
+            &confirmation,
+            approval.wid,
+            approval.btc_txid,
+            approval.tx.clone(),
+        );
+        let mut sm = Self::new(approval, timing);
+        assert!(sm.add_event(e2.clone(), timing).is_empty());
+        assert!(sm.add_event(e3, timing).is_empty());
+        sm.confirmed = Some(ConfirmedWithdrawal::from_confirmation(&e2, confirmation));
+        assert!(!sm.is_expecting_events());
+        sm
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::findings::FindingCategory;

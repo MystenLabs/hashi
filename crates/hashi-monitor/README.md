@@ -85,15 +85,21 @@ Bitcoin fact changes it:
   Which outputs are change comes from E2: the guardian labels each output
   from paths it derives itself. A withdrawal that never completes never
   touches the pool.
+- A complete withdrawal waits while an input is still in flight: the
+  outpoint of a deposit request Bitcoin has not answered, or an output of a
+  withdrawal that is not complete or that waits itself. The Sui scan can
+  deliver a request and the withdrawal that spends it in one poll, while the
+  Bitcoin answer comes on a later tick. The next state check tries again.
 
 Every operation is strict. One the pool already applied is a repeat and is
 skipped, so a restart can replay any range of events. One that contradicts
 the pool is a finding: **safety** `RpcInconsistency`, for `UtxoMismatch`
 when Bitcoin confirms a known outpoint with a second amount or script, and
 `UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
-transaction already spent, since Bitcoin cannot produce either; **liveness**
+transaction already spent, since Bitcoin cannot produce either; **safety**
 `UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
-never held; the pool records nothing for that spend. In one Bitcoin pass
+never held, since the bridge spent a coin that no verified deposit or change
+brought in; the pool records nothing for that spend. In one Bitcoin pass
 every add comes before every spend, so a pass
 that answers a deposit and the withdrawal that spends it is right in any
 order.
