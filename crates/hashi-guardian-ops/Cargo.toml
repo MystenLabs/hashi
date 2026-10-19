@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+base64ct.workspace = true
 clap.workspace = true
+colored.workspace = true
+hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true

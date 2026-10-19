@@ -3271,7 +3271,10 @@ name = "hashi-guardian-ops"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64ct",
  "clap",
+ "colored",
+ "hex",
  "serde",
  "serde_json",
  "serde_yaml 0.9.34+deprecated",

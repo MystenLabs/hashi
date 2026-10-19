@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::bail;
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,9 +21,11 @@ use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Slot {
+    #[value(name = "a")]
     A,
+    #[value(name = "b")]
     B,
 }
 
@@ -34,6 +37,13 @@ impl Slot {
         match self {
             Self::A => "",
             Self::B => "-b",
+        }
+    }
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
         }
     }
 }
@@ -62,6 +72,11 @@ impl fmt::Display for Role {
             Self::Absent => "absent",
         })
     }
+}
+
+pub struct Bucket {
+    pub name: String,
+    pub region: String,
 }
 
 /// The stack's configuration and outputs as a step found them when it started, so it acts on one view of both.
@@ -180,6 +195,66 @@ impl Stack {
         })
     }
 
+    /// The guardian's log bucket, as the stack deployed it.
+    pub fn bucket(&self) -> Result<Bucket> {
+        match (
+            self.output("s3_bucket_name"),
+            self.output("s3_bucket_region"),
+        ) {
+            (Some(name), Some(region)) => Ok(Bucket {
+                name: name.to_owned(),
+                region: region.to_owned(),
+            }),
+            _ => bail!(
+                "stack {} in {} has no deployed guardian",
+                self.name,
+                self.dir
+            ),
+        }
+    }
+
+    /// The slot named on the command line, or else the stack's only one.
+    pub fn select(&self, arg: Option<Slot>) -> Result<Slot> {
+        if let Some(slot) = arg {
+            return Ok(slot);
+        }
+        match self.slots()?.as_slice() {
+            [slot] => Ok(*slot),
+            [] => bail!("stack {} enables no guardian slot", self.name),
+            _ => bail!(
+                "stack {} has guardian slots a and b; name the one this step acts on with --slot a or --slot b",
+                self.name
+            ),
+        }
+    }
+
+    /// What a step needs about a slot: its build, its deployed guardian and its tunnel.
+    pub fn slot(&self, ctx: &Ctx, slot: Slot) -> Result<SlotView> {
+        let suffix = slot.suffix();
+        let commit = self.config(&format!("hashi-commit{suffix}")).unwrap_or("");
+        if !is_hex(commit, 40) {
+            bail!(
+                "stack {}'s hashi-commit{suffix} is not a full commit: {}",
+                self.name,
+                if commit.is_empty() { "unset" } else { commit }
+            );
+        }
+        let base = ctx.env.tunnel_port()?;
+        let port = match slot {
+            Slot::A => base,
+            Slot::B => base + 1,
+        };
+        Ok(SlotView {
+            slot,
+            commit: commit.to_owned(),
+            pcr0_key: format!("eif-pcr0{suffix}"),
+            role: self.role(slot)?,
+            instance: self.instance(slot)?.map(str::to_owned),
+            port,
+            endpoint: format!("http://127.0.0.1:{port}"),
+        })
+    }
+
     /// The stack's `rotation:*` tags, which hold rotation state apart from its configuration.
     pub fn rotation_tags(&self, ctx: &Ctx) -> Result<Vec<String>> {
         let tags: BTreeMap<String, Value> = read_json(
@@ -259,6 +334,41 @@ pub fn export(ctx: &Ctx, dir: &str, stack: &str) -> Result<Export> {
     .with_context(|| format!("could not read stack {stack} in {dir}"))
 }
 
+/// What a step needs about one slot.
+pub struct SlotView {
+    pub slot: Slot,
+    /// The commit the slot's guardian is built from.
+    pub commit: String,
+    /// The configuration key holding the slot's PCR0.
+    pub pcr0_key: String,
+    pub role: Role,
+    pub instance: Option<String>,
+    /// The local port its tunnel forwards.
+    pub port: u16,
+    pub endpoint: String,
+}
+
+impl SlotView {
+    pub fn tunnel_down(&self) -> String {
+        format!(
+            "Could not reach slot {slot}'s guardian at {}. Run the tunnel step for slot {slot} again: it closes once idle.",
+            self.endpoint,
+            slot = self.slot
+        )
+    }
+
+    /// The slot's instance, for steps that act on a deployed guardian.
+    pub fn require_instance(&self, stack: &Stack) -> Result<&str> {
+        self.instance.as_deref().ok_or_else(|| {
+            anyhow!(
+                "slot {} of stack {} has no deployed guardian",
+                self.slot,
+                stack.name
+            )
+        })
+    }
+}
+
 /// The version of the Pulumi CLI on PATH, as `v<version>` like [`pulumi_pin`].
 pub fn pulumi_version(ctx: &Ctx) -> Result<String> {
     let version = read(ctx.exec, &Cmd::new("pulumi").arg("version"))
@@ -274,6 +384,13 @@ pub fn pulumi_pin(ctx: &Ctx) -> Result<String> {
 
 pub fn pulumi(dir: &str) -> Cmd {
     Cmd::new("pulumi").arg("-C").arg(dir)
+}
+
+pub fn is_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn scalar(value: Value) -> String {
@@ -368,28 +485,38 @@ pub mod tests {
         let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
         let stack = Stack::load(&ctx).unwrap();
         assert_eq!(stack.slots().unwrap(), [Slot::A]);
-        assert_eq!(stack.role(Slot::A).unwrap(), Role::Active);
-        assert_eq!(stack.instance(Slot::A).unwrap(), Some("i-0aaa"));
+        assert_eq!(stack.select(None).unwrap(), Slot::A);
+        let view = stack.slot(&ctx, Slot::A).unwrap();
+        assert_eq!(view.role, Role::Active);
+        assert_eq!(view.instance.as_deref(), Some("i-0aaa"));
+        assert_eq!(view.endpoint, "http://127.0.0.1:3000");
+        assert_eq!(stack.bucket().unwrap().name, "guardian-bucket");
         assert_eq!(stack.role(Slot::B).unwrap(), Role::Absent);
     }
 
     #[test]
-    fn reads_both_slots_of_a_two_slot_stack() {
+    fn names_slots_on_a_two_slot_stack() {
         let exec = two_slots();
         let repo = tempfile::tempdir().unwrap();
         let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
         let stack = Stack::load(&ctx).unwrap();
-        assert_eq!(stack.slots().unwrap(), [Slot::A, Slot::B]);
-        assert_eq!(stack.role(Slot::B).unwrap(), Role::Standby);
-        assert_eq!(stack.instance(Slot::B).unwrap(), Some("i-0bbb"));
+        assert_eq!(
+            stack.select(None).unwrap_err().to_string(),
+            "stack org/testnet has guardian slots a and b; name the one this step acts on with --slot a or --slot b"
+        );
+        let view = stack.slot(&ctx, Slot::B).unwrap();
+        assert_eq!(view.role, Role::Standby);
+        assert_eq!(view.instance.as_deref(), Some("i-0bbb"));
+        assert_eq!(view.port, 3001);
+        assert_eq!(view.pcr0_key, "eif-pcr0-b");
     }
 
     #[test]
     fn refuses_what_the_enclave_program_would_not_read() {
         let repo = tempfile::tempdir().unwrap();
         let exec = stack_world(
-            serde_json::json!({ "slot-b-enabled": "yes" }),
-            serde_json::json!({ "active_slot": "c" }),
+            serde_json::json!({ "slot-b-enabled": "yes", "hashi-commit": "0873917ea" }),
+            serde_json::json!({}),
         );
         let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
         let stack = Stack::load(&ctx).unwrap();
@@ -397,9 +524,22 @@ pub mod tests {
             stack.slot_enabled(Slot::B).unwrap_err().to_string(),
             "stack org/testnet sets slot-b-enabled to yes, not true or false"
         );
+        let flipped = stack_world(
+            serde_json::json!({}),
+            serde_json::json!({ "active_slot": "c" }),
+        );
+        let unknown = Stack::load(&Ctx::for_test(repo.path(), &flipped, &stack_env())).unwrap();
         assert_eq!(
-            stack.active().unwrap_err().to_string(),
+            unknown.active().unwrap_err().to_string(),
             "stack org/testnet's active_slot output is c, not a or b"
+        );
+        assert_eq!(
+            stack.slot(&ctx, Slot::A).err().unwrap().to_string(),
+            "stack org/testnet's hashi-commit is not a full commit: 0873917ea"
+        );
+        assert_eq!(
+            stack.bucket().err().unwrap().to_string(),
+            format!("stack org/testnet in {ENCLAVE} has no deployed guardian")
         );
     }
 

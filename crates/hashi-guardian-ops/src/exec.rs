@@ -8,6 +8,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -17,9 +18,13 @@ use anyhow::anyhow;
 use serde::de::DeserializeOwned;
 
 /// The external programs the steps run.
-pub const REQUIRED: [(&str, &str); 2] = [
+pub const REQUIRED: [(&str, &str); 6] = [
+    ("aws", "AWS CLI v2"),
     ("curl", "standard system utilities"),
+    ("git", "git"),
+    ("grpcurl", "grpcurl"),
     ("pulumi", "Pulumi CLI"),
+    ("tar", "standard system utilities"),
 ];
 
 #[derive(Clone, Debug)]
@@ -86,6 +91,9 @@ pub trait Exec {
     /// Runs `cmd` to completion with its stdout captured and its stderr on the terminal, as `$(...)` does.
     fn output(&self, cmd: &Cmd) -> io::Result<Output>;
 
+    /// Replaces this process with `cmd`, as bash's `exec` does. Returns only if that fails.
+    fn exec(&self, cmd: &Cmd) -> io::Error;
+
     /// Whether `program` is on PATH.
     fn has(&self, program: &str) -> bool;
 }
@@ -107,6 +115,10 @@ impl Exec for System {
             stdout: String::from_utf8(output.stdout)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
         })
+    }
+
+    fn exec(&self, cmd: &Cmd) -> io::Error {
+        cmd.command().exec()
     }
 
     fn has(&self, program: &str) -> bool {
@@ -226,6 +238,11 @@ pub mod fake {
             let words = cmd.words();
             self.log.borrow_mut().push(words.clone());
             Ok((self.handler)(&words).unwrap_or_else(|| panic!("unexpected command: {words:?}")))
+        }
+
+        fn exec(&self, cmd: &Cmd) -> io::Error {
+            self.log.borrow_mut().push(cmd.words());
+            io::Error::other("exec in a test")
         }
 
         fn has(&self, _program: &str) -> bool {

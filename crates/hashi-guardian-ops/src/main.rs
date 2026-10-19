@@ -8,6 +8,7 @@ use clap::Subcommand;
 use hashi_guardian_ops::Ctx;
 use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
+use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::inspect;
 
 #[derive(Parser)]
@@ -23,8 +24,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print the stack's slots and the proxy, changing nothing.
+    /// Print the stack's slots, the proxy and the relay, changing nothing.
     Status,
+    /// Print a slot's guardian through its tunnel, once the proxy is shown to lead to it.
+    Info {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
+    /// Print a slot's host: the end of its boot log, its enclave and its units.
+    Host {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
+    /// Forward a local port to a slot's guardian. Leave it running in its own terminal.
+    Tunnel {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -33,6 +52,9 @@ fn main() -> anyhow::Result<()> {
     require_programs(&System)?;
     match cli.command {
         Command::Status => inspect::status(&ctx),
+        Command::Info { slot } => inspect::info(&ctx, slot),
+        Command::Host { slot } => inspect::host(&ctx, slot),
+        Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
     }
 }
 
@@ -55,5 +77,40 @@ mod tests {
                 .unwrap();
         assert_eq!(cli.env_file, PathBuf::from("testnet.env"));
         assert!(matches!(cli.command, Command::Status));
+    }
+
+    #[test]
+    fn slot_is_a_flag() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-ops",
+            "--env-file",
+            "e",
+            "info",
+            "--slot",
+            "b",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Info {
+                slot: Some(Slot::B)
+            }
+        ));
+        let cli = Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", "info"]).unwrap();
+        assert!(matches!(cli.command, Command::Info { slot: None }));
+        assert!(
+            Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", "info", "b"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hashi-guardian-ops",
+                "--env-file",
+                "e",
+                "info",
+                "--slot",
+                "c"
+            ])
+            .is_err()
+        );
     }
 }
