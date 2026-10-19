@@ -15,6 +15,7 @@ pub mod configs;
 pub mod deploy;
 pub mod inspect;
 pub mod kp_keys;
+pub mod session;
 
 /// Loads the stack and the slot a step names, or the stack's only one.
 fn slot(ctx: &Ctx, arg: Option<Slot>) -> Result<(Stack, SlotView)> {
