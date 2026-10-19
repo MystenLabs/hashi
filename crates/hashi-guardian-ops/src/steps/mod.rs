@@ -13,6 +13,7 @@ use crate::stack::Stack;
 
 pub mod configs;
 pub mod inspect;
+pub mod kp_keys;
 
 /// Loads the stack and the slot a step names, or the stack's only one.
 fn slot(ctx: &Ctx, arg: Option<Slot>) -> Result<(Stack, SlotView)> {

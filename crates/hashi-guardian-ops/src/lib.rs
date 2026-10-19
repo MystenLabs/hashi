@@ -16,6 +16,7 @@ pub mod env;
 pub mod exec;
 pub mod guardian;
 pub mod host;
+pub mod kp_bucket;
 pub mod render;
 pub mod stack;
 pub mod steps;
@@ -63,6 +64,10 @@ pub fn print_detail(msg: &str) {
 
 pub fn print_info(msg: &str) {
     print_detail(&format!("{} {msg}", "ℹ".blue().bold()));
+}
+
+pub fn print_success(msg: &str) {
+    print_detail(&format!("{} {msg}", "✓".green().bold()));
 }
 
 pub fn print_warning(msg: &str) {
