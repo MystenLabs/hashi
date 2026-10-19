@@ -24,8 +24,9 @@
 //!    added to the UTXO pool in the Bitcoin tick, right after its lookups,
 //!    so the pool takes a withdrawal only once Bitcoin has answered for its
 //!    inputs. The pool is checked against Bitcoin once at startup and then
-//!    every `UTXO_CHECK_INTERVAL`, each time right after a Sui poll, so a
-//!    withdrawal Bitcoin has mined is known before its spend is judged.
+//!    every `UTXO_CHECK_INTERVAL`. A spend that check cannot explain waits
+//!    for the Sui cursor to pass the time Bitcoin was asked, then a state
+//!    check judges it.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
 //!    checked-through time is exported.
 //!
@@ -33,7 +34,6 @@
 //! - A poll failure is transient. The auditor logs it and goes on; only a
 //!   failure to start is an error.
 
-use anyhow::Context as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,14 +225,7 @@ impl ContinuousAuditor {
     }
 
     /// Fails if the Bitcoin RPC fails.
-    /// Polls Sui first, so every withdrawal Bitcoin has mined is known and
-    /// its inputs are excused. A withdrawal committed since the last poll
-    /// can be mined already, and its spend would look unexpected. The check
-    /// is skipped when that poll fails.
     async fn tick_utxo_check(&mut self) -> anyhow::Result<()> {
-        self.tick_sui()
-            .await
-            .context("Sui poll before the UTXO pool check failed; check skipped")?;
         let started_at = now_timestamp_secs();
         let findings = self.inner.check_utxo_pool()?;
         self.report_findings(SOURCE_UTXO, &findings);
@@ -262,6 +255,8 @@ impl ContinuousAuditor {
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("violations", &violations);
+        let spends = self.inner.judge_suspect_spends();
+        self.report_findings(SOURCE_UTXO, &spends);
 
         let progress = self.inner.progress_watermarks(&self.window);
         tracing::info!(
@@ -292,7 +287,7 @@ impl ContinuousAuditor {
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
         // After the Bitcoin tick, which moved the confirmed withdrawals and
-        // deposits through the pool. The check polls Sui again itself.
+        // deposits through the pool.
         let utxo = self.tick_utxo_check().await;
         Self::log_initial_catch_up(SOURCE_UTXO, utxo);
         self.tick_state_checks_and_gc().await;
@@ -451,6 +446,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
             utxo_pool: None,
+            suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
             sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -483,6 +479,7 @@ mod tests {
                 pending_deposits: HashMap::new(),
                 pending_deposit_requests: HashMap::new(),
                 utxo_pool,
+                suspect_spends: HashMap::new(),
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, guardian_cursor),
                 sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
                 btc_client: BtcRpcClient::new(cfg).unwrap(),

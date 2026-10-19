@@ -113,16 +113,17 @@ the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Continuous monitoring" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
-held. It polls Sui first, so a withdrawal Bitcoin has mined is known and its
-inputs are excused; when that poll fails, the check is skipped. It logs the
-twenty UTXOs held longest, by block time, with each one's age, amount and
-origin. Then it reports:
+held. It first logs the twenty UTXOs held longest, by block time, with each
+one's age, amount and origin. Then it reports:
 
 - **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
   (31 days, since honest coin selection refreshes UTXOs older than 30);
 - **safety** `UtxoTooOld` past `UTXO_AGE_CRITICAL` (45 days), and
   `UtxoUnexpectedSpend` when a UTXO was spent by a transaction that is not a
-  confirmed Hashi withdrawal;
+  confirmed Hashi withdrawal. This one is not reported at once: a withdrawal
+  committed since the last Sui poll can be mined already. The spend waits,
+  and a state check reports it once the Sui cursor is past the time Bitcoin
+  was asked and still no followed withdrawal names the UTXO;
 - **safety** `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
   confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
   entered, so a missing answer is a reorg, a node without the transaction

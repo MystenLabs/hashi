@@ -22,6 +22,9 @@
 //!    moved, and the flows are dropped.
 //! 6. The progress watermarks give the time through which every flow is
 //!    verified, which is where a restart starts.
+//! 7. The UTXO pool check asks Bitcoin about every held UTXO. A spend no
+//!    followed withdrawal explains is a suspect, judged at a later state
+//!    check once the Sui cursor is past the time Bitcoin was asked.
 //!
 //! Assumptions:
 //! - The user's window is on the guardian timeline. A withdrawal is in the
@@ -162,6 +165,13 @@ impl fmt::Display for WithdrawalProgressBlocker {
     }
 }
 
+/// A spend the UTXO pool check saw that no followed withdrawal explained.
+struct SuspectSpend {
+    /// When Bitcoin was asked. Judged once the Sui cursor is past it.
+    asked_at: UnixSeconds,
+    amount: u64,
+}
+
 pub struct AuditorCore {
     // immutable
     cfg: Config,
@@ -176,6 +186,9 @@ pub struct AuditorCore {
     /// keeps no pool: batch mode has none, and continuous mode keeps one in
     /// its snapshot.
     utxo_pool: Option<UtxoPool>,
+    /// Spends waiting for the Sui cursor, by outpoint. Not in the snapshot:
+    /// the next pool check finds them again.
+    suspect_spends: HashMap<OutPoint, SuspectSpend>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
@@ -198,36 +211,45 @@ impl AuditorCore {
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
             utxo_pool,
+            suspect_spends: HashMap::new(),
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
         })
     }
 
-    /// Ask Bitcoin about every coin held in the UTXO pool and return the
-    /// findings. Nothing when no pool is kept.
-    pub fn check_utxo_pool(&self) -> anyhow::Result<Vec<MonitorFinding>> {
-        let Some(pool) = &self.utxo_pool else {
-            return Ok(Vec::new());
-        };
-        self.btc_client.ensure_synced()?;
-        // A withdrawal the monitor follows spends its inputs on Bitcoin
-        // before the flow completes, so those are not checked.
-        let pending_inputs = self
-            .pending_withdrawals
+    /// The inputs of every withdrawal the monitor follows. It spends them
+    /// on Bitcoin before its flow completes, so a spend of one is expected.
+    fn pending_inputs(&self) -> HashSet<OutPoint> {
+        self.pending_withdrawals
             .values()
             .flat_map(|sm| sm.tx().inputs.iter())
             .map(|input| OutPoint {
                 txid: Txid::from(input.id.txid),
                 vout: input.id.vout,
             })
-            .collect::<HashSet<_>>();
+            .collect()
+    }
+
+    /// Ask Bitcoin about every coin held in the UTXO pool and return the
+    /// findings. Nothing when no pool is kept. A spend that no followed
+    /// withdrawal explains is not a finding yet: a withdrawal committed
+    /// since the last Sui poll can be mined already. It is kept as a
+    /// suspect for `judge_suspect_spends`.
+    pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
+        let Some(pool) = &self.utxo_pool else {
+            return Ok(Vec::new());
+        };
+        self.btc_client.ensure_synced()?;
+        let pending_inputs = self.pending_inputs();
         let outpoints = pool
             .outpoints()
             .into_iter()
             .filter(|outpoint| !pending_inputs.contains(outpoint))
             .collect::<Vec<_>>();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
+        // Before the lookups, so a withdrawal committed during them still
+        // waits for the Sui cursor.
         let now = now_timestamp_secs();
         let oldest = pool.oldest(OLDEST_UTXOS_LOGGED);
         let oldest_lines = oldest
@@ -249,13 +271,52 @@ impl AuditorCore {
             "the UTXOs held longest, by block time:{oldest_lines}"
         );
         let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
-        let findings = pool.check(&states, &pending_inputs, now, &self.cfg.timing);
+        let mut findings = Vec::new();
+        let mut suspects = 0usize;
+        for finding in pool.check(&states, &pending_inputs, now, &self.cfg.timing) {
+            match finding {
+                MonitorFinding::UtxoUnexpectedSpend { outpoint, amount } => {
+                    suspects += 1;
+                    self.suspect_spends.entry(outpoint).or_insert(SuspectSpend {
+                        asked_at: now,
+                        amount,
+                    });
+                }
+                other => findings.push(other),
+            }
+        }
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),
+            suspects,
             "finished UTXO pool check"
         );
         Ok(findings)
+    }
+
+    /// Judge the spends the pool check could not explain. One is unexpected
+    /// once the Sui cursor is past the time Bitcoin was asked and still no
+    /// followed withdrawal names the UTXO: every withdrawal committed
+    /// before that time is known by then. Until then it waits.
+    pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
+        let named = self.pending_inputs();
+        let sui_cursor = self.sui_cursor();
+        let mut findings = Vec::new();
+        self.suspect_spends.retain(|outpoint, suspect| {
+            if named.contains(outpoint) {
+                tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
+                return false;
+            }
+            if sui_cursor <= suspect.asked_at {
+                return true;
+            }
+            findings.push(MonitorFinding::UtxoUnexpectedSpend {
+                outpoint: *outpoint,
+                amount: suspect.amount,
+            });
+            false
+        });
+        findings
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
@@ -718,6 +779,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
             utxo_pool: None,
+            suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -878,6 +940,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
             utxo_pool: None,
+            suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -910,6 +973,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
             utxo_pool: Some(UtxoPool::default()),
+            suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at).await,
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
@@ -1001,5 +1065,77 @@ mod tests {
         let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());
         assert_eq!(taken.restart_start, cursors);
         assert!(taken.withdrawal_blockers.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_suspect_spend_waits_while_the_sui_cursor_is_not_past_its_time() {
+        let mut auditor = auditor_with_pool().await;
+        let cursor = auditor.sui_cursor();
+        let outpoint = OutPoint {
+            txid: txid(9),
+            vout: 1,
+        };
+        auditor.suspect_spends.insert(
+            outpoint,
+            SuspectSpend {
+                asked_at: cursor,
+                amount: 5_000,
+            },
+        );
+
+        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.suspect_spends.contains_key(&outpoint));
+    }
+
+    #[tokio::test]
+    async fn a_suspect_spend_is_unexpected_once_the_sui_cursor_is_past_its_time() {
+        let mut auditor = auditor_with_pool().await;
+        let cursor = auditor.sui_cursor();
+        let outpoint = OutPoint {
+            txid: txid(9),
+            vout: 1,
+        };
+        auditor.suspect_spends.insert(
+            outpoint,
+            SuspectSpend {
+                asked_at: cursor - 1,
+                amount: 5_000,
+            },
+        );
+
+        assert_eq!(
+            auditor.judge_suspect_spends(),
+            vec![MonitorFinding::UtxoUnexpectedSpend {
+                outpoint,
+                amount: 5_000,
+            }]
+        );
+        assert!(auditor.suspect_spends.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_suspect_spend_a_withdrawal_names_is_cleared_without_a_finding() {
+        let mut auditor = auditor_with_pool().await;
+        let timing = auditor.cfg.timing.clone();
+        let cursor = auditor.sui_cursor();
+        // `withdrawal_tx` spends `txid(0x51):1`.
+        let outpoint = OutPoint {
+            txid: txid(0x51),
+            vout: 1,
+        };
+        auditor.suspect_spends.insert(
+            outpoint,
+            SuspectSpend {
+                asked_at: cursor - 1,
+                amount: 5_000,
+            },
+        );
+        auditor.pending_withdrawals.insert(
+            WithdrawalID::new([7; 32]),
+            complete_withdrawal(7, 7, vec![outpoint], &timing),
+        );
+
+        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.suspect_spends.is_empty());
     }
 }
