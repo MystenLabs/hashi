@@ -9,6 +9,7 @@ umask 077
 OUTPUT_DIR=.
 FORCE_WIPE=false
 WORK_DIR=
+GPG_HOME=
 KEYGEN_STARTED=false
 COMPLETE=false
 CARD=
@@ -30,19 +31,21 @@ run_or_die() {
 cleanup() {
   local status=$?
   trap - EXIT
+  if [[ -n "$GPG_HOME" ]]; then
+    gpgconf --homedir "$GPG_HOME" --kill all >/dev/null 2>&1 || true
+    rm -rf -- "$GPG_HOME"
+  fi
   if [[ -n "$WORK_DIR" ]]; then
-    # Test material and the isolated GnuPG home are never recovery artifacts.
-    if [[ -d "$WORK_DIR/gnupg" ]]; then
-      gpgconf --homedir "$WORK_DIR/gnupg" --kill all >/dev/null 2>&1 || true
-    fi
-    rm -rf -- "$WORK_DIR/gnupg"
+    # Keep public recovery artifacts, but never throwaway test material.
     rm -f -- "$WORK_DIR/test.txt" "$WORK_DIR/test.asc" "$WORK_DIR/test.decrypted"
     if [[ "$KEYGEN_STARTED" == true && "$COMPLETE" != true ]]; then
-      printf '\nProvisioning stopped after key generation was attempted. DO NOT regenerate keys or reset the card.\n' >&2
+      printf '\nProvisioning stopped after key generation was attempted; keys may or may not have been created.\n' >&2
       printf 'Public recovery files are retained in: %s\n' "$WORK_DIR" >&2
       printf '%s\n' \
         'Keep public.asc (even if a later step failed) and any files already published in the output directory.' \
-        'Inspect the card with oct status; resolve the reported error using the existing keys.' \
+        'Inspect the card with oct status. If no keys were created, rerun using the current PINs.' \
+        'If keys were created but no data depends on them, you can restart with --force-wipe.' \
+        'If data is encrypted to these keys, do not wipe or regenerate them; recover the public artifacts instead.' \
         'If public.asc is absent or incomplete, recover the existing public certificate with oct pubkey, not oct admin generate.' \
         'Recover ATT with ykman openpgp certificates export --format PEM att FILE and DEC with ykman openpgp keys attest --format PEM dec FILE.' \
         'Never import or generate an ATT key. Check oct pubkey --help for certificate recovery options.' >&2
@@ -102,6 +105,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+# Use a short absolute path: macOS TMPDIR and output paths can exceed GPG's
+# Unix socket path limit. Initialize before any PIN changes or key generation.
+GPG_HOME=$(mktemp -d /tmp/hashi-gpg.XXXXXXXX) || die 'Could not create the isolated test keyring.'
+run_or_die 'Could not launch the test GnuPG agent.' gpgconf --homedir "$GPG_HOME" --launch gpg-agent
+
 # Both inventories must stay unambiguous. Pin ykman mutations to the serial,
 # and oct mutations to the OpenPGP card identifier selected here.
 inspect_devices() {
@@ -155,17 +163,25 @@ require_empty_slots() {
 
 printf '%s\n' 'Disconnect every other YubiKey and OpenPGP card before continuing.'
 inspect_devices
-info=$(ykman --device "$SERIAL" info) || die 'Could not read firmware version.'
+info=$(ykman --device "$SERIAL" info) || die 'Could not read YubiKey model and firmware version.'
 firmware_count=0
 firmware_major=0
 firmware_minor=0
+device_count=0
+device_type=
 while IFS= read -r line; do
+  if [[ "$line" == "Device type: "* ]]; then
+    device_count=$((device_count + 1))
+    device_type=${line#Device type: }
+  fi
   if [[ "$line" =~ ^Firmware[[:space:]]version:[[:space:]]+([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})[[:space:]]*$ ]]; then
     firmware_count=$((firmware_count + 1))
     firmware_major=$((10#${BASH_REMATCH[1]}))
     firmware_minor=$((10#${BASH_REMATCH[2]}))
   fi
 done <<<"$info"
+[[ "$device_count" == 1 && -n "$device_type" ]] || die 'Could not unambiguously identify the YubiKey model; refusing to change the card.'
+[[ "$device_type" != *FIPS* ]] || die 'YubiKey FIPS models are not supported: this script uses X25519 decryption keys. Use a non-FIPS YubiKey; no card data or PINs have been changed.'
 [[ "$firmware_count" == 1 ]] || die 'Could not unambiguously parse the firmware version.'
 ((firmware_major > 5 || (firmware_major == 5 && firmware_minor >= 7))) || die 'YubiKey firmware 5.7 or newer is required.'
 if [[ "$FORCE_WIPE" == true ]]; then
@@ -207,14 +223,12 @@ run_or_die 'Changing the Admin PIN failed. The User PIN may already have changed
 inspect_devices
 require_empty_slots
 KEYGEN_STARTED=true
-run_or_die 'Key generation failed; inspect the existing card keys, do not regenerate.' \
+run_or_die 'Key generation did not complete; inspect the card and follow the recovery guidance below.' \
   oct admin --card "$CARD" generate --userid "$USER_ID" --output "$WORK_DIR/public.asc" --no-aut curve25519
 [[ -s "$WORK_DIR/public.asc" ]] || die 'Key generation produced no public certificate.'
 
-# Use an isolated keyring so decryption cannot accidentally use a local private key.
-run_or_die 'Could not create the test keyring.' mkdir -m 700 -- "$WORK_DIR/gnupg"
-run_or_die 'Could not launch the test GnuPG agent.' gpgconf --homedir "$WORK_DIR/gnupg" --launch gpg-agent
-key_data=$(gpg --homedir "$WORK_DIR/gnupg" --batch --with-colons --show-keys -- "$WORK_DIR/public.asc") || die 'Could not parse the public certificate.'
+# Use the isolated keyring so decryption cannot use a local private key.
+key_data=$(gpg --homedir "$GPG_HOME" --batch --with-colons --show-keys -- "$WORK_DIR/public.asc") || die 'Could not parse the public certificate.'
 primary_fingerprint=
 encryption_fingerprint=
 primary_count=0
@@ -267,7 +281,7 @@ run_or_die 'Could not create the DEC attestation.' \
   ykman --device "$SERIAL" openpgp keys attest --format PEM dec "$WORK_DIR/attestation-dec.pem"
 [[ -s "$WORK_DIR/attestation-dec.pem" ]] || die 'DEC attestation is empty.'
 run_or_die 'Could not export the labeled fingerprint listing.' \
-  gpg --homedir "$WORK_DIR/gnupg" --batch --show-keys --with-subkey-fingerprint \
+  gpg --homedir "$GPG_HOME" --batch --show-keys --with-subkey-fingerprint \
   -- "$WORK_DIR/public.asc" >"$WORK_DIR/fingerprints.txt"
 
 # Noclobber redirection refuses existing files, symlinks, and directories, even
@@ -284,16 +298,16 @@ for suffix in attestation-device.pem attestation-dec.pem fingerprints.txt; do
 done
 
 run_or_die 'Could not import the public certificate for testing.' \
-  gpg --homedir "$WORK_DIR/gnupg" --batch --import "$WORK_DIR/public.asc"
+  gpg --homedir "$GPG_HOME" --batch --import "$WORK_DIR/public.asc"
 run_or_die 'Could not associate the public certificate with the card.' \
-  gpg --homedir "$WORK_DIR/gnupg" --card-status
+  gpg --homedir "$GPG_HOME" --card-status
 printf 'YubiKey backup decryption test: %s\n' "$encryption_fingerprint" >"$WORK_DIR/test.txt"
 run_or_die 'Could not encrypt to the exact encryption subkey.' \
-  gpg --homedir "$WORK_DIR/gnupg" --batch --trust-model always --armor --encrypt \
+  gpg --homedir "$GPG_HOME" --batch --trust-model always --armor --encrypt \
   --recipient "$encryption_fingerprint!" --output "$WORK_DIR/test.asc" "$WORK_DIR/test.txt"
 printf '%s\n' 'Enter the User PIN when prompted. Confirm decryption waits for touch, then touch the YubiKey.'
 run_or_die 'Card-backed test decryption failed.' \
-  gpg --homedir "$WORK_DIR/gnupg" --output "$WORK_DIR/test.decrypted" --decrypt "$WORK_DIR/test.asc"
+  gpg --homedir "$GPG_HOME" --output "$WORK_DIR/test.decrypted" --decrypt "$WORK_DIR/test.asc"
 run_or_die 'Decrypted plaintext did not match.' cmp -s "$WORK_DIR/test.txt" "$WORK_DIR/test.decrypted"
 COMPLETE=true
 printf '\nDecryption round-trip succeeded. Public artifacts:\n'

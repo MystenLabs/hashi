@@ -99,10 +99,22 @@ The script also creates YubiKey attestation evidence. If desired, share all 4
 public files to [assemble a multi-recipient backup certificate](#assemble-a-multi-recipient-backup-certificate),
 which can verify the attestations.
 
+For YubiKey restores with `--use-gpg-agent`, import the public certificate and
+link the card in your normal GnuPG home (the script's test keyring is temporary):
+
+```sh
+gpg --import "./backup-key/yubikey-backup-<fingerprint>.asc"
+gpg --card-status
+```
+
+Replace `<fingerprint>` with the generated filename's fingerprint and keep the
+YubiKey connected; if using a separate recovery GnuPG home, use it for both commands.
+
 Preserve the filenames. Store the YubiKey securely; do not share it or the PINs.
-If setup fails after key generation, retain the public files and follow the
-script's recovery guidance. **Do not regenerate keys:** doing so would destroy
-access to backups encrypted to the existing key.
+If setup fails, retain the public files and inspect the card before retrying.
+You can restart provisioning if no data depends on any newly generated keys.
+Otherwise, preserve the keys and follow the script's public-artifact recovery
+guidance: wiping or regenerating them would destroy access to existing backups.
 
 ### Option 2: Create a local private key file
 
