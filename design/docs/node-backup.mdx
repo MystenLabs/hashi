@@ -240,6 +240,11 @@ policy, and it does not check X.509 expiry or revocation.
 Before relying on the certificate, make a backup and confirm that each recipient
 can restore that same archive independently.
 
+Run `hashi backup test --backup-pgp-cert hashi-backup-cert.asc --use-gpg-agent`
+for a temporary-message round trip with a YubiKey or GnuPG key, or replace
+`--use-gpg-agent` with `--backup-pgp-secret-key private.asc` for a local private key.
+Test files are automatically cleaned up on success or error.
+
 ## Configuring hashi
 
 Every node config must provide `backup-pgp-cert` (a certificate file path or inline

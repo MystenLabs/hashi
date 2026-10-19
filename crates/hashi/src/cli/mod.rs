@@ -476,6 +476,29 @@ pub enum ConfigCommands {
 
 #[derive(Subcommand)]
 pub enum BackupCommands {
+    /// Encrypt a temporary test message and verify it can be decrypted
+    Test {
+        /// Public OpenPGP certificate file to encrypt to
+        #[clap(long)]
+        backup_pgp_cert: std::path::PathBuf,
+
+        /// Decrypt with a local OpenPGP secret key file
+        #[clap(long, conflicts_with = "use_gpg_agent")]
+        backup_pgp_secret_key: Option<std::path::PathBuf>,
+
+        /// Decrypt through GnuPG using a YubiKey/OpenPGP smartcard or a key in its keyring
+        #[clap(long)]
+        use_gpg_agent: bool,
+
+        /// GNUPGHOME to use with --use-gpg-agent
+        #[clap(
+            long,
+            requires = "use_gpg_agent",
+            conflicts_with = "backup_pgp_secret_key"
+        )]
+        gpg_homedir: Option<std::path::PathBuf>,
+    },
+
     #[cfg(feature = "backup-assemble-cert")]
     #[clap(about = "Assemble a multi-recipient OpenPGP backup certificate using gpg-agent")]
     AssembleCert {
@@ -1377,6 +1400,23 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
         },
         CliCommand::Backup { action } => match action {
+            BackupCommands::Test {
+                backup_pgp_cert,
+                backup_pgp_secret_key,
+                use_gpg_agent,
+                gpg_homedir,
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    commands::backup::test(
+                        &backup_pgp_cert,
+                        backup_pgp_secret_key.as_deref(),
+                        use_gpg_agent,
+                        gpg_homedir.as_deref(),
+                    )
+                })
+                .await
+                .context("Backup test task failed")??;
+            }
             #[cfg(feature = "backup-assemble-cert")]
             BackupCommands::AssembleCert {
                 primary_cert,

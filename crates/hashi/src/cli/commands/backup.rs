@@ -14,6 +14,7 @@ use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
 use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::decrypt_with_secret_key;
+use hashi_types::pgp::encrypt_armored;
 use std::fs;
 use std::fs::File;
 use std::io;
@@ -264,6 +265,51 @@ pub fn recover_mpc_key(
     });
     write_encrypted_bcs(output, &recovered, output_recipient)?;
     print_success(&format!("MPC root key recovered: {}", output.display()));
+    Ok(())
+}
+
+/// Test the normal encryption and restore decryptors without creating a backup.
+pub fn test(
+    cert_path: &Path,
+    secret_key: Option<&Path>,
+    use_gpg_agent: bool,
+    gpg_homedir: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!(
+        secret_key.is_some() != use_gpg_agent,
+        "Pass exactly one test backend: --backup-pgp-secret-key or --use-gpg-agent"
+    );
+    let cert = PgpPublicCert::new(
+        fs::read_to_string(cert_path)
+            .with_context(|| format!("Failed to read certificate {}", cert_path.display()))?,
+    )?;
+    let temp = tempfile::Builder::new()
+        .prefix("hashi-backup-test-")
+        .tempdir()?;
+    let message = format!(
+        "Hashi backup encryption/decryption test at {}.\n",
+        jiff::Timestamp::now()
+    );
+    fs::write(temp.path().join("test.txt"), &message)?;
+    let encrypted = temp.path().join("test.asc");
+    fs::write(&encrypted, encrypt_armored(message.as_bytes(), &cert)?)?;
+    let decrypted = temp.path().join("decrypted.txt");
+    let mut output = File::create(&decrypted)?;
+    if let Some(key) = secret_key {
+        io::copy(
+            &mut decrypt_with_local_secret_key(&encrypted, key)?,
+            &mut output,
+        )?;
+    } else {
+        io::copy(&mut decrypt_with_gpg(&encrypted, gpg_homedir)?, &mut output)?;
+    }
+    drop(output);
+    anyhow::ensure!(
+        fs::read(&decrypted)? == message.as_bytes(),
+        "Backup test failed: decrypted message differs from the original"
+    );
+    temp.close().context("Failed to remove backup test files")?;
+    print_success("Backup encryption/decryption test passed");
     Ok(())
 }
 
