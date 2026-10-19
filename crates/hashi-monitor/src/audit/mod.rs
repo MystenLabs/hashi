@@ -432,7 +432,11 @@ impl AuditorCore {
     /// deposit request Bitcoin has not answered, or an output of a
     /// withdrawal that is not complete or that waits itself. Its inputs are
     /// not in the pool yet, and a spend of them would be a false finding.
-    /// The next state check tries again.
+    /// The next state check tries again. The wait is bounded: a request
+    /// lapses on its own, and a withdrawal past a deadline, one with a
+    /// missing-event finding, blocks nothing. Its spends then go through,
+    /// and each one of its change is a finding, as a spend of an unknown
+    /// UTXO.
     fn ready_withdrawals(
         &self,
         window: &impl AuditWindow,
@@ -443,11 +447,14 @@ impl AuditorCore {
             .filter(|sm| sm.is_expecting_events())
             .map(|sm| OutPoint::from(sm.deposit_id()))
             .collect::<HashSet<_>>();
+        let cursors = self.cursors();
         let mut blocked_txids = HashSet::new();
         let mut ready = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if sm.is_expecting_events() {
-                blocked_txids.insert(sm.btc_txid());
+                if !sm.is_in_audit_window(window) || sm.violations(&cursors).is_empty() {
+                    blocked_txids.insert(sm.btc_txid());
+                }
             } else if sm.is_in_audit_window(window) {
                 ready.push(sm);
             }
@@ -1105,5 +1112,53 @@ mod tests {
             }]
         );
         assert!(auditor.pending_withdrawals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_complete_withdrawal_waits_for_an_open_parent_until_its_deadline() {
+        let mut auditor = auditor_with_pool().await;
+        let timing = auditor.cfg.timing.clone();
+        let cursor = looked_up_approval().timestamp_secs;
+        // The parent has only its guardian approval, and its E1 is not due
+        // yet at the Sui cursor.
+        let parent_approval = |at: UnixSeconds| MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            wid: WithdrawalID::new([7; 32]),
+            timestamp_secs: at,
+            btc_txid: txid(7),
+            tx: withdrawal_tx(vec![0x55; 20]),
+        };
+        auditor.pending_withdrawals.insert(
+            WithdrawalID::new([7; 32]),
+            WithdrawalStateMachine::new(parent_approval(cursor), &timing),
+        );
+        auditor.pending_withdrawals.insert(
+            WithdrawalID::new([8; 32]),
+            complete_withdrawal(8, 8, vec![change_of(7)], &timing),
+        );
+
+        assert!(auditor.retire_complete_flows(&AllTime).is_empty());
+        assert_eq!(auditor.pending_withdrawals.len(), 2);
+
+        // The parent's E1 is overdue: it blocks nothing, and the child's
+        // spend of its change is a finding.
+        auditor.pending_withdrawals.insert(
+            WithdrawalID::new([7; 32]),
+            WithdrawalStateMachine::new(parent_approval(cursor - 100), &timing),
+        );
+        let findings = auditor.retire_complete_flows(&AllTime);
+
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::UtxoUnknownInputSpent {
+                outpoint: change_of(7),
+                txid: txid(8),
+            }]
+        );
+        assert_eq!(auditor.pending_withdrawals.len(), 1);
+        assert_eq!(
+            auditor.utxo_pool.as_ref().unwrap().outpoints(),
+            vec![change_of(8)]
+        );
     }
 }
