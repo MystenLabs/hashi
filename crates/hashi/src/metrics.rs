@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
+use prometheus::CounterVec;
 use prometheus::Histogram;
 use prometheus::HistogramVec;
 use prometheus::IntCounter;
@@ -13,6 +14,7 @@ use prometheus::IntCounterVec;
 use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 use prometheus::Registry;
+use prometheus::register_counter_vec_with_registry;
 use prometheus::register_histogram_vec_with_registry;
 use prometheus::register_histogram_with_registry;
 use prometheus::register_int_counter_vec_with_registry;
@@ -47,6 +49,7 @@ pub struct Metrics {
     pub(crate) peer_first_seen_timestamp_seconds: IntGaugeVec,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
+    pub(crate) peer_bridge_work_seconds_total: CounterVec,
 
     // Per-MPC-protocol body-size metrics.
     pub(crate) mpc_request_size_bytes: HistogramVec,
@@ -311,6 +314,11 @@ pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
 
+pub const SIGNING_REFUSAL_COMMITTEE: &str = "committee";
+pub const SIGNING_REFUSAL_CAP: &str = "cap";
+pub const SIGNING_REFUSAL_BUSY: &str = "busy";
+pub const SIGNING_REFUSAL_SHAPE: &str = "shape";
+
 pub(crate) const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "unchecked",
     "not_found",
@@ -537,8 +545,15 @@ impl Metrics {
             .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
-                "SignWithdrawalTransaction, SignWithdrawalTxSigning and SignMpcInputSignatures calls refused, by caller and reason (committee, cap or shape)",
+                "SignWithdrawalTransaction, SignWithdrawalTxSigning and SignMpcInputSignatures calls refused, by caller and reason (committee, cap, busy or shape)",
                 &["peer", "reason"],
+                registry,
+            )
+            .unwrap(),
+            peer_bridge_work_seconds_total: register_counter_vec_with_registry!(
+                "hashi_peer_bridge_work_seconds_total",
+                "Seconds withdrawal signing jobs ran on the blocking pool, by caller",
+                &["peer"],
                 registry,
             )
             .unwrap(),

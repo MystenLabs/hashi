@@ -14,10 +14,13 @@ use std::task::Poll;
 use std::task::ready;
 
 use bytes::Bytes;
+use prometheus::Counter;
 use prometheus::Histogram;
 use prometheus::IntCounter;
 use prometheus::IntGauge;
 use sui_sdk_types::Address;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
 use super::request_body::LimitedBody;
 use super::route_limits::RouteLimits;
@@ -218,6 +221,17 @@ impl PeerInflightLimiter {
                 let label = address.to_string();
                 let metrics = &self.0.metrics;
                 metrics.peer_first_seen(&label);
+                for reason in [
+                    crate::metrics::SIGNING_REFUSAL_BUSY,
+                    crate::metrics::SIGNING_REFUSAL_SHAPE,
+                ] {
+                    metrics
+                        .withdrawal_signing_refused_total
+                        .with_label_values(&[&label, reason]);
+                }
+                metrics
+                    .peer_bridge_work_seconds_total
+                    .with_label_values(&[&label]);
                 Arc::new(Peer {
                     inflight: AtomicU32::new(0),
                     high_water: AtomicU32::new(0),
@@ -521,6 +535,97 @@ impl Drop for CallerTaskSlot {
     fn drop(&mut self) {
         if let Some(entry) = self.tasks.lock().unwrap().get_mut(&self.caller) {
             entry.active -= 1;
+        }
+    }
+}
+
+const SIGNING_PLACES: usize = 6;
+const SIGNING_RUNS: usize = 2;
+
+#[derive(Clone, Default)]
+pub(crate) struct SigningWorkLimiter {
+    callers: Arc<Mutex<HashMap<Address, CallerSigningWork>>>,
+}
+
+#[derive(Clone)]
+struct CallerSigningWork {
+    places: Arc<Semaphore>,
+    runs: Arc<Semaphore>,
+}
+
+pub(crate) struct SigningPlace {
+    place: OwnedSemaphorePermit,
+    runs: Arc<Semaphore>,
+}
+
+pub(crate) struct SigningRun {
+    place: OwnedSemaphorePermit,
+    run: OwnedSemaphorePermit,
+}
+
+impl SigningWorkLimiter {
+    pub(crate) fn try_take_place(&self, caller: Address) -> Option<SigningPlace> {
+        let work = self
+            .callers
+            .lock()
+            .unwrap()
+            .entry(caller)
+            .or_insert_with(|| CallerSigningWork {
+                places: Arc::new(Semaphore::new(SIGNING_PLACES)),
+                runs: Arc::new(Semaphore::new(SIGNING_RUNS)),
+            })
+            .clone();
+        let place = work.places.try_acquire_owned().ok()?;
+        Some(SigningPlace {
+            place,
+            runs: work.runs,
+        })
+    }
+
+    #[cfg(test)]
+    fn available(&self, caller: Address) -> (usize, usize) {
+        let callers = self.callers.lock().unwrap();
+        let work = &callers[&caller];
+        (
+            work.places.available_permits(),
+            work.runs.available_permits(),
+        )
+    }
+}
+
+impl SigningPlace {
+    pub(crate) async fn run(self) -> SigningRun {
+        let run = self
+            .runs
+            .acquire_owned()
+            .await
+            .expect("signing run semaphores are never closed");
+        SigningRun {
+            place: self.place,
+            run,
+        }
+    }
+}
+
+impl SigningRun {
+    pub(crate) async fn run_blocking<T: Send + 'static>(
+        self,
+        work_seconds: Counter,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> (T, OwnedSemaphorePermit) {
+        let span = tracing::Span::current();
+        let job = tokio::task::spawn_blocking(move || {
+            let _span = span.entered();
+            let started = std::time::Instant::now();
+            let output = work();
+            work_seconds.inc_by(started.elapsed().as_secs_f64());
+            drop(self.run);
+            (output, self.place)
+        });
+        match job.await {
+            Ok(output) => output,
+            Err(e) if e.is_cancelled() => std::future::pending().await,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
         }
     }
 }
@@ -1060,6 +1165,53 @@ mod tests {
                 .get(),
             limit as i64
         );
+    }
+
+    #[tokio::test]
+    async fn a_caller_runs_two_signing_jobs_and_queues_four() {
+        use futures::FutureExt;
+
+        let limiter = SigningWorkLimiter::default();
+        let mut places: Vec<_> = (0..SIGNING_PLACES)
+            .map(|_| limiter.try_take_place(peer(b'a')).unwrap())
+            .collect();
+        assert!(limiter.try_take_place(peer(b'a')).is_none());
+        assert!(limiter.try_take_place(peer(b'b')).is_some());
+
+        let mut running = Vec::new();
+        for _ in 0..SIGNING_RUNS {
+            running.push(places.pop().unwrap().run().await);
+        }
+        assert!(places.pop().unwrap().run().now_or_never().is_none());
+        assert_eq!(limiter.available(peer(b'a')), (1, 0));
+
+        running.pop();
+        assert!(places.pop().unwrap().run().now_or_never().is_some());
+        assert_eq!(limiter.available(peer(b'a')), (3, 1));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_signing_job_keeps_its_permits_until_it_ends() {
+        let limiter = SigningWorkLimiter::default();
+        let run = limiter.try_take_place(peer(b'a')).unwrap().run().await;
+        let (started, wait_started) = tokio::sync::oneshot::channel();
+        let (release, wait_release) = std::sync::mpsc::channel::<()>();
+        let work_seconds = Counter::new("work_seconds", "work seconds").unwrap();
+        let job = tokio::spawn(run.run_blocking(work_seconds.clone(), move || {
+            started.send(()).unwrap();
+            wait_release.recv().unwrap();
+        }));
+        wait_started.await.unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            limiter.available(peer(b'a')),
+            (SIGNING_PLACES - 1, SIGNING_RUNS - 1)
+        );
+
+        release.send(()).unwrap();
+        until(|| limiter.available(peer(b'a')) == (SIGNING_PLACES, SIGNING_RUNS)).await;
+        assert!(work_seconds.get() > 0.0);
     }
 
     #[tokio::test]
