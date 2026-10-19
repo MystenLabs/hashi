@@ -180,12 +180,12 @@ impl From<UtxoPool> for UtxoPoolWire {
 }
 
 impl UtxoPool {
-    /// The number of UTXOs held.
     /// Whether a withdrawal the pool took spent the UTXO.
     pub fn is_spent(&self, outpoint: &OutPoint) -> bool {
         self.spent.contains_key(outpoint)
     }
 
+    /// The number of UTXOs held.
     pub fn len(&self) -> usize {
         self.utxos.len()
     }
@@ -200,7 +200,6 @@ impl UtxoPool {
         self.spent.len()
     }
 
-    /// The outpoints held, in order.
     /// The `count` UTXOs held longest, oldest first by block time.
     pub fn oldest(&self, count: usize) -> Vec<(OutPoint, &Utxo)> {
         let mut utxos = self
@@ -213,6 +212,7 @@ impl UtxoPool {
         utxos
     }
 
+    /// The outpoints held, in order.
     pub fn outpoints(&self) -> Vec<OutPoint> {
         self.utxos.keys().copied().collect()
     }
