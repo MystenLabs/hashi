@@ -1685,7 +1685,7 @@ impl Metrics {
             .unwrap(),
             mpc_sign_collection_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_sign_collection_duration_seconds",
-                "Duration of P2P partial signature collection from peers",
+                "Time to collect and aggregate partial signatures, including run permit waits",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,

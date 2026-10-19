@@ -1412,7 +1412,7 @@ Notes:
 | `hashi_mpc_unguarded_spawn_blocking_total` | counter | MPC work started outside the per-peer budget. Healthy: `0`. |
 | `hashi_peer_first_seen_timestamp_seconds` | gauge | When this node first saw each peer since start. The peer alerts need it. |
 | `hashi_withdrawal_signing_refused_total` | counter | Withdrawal signing calls this node refused as `committee`, `cap`, `busy` or `shape`, by `peer`. Healthy: `shape` flat, and `busy` too while the leader has a guardian. `committee` moves at epoch changes, and `cap` is noisy. |
-| `hashi_peer_bridge_work_seconds_total` | counter | Seconds this node spent validating each peer's withdrawal signing requests, at most two at a time per peer. A rate near 2 over an hour means the peer keeps both busy, which an honest leader with a guardian does not unless your node is much slower than its peers. |
+| `hashi_peer_bridge_work_seconds_total` | counter | Seconds this node spent validating and signing each peer's withdrawal signing requests, at most two at a time per peer. A rate near 2 over an hour means the peer keeps both busy, which an honest leader with a guardian does not unless your node is much slower than its peers, or another member's bad partial signatures are slowing aggregation (`hashi_mpc_partial_sig_mismatch_total` names that member when the blame is certain). |
 
 > **Not in the 1.0 releases.** `hashi_withdrawal_bitcoin_check_script_failures_total` and `hashi_withdrawal_bitcoin_check_blind` come with the `testmempoolaccept` withdrawal check, which `testnet-1.0` and `mainnet-1.0` do not have. On 1.0 both metrics are absent and their alerts in [8.4](#84-suggested-alerts) never fire.
 

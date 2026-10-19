@@ -605,6 +605,13 @@ impl SigningPlace {
             run,
         }
     }
+
+    pub(crate) fn run_gate(&self, work_seconds: Counter) -> RunGate {
+        RunGate::Caller {
+            runs: self.runs.clone(),
+            work_seconds,
+        }
+    }
 }
 
 impl SigningRun {
@@ -613,20 +620,78 @@ impl SigningRun {
         work_seconds: Counter,
         work: impl FnOnce() -> T + Send + 'static,
     ) -> (T, OwnedSemaphorePermit) {
-        let span = tracing::Span::current();
-        let job = tokio::task::spawn_blocking(move || {
-            let _span = span.entered();
-            let started = std::time::Instant::now();
-            let output = work();
-            work_seconds.inc_by(started.elapsed().as_secs_f64());
-            drop(self.run);
-            (output, self.place)
-        });
-        match job.await {
-            Ok(output) => output,
-            Err(e) if e.is_cancelled() => std::future::pending().await,
-            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        let place = self.place;
+        run_holding(self.run, work_seconds, move || (work(), place)).await
+    }
+}
+
+pub(crate) enum RunGate {
+    Unbounded,
+    Caller {
+        runs: Arc<Semaphore>,
+        work_seconds: Counter,
+    },
+}
+
+pub(crate) enum GatedRun {
+    Unbounded,
+    Caller {
+        run: OwnedSemaphorePermit,
+        work_seconds: Counter,
+    },
+}
+
+impl RunGate {
+    pub(crate) async fn admit(&self, deadline: tokio::time::Instant) -> Option<GatedRun> {
+        match self {
+            RunGate::Unbounded => Some(GatedRun::Unbounded),
+            RunGate::Caller { runs, work_seconds } => {
+                let run = tokio::time::timeout_at(deadline, runs.clone().acquire_owned())
+                    .await
+                    .ok()?
+                    .expect("signing run semaphores are never closed");
+                Some(GatedRun::Caller {
+                    run,
+                    work_seconds: work_seconds.clone(),
+                })
+            }
         }
+    }
+}
+
+impl GatedRun {
+    pub(crate) async fn run_blocking<T: Send + 'static>(
+        self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        match self {
+            GatedRun::Unbounded => {
+                let span = tracing::Span::current();
+                crate::mpc::spawn_blocking(move || span.in_scope(work)).await
+            }
+            GatedRun::Caller { run, work_seconds } => run_holding(run, work_seconds, work).await,
+        }
+    }
+}
+
+async fn run_holding<T: Send + 'static>(
+    run: OwnedSemaphorePermit,
+    work_seconds: Counter,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let span = tracing::Span::current();
+    let job = tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+        let started = std::time::Instant::now();
+        let output = work();
+        work_seconds.inc_by(started.elapsed().as_secs_f64());
+        drop(run);
+        output
+    });
+    match job.await {
+        Ok(output) => output,
+        Err(e) if e.is_cancelled() => std::future::pending().await,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
     }
 }
 

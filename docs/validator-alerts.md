@@ -61,10 +61,12 @@ Dashboard-worthy but **not** alerts:
   `hashi_peer_connections_max` — each peer's peak since start, against limits
   such as `hashi_peer_inflight_limit_bytes`.
 - `hashi_peer_bridge_work_seconds_total` — seconds your node spent validating
-  each peer's withdrawal signing requests, at most two at a time per peer. A
-  rate near 2 over an hour means the peer keeps both busy, which an honest
-  leader with a guardian does not unless your node is much slower than its
-  peers.
+  and signing each peer's withdrawal signing requests, at most two at a time
+  per peer. A rate near 2 over an hour means the peer keeps both busy, which an
+  honest leader with a guardian does not unless your node is much slower than
+  its peers, or another member's bad partial signatures are slowing aggregation
+  (`hashi_mpc_partial_sig_mismatch_total` names that member when the blame is
+  certain).
 
 ## What NOT to alert on
 
