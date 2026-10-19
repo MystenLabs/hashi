@@ -11,6 +11,7 @@ use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::configs;
+use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 
@@ -59,6 +60,19 @@ enum Command {
         #[arg(long)]
         slot: Option<Slot>,
     },
+    /// Measure a slot's build on GitHub's two runners, or check a run.
+    Measure {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+        /// Check this run of the measurement workflow instead of dispatching one.
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+    /// Apply the whole enclave stack, for a guardian's first deployment.
+    Deploy,
+    /// Build the proxy at the active slot's commit and roll it, through the workflow GUARDIAN_PROXY_WORKFLOW names.
+    Proxy,
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -78,6 +92,9 @@ fn main() -> anyhow::Result<()> {
         Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Command::Render { slot } => configs::render(&ctx, slot),
         Command::Publish { slot } => configs::publish(&ctx, slot),
+        Command::Measure { slot, run_id } => deploy::measure(&ctx, slot, run_id),
+        Command::Deploy => deploy::deploy(&ctx),
+        Command::Proxy => deploy::proxy(&ctx),
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }

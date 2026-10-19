@@ -22,6 +22,7 @@ use serde::Deserialize;
 use crate::Ctx;
 use crate::commit::Tree;
 use crate::exec::Cmd;
+use crate::exec::read;
 use crate::exec::read_json;
 use crate::stack::Role;
 use crate::stack::SlotView;
@@ -191,6 +192,18 @@ pub fn proxy_info(ctx: &Ctx) -> Result<ProxyInfo> {
             .arg(format!("{url}/info")),
     )
     .with_context(|| format!("could not read the proxy's {url}/info"))
+}
+
+pub fn proxy_health(ctx: &Ctx) -> Result<()> {
+    let url = ctx.env.proxy_url()?.url;
+    read(
+        ctx.exec,
+        &Cmd::new("curl")
+            .args(["-fsS", "--max-time", "15", "-o", "/dev/null"])
+            .arg(format!("{url}/health")),
+    )
+    .with_context(|| format!("{url}/health does not answer"))?;
+    Ok(())
 }
 
 /// A slot's guardian, as reached through its tunnel and as the proxy leads to it.

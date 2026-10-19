@@ -22,6 +22,9 @@ use crate::exec::read;
 use crate::exec::read_json;
 use crate::host;
 
+/// The type of a guardian's host in the stack's state and plans.
+pub const INSTANCE: &str = "aws:ec2/instance:Instance";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Slot {
     #[value(name = "a")]
@@ -212,7 +215,7 @@ impl Stack {
                 region: region.to_owned(),
             }),
             _ => bail!(
-                "stack {} in {} has no deployed guardian",
+                "stack {} in {} has no deployed guardian; run the deploy step first",
                 self.name,
                 self.dir
             ),
@@ -296,6 +299,16 @@ impl Stack {
             .manifest
             .version)
     }
+
+    /// The guardian instances in the stack's state, by URN and ID.
+    pub fn instances(&self, ctx: &Ctx) -> Result<Vec<Resource>> {
+        Ok(export(ctx, &self.dir, &self.name)?
+            .deployment
+            .resources
+            .into_iter()
+            .filter(|resource| resource.kind == INSTANCE)
+            .collect())
+    }
 }
 
 /// The project a Pulumi program's own directory declares, whose name prefixes the program's configuration keys. `pulumi
@@ -338,12 +351,22 @@ pub struct Export {
 #[derive(Deserialize)]
 pub struct Deployment {
     pub manifest: Manifest,
+    #[serde(default)]
+    pub resources: Vec<Resource>,
 }
 
 #[derive(Deserialize)]
 pub struct Manifest {
     #[serde(default)]
     pub version: String,
+}
+
+#[derive(Deserialize)]
+pub struct Resource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub urn: String,
+    pub id: Option<String>,
 }
 
 /// A stack's state, as `pulumi stack export` prints it.
@@ -441,12 +464,20 @@ fn scalar(value: Value) -> String {
 
 #[cfg(test)]
 pub mod tests {
+    use base64ct::Base64;
+    use base64ct::Encoding;
+
     use super::*;
     use crate::exec::fake::Fake;
 
     pub const COMMIT: &str = "0873917ea0000000000000000000000000000000";
     /// The test programs' directories, each holding only its project file.
     pub const ENCLAVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/programs/enclave");
+
+    /// What `aws ec2 describe-instance-attribute` prints for a host launched to build `commit`.
+    pub fn user_data(commit: &str) -> String {
+        Base64::encode_string(format!("#!/bin/bash\ngit checkout {commit}\n").as_bytes())
+    }
 
     /// A world whose pulumi answers with this configuration and these outputs.
     pub fn stack_world(config: Value, outputs: Value) -> Fake {
@@ -578,7 +609,9 @@ pub mod tests {
         );
         assert_eq!(
             stack.bucket().err().unwrap().to_string(),
-            format!("stack org/testnet in {ENCLAVE} has no deployed guardian")
+            format!(
+                "stack org/testnet in {ENCLAVE} has no deployed guardian; run the deploy step first"
+            )
         );
     }
 
