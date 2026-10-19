@@ -20,11 +20,11 @@
 //! 3. Then the Sui, guardian and Bitcoin ticks run every `POLL_INTERVAL`,
 //!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
 //!    Sui approvals, report the violations, log the progress watermarks,
-//!    and save the snapshot one state check behind. The complete flows
-//!    retire in the Bitcoin tick, right after its lookups, so the UTXO pool
-//!    takes a withdrawal only once Bitcoin has answered for its inputs. The
-//!    pool is checked against Bitcoin once at startup and then every
-//!    `UTXO_CHECK_INTERVAL`.
+//!    and save the snapshot one state check behind. The complete flows are
+//!    added to the UTXO pool in the Bitcoin tick, right after its lookups,
+//!    so the pool takes a withdrawal only once Bitcoin has answered for its
+//!    inputs. The pool is checked against Bitcoin once at startup and then
+//!    every `UTXO_CHECK_INTERVAL`.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
 //!    checked-through time is exported.
 //!
@@ -231,17 +231,18 @@ impl ContinuousAuditor {
         Ok(())
     }
 
-    /// Fails if the Bitcoin RPC fails. The complete flows retire here, right
-    /// after the lookups and before any other poll, so the UTXO pool sees a
-    /// withdrawal's inputs enter before the withdrawal spends them: Bitcoin
-    /// confirms a withdrawal only after the deposits and withdrawals that
-    /// made its inputs, and one round of lookups answers them all.
+    /// Fails if the Bitcoin RPC fails. The complete flows are added to the
+    /// UTXO pool here, right after the lookups and before any other poll, so
+    /// the pool sees a withdrawal's inputs enter before the withdrawal
+    /// spends them: Bitcoin confirms a withdrawal only after the deposits
+    /// and withdrawals that made its inputs, and one round of lookups
+    /// answers them all.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
         let findings = self.inner.fetch_btc_info(&self.window)?;
         self.report_findings("btc", &findings);
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
-        let pool_findings = self.inner.retire_complete_flows(&self.window);
+        let pool_findings = self.inner.add_to_pool(&self.window);
         self.report_findings("pool", &pool_findings);
         Ok(())
     }

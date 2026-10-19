@@ -18,8 +18,8 @@
 //!    withdrawal id, since the Sui scan may have started after it.
 //! 4. Each tick, the core reports the violations of every machine in the
 //!    audit window: the expected events whose deadline a cursor has passed.
-//! 5. Complete flows retire: the UTXO pool takes the UTXOs they moved, then
-//!    they are dropped.
+//! 5. Complete flows are added to the UTXO pool: it takes the UTXOs they
+//!    moved, and the flows are dropped.
 //! 6. The progress watermarks give the time through which every flow is
 //!    verified, which is where a restart starts.
 //!
@@ -149,12 +149,16 @@ impl fmt::Display for WithdrawalProgressBlocker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "wid={}, btc_txid={}, earliest_event_at={}, waiting_for={:?}",
+            "wid={}, btc_txid={}, earliest_event_at={}, ",
             self.wid,
             self.btc_txid,
             utc_timestamp(self.earliest_event_at),
-            self.waiting_for,
-        )
+        )?;
+        if self.waiting_for.is_empty() {
+            write!(f, "complete, enters the pool at the next Bitcoin tick")
+        } else {
+            write!(f, "waiting_for={:?}", self.waiting_for)
+        }
     }
 }
 
@@ -504,8 +508,8 @@ impl AuditorCore {
         findings
     }
 
-    /// Retire every complete flow in the window: the UTXO pool takes the
-    /// UTXOs it moved, then the flow is dropped and logged. The pool takes
+    /// Add every complete flow in the window to the UTXO pool: it takes the
+    /// UTXOs the flow moved, then the flow is dropped and logged. The pool takes
     /// every deposit before any withdrawal, and a withdrawal's change before
     /// its inputs, so the order the flows completed in does not matter.
     /// Call it right after the Bitcoin lookups and before any other poll:
@@ -518,7 +522,7 @@ impl AuditorCore {
     /// never completes never reaches the pool: its inputs stay held, and
     /// the daily check reports them, on top of the finding for its missing
     /// event.
-    pub fn retire_complete_flows(&mut self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
+    pub fn add_to_pool(&mut self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_confirmed_deposits();
         let confirmed_withdrawals = self.complete_withdrawals(window);
@@ -578,11 +582,17 @@ impl AuditorCore {
         findings
     }
 
+    /// Where a restart can start and still replay every flow the auditor
+    /// holds: an open flow, and a complete one the pool has not taken yet.
+    /// A complete flow leaves the auditor only when `add_to_pool` takes it,
+    /// in the Bitcoin tick, so it pins the floor until then. Otherwise a
+    /// snapshot saved in between would skip it, and its UTXOs would never
+    /// move in the pool.
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
         let mut verified_up_to_withdrawals = self.guardian_cursor();
         let mut withdrawal_blockers = Vec::new();
         for sm in self.pending_withdrawals.values() {
-            if !sm.is_in_audit_window(window) || !sm.is_expecting_events() {
+            if !sm.is_in_audit_window(window) {
                 continue;
             }
 
@@ -601,17 +611,15 @@ impl AuditorCore {
             }
         }
 
-        // A deposit request still asked about pins the floor too, so a
+        // A deposit or deposit request still held pins the floor too, so a
         // restart replays it and its UTXO is not lost.
         let unresolved_deposit_floor = self
             .pending_deposits
             .values()
-            .filter(|sm| sm.is_expecting_events())
             .map(|sm| sm.sui_event().timestamp_secs)
             .chain(
                 self.pending_deposit_requests
                     .values()
-                    .filter(|sm| sm.is_expecting_events())
                     .map(DepositRequestStateMachine::requested_at),
             )
             .min()
@@ -955,7 +963,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![unknown], &timing),
         );
 
-        let findings = auditor.retire_complete_flows(&AllTime);
+        let findings = auditor.add_to_pool(&AllTime);
 
         assert_eq!(
             findings,
@@ -965,5 +973,33 @@ mod tests {
             }]
         );
         assert!(auditor.pending_withdrawals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_complete_withdrawal_holds_the_restart_start_until_the_pool_takes_it() {
+        let mut auditor = auditor_with_pool().await;
+        let timing = auditor.cfg.timing.clone();
+        let input = OutPoint {
+            txid: txid(9),
+            vout: 1,
+        };
+        auditor.pending_withdrawals.insert(
+            WithdrawalID::new([7; 32]),
+            complete_withdrawal(7, 7, vec![input], &timing),
+        );
+
+        let held = auditor.progress_watermarks(&AllTime);
+        assert_eq!(held.restart_start, 1_000);
+        assert!(matches!(
+            &held.withdrawal_blockers.0[..],
+            [blocker] if blocker.waiting_for.is_empty()
+        ));
+
+        auditor.add_to_pool(&AllTime);
+
+        let taken = auditor.progress_watermarks(&AllTime);
+        let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());
+        assert_eq!(taken.restart_start, cursors);
+        assert!(taken.withdrawal_blockers.0.is_empty());
     }
 }

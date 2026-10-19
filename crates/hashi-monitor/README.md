@@ -202,8 +202,9 @@ reported again. A snapshot of another deployment, or one saved by a monitor
 before the pool existed, is ignored and the run is a first run. Delete the
 object to start over from genesis.
 
-A flow that never completes holds `restart_start` back, so every restart
-replays everything since that flow began. To move the restart point past it,
+A flow holds `restart_start` back until the pool takes it, at the Bitcoin
+tick after it completes. A flow that never completes holds it back for good,
+so every restart replays everything since that flow began. To move the restart point past it,
 edit `restart_start` in the object by hand while the monitor is stopped; the
 flow is then no longer audited. The field is a UTC timestamp such as
 `2026-10-05T23:30:36Z`.
