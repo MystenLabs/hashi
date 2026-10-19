@@ -9,6 +9,7 @@ use hashi_guardian_ops::Ctx;
 use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
+use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::inspect;
 
 #[derive(Parser)]
@@ -44,6 +45,12 @@ enum Command {
         #[arg(long)]
         slot: Option<Slot>,
     },
+    /// Write a slot's configuration for the operator and the key provisioners, and check it with the guardian's tools.
+    Render {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +62,7 @@ fn main() -> anyhow::Result<()> {
         Command::Info { slot } => inspect::info(&ctx, slot),
         Command::Host { slot } => inspect::host(&ctx, slot),
         Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
+        Command::Render { slot } => configs::render(&ctx, slot),
     }
 }
 
