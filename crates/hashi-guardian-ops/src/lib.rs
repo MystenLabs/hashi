@@ -11,6 +11,7 @@ use anyhow::Context;
 use anyhow::Result;
 use colored::Colorize;
 
+pub mod ask;
 pub mod commit;
 pub mod env;
 pub mod exec;
@@ -21,22 +22,25 @@ pub mod render;
 pub mod stack;
 pub mod steps;
 
+use ask::Ask;
 use env::Env;
 use exec::Exec;
 
 pub struct Ctx<'a> {
     pub env: Env,
     pub exec: &'a dyn Exec,
+    pub ask: &'a dyn Ask,
     /// The hashi checkout this tool runs from, which holds its rendered files under `.hashi/`.
     pub repo: PathBuf,
 }
 
 impl<'a> Ctx<'a> {
-    pub fn new(env_file: &Path, exec: &'a dyn Exec) -> Result<Self> {
+    pub fn new(env_file: &Path, exec: &'a dyn Exec, ask: &'a dyn Ask) -> Result<Self> {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         Ok(Self {
             env: Env::load(env_file)?,
             exec,
+            ask,
             repo: std::fs::canonicalize(&repo)
                 .with_context(|| format!("could not find this checkout at {}", repo.display()))?,
         })
@@ -51,8 +55,14 @@ impl<'a> Ctx<'a> {
         Self {
             env: Env::new(PathBuf::from("testnet.env"), values),
             exec,
+            ask: &ask::scripted::NO_ANSWERS,
             repo: repo.to_owned(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_ask(self, ask: &'a dyn Ask) -> Self {
+        Self { ask, ..self }
     }
 }
 
@@ -72,6 +82,11 @@ pub fn print_success(msg: &str) {
 
 pub fn print_warning(msg: &str) {
     print_detail(&format!("{} {msg}", "⚠".yellow().bold()));
+}
+
+/// Ends a step by naming the one after it, so the steps and the runbook can't drift apart.
+pub fn next(step: &str) {
+    print_info(&format!("Next: {step}"));
 }
 
 #[cfg(test)]

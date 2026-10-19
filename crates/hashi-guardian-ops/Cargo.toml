@@ -10,9 +10,9 @@ clap.workspace = true
 colored.workspace = true
 hex.workspace = true
 jiff.workspace = true
+libc = "0.2.184"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
-
-[dev-dependencies]
+sha2 = "0.10.9"
 tempfile.workspace = true
