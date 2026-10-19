@@ -2,17 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The guardian operator's steps. It drives the guardian's infrastructure (Pulumi, AWS, the proxy) from the latest
-//! checkout.
+//! checkout, and takes everything that must match the guardian from the guardian's own commit: see [`commit`].
 
 use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use colored::Colorize;
 
+pub mod commit;
 pub mod env;
 pub mod exec;
 pub mod guardian;
+pub mod host;
 pub mod stack;
 pub mod steps;
 
@@ -49,4 +52,18 @@ impl<'a> Ctx<'a> {
             repo: repo.to_owned(),
         }
     }
+}
+
+/// Prints a note for the operator. Notes go to stderr: stdout carries only a step's results (a report, a roster, a
+/// digest to post), so piping a step's stdout never picks up its progress.
+pub fn print_detail(msg: &str) {
+    eprintln!("{msg}");
+}
+
+pub fn print_info(msg: &str) {
+    print_detail(&format!("{} {msg}", "ℹ".blue().bold()));
+}
+
+pub fn print_warning(msg: &str) {
+    print_detail(&format!("{} {msg}", "⚠".yellow().bold()));
 }
