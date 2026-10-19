@@ -90,7 +90,7 @@ fn describe_slot(stack: &Stack, slot: Slot) -> String {
 fn describe_proxy(info: &ProxyInfo) -> String {
     let age = match info.age() {
         Some(age) if age > CURRENT_FOR => format!(
-            ", as of {}s ago: the guardian has stopped answering the proxy",
+            ", as of {}s ago, too old to show that the proxy still reaches that guardian",
             age.as_secs()
         ),
         Some(age) => format!(", as of {}s ago", age.as_secs()),
@@ -183,7 +183,8 @@ mod tests {
             timestamp_ms: Some("1720000000123".to_owned()),
         };
         assert!(
-            describe_proxy(&info).ends_with("ago: the guardian has stopped answering the proxy")
+            describe_proxy(&info)
+                .ends_with("ago, too old to show that the proxy still reaches that guardian")
         );
     }
 }
