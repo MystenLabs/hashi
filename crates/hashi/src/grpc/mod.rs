@@ -55,16 +55,25 @@ pub struct HttpService {
     inner: Arc<Hashi>,
     signing_tasks: peer_limit::CallerTaskLimiter,
     signing_work: peer_limit::SigningWorkLimiter,
+    store_reads: peer_limit::CallerTaskLimiter,
 }
 
 impl HttpService {
     pub fn new(hashi: Arc<Hashi>) -> Self {
-        let signing_tasks = peer_limit::CallerTaskLimiter::new(hashi.metrics.clone());
+        let signing_tasks =
+            peer_limit::CallerTaskLimiter::new(hashi.metrics.withdrawal_signing_tasks_max.clone());
+        let store_reads =
+            peer_limit::CallerTaskLimiter::new(hashi.metrics.peer_store_reads_max.clone());
         Self {
             inner: hashi,
             signing_tasks,
             signing_work: Default::default(),
+            store_reads,
         }
+    }
+
+    pub(crate) fn store_reads(&self) -> peer_limit::CallerTaskLimiter {
+        self.store_reads.clone()
     }
 
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {

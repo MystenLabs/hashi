@@ -225,6 +225,9 @@ impl Hashi {
         self.metrics
             .mpc_manager_epoch
             .set(manager.mpc_config.epoch as i64);
+        self.metrics
+            .mpc_committee_members
+            .set(manager.committee.members().len() as i64);
         *self.shape_params.write().unwrap() = Some(Arc::new(manager.shape_params()));
         match self.mpc_manager.get() {
             Some(lock) => {

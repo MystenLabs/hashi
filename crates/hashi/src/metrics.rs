@@ -49,6 +49,8 @@ pub struct Metrics {
     pub(crate) peer_first_seen_timestamp_seconds: IntGaugeVec,
     pub(crate) withdrawal_signing_tasks_max: IntGaugeVec,
     pub(crate) withdrawal_signing_refused_total: IntCounterVec,
+    pub(crate) peer_store_reads_max: IntGaugeVec,
+    pub peer_store_reads_shed_total: IntCounterVec,
     pub(crate) peer_bridge_work_seconds_total: CounterVec,
 
     // Per-MPC-protocol body-size metrics.
@@ -81,6 +83,12 @@ pub struct Metrics {
     pub unknown_caller_refused_total: IntCounterVec,
     pub mpc_rpc_caller_refused_total: IntCounterVec,
     pub mpc_rotation_messages_received_total: IntCounterVec,
+    pub mpc_peer_refusals_total: IntCounterVec,
+    pub(crate) mpc_peer_refusals_first_timestamp_seconds: IntGaugeVec,
+    pub(crate) mpc_refusals_total: IntCounterVec,
+    pub mpc_stored_rows_refused_total: IntCounterVec,
+    pub(crate) mpc_stored_rows_refused_first_timestamp_seconds: IntGaugeVec,
+    pub(crate) mpc_committee_members: IntGauge,
     pub validator_registration_aborts_total: IntCounterVec,
     pub guardian_bootstrap_attempts_total: IntCounter,
     pub guardian_bootstrap_outcomes_total: IntCounterVec,
@@ -319,6 +327,13 @@ pub const SIGNING_REFUSAL_CAP: &str = "cap";
 pub const SIGNING_REFUSAL_BUSY: &str = "busy";
 pub const SIGNING_REFUSAL_SHAPE: &str = "shape";
 
+const MPC_REFUSAL_REQUEST: &str = "request";
+const MPC_REFUSAL_RESPONSE: &str = "response";
+
+pub(crate) const STORED_ROW_LOAD: &str = "load";
+pub(crate) const STORED_ROW_READ: &str = "read";
+pub(crate) const STORED_ROW_SERVE: &str = "serve";
+
 pub(crate) const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "unchecked",
     "not_found",
@@ -543,6 +558,20 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            peer_store_reads_max: register_int_gauge_vec_with_registry!(
+                "hashi_peer_store_reads_max",
+                "Peak concurrent store-reading RetrieveMessages per requester since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_store_reads_shed_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_store_reads_shed_total",
+                "RetrieveMessages shed because the requester already held all its store-read permits",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
                 "SignWithdrawalTransaction, SignWithdrawalTxSigning and SignMpcInputSignatures calls refused, by caller and reason (committee, cap, busy or shape)",
@@ -733,6 +762,47 @@ impl Metrics {
                 "hashi_mpc_rotation_messages_received_total",
                 "SendMessages requests carrying rotation messages that passed the gates and decoded, by wire shape: map or blob",
                 &["shape"],
+                registry,
+            )
+            .unwrap(),
+            mpc_peer_refusals_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_peer_refusals_total",
+                "MPC requests refused by a handler's count check (side request, each retry counted), and the peer's responses refused by this node's response checks or decode limits (side response, once per call)",
+                &["peer", "side"],
+                registry,
+            )
+            .unwrap(),
+            mpc_peer_refusals_first_timestamp_seconds: register_int_gauge_vec_with_registry!(
+                "hashi_mpc_peer_refusals_first_timestamp_seconds",
+                "Unix time of the first refusal counted for the peer and side since start",
+                &["peer", "side"],
+                registry,
+            )
+            .unwrap(),
+            mpc_refusals_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_refusals_total",
+                "The refusals in hashi_mpc_peer_refusals_total, by side, handler, protocol and reason",
+                &["side", "handler", "protocol", "reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_stored_rows_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_stored_rows_refused_total",
+                "This node's own stored MPC rows refused as unusable, by protocol and phase: load (the bulk loaders), read (the previous-epoch repair walk) or serve (RetrieveMessages)",
+                &["protocol", "phase"],
+                registry,
+            )
+            .unwrap(),
+            mpc_stored_rows_refused_first_timestamp_seconds: register_int_gauge_vec_with_registry!(
+                "hashi_mpc_stored_rows_refused_first_timestamp_seconds",
+                "Unix time of the first stored-row refusal counted for the protocol and phase since start",
+                &["protocol", "phase"],
+                registry,
+            )
+            .unwrap(),
+            mpc_committee_members: register_int_gauge_with_registry!(
+                "hashi_mpc_committee_members",
+                "Members of the committee of the installed MPC manager",
                 registry,
             )
             .unwrap(),
@@ -1821,6 +1891,21 @@ impl Metrics {
             .set(unix_time_secs());
     }
 
+    pub(crate) fn refusal_counters(&self) -> RefusalCounters {
+        RefusalCounters {
+            by_peer: self.mpc_peer_refusals_total.clone(),
+            first_refused: self.mpc_peer_refusals_first_timestamp_seconds.clone(),
+            by_kind: self.mpc_refusals_total.clone(),
+        }
+    }
+
+    pub(crate) fn stored_row_refusals(&self) -> StoredRowRefusals {
+        StoredRowRefusals {
+            refused: self.mpc_stored_rows_refused_total.clone(),
+            first_refused: self.mpc_stored_rows_refused_first_timestamp_seconds.clone(),
+        }
+    }
+
     pub(crate) fn peer_first_seen(&self, peer: &str) {
         let first_seen = self
             .peer_first_seen_timestamp_seconds
@@ -2150,6 +2235,68 @@ fn trm_outcome_label(result: &Result<crate::trm::Verdict, crate::trm::TrmError>)
         Ok(Verdict::Pending) => TRM_OUTCOME_PENDING,
         Err(TrmError::Transient(_)) => TRM_OUTCOME_TRANSIENT_ERROR,
         Err(TrmError::Permanent(_)) => TRM_OUTCOME_PERMANENT_ERROR,
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RefusalCounters {
+    by_peer: IntCounterVec,
+    first_refused: IntGaugeVec,
+    by_kind: IntCounterVec,
+}
+
+impl RefusalCounters {
+    pub(crate) fn request(&self, peer: &sui_sdk_types::Address, handler: &str, protocol: &str) {
+        self.record(peer, MPC_REFUSAL_REQUEST, handler, protocol, "count");
+    }
+
+    pub(crate) fn response(
+        &self,
+        peer: &sui_sdk_types::Address,
+        handler: &str,
+        protocol: &str,
+        reason: &str,
+    ) {
+        self.record(peer, MPC_REFUSAL_RESPONSE, handler, protocol, reason);
+    }
+
+    fn record(
+        &self,
+        peer: &sui_sdk_types::Address,
+        side: &str,
+        handler: &str,
+        protocol: &str,
+        reason: &str,
+    ) {
+        let peer = peer.to_string();
+        let refused = self.by_peer.with_label_values(&[&peer, side]);
+        if refused.get() == 0 {
+            self.first_refused
+                .with_label_values(&[&peer, side])
+                .set(unix_time_secs());
+        }
+        refused.inc();
+        self.by_kind
+            .with_label_values(&[side, handler, protocol, reason])
+            .inc();
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StoredRowRefusals {
+    refused: IntCounterVec,
+    first_refused: IntGaugeVec,
+}
+
+impl StoredRowRefusals {
+    pub(crate) fn record(&self, protocol: &str, phase: &str) {
+        let refused = self.refused.with_label_values(&[protocol, phase]);
+        if refused.get() == 0 {
+            self.first_refused
+                .with_label_values(&[protocol, phase])
+                .set(unix_time_secs());
+        }
+        refused.inc();
     }
 }
 

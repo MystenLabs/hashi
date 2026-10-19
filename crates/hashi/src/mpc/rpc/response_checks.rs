@@ -19,11 +19,40 @@ use std::collections::HashMap;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Refused {
+    #[error("count check: {0}")]
+    Count(#[from] CountCheckError),
+    #[error("{0}")]
+    Variant(String),
+    #[error("share index {0} is not a non-zero u16")]
+    Shape(u32),
+    #[error("responder not in the committee")]
+    Member,
+    #[error("bytes don't match the certificate's hash")]
+    Hash,
+    #[error("{0}")]
+    Decode(String),
+}
+
+impl Refused {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Count(_) => "count",
+            Self::Variant(_) => "variant",
+            Self::Shape(_) => "shape",
+            Self::Member => "member",
+            Self::Hash => "hash",
+            Self::Decode(_) => "decode",
+        }
+    }
+}
+
 pub(crate) fn certified_retrieval(
     protocol_type: ProtocolTypeIndicator,
     response: &proto::RetrieveMessagesResponse,
     expected: MessagesHash,
-) -> Result<PreparedMessages, String> {
+) -> Result<PreparedMessages, Refused> {
     use proto::retrieve_messages_response::Messages as Wire;
     match (protocol_type, &response.messages) {
         (ProtocolTypeIndicator::Dkg, Some(Wire::DkgMessage(message))) => {
@@ -36,7 +65,9 @@ pub(crate) fn certified_retrieval(
             rotation_blob(&map.messages)
                 .and_then(|blob| Cached::certified(&blob, expected).map(PreparedMessages::Rotation))
         }
-        (protocol_type, _) => Err(format!("not a {protocol_type:?} retrieval response")),
+        (protocol_type, _) => Err(Refused::Variant(format!(
+            "not a {protocol_type:?} retrieval response"
+        ))),
     }
 }
 
@@ -45,15 +76,14 @@ pub(crate) fn avid_bundle(
     shape: &ShapeParams,
     dealer: PartyId,
     response: &proto::RetrieveMessagesResponse,
-) -> Result<AvidNonceRetrievalMessage, String> {
+) -> Result<AvidNonceRetrievalMessage, Refused> {
     use proto::retrieve_messages_response::Messages as Wire;
+    let not_avid = || Refused::Variant("not an AVID retrieval response".into());
     let Some(Wire::AvidNonceRetrievalMessage(bundle)) = &response.messages else {
-        return Err("not an AVID retrieval response".into());
+        return Err(not_avid());
     };
     let current = shape.current();
-    let responder = current
-        .party_of(&signer)
-        .ok_or("responder not in the committee")?;
+    let responder = current.party_of(&signer).ok_or(Refused::Member)?;
     bundle
         .common
         .as_ref()
@@ -69,14 +99,13 @@ pub(crate) fn avid_bundle(
             bundle.avid_vote.as_ref().map_or(Ok(()), |vote| {
                 count_check::check_avid_vote(bytes(vote), current.weights())
             })
-        })
-        .map_err(count_refused)?;
+        })?;
     match RetrieveMessagesResponse::try_from(response)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Refused::Decode(e.to_string()))?
         .messages
     {
         Messages::AvidNonceRetrieval(bundle) => Ok(bundle),
-        _ => Err("not an AVID retrieval response".into()),
+        _ => Err(not_avid()),
     }
 }
 
@@ -84,36 +113,40 @@ pub(crate) fn avss_complaint_response(
     protocol_type: ProtocolTypeIndicator,
     responder_weight: Option<u16>,
     response: &proto::ComplainResponse,
-) -> Result<avss::ComplaintResponse, String> {
+) -> Result<avss::ComplaintResponse, Refused> {
     use proto::complain_response::Responses;
     let shares = match (protocol_type, &response.responses) {
         (ProtocolTypeIndicator::Dkg, Some(Responses::DkgResponse(shares)))
         | (ProtocolTypeIndicator::KeyRotation, Some(Responses::RotationResponse(shares))) => {
             bytes(shares)
         }
-        (protocol_type, _) => return Err(format!("not a {protocol_type:?} complaint response")),
+        (protocol_type, _) => {
+            return Err(Refused::Variant(format!(
+                "not a {protocol_type:?} complaint response"
+            )));
+        }
     };
-    let weight = responder_weight.ok_or("responder not in the committee")?;
-    count_check::check_avss_complaint_response(shares, weight).map_err(count_refused)?;
-    bcs::from_bytes(shares).map_err(|e| format!("complaint response: {e}"))
+    let weight = responder_weight.ok_or(Refused::Member)?;
+    count_check::check_avss_complaint_response(shares, weight)?;
+    bcs::from_bytes(shares).map_err(complaint_decode_refused)
 }
 
 pub(crate) fn avid_complaint_response(
     response: &proto::ComplainResponse,
-) -> Result<batch_avss_avid::ComplaintResponse, String> {
+) -> Result<batch_avss_avid::ComplaintResponse, Refused> {
     use proto::complain_response::Responses;
     let Some(Responses::AvidNonceResponse(avid)) = &response.responses else {
-        return Err("not an AVID complaint response".into());
+        return Err(Refused::Variant("not an AVID complaint response".into()));
     };
-    count_check::check_avid_complaint_response(bytes(avid)).map_err(count_refused)?;
-    bcs::from_bytes(bytes(avid)).map_err(|e| format!("complaint response: {e}"))
+    count_check::check_avid_complaint_response(bytes(avid))?;
+    bcs::from_bytes(bytes(avid)).map_err(complaint_decode_refused)
 }
 
 pub(crate) fn complaint_response_limit(responder_weight: u16) -> usize {
     2 * count_check::avss_complaint_response_size(responder_weight) + 1024
 }
 
-fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, String> {
+fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, Refused> {
     let mut entries = map
         .iter()
         .map(|(&index, message)| {
@@ -121,7 +154,7 @@ fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, String> {
                 .ok()
                 .filter(|index| *index != 0)
                 .map(|index| (index.to_le_bytes(), bytes(message)))
-                .ok_or_else(|| format!("share index {index} is not a non-zero u16"))
+                .ok_or(Refused::Shape(index))
         })
         .collect::<Result<Vec<_>, _>>()?;
     entries.sort_unstable_by_key(|(key, _)| *key);
@@ -144,8 +177,8 @@ fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, String> {
     Ok(blob)
 }
 
-fn count_refused(e: CountCheckError) -> String {
-    format!("count check: {e}")
+fn complaint_decode_refused(e: bcs::Error) -> Refused {
+    Refused::Decode(format!("complaint response: {e}"))
 }
 
 fn bytes(bcs: &Bcs) -> &[u8] {

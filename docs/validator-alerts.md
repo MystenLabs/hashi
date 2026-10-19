@@ -3,7 +3,7 @@
 Recommended Prometheus alerts for hashi validator operators. A ready-to-use
 rules file lives at [`monitoring/validator-alerts.example.yml`](../monitoring/validator-alerts.example.yml).
 [`monitoring/validator-alerts.test.yml`](../monitoring/validator-alerts.test.yml) has `promtool`
-tests for the peer and MPC work alerts.
+tests for the peer, MPC work and MPC refusal alerts.
 
 Two principles shape this list:
 
@@ -36,6 +36,9 @@ Two principles shape this list:
 | Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing refusal rose in 1h (see the rules file) | For a shed counter, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). |
 | Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
 | MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
+| MPC peer refused        | A peer's MPC requests or responses were refused in 1h (see the rules file) | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch can also come from an honest signer that lost its stored copy. |
+| MPC peers refused at once | 3 or more peers, and more than half of `hashi_mpc_committee_members`, were refused in 10m (see the rules file) | That many at once usually means your node's checks and its peers' messages disagree, which a build mismatch causes: compare builds first. A fixed count alone would page whenever 3 members are broken. |
+| Stored rows refused     | `hashi_mpc_stored_rows_refused_total` rose in 1h (see the rules file) | Your node refused a row it stored itself: a damaged store, or a new build refusing what an earlier one accepted. Requesters see only `NotFound`, so no other alert fires. |
 
 Dashboard-worthy but **not** alerts:
 
@@ -60,6 +63,12 @@ Dashboard-worthy but **not** alerts:
 - `hashi_peer_inflight_max`, `hashi_peer_inflight_max_bytes`,
   `hashi_peer_connections_max` — each peer's peak since start, against limits
   such as `hashi_peer_inflight_limit_bytes`.
+- `hashi_peer_store_reads_max` — each requester's peak store-reading
+  `RetrieveMessages` since start, against the limit of 4. An honest requester
+  rarely holds more than two.
+- `hashi_mpc_refusals_total` — the MPC refusals behind the refusal alerts, by
+  `side`, `handler`, `protocol` and `reason`. A complaint that names no
+  protocol counts as `unspecified`.
 - `hashi_peer_bridge_work_seconds_total` — seconds your node spent validating
   and signing each peer's withdrawal signing requests, at most two at a time
   per peer. A rate near 2 over an hour means the peer keeps both busy, which an
@@ -103,6 +112,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_db_*` | node |
 | `hashi_withdrawal_bitcoin_check_*` | node |
 | `hashi_peer_*`, `hashi_mpc_unguarded_spawn_blocking_total` | node |
+| `hashi_mpc_peer_refusals_*`, `hashi_mpc_refusals_total`, `hashi_mpc_stored_rows_refused_*`, `hashi_mpc_committee_members` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

@@ -338,6 +338,15 @@ impl TestSetup {
         validator_index: usize,
         store: Arc<dyn PublicMessagesStore>,
     ) -> MpcManager {
+        self.create_manager_with_store_and_metrics(validator_index, store, &test_metrics())
+    }
+
+    fn create_manager_with_store_and_metrics(
+        &self,
+        validator_index: usize,
+        store: Arc<dyn PublicMessagesStore>,
+        metrics: &Metrics,
+    ) -> MpcManager {
         let address = Address::new([validator_index as u8; 32]);
         MpcManager::new(
             address,
@@ -354,7 +363,7 @@ impl TestSetup {
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
             ComplaintResponsePolicy::AllowAll,
-            &test_metrics(),
+            metrics,
         )
         .unwrap()
     }
@@ -4753,6 +4762,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -4833,6 +4843,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -4906,6 +4917,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
         signers,
         &mock_p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -4960,6 +4972,7 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -5025,6 +5038,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -5131,6 +5145,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
         vec![addr3, addr4],
         &p2p,
         setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -5193,8 +5208,14 @@ async fn test_retrieve_dealer_message_success() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Party requests dealer's share from certificate signers
-    let result =
-        MpcManager::retrieve_dealer_message(&party_manager, &dkg_message, &cert, &mock_p2p).await;
+    let result = MpcManager::retrieve_dealer_message(
+        &party_manager,
+        &dkg_message,
+        &cert,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_ok());
     let mgr = party_manager.read().unwrap();
@@ -5277,8 +5298,14 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
     let party_mgr = Arc::new(RwLock::new(party_mgr));
 
     // Should succeed by trying validator 1 (fails), then dealer (succeeds)
-    let result =
-        MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &mock_p2p).await;
+    let result = MpcManager::retrieve_dealer_message(
+        &party_mgr,
+        &dkg_message,
+        &cert,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_ok());
     assert!(
@@ -5344,8 +5371,14 @@ async fn test_retrieve_dealer_message_all_signers_fail() {
     let party_mgr = Arc::new(RwLock::new(party_mgr));
 
     // Should fail because all signers are offline
-    let result =
-        MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &mock_p2p).await;
+    let result = MpcManager::retrieve_dealer_message(
+        &party_mgr,
+        &dkg_message,
+        &cert,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -5435,8 +5468,14 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     // 1. Tries Byzantine signer first -> returns message B
     // 2. Computes hash(message B) != hash(message A) -> rejects, continues
     // 3. Tries real dealer A -> returns message A -> hash matches -> success
-    let result =
-        MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &mock_p2p).await;
+    let result = MpcManager::retrieve_dealer_message(
+        &party_mgr,
+        &dkg_message,
+        &cert,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
 
     assert!(result.is_ok());
     // Should have dealer A's correct message (from second signer)
@@ -5564,13 +5603,28 @@ async fn test_retrieve_dealer_message_drops_a_mismatched_response_without_retryi
         calls: Default::default(),
     };
     let party_mgr = Arc::new(RwLock::new(setup.create_manager(2)));
+    let metrics = test_metrics();
 
-    MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &channel)
+    MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &channel, &metrics)
         .await
         .unwrap();
 
     assert_eq!(channel.calls.lock().unwrap()[&mismatched_signer], 1);
     assert!(logs_contain("bytes don't match the certificate's hash"));
+    assert_eq!(
+        metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&mismatched_signer.to_string(), "response"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .mpc_refusals_total
+            .with_label_values(&["response", "retrieve_messages", "dkg", "hash"])
+            .get(),
+        1
+    );
     let mgr = party_mgr.read().unwrap();
     let entry = mgr.current_dkg_messages.get_entry(&dealer_addr).unwrap();
     assert_eq!(entry.bytes(), &served);
@@ -6189,6 +6243,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
         &dkg_dealer_hash,
         &certificate,
         &mock_p2p,
+        &test_metrics(),
     )
     .await;
 
@@ -9692,6 +9747,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         signers,
         &mock_p2p,
         rotation_setup.setup.epoch(),
+        &test_metrics(),
     )
     .await;
 
@@ -12276,7 +12332,7 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
         panic!("expected a cache hit");
     };
     let response = reply.to_proto(&receiver.shape_params(), &request).unwrap();
-    let Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessages(served)) =
+    let Some(proto::retrieve_messages_response::Messages::RotationMessages(served)) =
         response.messages
     else {
         panic!("expected rotation messages");
@@ -12313,11 +12369,13 @@ fn rotation_messages_round_trip_as_a_map_and_as_one_bcs_blob() {
 
     assert!(matches!(
         blob.messages,
-        Some(hashi_types::proto::send_messages_request::Messages::RotationMessagesBcs(_))
+        Some(proto::send_messages_request::Messages::RotationMessagesBcs(
+            _
+        ))
     ));
     assert!(matches!(
         map.messages,
-        Some(hashi_types::proto::send_messages_request::Messages::RotationMessages(_))
+        Some(proto::send_messages_request::Messages::RotationMessages(_))
     ));
     for proto in [&blob, &map] {
         let decoded = SendMessagesRequest::try_from(proto).unwrap();
@@ -12366,7 +12424,7 @@ fn rotation_responses_take_the_shape_the_request_epochs_committee_selects() {
         .to_proto(&shape, &request(receiver.previous_epoch))
         .unwrap();
 
-    let Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessagesBcs(served)) =
+    let Some(proto::retrieve_messages_response::Messages::RotationMessagesBcs(served)) =
         &current.messages
     else {
         panic!("expected one BCS blob for the current epoch");
@@ -12374,7 +12432,7 @@ fn rotation_responses_take_the_shape_the_request_epochs_committee_selects() {
     assert_eq!(served.value.as_deref(), Some(&blob[..]));
     assert!(matches!(
         previous.messages,
-        Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessages(_))
+        Some(proto::retrieve_messages_response::Messages::RotationMessages(_))
     ));
     for response in [&current, &previous] {
         let decoded = RetrieveMessagesResponse::try_from(response).unwrap();
@@ -12387,7 +12445,7 @@ fn rotation_responses_take_the_shape_the_request_epochs_committee_selects() {
         .unwrap();
     assert!(matches!(
         previous_with_blob.messages,
-        Some(hashi_types::proto::retrieve_messages_response::Messages::RotationMessagesBcs(_))
+        Some(proto::retrieve_messages_response::Messages::RotationMessagesBcs(_))
     ));
 }
 
@@ -18861,16 +18919,16 @@ fn retrieve_messages_does_not_starve_the_runtime() {
     hashi.set_mpc_manager(manager);
     let service = crate::grpc::HttpService::new(hashi);
 
-    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
         epoch: Some(epoch),
         dealer: Some(setup.address(2).to_string()),
-        protocol_type: Some(hashi_types::proto::MpcProtocolType::Dkg as i32),
+        protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
         batch_index: None,
     });
     request.extensions_mut().insert(setup.address(1));
 
     let handler = rt.spawn(async move {
-        use hashi_types::proto::mpc_service_server::MpcService;
+        use proto::mpc_service_server::MpcService;
         service.retrieve_messages(request).await
     });
 
@@ -18889,7 +18947,7 @@ fn retrieve_messages_does_not_starve_the_runtime() {
     polled.expect("worker thread was blocked by the storage read");
     assert!(matches!(
         response.unwrap().into_inner().messages,
-        Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
+        Some(proto::retrieve_messages_response::Messages::DkgMessage(_))
     ));
 }
 
@@ -18931,16 +18989,16 @@ fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
     let mpc_lock = hashi.mpc_manager().unwrap();
     let service = crate::grpc::HttpService::new(hashi);
 
-    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
         epoch: Some(epoch),
         dealer: Some(setup.address(2).to_string()),
-        protocol_type: Some(hashi_types::proto::MpcProtocolType::Dkg as i32),
+        protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
         batch_index: None,
     });
     request.extensions_mut().insert(setup.address(1));
 
     let handler = rt.spawn(async move {
-        use hashi_types::proto::mpc_service_server::MpcService;
+        use proto::mpc_service_server::MpcService;
         service.retrieve_messages(request).await
     });
 
@@ -18958,8 +19016,284 @@ fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
     );
     assert!(matches!(
         response.unwrap().into_inner().messages,
-        Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
+        Some(proto::retrieve_messages_response::Messages::DkgMessage(_))
     ));
+}
+
+#[test]
+fn a_requester_over_its_store_read_permits_is_shed_and_others_are_admitted() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let dealer_message = setup
+        .create_manager(0)
+        .create_dealer_message(&mut rand::thread_rng());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut manager = setup.create_manager_with_store(
+        0,
+        Arc::new(BlockingDealerMessageStore {
+            message: dealer_message.clone(),
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let epoch = manager.mpc_config.epoch;
+    manager
+        .persist_and_cache_dkg_message(epoch, setup.address(0), &dealer_message)
+        .unwrap();
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+    let retrieve = |requester: Address, dealer: Address| {
+        let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
+            epoch: Some(epoch),
+            dealer: Some(dealer.to_string()),
+            protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
+            batch_index: None,
+        });
+        request.extensions_mut().insert(requester);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.retrieve_messages(request).await
+        })
+    };
+    let (requester, other, stored, cached) = (
+        setup.address(1),
+        setup.address(3),
+        setup.address(2),
+        setup.address(0),
+    );
+
+    let mut handlers: Vec<_> = (0..4)
+        .map(|_| {
+            let handler = retrieve(requester, stored);
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a retrieval within the permits never reached the store");
+            handler
+        })
+        .collect();
+    let shed = rt
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), retrieve(requester, stored)).await
+        })
+        .expect("the retrieval over the permits reached the store")
+        .unwrap()
+        .unwrap_err();
+    let from_memory = rt
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), retrieve(requester, cached)).await
+        })
+        .expect("a retrieval served from memory waited for a permit")
+        .unwrap();
+    handlers.push(retrieve(other, stored));
+    let other_entered = entered_rx.recv_timeout(Duration::from_secs(10));
+    for _ in 0..handlers.len() {
+        release_tx.send(()).unwrap();
+    }
+    let responses: Vec<_> = handlers
+        .into_iter()
+        .map(|handler| rt.block_on(handler).unwrap())
+        .collect();
+
+    assert_eq!(shed.code(), tonic::Code::Unavailable);
+    assert!(
+        shed.message()
+            .contains(crate::grpc::PEER_INFLIGHT_LIMIT_MSG),
+        "{}",
+        shed.message()
+    );
+    assert!(from_memory.is_ok(), "{from_memory:?}");
+    other_entered.expect("another requester was refused a permit");
+    assert!(responses.iter().all(Result::is_ok), "{responses:?}");
+    let label = requester.to_string();
+    assert_eq!(
+        metrics
+            .peer_store_reads_shed_total
+            .with_label_values(&[&label])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .peer_store_reads_max
+            .with_label_values(&[&label])
+            .get(),
+        4
+    );
+}
+
+#[test]
+fn a_retrieval_abandoned_while_queued_on_the_manager_lock_never_reads_the_store() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let dealer_message = setup
+        .create_manager(0)
+        .create_dealer_message(&mut rand::thread_rng());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let manager = setup.create_manager_with_store(
+        0,
+        Arc::new(BlockingDealerMessageStore {
+            message: dealer_message,
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi.clone());
+    let requester = setup.address(1);
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
+        epoch: Some(epoch),
+        dealer: Some(setup.address(2).to_string()),
+        protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
+        batch_index: None,
+    });
+    request.extensions_mut().insert(requester);
+    let idle_refs = Arc::strong_count(&mpc_lock);
+    let wait_for_refs = |refs: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&mpc_lock) != refs {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "manager refs never reached {refs}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let held = mpc_lock.write().unwrap();
+    let handler = rt.spawn(async move {
+        use proto::mpc_service_server::MpcService;
+        service.retrieve_messages(request).await
+    });
+    wait_for_refs(idle_refs + 1);
+    handler.abort();
+    assert!(rt.block_on(handler).unwrap_err().is_cancelled());
+    drop(held);
+    wait_for_refs(idle_refs);
+
+    assert!(
+        entered_rx.try_recv().is_err(),
+        "the abandoned retrieval read the store"
+    );
+    assert_eq!(
+        metrics
+            .peer_store_reads_max
+            .with_label_values(&[&requester.to_string()])
+            .get(),
+        0
+    );
+}
+
+#[test]
+fn stored_rows_refused_at_load_and_while_serving_are_counted() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let epoch = setup.epoch();
+    let encs_count = 1 + usize::from(setup.dkg_config().threshold) * 33 + 64;
+    let miscounted = |dealer: usize| {
+        let honest = setup
+            .create_manager(dealer)
+            .create_dealer_message(&mut rand::thread_rng());
+        let mut bytes = bcs::to_bytes(&honest).unwrap();
+        bytes[encs_count] += 1;
+        bytes.insert(bytes.len() - 96, 0);
+        bcs::from_bytes::<avss::Message>(&bytes).unwrap()
+    };
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    let metrics = hashi.metrics.clone();
+    let store = Arc::new(InMemoryPublicMessagesStore::new());
+    store
+        .store_dealer_message(epoch, &setup.address(1), &miscounted(1))
+        .unwrap();
+    let manager = setup.create_manager_with_store_and_metrics(0, store.clone(), &metrics);
+    let previous_epoch = manager.previous_epoch;
+    store
+        .store_dealer_message(previous_epoch, &setup.address(3), &miscounted(3))
+        .unwrap();
+    hashi.set_mpc_manager(manager);
+    let service = crate::grpc::HttpService::new(hashi);
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
+        epoch: Some(previous_epoch),
+        dealer: Some(setup.address(3).to_string()),
+        protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
+        batch_index: None,
+    });
+    request.extensions_mut().insert(setup.address(2));
+    let served = rt
+        .block_on(async {
+            use proto::mpc_service_server::MpcService;
+            service.retrieve_messages(request).await
+        })
+        .unwrap_err();
+
+    assert_eq!(served.code(), tonic::Code::NotFound, "{}", served.message());
+    let refused = |phase: &str| {
+        let refused = metrics
+            .mpc_stored_rows_refused_total
+            .with_label_values(&["dkg", phase])
+            .get();
+        let first = metrics
+            .mpc_stored_rows_refused_first_timestamp_seconds
+            .with_label_values(&["dkg", phase])
+            .get();
+        (refused, first > 0)
+    };
+    assert_eq!(refused("load"), (1, true));
+    assert_eq!(refused("serve"), (1, true));
+    assert_eq!(metrics.mpc_committee_members.get(), 4);
 }
 
 #[test]
@@ -19000,16 +19334,16 @@ fn avid_retrieval_store_read_does_not_hold_the_manager_lock() {
     let mpc_lock = hashi.mpc_manager().unwrap();
     let service = crate::grpc::HttpService::new(hashi);
 
-    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
         epoch: Some(epoch),
         dealer: Some(setup.address(2).to_string()),
-        protocol_type: Some(hashi_types::proto::MpcProtocolType::NonceGeneration as i32),
+        protocol_type: Some(proto::MpcProtocolType::NonceGeneration as i32),
         batch_index: Some(0),
     });
     request.extensions_mut().insert(setup.address(1));
 
     let handler = rt.spawn(async move {
-        use hashi_types::proto::mpc_service_server::MpcService;
+        use proto::mpc_service_server::MpcService;
         service.retrieve_messages(request).await
     });
 
@@ -19069,18 +19403,19 @@ fn send_messages_count_checks_before_the_manager_lock() {
     .unwrap();
     hashi.set_mpc_manager(manager);
     let mpc_lock = hashi.mpc_manager().unwrap();
+    let metrics = hashi.metrics.clone();
     let service = crate::grpc::HttpService::new(hashi);
     let send = |message: Vec<u8>| {
-        let mut request = tonic::Request::new(hashi_types::proto::SendMessagesRequest {
+        let mut request = tonic::Request::new(proto::SendMessagesRequest {
             epoch: Some(epoch),
-            messages: Some(
-                hashi_types::proto::send_messages_request::Messages::DkgMessage(message.into()),
-            ),
+            messages: Some(proto::send_messages_request::Messages::DkgMessage(
+                message.into(),
+            )),
         });
         request.extensions_mut().insert(setup.address(1));
         let service = service.clone();
         rt.spawn(async move {
-            use hashi_types::proto::mpc_service_server::MpcService;
+            use proto::mpc_service_server::MpcService;
             service.send_messages(request).await
         })
     };
@@ -19110,6 +19445,28 @@ fn send_messages_count_checks_before_the_manager_lock() {
         undecodable.message().contains("dkg_message"),
         "{}",
         undecodable.message()
+    );
+    let sender = setup.address(1).to_string();
+    assert_eq!(
+        metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&sender, "request"])
+            .get(),
+        1
+    );
+    assert!(
+        metrics
+            .mpc_peer_refusals_first_timestamp_seconds
+            .with_label_values(&[&sender, "request"])
+            .get()
+            > 0
+    );
+    assert_eq!(
+        metrics
+            .mpc_refusals_total
+            .with_label_values(&["request", "send_messages", "dkg", "count"])
+            .get(),
+        1
     );
 
     let accepted = rt.block_on(send(honest)).unwrap();
@@ -19153,18 +19510,16 @@ fn a_rotation_blob_is_count_checked_before_the_manager_lock() {
     let mpc_lock = hashi.mpc_manager().unwrap();
     let service = crate::grpc::HttpService::new(hashi);
     let send = |messages: &RotationMessages| {
-        let mut request = tonic::Request::new(hashi_types::proto::SendMessagesRequest {
+        let mut request = tonic::Request::new(proto::SendMessagesRequest {
             epoch: Some(epoch),
-            messages: Some(
-                hashi_types::proto::send_messages_request::Messages::RotationMessagesBcs(
-                    bcs::to_bytes(messages).unwrap().into(),
-                ),
-            ),
+            messages: Some(proto::send_messages_request::Messages::RotationMessagesBcs(
+                bcs::to_bytes(messages).unwrap().into(),
+            )),
         });
         request.extensions_mut().insert(dealer);
         let service = service.clone();
         rt.spawn(async move {
-            use hashi_types::proto::mpc_service_server::MpcService;
+            use proto::mpc_service_server::MpcService;
             service.send_messages(request).await
         })
     };
@@ -19238,7 +19593,7 @@ fn complain_admits_a_zero_weight_member_and_refuses_a_non_member() {
         proto_request.extensions_mut().insert(caller);
         let service = service.clone();
         rt.block_on(async move {
-            use hashi_types::proto::mpc_service_server::MpcService;
+            use proto::mpc_service_server::MpcService;
             service.complain(proto_request).await
         })
     };
@@ -19340,7 +19695,7 @@ fn a_previous_epoch_dkg_row_that_fails_the_count_check_is_not_served() {
         },
     );
     assert!(
-        matches!(&retrieved, Err(MpcError::NotFound(reason)) if reason.contains("ciphertext.encs")),
+        matches!(&retrieved, Err(MpcError::StoredRowRefused { reason, .. }) if reason.contains("ciphertext.encs")),
         "{retrieved:?}"
     );
 }
@@ -19639,7 +19994,7 @@ fn stored_avid_state_is_refused_when_the_snapshot_is_for_another_epoch() {
     assert!(finish_avid_retrieval(&*store, pending(), &shape).is_ok());
     let refused = finish_avid_retrieval(&*store, pending(), &ahead).map(drop);
     assert!(
-        matches!(&refused, Err(MpcError::NotFound(reason)) if reason.contains("no AVID parameters for epoch")),
+        matches!(&refused, Err(MpcError::StoredRowRefused { reason, .. }) if reason.contains("no AVID parameters for epoch")),
         "{refused:?}"
     );
 }
@@ -19687,15 +20042,15 @@ async fn retrieve_messages_serves_stored_avid_state_while_a_newer_snapshot_is_pu
     *hashi.shape_params.write().unwrap() = Some(Arc::new(ahead));
     let service = crate::grpc::HttpService::new(hashi);
 
-    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+    let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
         epoch: Some(epoch),
         dealer: Some(fx.dealer_addr.to_string()),
-        protocol_type: Some(hashi_types::proto::MpcProtocolType::NonceGeneration as i32),
+        protocol_type: Some(proto::MpcProtocolType::NonceGeneration as i32),
         batch_index: Some(batch_index),
     });
     request.extensions_mut().insert(setup.address(4));
 
-    use hashi_types::proto::mpc_service_server::MpcService;
+    use proto::mpc_service_server::MpcService;
     let response = service
         .retrieve_messages(request)
         .await
@@ -19703,7 +20058,7 @@ async fn retrieve_messages_serves_stored_avid_state_while_a_newer_snapshot_is_pu
         .into_inner();
     assert!(matches!(
         response.messages,
-        Some(hashi_types::proto::retrieve_messages_response::Messages::AvidNonceRetrievalMessage(
+        Some(proto::retrieve_messages_response::Messages::AvidNonceRetrievalMessage(
             ref retrieval
         )) if retrieval.common.is_some()
     ));

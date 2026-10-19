@@ -97,8 +97,14 @@ fn map_status(status: tonic::Status) -> ChannelError {
         ]
         .iter()
         .any(|marker| status.message().contains(marker));
+    let response_too_large = status.code() == tonic::Code::OutOfRange
+        && status
+            .message()
+            .contains("decoded message length too large");
     if up_but_not_serving {
         ChannelError::NotReady(status.to_string())
+    } else if response_too_large {
+        ChannelError::ResponseTooLarge(status.to_string())
     } else {
         ChannelError::RequestFailed(status.to_string())
     }
@@ -245,6 +251,22 @@ mod tests {
         let not_found = tonic::Status::not_found("WithdrawalTransaction not found on-chain");
         assert!(matches!(
             map_status(not_found),
+            ChannelError::RequestFailed(_)
+        ));
+
+        let too_large = tonic::Status::out_of_range(
+            "Error, decoded message length too large: found 5000 bytes, the limit is: 4096 bytes",
+        );
+        assert!(matches!(
+            map_status(too_large),
+            ChannelError::ResponseTooLarge(_)
+        ));
+
+        let request_too_large = tonic::Status::out_of_range(
+            "declared message length 5000 exceeds this route's limit of 4096 bytes",
+        );
+        assert!(matches!(
+            map_status(request_too_large),
             ChannelError::RequestFailed(_)
         ));
     }

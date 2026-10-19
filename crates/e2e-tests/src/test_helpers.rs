@@ -698,6 +698,18 @@ pub fn assert_no_member_refusals(networks: &TestNetworks) {
                 &metrics.peer_responses_shed_total,
                 "shed member responses over the byte budget",
             ),
+            (
+                &metrics.peer_store_reads_shed_total,
+                "shed member store reads over the per-requester permits",
+            ),
+            (
+                &metrics.mpc_peer_refusals_total,
+                "refused MPC messages from members",
+            ),
+            (
+                &metrics.mpc_stored_rows_refused_total,
+                "refused its own stored MPC rows",
+            ),
         ] {
             let nonzero: Vec<String> = counter
                 .collect()

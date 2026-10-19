@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::mpc::RetrieveReply;
-use crate::mpc::not_found_if_refused;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::stored_rows;
 use crate::mpc::types;
@@ -327,14 +326,12 @@ impl RetrieveReply {
         use proto::retrieve_messages_response::Messages;
         let messages = match self {
             Self::Dkg(bytes) => {
-                stored_rows::check_dkg_message(shape, request.epoch, &request.dealer, bytes)
-                    .map_err(not_found_if_refused)?;
+                stored_rows::check_dkg_message(shape, request.epoch, &request.dealer, bytes)?;
                 Messages::DkgMessage(named_bcs::<avss::Message>(bytes.clone()))
             }
             Self::Rotation(blob) => {
                 let entries =
-                    stored_rows::rotation_entries(shape, request.epoch, &request.dealer, blob)
-                        .map_err(not_found_if_refused)?;
+                    stored_rows::rotation_entries(shape, request.epoch, &request.dealer, blob)?;
                 if shape
                     .committee_for_epoch(request.epoch)
                     .is_some_and(|committee| committee.rotation_messages_bcs())

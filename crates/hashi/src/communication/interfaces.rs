@@ -25,6 +25,9 @@ pub enum ChannelError {
     #[error("Request failed: {0}")]
     RequestFailed(String),
 
+    #[error("Response too large: {0}")]
+    ResponseTooLarge(String),
+
     /// The peer explicitly answered that it is up but not ready to serve
     /// yet (e.g. still reconciling its signing manager right after an epoch
     /// change). Distinguished from [`ChannelError::RequestFailed`] so

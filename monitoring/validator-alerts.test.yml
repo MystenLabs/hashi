@@ -131,6 +131,8 @@ tests:
         values: '_x130 1x70'
       - series: 'hashi_peer_requests_over_connection_limit_total{peer="A",instance="n1",job="hashi"}'
         values: '_x130 1x70'
+      - series: 'hashi_peer_store_reads_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x130 1x70'
     alert_rule_test:
       - eval_time: 150m
         alertname: HashiPeerShed
@@ -150,6 +152,10 @@ tests:
           - exp_labels: {peer: A, instance: n1, job: hashi, limit: connections, severity: warning}
             exp_annotations:
               summary: shed or refused traffic from peer A (connections)
+              description: *peer_shed
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: store_reads, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (store_reads)
               description: *peer_shed
 
   - name: withdrawal-signing-busy-in-its-first-sample-fires-and-cap-does-not
@@ -382,3 +388,136 @@ tests:
             exp_annotations:
               summary: MPC work started outside the per-peer budget
               description: *unguarded
+
+  - name: mpc-peer-refused-in-its-first-sample
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="response",instance="n1",job="hashi"}'
+        values: '_x131 7830x120'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="response",instance="n1",job="hashi"}'
+        values: '_x131 1x120'
+    alert_rule_test:
+      - eval_time: 135m
+        alertname: HashiMpcPeerRefused
+        exp_alerts:
+          - exp_labels: {peer: A, side: response, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: MPC responses from peer A refused
+              description: >-
+                The peer is likely faulty or on a broken build; a hash mismatch can also
+                be an honest signer that lost its row. Look the peer up with
+                `hashi committee -c hashi-cli.toml view A`.
+      - eval_time: 200m
+        alertname: HashiMpcPeerRefused
+        exp_alerts: []
+
+  - name: mpc-refusal-before-a-host-reboot-does-not-refire
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '60x99'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '5x99'
+    alert_rule_test:
+      - eval_time: 103m
+        alertname: HashiMpcPeerRefused
+        exp_alerts: []
+
+  - name: three-refused-peers-in-a-committee-of-four-page
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_committee_members{instance="n1",job="hashi"}'
+        values: '4x100'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="B",side="response",instance="n1",job="hashi"}'
+        values: '_x71 4230x28'
+      - series: 'hashi_mpc_peer_refusals_total{peer="B",side="response",instance="n1",job="hashi"}'
+        values: '_x71 1x28'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="C",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="C",side="request",instance="n1",job="hashi"}'
+        values: '0x73 1x26'
+    alert_rule_test:
+      - eval_time: 72m
+        alertname: HashiMpcPeersRefusedAtOnce
+        exp_alerts: []
+      - eval_time: 76m
+        alertname: HashiMpcPeersRefusedAtOnce
+        exp_alerts:
+          - exp_labels: {instance: n1, job: hashi, severity: critical}
+            exp_annotations:
+              summary: MPC messages from 3 peers refused within 10 minutes
+              description: >-
+                Usually a build mismatch: compare this node's build with the peers'
+                (GetServiceInfo). Each peer also has a HashiMpcPeerRefused alert.
+      - eval_time: 90m
+        alertname: HashiMpcPeersRefusedAtOnce
+        exp_alerts: []
+
+  - name: three-refused-peers-in-a-large-committee-do-not-page
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_committee_members{instance="n1",job="hashi"}'
+        values: '10x100'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="B",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="B",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="C",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="C",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: HashiMpcPeersRefusedAtOnce
+        exp_alerts: []
+
+  - name: a-peer-refused-on-both-sides-counts-once
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_committee_members{instance="n1",job="hashi"}'
+        values: '4x100'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="A",side="response",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="A",side="response",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+      - series: 'hashi_mpc_peer_refusals_first_timestamp_seconds{peer="B",side="request",instance="n1",job="hashi"}'
+        values: '60x100'
+      - series: 'hashi_mpc_peer_refusals_total{peer="B",side="request",instance="n1",job="hashi"}'
+        values: '0x69 1x30'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: HashiMpcPeersRefusedAtOnce
+        exp_alerts: []
+
+  - name: stored-row-refused-at-load-in-its-first-sample
+    interval: 1m
+    input_series:
+      - series: 'hashi_mpc_stored_rows_refused_first_timestamp_seconds{protocol="key_rotation",phase="load",instance="n1",job="hashi"}'
+        values: '_x131 7830x120'
+      - series: 'hashi_mpc_stored_rows_refused_total{protocol="key_rotation",phase="load",instance="n1",job="hashi"}'
+        values: '_x131 1x120'
+    alert_rule_test:
+      - eval_time: 135m
+        alertname: HashiMpcStoredRowsRefused
+        exp_alerts:
+          - exp_labels: {protocol: key_rotation, phase: load, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: this node refused its own stored key_rotation rows (load)
+              description: >-
+                A damaged store or, if several nodes see this after an upgrade, a build
+                refusing rows an earlier one wrote. A rotation needing the row can fail.
+      - eval_time: 200m
+        alertname: HashiMpcStoredRowsRefused
+        exp_alerts: []

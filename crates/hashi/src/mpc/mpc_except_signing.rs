@@ -15,6 +15,9 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::metrics::RefusalCounters;
+use crate::metrics::STORED_ROW_LOAD;
+use crate::metrics::STORED_ROW_READ;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
 use crate::mpc::rpc::response_checks;
@@ -559,7 +562,7 @@ impl MpcManager {
             test_corrupt_shares_for,
             complaint_response_policy,
         };
-        manager.load_stored_messages()?;
+        manager.load_stored_messages(metrics)?;
         Ok(manager)
     }
 
@@ -1071,7 +1074,7 @@ impl MpcManager {
             let mut mgr = mpc_manager.write().unwrap();
             // Load rotation messages from DB for restart recovery.
             // For live rotation this is a no-op (no messages stored yet).
-            mgr.load_stored_rotation_messages()?;
+            mgr.load_stored_rotation_messages(metrics)?;
         }
         // Optimization: a node that fell back to the new-member path has empty
         // key shares and cannot generate valid rotation messages.
@@ -1701,7 +1704,7 @@ impl MpcManager {
                     .mpc_message_retrieval_duration_seconds
                     .with_label_values(&[MPC_LABEL_DKG])
                     .start_timer();
-                Self::retrieve_dealer_message(mpc_manager, message, &dkg_cert, p2p_channel)
+                Self::retrieve_dealer_message(mpc_manager, message, &dkg_cert, p2p_channel, metrics)
                     .await
                     .map_err(|e| {
                         tracing::error!(
@@ -1781,6 +1784,7 @@ impl MpcManager {
                     signers,
                     p2p_channel,
                     epoch,
+                    metrics,
                 )
                 .await?;
                 {
@@ -2013,16 +2017,22 @@ impl MpcManager {
                     .mpc_message_retrieval_duration_seconds
                     .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                     .start_timer();
-                Self::retrieve_rotation_messages(mpc_manager, message, &rotation_cert, p2p_channel)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(
-                            "Failed to retrieve rotation messages for dealer {:?}: {}",
-                            dealer,
-                            e
-                        );
+                Self::retrieve_rotation_messages(
+                    mpc_manager,
+                    message,
+                    &rotation_cert,
+                    p2p_channel,
+                    metrics,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to retrieve rotation messages for dealer {:?}: {}",
+                        dealer,
                         e
-                    })?;
+                    );
+                    e
+                })?;
                 drop(_timer);
                 // Delete stale outputs from the RPC handler so the party phase
                 // reprocesses with the retrieved (certified) messages.
@@ -2093,6 +2103,7 @@ impl MpcManager {
                 signers,
                 p2p_channel,
                 epoch,
+                metrics,
             )
             .await?;
             {
@@ -3590,6 +3601,7 @@ impl MpcManager {
         .await;
         let mgr = Arc::clone(mpc_manager);
         let nonce_cert = nonce_cert.clone();
+        let refusals = metrics.refusal_counters();
         let outcome = spawn_blocking(move || {
             let mut refused = Vec::new();
             let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
@@ -3598,10 +3610,25 @@ impl MpcManager {
                     Ok(response) => {
                         response_checks::avid_bundle(addr, &shape, dealer_party, &response)
                             .map(|bundle| (addr, bundle))
-                            .inspect_err(|reason| refused.push(format!("{addr:?}: {reason}")))
+                            .inspect_err(|reason| {
+                                refusals.response(
+                                    &addr,
+                                    "retrieve_messages",
+                                    MPC_LABEL_NONCE_GENERATION,
+                                    reason.label(),
+                                );
+                                refused.push(format!("{addr:?}: {reason}"))
+                            })
                             .ok()
                     }
                     Err(e) => {
+                        count_response_too_large(
+                            &refusals,
+                            &addr,
+                            "retrieve_messages",
+                            MPC_LABEL_NONCE_GENERATION,
+                            &e,
+                        );
                         tracing::info!("AVID retrieval from {:?} failed: {}", addr, e);
                         None
                     }
@@ -3800,6 +3827,13 @@ impl MpcManager {
             let response = match result {
                 Ok(response) => response,
                 Err(e) => {
+                    count_response_too_large(
+                        &metrics.refusal_counters(),
+                        &signer,
+                        "complain",
+                        MPC_LABEL_NONCE_GENERATION,
+                        &e,
+                    );
                     tracing::info!("AVID complaint to {:?} failed: {}", signer, e);
                     continue;
                 }
@@ -3815,9 +3849,16 @@ impl MpcManager {
                 let receiver = Arc::clone(&receiver);
                 let verified_common = Arc::clone(&verified_common);
                 let verified_so_far = verified.clone();
+                let refusals = metrics.refusal_counters();
                 spawn_blocking(move || {
                     let response = response_checks::avid_complaint_response(&response)
                         .map_err(|reason| {
+                            refusals.response(
+                                &signer,
+                                "complain",
+                                MPC_LABEL_NONCE_GENERATION,
+                                reason.label(),
+                            );
                             tracing::warn!(
                                 "AVID complaint response from {signer:?} for dealer {dealer:?} \
                                  batch {batch_index} refused: {reason}"
@@ -4346,6 +4387,7 @@ impl MpcManager {
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
@@ -4372,14 +4414,20 @@ impl MpcManager {
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
-        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
-            .await
-            .ok_or_else(|| {
-                MpcError::PairwiseCommunicationError(format!(
-                    "Could not retrieve message for dealer {:?} from any signer",
-                    message.dealer_address
-                ))
-            })?;
+        let prepared = hedged_retrieve(
+            signers,
+            p2p_channel,
+            &request,
+            message.messages_hash,
+            metrics,
+        )
+        .await
+        .ok_or_else(|| {
+            MpcError::PairwiseCommunicationError(format!(
+                "Could not retrieve message for dealer {:?} from any signer",
+                message.dealer_address
+            ))
+        })?;
         let PreparedMessages::Dkg(entry) = prepared else {
             unreachable!("a DKG retrieval accepts only a DKG response")
         };
@@ -4478,6 +4526,7 @@ impl MpcManager {
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<()> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
@@ -4508,13 +4557,19 @@ impl MpcManager {
                 })?;
             (request, signers)
         };
-        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
-            .await
-            .ok_or_else(|| {
-                MpcError::PairwiseCommunicationError(
-                    "Failed to retrieve rotation messages from any signer".to_string(),
-                )
-            })?;
+        let prepared = hedged_retrieve(
+            signers,
+            p2p_channel,
+            &request,
+            message.messages_hash,
+            metrics,
+        )
+        .await
+        .ok_or_else(|| {
+            MpcError::PairwiseCommunicationError(
+                "Failed to retrieve rotation messages from any signer".to_string(),
+            )
+        })?;
         let PreparedMessages::Rotation(entry) = prepared else {
             unreachable!("a rotation retrieval accepts only a rotation response")
         };
@@ -4530,6 +4585,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
+        metrics: &Metrics,
     ) -> MpcResult<avss::AvssOutput> {
         let (complaint_request, receiver, committee, weights) = {
             let mgr = mpc_manager.read().unwrap();
@@ -4569,6 +4625,13 @@ impl MpcManager {
             let response = match result {
                 Ok(r) => r,
                 Err(e) => {
+                    count_response_too_large(
+                        &metrics.refusal_counters(),
+                        &signer,
+                        "complain",
+                        MPC_LABEL_DKG,
+                        &e,
+                    );
                     tracing::info!("Complaint to {:?} failed: {}", signer, e);
                     continue;
                 }
@@ -4585,6 +4648,12 @@ impl MpcManager {
             let complaint_response = match checked {
                 Ok(resp) => resp,
                 Err(reason) => {
+                    metrics.refusal_counters().response(
+                        &signer,
+                        "complain",
+                        MPC_LABEL_DKG,
+                        reason.label(),
+                    );
                     tracing::warn!(
                         "DKG complaint response from {signer:?} for dealer {dealer:?} refused: \
                          {reason}"
@@ -4635,6 +4704,7 @@ impl MpcManager {
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
+        metrics: &Metrics,
     ) -> MpcResult<HashMap<ShareIndex, avss::AvssOutput>> {
         let (recovery_contexts, committee, weights) = {
             let mgr = mpc_manager.read().unwrap();
@@ -4667,6 +4737,13 @@ impl MpcManager {
                     let response = match result {
                         Ok(response) => response,
                         Err(e) => {
+                            count_response_too_large(
+                                &metrics.refusal_counters(),
+                                &signer,
+                                "complain",
+                                MPC_LABEL_KEY_ROTATION,
+                                &e,
+                            );
                             tracing::info!(
                                 "Failed to get rotation complaint response from {}: {}",
                                 signer,
@@ -4687,6 +4764,12 @@ impl MpcManager {
                     let resp = match checked {
                         Ok(resp) => resp,
                         Err(reason) => {
+                            metrics.refusal_counters().response(
+                                &signer,
+                                "complain",
+                                MPC_LABEL_KEY_ROTATION,
+                                reason.label(),
+                            );
                             tracing::warn!(
                                 "Rotation complaint response from {signer:?} for dealer \
                                  {dealer:?} share {share_index} refused: {reason}"
@@ -4730,7 +4813,7 @@ impl MpcManager {
         Ok(results.into_iter().collect())
     }
 
-    fn load_stored_messages(&mut self) -> MpcResult<()> {
+    fn load_stored_messages(&mut self, metrics: &Metrics) -> MpcResult<()> {
         let epoch = self.mpc_config.epoch;
         let shape = self.shape_params();
         for (dealer, bytes) in self
@@ -4750,13 +4833,16 @@ impl MpcManager {
                     tracing::warn!("Skipping a stored DKG message: {e}");
                     self.skipped_rows
                         .insert((ProtocolTypeIndicator::Dkg, dealer));
+                    metrics
+                        .stored_row_refusals()
+                        .record(MPC_LABEL_DKG, STORED_ROW_LOAD);
                 }
             }
         }
-        self.load_stored_rotation_messages()
+        self.load_stored_rotation_messages(metrics)
     }
 
-    fn load_stored_rotation_messages(&mut self) -> MpcResult<()> {
+    fn load_stored_rotation_messages(&mut self, metrics: &Metrics) -> MpcResult<()> {
         let epoch = self.mpc_config.epoch;
         let shape = self.shape_params();
         for (dealer, bytes) in self
@@ -4776,6 +4862,9 @@ impl MpcManager {
                     tracing::warn!("Skipping stored rotation messages: {e}");
                     self.skipped_rows
                         .insert((ProtocolTypeIndicator::KeyRotation, dealer));
+                    metrics
+                        .stored_row_refusals()
+                        .record(MPC_LABEL_KEY_ROTATION, STORED_ROW_LOAD);
                 }
             }
         }
@@ -5870,6 +5959,7 @@ impl MpcManager {
                         signers,
                         p2p_channel,
                         previous_epoch,
+                        metrics,
                     )
                     .await?;
                     drop(_recovery_timer);
@@ -5935,6 +6025,7 @@ impl MpcManager {
                         signers,
                         p2p_channel,
                         previous_epoch,
+                        metrics,
                     )
                     .await?;
                     drop(_recovery_timer);
@@ -6062,6 +6153,7 @@ impl MpcManager {
                         certificate,
                         protocol_type,
                         p2p_channel,
+                        metrics,
                     );
                     match tokio::time::timeout(PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT, repair)
                         .await
@@ -6115,6 +6207,11 @@ impl MpcManager {
                     .mpc_previous_message_unusable_total
                     .with_label_values(&[cert.inner().protocol_label()])
                     .inc();
+                if matches!(e, MpcError::StoredRowRefused { .. }) {
+                    metrics
+                        .stored_row_refusals()
+                        .record(protocol_type.label(), STORED_ROW_READ);
+                }
                 tracing::warn!(
                     "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
                      could not be read ({e})",
@@ -6147,6 +6244,7 @@ impl MpcManager {
         certificate: &DealerCertificate,
         protocol_type: ProtocolTypeIndicator,
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<Messages> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
@@ -6168,14 +6266,20 @@ impl MpcManager {
                 })?;
             (request, signers)
         };
-        let prepared = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
-            .await
-            .ok_or_else(|| {
-                MpcError::PairwiseCommunicationError(format!(
-                    "Could not retrieve previous epoch message for dealer {:?} from any signer",
-                    message.dealer_address
-                ))
-            })?;
+        let prepared = hedged_retrieve(
+            signers,
+            p2p_channel,
+            &request,
+            message.messages_hash,
+            metrics,
+        )
+        .await
+        .ok_or_else(|| {
+            MpcError::PairwiseCommunicationError(format!(
+                "Could not retrieve previous epoch message for dealer {:?} from any signer",
+                message.dealer_address
+            ))
+        })?;
         let mut mgr = mpc_manager.write().unwrap();
         let previous_epoch = mgr.previous_epoch;
         match prepared {
@@ -6631,7 +6735,16 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
                     tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e)
                 }
             }
-            Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
+            Err(e) => {
+                count_response_too_large(
+                    &metrics.refusal_counters(),
+                    &addr,
+                    "send_messages",
+                    protocol,
+                    &e,
+                );
+                tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e)
+            }
         }
         if grace_deadline.is_none() && aggregator.reduced_weight_reached(stop.threshold) {
             grace_deadline = Some(tokio::time::Instant::now() + stop.grace);
@@ -6686,6 +6799,18 @@ fn fan_out_complaints<'a, P: P2PChannel + 'a>(
         .collect()
 }
 
+fn count_response_too_large(
+    refusals: &RefusalCounters,
+    peer: &Address,
+    handler: &str,
+    protocol: &str,
+    e: &ChannelError,
+) {
+    if matches!(e, ChannelError::ResponseTooLarge(_)) {
+        refusals.response(peer, handler, protocol, "limit");
+    }
+}
+
 fn responder_weights(
     shape: &ShapeParams,
     epoch: u64,
@@ -6725,7 +6850,9 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
     p2p_channel: &'a P,
     request: &'a RetrieveMessagesRequest,
     expected_hash: MessagesHash,
+    metrics: &Metrics,
 ) -> Option<PreparedMessages> {
+    let protocol = request.protocol_type.label();
     signers.shuffle(&mut rand::thread_rng());
     let mut remaining = signers.into_iter();
     let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
@@ -6762,19 +6889,32 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
                         .await
                         {
                             Ok(prepared) => return Some(prepared),
-                            Err(reason) => tracing::warn!(
-                                "{:?} retrieval response from {signer:?} for dealer {:?} \
-                                 refused: {reason}",
-                                request.protocol_type,
-                                request.dealer,
-                            ),
+                            Err(reason) => {
+                                metrics.refusal_counters().response(
+                                    &signer,
+                                    "retrieve_messages",
+                                    protocol,
+                                    reason.label(),
+                                );
+                                tracing::warn!(
+                                    "{:?} retrieval response from {signer:?} for dealer {:?} \
+                                     refused: {reason}",
+                                    request.protocol_type,
+                                    request.dealer,
+                                )
+                            }
                         }
                     }
-                    Err(e) => tracing::info!(
-                        "Retrieve from signer {:?} failed: {}",
-                        signer,
-                        e
-                    ),
+                    Err(e) => {
+                        count_response_too_large(
+                            &metrics.refusal_counters(),
+                            &signer,
+                            "retrieve_messages",
+                            protocol,
+                            &e,
+                        );
+                        tracing::info!("Retrieve from signer {:?} failed: {}", signer, e)
+                    }
                 },
                 _ = &mut timeout => break,
             }
@@ -6963,6 +7103,7 @@ async fn publish_dealer_cert(
 fn publish_outcome_label(e: &ChannelError) -> &'static str {
     match e {
         ChannelError::RequestFailed(_) => "request_failed",
+        ChannelError::ResponseTooLarge(_) => "response_too_large",
         ChannelError::NotReady(_) => "not_ready",
         ChannelError::ClientNotFound(_) => "client_not_found",
         ChannelError::Timeout => "timeout",
@@ -7007,6 +7148,16 @@ pub(crate) enum RetrieveOutcome {
     NeedsAvidStore(AvidPending),
 }
 
+impl RetrieveOutcome {
+    pub(crate) fn reads_store(&self) -> bool {
+        match self {
+            Self::Ready(_) => false,
+            Self::NeedsStore => true,
+            Self::NeedsAvidStore(pending) => pending.reads_store(),
+        }
+    }
+}
+
 pub(crate) enum RetrieveReply {
     Dkg(Bytes),
     Rotation(Bytes),
@@ -7046,6 +7197,12 @@ pub(crate) struct AvidPending {
     held: Lookup<Arc<HeldAvidEchoes>>,
 }
 
+impl AvidPending {
+    fn reads_store(&self) -> bool {
+        matches!(self.round_state, Lookup::Pending) || matches!(self.held, Lookup::Pending)
+    }
+}
+
 pub(crate) fn finish_avid_retrieval(
     store: &dyn PublicMessagesStore,
     pending: AvidPending,
@@ -7059,8 +7216,7 @@ pub(crate) fn finish_avid_retrieval(
             .map(|bytes| {
                 stored_rows::held_avid_echoes(shape, pending.epoch, &pending.dealer, &bytes)
             })
-            .transpose()
-            .map_err(not_found_if_refused)?
+            .transpose()?
             .map(Arc::new),
     };
     let round_state = match pending.round_state {
@@ -7071,8 +7227,7 @@ pub(crate) fn finish_avid_retrieval(
             .map(|bytes| {
                 stored_rows::avid_round_state(shape, pending.epoch, &pending.dealer, &bytes)
             })
-            .transpose()
-            .map_err(not_found_if_refused)?
+            .transpose()?
             .map(Arc::new),
     };
     let retrieval = AvidRetrieval {
@@ -7146,18 +7301,6 @@ pub(crate) fn retrieve_from_store(
         ProtocolTypeIndicator::NonceGeneration => None,
     };
     reply.ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
-}
-
-pub(crate) fn not_found_if_refused(e: MpcError) -> MpcError {
-    match e {
-        MpcError::StoredRowRefused { dealer, reason } => {
-            tracing::warn!("Stored row for dealer {dealer:?} refused ({reason}); not served");
-            MpcError::NotFound(format!(
-                "stored row for dealer {dealer:?} refused: {reason}"
-            ))
-        }
-        e => e,
-    }
 }
 
 fn warn_if_refused(e: MpcError) -> MpcError {
