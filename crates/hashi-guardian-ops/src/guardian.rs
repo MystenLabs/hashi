@@ -204,8 +204,7 @@ pub struct Reached {
 /// Stops unless the proxy leads key provisioners and nodes to the slot's guardian as its role says: the proxy fronts
 /// the active slot, and its relay sends key provisioners to a standby.
 pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -> Result<Reached> {
-    view.require_instance(stack)?;
-    view.require_deployed(stack)?;
+    view.require_deployed(ctx, stack)?;
     let info = slot_info(ctx, tree, view)?;
     let Some(signing_key) = info.signing_key.clone().filter(|key| is_hex(key, 64)) else {
         bail!(

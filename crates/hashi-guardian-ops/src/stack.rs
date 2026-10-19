@@ -20,6 +20,7 @@ use crate::Ctx;
 use crate::exec::Cmd;
 use crate::exec::read;
 use crate::exec::read_json;
+use crate::host;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Slot {
@@ -368,26 +369,19 @@ impl SlotView {
         })
     }
 
-    /// Stops unless an active slot's guardian runs the commit the slot configures, whose protos decode its answers. The
-    /// stack records no deployed commit for a standby, which is read with its configured one.
-    pub fn require_deployed(&self, stack: &Stack) -> Result<()> {
-        if self.role != Role::Active {
-            return Ok(());
-        }
-        match stack.output("guardian_hashi_commit") {
-            Some(applied) if applied == self.commit => Ok(()),
-            Some(applied) => bail!(
-                "stack {} configures commit {} for slot {}, whose guardian the stack last deployed at {applied}; set it back, or deploy it, first",
+    /// Stops unless the slot's host was launched to build the commit the slot configures, whose protos decode its
+    /// guardian's answers. The stack records no standby's commit, but every host's user-data names its own.
+    pub fn require_deployed(&self, ctx: &Ctx, stack: &Stack) -> Result<()> {
+        let instance = self.require_instance(stack)?;
+        if !host::user_data(ctx, &stack.bucket()?.region, instance)?.contains(&self.commit) {
+            bail!(
+                "stack {} configures commit {} for slot {}, but its host {instance} was launched to build another commit; set it back, or deploy it, first",
                 stack.name,
                 self.commit,
                 self.slot
-            ),
-            None => bail!(
-                "stack {} has no guardian_hashi_commit output, so nothing shows which commit slot {}'s guardian runs",
-                stack.name,
-                self.slot
-            ),
+            );
         }
+        Ok(())
     }
 }
 
@@ -464,7 +458,6 @@ pub mod tests {
             serde_json::json!({
                 "active_slot": "a",
                 "enclave_instance_id": "i-0aaa",
-                "guardian_hashi_commit": COMMIT,
                 "standby_instance_id": "",
                 "s3_bucket_name": "guardian-bucket",
                 "s3_bucket_region": "us-west-2",
@@ -482,7 +475,6 @@ pub mod tests {
             serde_json::json!({
                 "active_slot": "a",
                 "enclave_instance_id": "i-0aaa",
-                "guardian_hashi_commit": COMMIT,
                 "standby_instance_id": "i-0bbb",
                 "s3_bucket_name": "guardian-bucket",
                 "s3_bucket_region": "us-west-2",

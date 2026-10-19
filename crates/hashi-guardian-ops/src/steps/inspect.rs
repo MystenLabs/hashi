@@ -71,7 +71,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
             stack.slot(ctx, read_as)
         })
         .and_then(|view| {
-            view.require_deployed(&stack)?;
+            view.require_deployed(ctx, &stack)?;
             Tree::at(
                 ctx,
                 &view.commit,
@@ -246,6 +246,8 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
+    use base64ct::Base64;
+    use base64ct::Encoding;
     use serde_json::json;
 
     use super::*;
@@ -258,8 +260,13 @@ mod tests {
     const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const KEY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    /// A two-slot stack whose tunnels reach guardians with `KEY_A` and `KEY_B`, and whose proxy fronts `fronted` and
-    /// relays to `relayed`.
+    /// What `aws ec2 describe-instance-attribute` prints for a host launched to build `commit`.
+    fn user_data(commit: &str) -> String {
+        Base64::encode_string(format!("#!/bin/bash\ngit checkout {commit}\n").as_bytes())
+    }
+
+    /// A two-slot stack whose hosts build `COMMIT`, whose tunnels reach guardians with `KEY_A` and `KEY_B`, and whose
+    /// proxy fronts `fronted` and relays to `relayed`.
     fn world(fronted: &'static str, relayed: &'static str) -> Fake {
         world_as_of(fronted, relayed, Some(Duration::ZERO))
     }
@@ -307,14 +314,15 @@ mod tests {
                     }
                     Some((true, info.to_string()))
                 }
+                ("aws", _) if words[1] == "ec2" => Some((true, user_data(COMMIT))),
                 _ => None,
             }
         })
     }
 
-    /// A world where `stack`'s configuration and outputs load and every other read fails. Any other command is a
-    /// change, which fails the test.
-    fn only_the_stack(stack: Fake) -> Fake {
+    /// A world where `stack`'s configuration and outputs load, its hosts build `launched` (or can't be read), and every
+    /// other read fails. Any other command is a change, which fails the test.
+    fn only_the_stack(stack: Fake, launched: Option<&'static str>) -> Fake {
         Fake::new(move |words| {
             let w: Vec<&str> = words.iter().map(String::as_str).collect();
             match w.as_slice() {
@@ -323,11 +331,13 @@ mod tests {
                         .ok()
                         .map(|output| (output.success, output.stdout))
                 }
+                ["aws", "ec2", "describe-instance-attribute", ..] => Some(
+                    launched.map_or((false, String::new()), |commit| (true, user_data(commit))),
+                ),
                 ["pulumi", "version"]
                 | ["pulumi", "-C", _, "stack", "export", ..]
                 | ["pulumi", "-C", _, "stack", "tag", "ls", ..]
-                | ["curl", ..]
-                | ["git", "-C", _, "rev-parse", ..] => Some((false, String::new())),
+                | ["curl", ..] => Some((false, String::new())),
                 _ => None,
             }
         })
@@ -399,31 +409,56 @@ mod tests {
     }
 
     #[test]
-    fn reads_no_active_guardian_whose_configured_commit_is_not_deployed() {
-        // Until the stack deploys the new commit, the slot runs the old one, which the new commit's protos may misread.
-        let repo = tempfile::tempdir().unwrap();
-        let configured = "c4".repeat(20);
-        let exec = only_the_stack(crate::stack::tests::stack_world(
-            json!({ "hashi-commit": configured }),
-            json!({ "active_slot": "a", "enclave_instance_id": "i-0aaa", "guardian_hashi_commit": COMMIT }),
-        ));
-        let ctx = test_ctx(repo.path(), &exec);
-        std::fs::create_dir_all(repo.path().join(".hashi/guardian-init").join(&configured))
-            .unwrap();
-        assert_eq!(
-            info(&ctx, None).unwrap_err().to_string(),
-            format!(
-                "stack org/testnet configures commit {configured} for slot a, whose guardian the stack last deployed at {COMMIT}; set it back, or deploy it, first"
-            )
-        );
-        // With no standby, status's relay read reaches that guardian too, and grpcurl would fail the test.
-        status(&ctx).unwrap();
+    fn reads_no_guardian_whose_host_builds_another_commit() {
+        // Until the stack deploys a slot's new commit, its host runs the old one, which the new commit's protos may
+        // misread. Both hosts here build COMMIT.
+        let pending = "c4".repeat(20);
+        let outputs = json!({
+            "active_slot": "a",
+            "enclave_instance_id": "i-0aaa",
+            "standby_instance_id": "i-0bbb",
+            "s3_bucket_name": "guardian-bucket",
+            "s3_bucket_region": "us-west-2",
+        });
+        let mut no_standby = outputs.clone();
+        no_standby["standby_instance_id"] = "".into();
+        for (slot, host, config, outputs) in [
+            (
+                Slot::A,
+                "i-0aaa",
+                json!({ "hashi-commit": pending }),
+                no_standby,
+            ),
+            (
+                Slot::B,
+                "i-0bbb",
+                json!({ "hashi-commit": COMMIT, "hashi-commit-b": pending, "slot-b-enabled": "true" }),
+                outputs,
+            ),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            let exec = only_the_stack(
+                crate::stack::tests::stack_world(config, outputs),
+                Some(COMMIT),
+            );
+            let ctx = test_ctx(repo.path(), &exec);
+            std::fs::create_dir_all(repo.path().join(".hashi/guardian-init").join(&pending))
+                .unwrap();
+            assert_eq!(
+                info(&ctx, Some(slot)).unwrap_err().to_string(),
+                format!(
+                    "stack org/testnet configures commit {pending} for slot {slot}, but its host {host} was launched to build another commit; set it back, or deploy it, first"
+                )
+            );
+            // status reads the relay as this slot, and grpcurl would fail the test.
+            status(&ctx).unwrap();
+        }
     }
 
     #[test]
     fn status_reports_a_partly_broken_stack() {
         let repo = tempfile::tempdir().unwrap();
-        let exec = only_the_stack(crate::stack::tests::two_slots());
+        let exec = only_the_stack(crate::stack::tests::two_slots(), None);
         let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
         status(&ctx).unwrap();
         for read in [
@@ -431,7 +466,7 @@ mod tests {
             &["pulumi", "-C", ENCLAVE, "stack", "export"],
             &["pulumi", "-C", ENCLAVE, "stack", "tag", "ls"],
             &["curl"],
-            &["git"],
+            &["aws", "ec2", "describe-instance-attribute"],
         ] {
             assert!(exec.ran(read), "{read:?}");
         }

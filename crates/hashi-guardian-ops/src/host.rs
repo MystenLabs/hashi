@@ -1,10 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Commands on a guardian host, through SSM.
+//! A guardian host: the user-data it was launched with, and commands on it through SSM.
 
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use base64ct::Base64;
+use base64ct::Encoding;
 
 use crate::Ctx;
 use crate::exec::Cmd;
@@ -60,6 +63,21 @@ pub fn run(ctx: &Ctx, region: &str, instance: &str, commands: &[&str]) -> Result
 
 fn aws_ssm(region: &str, action: &str) -> Cmd {
     Cmd::new("aws").args(["ssm", action, "--region", region])
+}
+
+/// The user-data the host was launched with, which names the commit it builds its guardian from.
+pub fn user_data(ctx: &Ctx, region: &str, instance: &str) -> Result<String> {
+    let encoded = read(
+        ctx.exec,
+        &Cmd::new("aws")
+            .args(["ec2", "describe-instance-attribute", "--region", region])
+            .args(["--instance-id", instance, "--attribute", "userData"])
+            .args(["--query", "UserData.Value", "--output", "text"]),
+    )
+    .with_context(|| format!("could not read the user-data of {instance}"))?;
+    let decoded = Base64::decode_vec(encoded.trim())
+        .map_err(|_| anyhow!("the user-data of {instance} is not base64"))?;
+    Ok(String::from_utf8_lossy(&decoded).into_owned())
 }
 
 /// The commands the host step runs: the end of the boot log, whether the boot finished, the enclave and the units.
@@ -129,6 +147,50 @@ mod tests {
         assert_eq!(
             log[1][6..],
             ["--command-id", "cmd-1", "--instance-id", "i-0aaa"]
+        );
+    }
+
+    #[test]
+    fn reads_the_user_data_a_host_was_launched_with() {
+        let exec = Fake::new(|words| {
+            (words[1] == "ec2").then(|| {
+                (
+                    true,
+                    format!("{}\n", Base64::encode_string(b"#!/bin/bash\necho hi\n")),
+                )
+            })
+        });
+        let repo = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        assert_eq!(
+            user_data(&ctx, "us-west-2", "i-0bbb").unwrap(),
+            "#!/bin/bash\necho hi\n"
+        );
+        assert_eq!(
+            exec.log.borrow()[0][1..],
+            [
+                "ec2",
+                "describe-instance-attribute",
+                "--region",
+                "us-west-2",
+                "--instance-id",
+                "i-0bbb",
+                "--attribute",
+                "userData",
+                "--query",
+                "UserData.Value",
+                "--output",
+                "text",
+            ]
+        );
+
+        let exec = Fake::new(|_| Some((true, "not base64!\n".to_owned())));
+        let ctx = Ctx::for_test(repo.path(), &exec, &[]);
+        assert_eq!(
+            user_data(&ctx, "us-west-2", "i-0bbb")
+                .unwrap_err()
+                .to_string(),
+            "the user-data of i-0bbb is not base64"
         );
     }
 
