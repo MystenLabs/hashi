@@ -88,6 +88,10 @@ impl Env {
             .ok_or_else(|| anyhow!("{} does not set {key}", self.path.display()))
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The local port slot a's tunnel uses; slot b's is the next one.
     pub fn tunnel_port(&self) -> Result<u16> {
         let Some(value) = self.get("TUNNEL_PORT") else {

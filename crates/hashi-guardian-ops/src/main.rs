@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::Subcommand;
 use hashi_guardian_ops::Ctx;
+use hashi_guardian_ops::ask::Terminal;
 use hashi_guardian_ops::exec::System;
 use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
@@ -52,6 +53,12 @@ enum Command {
         #[arg(long)]
         slot: Option<Slot>,
     },
+    /// Publish a slot's configuration to the key provisioners' bucket.
+    Publish {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -62,7 +69,7 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let ctx = Ctx::new(&cli.env_file, &System)?;
+    let ctx = Ctx::new(&cli.env_file, &System, &Terminal)?;
     require_programs(&System)?;
     match cli.command {
         Command::Status => inspect::status(&ctx),
@@ -70,6 +77,7 @@ fn main() -> anyhow::Result<()> {
         Command::Host { slot } => inspect::host(&ctx, slot),
         Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Command::Render { slot } => configs::render(&ctx, slot),
+        Command::Publish { slot } => configs::publish(&ctx, slot),
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }
