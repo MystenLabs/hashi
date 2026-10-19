@@ -72,6 +72,10 @@ use pool::UtxoPool;
 use std::fmt;
 use sui_sdk_types::Address;
 
+/// The UTXOs held longest that the daily check logs, for a look at the
+/// pool's age without the findings.
+const OLDEST_UTXOS_LOGGED: usize = 20;
+
 pub trait AuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
 }
@@ -220,13 +224,28 @@ impl AuditorCore {
             .filter(|outpoint| !pending_inputs.contains(outpoint))
             .collect::<Vec<_>>();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
-        let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
-        let findings = pool.check(
-            &states,
-            &pending_inputs,
-            now_timestamp_secs(),
-            &self.cfg.timing,
+        let now = now_timestamp_secs();
+        let oldest = pool.oldest(OLDEST_UTXOS_LOGGED);
+        let oldest_lines = oldest
+            .iter()
+            .map(|(outpoint, utxo)| {
+                format!(
+                    "\n  age={:.1}d first_seen={} amount={} origin={:?} outpoint={}",
+                    now.saturating_sub(utxo.first_seen) as f64 / 86_400.0,
+                    utc_timestamp(utxo.first_seen),
+                    utxo.amount,
+                    utxo.origin,
+                    outpoint,
+                )
+            })
+            .collect::<String>();
+        tracing::info!(
+            listed = oldest.len(),
+            held = pool.len(),
+            "the UTXOs held longest, by block time:{oldest_lines}"
         );
+        let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
+        let findings = pool.check(&states, &pending_inputs, now, &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),

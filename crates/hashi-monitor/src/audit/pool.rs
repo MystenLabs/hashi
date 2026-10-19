@@ -187,6 +187,18 @@ impl UtxoPool {
     }
 
     /// The outpoints held, in order.
+    /// The `count` UTXOs held longest, oldest first by block time.
+    pub fn oldest(&self, count: usize) -> Vec<(OutPoint, &Utxo)> {
+        let mut utxos = self
+            .utxos
+            .iter()
+            .map(|(outpoint, utxo)| (*outpoint, utxo))
+            .collect::<Vec<_>>();
+        utxos.sort_by_key(|(_, utxo)| utxo.first_seen);
+        utxos.truncate(count);
+        utxos
+    }
+
     pub fn outpoints(&self) -> Vec<OutPoint> {
         self.utxos.keys().copied().collect()
     }

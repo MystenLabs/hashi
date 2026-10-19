@@ -112,7 +112,8 @@ the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Continuous monitoring" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
-held:
+held. It first logs the twenty UTXOs held longest, by block time, with each
+one's age, amount and origin. Then it reports:
 
 - **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
   (31 days, since honest coin selection refreshes UTXOs older than 30);
