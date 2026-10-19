@@ -11,6 +11,7 @@ use hashi_guardian_ops::exec::require_programs;
 use hashi_guardian_ops::stack::Slot;
 use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::inspect;
+use hashi_guardian_ops::steps::kp_keys;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-ops")]
@@ -51,6 +52,12 @@ enum Command {
         #[arg(long)]
         slot: Option<Slot>,
     },
+    /// Download and verify every key provisioner's uploaded public key, then write the roster.
+    DownloadKpPubkeys {
+        /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -63,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Command::Host { slot } => inspect::host(&ctx, slot),
         Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Command::Render { slot } => configs::render(&ctx, slot),
+        Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }
 
