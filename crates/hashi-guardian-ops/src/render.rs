@@ -5,8 +5,7 @@
 //! the certificates they list. Both name everything the operator and the key provisioners must agree on, with the
 //! endpoint each reaches the guardian by.
 //!
-//! The layout is guardian.sh's, byte for byte, so files rendered by either stay fresh for the other. guardian.sh lists
-//! no earlier build, so only this tool renders a rotation onto another build.
+//! The layout is byte for byte what the bash guardian.sh wrote, which the goldens pin.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -218,7 +217,7 @@ pub fn prev_builds(ctx: &Ctx, stack: &Stack, view: &SlotView, pcr0: &str) -> Res
     Ok(builds)
 }
 
-/// A verified roster, as `download-kp-pubkeys.sh` wrote it: one directory per key provisioner.
+/// A verified roster, as the download-kp-pubkeys step writes it: one directory per key provisioner.
 pub struct Roster {
     pub dir: String,
     pub threshold: u32,
@@ -644,7 +643,7 @@ pub mod tests {
         }
     }
 
-    /// A roster directory as `download-kp-pubkeys.sh` writes it, each file holding `tag` and its own name.
+    /// A roster directory as the download-kp-pubkeys step writes it, each file holding `tag` and its own name.
     pub fn roster_dir(root: &Path, ids: &[&str], tag: &str) -> String {
         std::fs::create_dir_all(root).unwrap();
         std::fs::write(root.join("roster.txt"), "1  x\n").unwrap();

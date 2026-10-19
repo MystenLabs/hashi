@@ -64,8 +64,8 @@ group_by_four() {
   printf '%s' "$grouped$value"
 }
 
-# Prints one SHA-256 digest over every file under a directory. publish-kp-config.sh refuses to
-# publish unless its copy of this function is the same.
+# Prints one SHA-256 digest over every file under a directory. The publish step of
+# hashi-guardian-ops refuses to publish unless its copy of this function is the same.
 config_digest() {
   local manifest digest
   manifest="$(cd "$1" && find . -type f -exec shasum -a 256 {} + | sort -k 2)" || return 1
