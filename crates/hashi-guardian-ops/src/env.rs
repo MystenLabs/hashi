@@ -19,6 +19,13 @@ const KEYS: &[&str] = &[
     "GUARDIAN_STACK",
     "GUARDIAN_PROXY_URL",
     "PULUMI_VERSION",
+    "KP_ROSTER_DIR",
+    "KP_THRESHOLD",
+    "SUI_RPC",
+    "HASHI_PACKAGE_ID",
+    "HASHI_OBJECT_ID",
+    "BITCOIN_NETWORK",
+    "RETENTION_ENVIRONMENT",
     "TUNNEL_PORT",
 ];
 
