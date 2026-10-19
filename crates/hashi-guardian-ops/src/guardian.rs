@@ -157,8 +157,8 @@ fn grpcurl(protos: &Path, proto: &str) -> Cmd {
         .arg(format!("sui/hashi/v1alpha/{proto}"))
 }
 
-/// How old `/info` can be while the guardian still answers the proxy, which caches it for 30 seconds. When the
-/// guardian stops answering, the proxy keeps serving its last view, however old.
+/// How old `/info` can be and still show that the proxy reaches its guardian: the proxy caches it for 30 seconds by
+/// default, and serves its last view, however old, while a refresh is in flight or failing.
 pub const CURRENT_FOR: Duration = Duration::from_secs(90);
 
 /// The proxy's public `/info`, which describes the guardian it fronts. Its u64s are strings.
@@ -205,6 +205,7 @@ pub struct Reached {
 /// the active slot, and its relay sends key provisioners to a standby.
 pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -> Result<Reached> {
     view.require_instance(stack)?;
+    view.require_deployed(stack)?;
     let info = slot_info(ctx, tree, view)?;
     let Some(signing_key) = info.signing_key.clone().filter(|key| is_hex(key, 64)) else {
         bail!(
@@ -215,10 +216,22 @@ pub fn require_reached(ctx: &Ctx, stack: &Stack, view: &SlotView, tree: &Tree) -
     };
     if view.role == Role::Active {
         let proxy = proxy_info(ctx)?;
+        match proxy.age() {
+            Some(age) if age <= CURRENT_FOR => {}
+            Some(age) => bail!(
+                "the proxy's /info is {}s old, too old to show that the proxy still reaches slot {}'s guardian; run this step again, and if it stays this old, check the proxy's logs",
+                age.as_secs(),
+                view.slot
+            ),
+            None => bail!(
+                "the proxy's /info does not say when its guardian answered, so it does not show that the proxy reaches slot {}'s guardian",
+                view.slot
+            ),
+        }
         let fronted = proxy.signing_pub_key.as_deref().unwrap_or("none");
         if fronted != signing_key {
             bail!(
-                "the proxy fronts guardian {fronted}, but {} reaches slot {}'s {signing_key}; the proxy caches its view for 30 seconds: run this step again; if they still differ, check that the tunnel is slot {}'s",
+                "the proxy fronts guardian {fronted}, but {} reaches slot {}'s {signing_key}; the proxy caches its view for 30 seconds by default: run this step again; if they still differ, check that the tunnel is slot {}'s",
                 view.endpoint,
                 view.slot,
                 view.slot

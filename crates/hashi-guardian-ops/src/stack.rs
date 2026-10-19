@@ -337,7 +337,7 @@ pub fn export(ctx: &Ctx, dir: &str, stack: &str) -> Result<Export> {
 /// What a step needs about one slot.
 pub struct SlotView {
     pub slot: Slot,
-    /// The commit the slot's guardian is built from.
+    /// The commit the slot configures, which its guardian runs once the stack has deployed it.
     pub commit: String,
     /// The configuration key holding the slot's PCR0.
     pub pcr0_key: String,
@@ -366,6 +366,28 @@ impl SlotView {
                 stack.name
             )
         })
+    }
+
+    /// Stops unless an active slot's guardian runs the commit the slot configures, whose protos decode its answers. The
+    /// stack records no deployed commit for a standby, which is read with its configured one.
+    pub fn require_deployed(&self, stack: &Stack) -> Result<()> {
+        if self.role != Role::Active {
+            return Ok(());
+        }
+        match stack.output("guardian_hashi_commit") {
+            Some(applied) if applied == self.commit => Ok(()),
+            Some(applied) => bail!(
+                "stack {} configures commit {} for slot {}, whose guardian the stack last deployed at {applied}; set it back, or deploy it, first",
+                stack.name,
+                self.commit,
+                self.slot
+            ),
+            None => bail!(
+                "stack {} has no guardian_hashi_commit output, so nothing shows which commit slot {}'s guardian runs",
+                stack.name,
+                self.slot
+            ),
+        }
     }
 }
 
@@ -442,6 +464,7 @@ pub mod tests {
             serde_json::json!({
                 "active_slot": "a",
                 "enclave_instance_id": "i-0aaa",
+                "guardian_hashi_commit": COMMIT,
                 "standby_instance_id": "",
                 "s3_bucket_name": "guardian-bucket",
                 "s3_bucket_region": "us-west-2",
@@ -459,6 +482,7 @@ pub mod tests {
             serde_json::json!({
                 "active_slot": "a",
                 "enclave_instance_id": "i-0aaa",
+                "guardian_hashi_commit": COMMIT,
                 "standby_instance_id": "i-0bbb",
                 "s3_bucket_name": "guardian-bucket",
                 "s3_bucket_region": "us-west-2",

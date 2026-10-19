@@ -71,6 +71,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
             stack.slot(ctx, read_as)
         })
         .and_then(|view| {
+            view.require_deployed(&stack)?;
             Tree::at(
                 ctx,
                 &view.commit,
@@ -241,6 +242,10 @@ pub fn tunnel(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
     use serde_json::json;
 
     use super::*;
@@ -256,7 +261,19 @@ mod tests {
     /// A two-slot stack whose tunnels reach guardians with `KEY_A` and `KEY_B`, and whose proxy fronts `fronted` and
     /// relays to `relayed`.
     fn world(fronted: &'static str, relayed: &'static str) -> Fake {
+        world_as_of(fronted, relayed, Some(Duration::ZERO))
+    }
+
+    /// [`world`], with the proxy's view `age` old, or undated.
+    fn world_as_of(fronted: &'static str, relayed: &'static str, age: Option<Duration>) -> Fake {
         let stack = crate::stack::tests::two_slots();
+        let answered = age.map(|age| {
+            (SystemTime::now() - age)
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .to_string()
+        });
         Fake::new(move |words| {
             if words[0] == "pulumi" {
                 return crate::exec::Exec::output(&stack, &Cmd::new("pulumi").args(&words[1..]))
@@ -283,10 +300,34 @@ mod tests {
                             .to_string(),
                     ))
                 }
-                ("curl", url) if url.ends_with("/info") => Some((
-                    true,
-                    json!({ "signingPubKey": fronted, "committeeEpoch": "1253" }).to_string(),
-                )),
+                ("curl", url) if url.ends_with("/info") => {
+                    let mut info = json!({ "signingPubKey": fronted, "committeeEpoch": "1253" });
+                    if let Some(answered) = &answered {
+                        info["timestampMs"] = answered.clone().into();
+                    }
+                    Some((true, info.to_string()))
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// A world where `stack`'s configuration and outputs load and every other read fails. Any other command is a
+    /// change, which fails the test.
+    fn only_the_stack(stack: Fake) -> Fake {
+        Fake::new(move |words| {
+            let w: Vec<&str> = words.iter().map(String::as_str).collect();
+            match w.as_slice() {
+                ["pulumi", "-C", _, "config", ..] | ["pulumi", "-C", _, "stack", "output", ..] => {
+                    crate::exec::Exec::output(&stack, &Cmd::new("pulumi").args(&words[1..]))
+                        .ok()
+                        .map(|output| (output.success, output.stdout))
+                }
+                ["pulumi", "version"]
+                | ["pulumi", "-C", _, "stack", "export", ..]
+                | ["pulumi", "-C", _, "stack", "tag", "ls", ..]
+                | ["curl", ..]
+                | ["git", "-C", _, "rev-parse", ..] => Some((false, String::new())),
                 _ => None,
             }
         })
@@ -333,26 +374,56 @@ mod tests {
     }
 
     #[test]
+    fn info_needs_a_current_proxy_view_of_an_active_guardian() {
+        // The proxy serves its last view while it can't reach its guardian, so an old one shows nothing about the route.
+        let repo = tempfile::tempdir().unwrap();
+        let exec = world_as_of(KEY_A, KEY_B, Some(CURRENT_FOR * 2));
+        let ctx = test_ctx(repo.path(), &exec);
+        let error = info(&ctx, Some(Slot::A)).unwrap_err().to_string();
+        assert!(
+            error.starts_with("the proxy's /info is ")
+                && error.contains(
+                    "s old, too old to show that the proxy still reaches slot a's guardian;"
+                ),
+            "{error}"
+        );
+        // A standby's tunnel has only to reach a guardian other than the one the proxy last showed.
+        info(&ctx, Some(Slot::B)).unwrap();
+
+        let exec = world_as_of(KEY_A, KEY_B, None);
+        let ctx = test_ctx(repo.path(), &exec);
+        assert_eq!(
+            info(&ctx, Some(Slot::A)).unwrap_err().to_string(),
+            "the proxy's /info does not say when its guardian answered, so it does not show that the proxy reaches slot a's guardian"
+        );
+    }
+
+    #[test]
+    fn reads_no_active_guardian_whose_configured_commit_is_not_deployed() {
+        // Until the stack deploys the new commit, the slot runs the old one, which the new commit's protos may misread.
+        let repo = tempfile::tempdir().unwrap();
+        let configured = "c4".repeat(20);
+        let exec = only_the_stack(crate::stack::tests::stack_world(
+            json!({ "hashi-commit": configured }),
+            json!({ "active_slot": "a", "enclave_instance_id": "i-0aaa", "guardian_hashi_commit": COMMIT }),
+        ));
+        let ctx = test_ctx(repo.path(), &exec);
+        std::fs::create_dir_all(repo.path().join(".hashi/guardian-init").join(&configured))
+            .unwrap();
+        assert_eq!(
+            info(&ctx, None).unwrap_err().to_string(),
+            format!(
+                "stack org/testnet configures commit {configured} for slot a, whose guardian the stack last deployed at {COMMIT}; set it back, or deploy it, first"
+            )
+        );
+        // With no standby, status's relay read reaches that guardian too, and grpcurl would fail the test.
+        status(&ctx).unwrap();
+    }
+
+    #[test]
     fn status_reports_a_partly_broken_stack() {
         let repo = tempfile::tempdir().unwrap();
-        let stack = crate::stack::tests::two_slots();
-        // The stack loads, and every other read fails. Any other command is a change, which fails the test.
-        let exec = Fake::new(move |words| {
-            let w: Vec<&str> = words.iter().map(String::as_str).collect();
-            match w.as_slice() {
-                ["pulumi", "-C", _, "config", ..] | ["pulumi", "-C", _, "stack", "output", ..] => {
-                    crate::exec::Exec::output(&stack, &Cmd::new("pulumi").args(&words[1..]))
-                        .ok()
-                        .map(|output| (output.success, output.stdout))
-                }
-                ["pulumi", "version"]
-                | ["pulumi", "-C", _, "stack", "export", ..]
-                | ["pulumi", "-C", _, "stack", "tag", "ls", ..]
-                | ["curl", ..]
-                | ["git", "-C", _, "rev-parse", ..] => Some((false, String::new())),
-                _ => None,
-            }
-        });
+        let exec = only_the_stack(crate::stack::tests::two_slots());
         let ctx = Ctx::for_test(repo.path(), &exec, &stack_env());
         status(&ctx).unwrap();
         for read in [
