@@ -8,9 +8,15 @@
 //! unencrypted tar archives. CLI-specific orchestration (config loading, DB-open locking policy, and user output)
 //! lives in [`crate::cli::commands::backup`].
 
+mod recovery;
+
 use anyhow::Context;
 use anyhow::Result;
 use aws_sdk_s3::operation::put_object::PutObjectOutput;
+use fastcrypto::hash::HashFunction;
+use fastcrypto::hash::Sha256;
+use fjall::KeyspaceCreateOptions;
+use fjall::Readable;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
 use std::collections::HashSet;
@@ -36,8 +42,12 @@ use crate::Hashi;
 use crate::backup_s3::BackupS3Client;
 use crate::db::Database;
 
-use fjall::KeyspaceCreateOptions;
-use fjall::Readable;
+pub use recovery::MpcRecoveryRecord;
+pub use recovery::MpcRecoveryRecordV1;
+pub use recovery::RecoveredMpcKey;
+pub use recovery::RecoveredMpcKeyV1;
+pub use recovery::read_mpc_recovery_record;
+pub use recovery::reconstruct_root_scalar;
 
 pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
@@ -50,6 +60,10 @@ pub(crate) const RESTORE_STAGING_DIR_NAME_PREFIX: &str = ".hashi-restore-";
 const BACKUP_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(14 * 24);
 /// How old the newest archive may get before it is deleted too.
 const LAST_ARCHIVE_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(30 * 24);
+/// Check daily, but publish a new same-epoch recovery archive only every three days.
+const MPC_RECOVERY_CHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+const MPC_RECOVERY_FRESHNESS: jiff::SignedDuration = jiff::SignedDuration::from_hours(3 * 24);
 const _: () = assert!(
     LAST_ARCHIVE_RETENTION.as_secs() > BACKUP_RETENTION.as_secs(),
     "LAST_ARCHIVE_RETENTION must exceed BACKUP_RETENTION, or the newest archive would expire \
@@ -62,8 +76,25 @@ pub enum BackupArchiveFormat {
     Unencrypted,
 }
 
+pub enum BackupAction {
+    CleanupOnly,
+    SaveNodeState,
+    SaveWithRecovery(Box<MpcRecoveryRecord>),
+}
+
+impl BackupAction {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::CleanupOnly => "cleanup_only",
+            Self::SaveNodeState => "save_node_state",
+            Self::SaveWithRecovery(_) => "save_with_recovery",
+        }
+    }
+}
+
 enum BackupMaintenanceRequest {
-    EpochChanged { epoch: u64, write_backup: bool },
+    EpochChange { epoch: u64, action: BackupAction },
+    RefreshRecovery,
 }
 
 #[derive(Clone, Debug)]
@@ -72,20 +103,25 @@ pub struct BackupHandle {
 }
 
 impl BackupHandle {
-    pub fn maintain_backups_after_epoch_change(&self, epoch: u64, write_backup: bool) {
+    pub fn maintain_backups_after_epoch_change(&self, epoch: u64, action: BackupAction) {
+        let kind = action.kind();
         if self
             .sender
-            .send(BackupMaintenanceRequest::EpochChanged {
-                epoch,
-                write_backup,
-            })
+            .send(BackupMaintenanceRequest::EpochChange { epoch, action })
             .is_err()
         {
             warn!(
                 epoch,
-                write_backup, "Skipping epoch backup maintenance: backup service is stopped"
+                action = kind,
+                "Skipping epoch backup maintenance: backup service is stopped"
             );
         }
+    }
+
+    pub(crate) fn refresh_mpc_recovery_for_test(&self) {
+        self.sender
+            .send(BackupMaintenanceRequest::RefreshRecovery)
+            .expect("backup service is stopped");
     }
 }
 
@@ -93,6 +129,7 @@ pub struct BackupService {
     inner: Arc<Hashi>,
     receiver: mpsc::UnboundedReceiver<BackupMaintenanceRequest>,
     s3_client: Option<BackupS3Client>,
+    recovery: Option<Box<MpcRecoveryRecord>>,
 }
 
 impl BackupService {
@@ -103,44 +140,110 @@ impl BackupService {
             inner: hashi,
             receiver,
             s3_client: None,
+            recovery: None,
         };
         let handle = BackupHandle { sender };
         (service, handle)
     }
 
-    pub fn start(self) -> Service {
+    pub fn start(mut self) -> Service {
         Service::new().spawn_aborting(async move {
             self.run().await;
             Ok(())
         })
     }
 
-    async fn run(mut self) {
-        while let Some(request) = self.receiver.recv().await {
-            match request {
-                BackupMaintenanceRequest::EpochChanged {
-                    epoch,
-                    write_backup,
-                } => {
-                    if let Err(e) = self.process_epoch_change(epoch, write_backup).await {
-                        error!(
-                            epoch,
-                            write_backup, "Epoch backup maintenance failed: {e:#}"
-                        );
+    async fn run(&mut self) {
+        let mut refresh = tokio::time::interval(MPC_RECOVERY_CHECK_INTERVAL);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let Some(request) = self.next_request(&mut refresh).await else {
+                break;
+            };
+            let (epoch, action) = match request {
+                BackupMaintenanceRequest::EpochChange { epoch, action } => (epoch, action),
+                BackupMaintenanceRequest::RefreshRecovery => {
+                    let epoch = self
+                        .inner
+                        .onchain_state_opt()
+                        .map(|state| state.state().hashi().committees.epoch())
+                        .unwrap_or_default();
+                    match self.recovery.take() {
+                        Some(recovery) => match self.recovery_status(&recovery) {
+                            RecoveryRefreshStatus::Active => {
+                                let MpcRecoveryRecord::V1(record) = recovery.as_ref();
+                                (record.epoch, BackupAction::SaveWithRecovery(recovery))
+                            }
+                            RecoveryRefreshStatus::AwaitingMirror => {
+                                self.recovery = Some(recovery);
+                                (epoch, BackupAction::CleanupOnly)
+                            }
+                            RecoveryRefreshStatus::Obsolete => (epoch, BackupAction::CleanupOnly),
+                        },
+                        None => (epoch, BackupAction::CleanupOnly),
                     }
                 }
+            };
+            if self.recovery.as_ref().is_some_and(|record| {
+                self.recovery_status(record) == RecoveryRefreshStatus::Obsolete
+            }) {
+                self.recovery = None;
+            }
+            let kind = action.kind();
+            if let Err(e) = self.process_epoch_change(epoch, action).await {
+                error!(
+                    epoch,
+                    action = kind,
+                    "Epoch backup maintenance failed: {e:#}"
+                );
             }
         }
         info!("Backup service stopped");
     }
 
-    async fn process_epoch_change(&mut self, epoch: u64, write_backup: bool) -> Result<()> {
+    async fn next_request(
+        &mut self,
+        refresh: &mut tokio::time::Interval,
+    ) -> Option<BackupMaintenanceRequest> {
+        tokio::select! {
+            request = self.receiver.recv() => request,
+            _ = refresh.tick() => Some(BackupMaintenanceRequest::RefreshRecovery),
+        }
+    }
+
+    fn recovery_status(&self, recovery: &MpcRecoveryRecord) -> RecoveryRefreshStatus {
+        let Some(onchain_state) = self.inner.onchain_state_opt() else {
+            return RecoveryRefreshStatus::Obsolete;
+        };
+        let state = onchain_state.state();
+        recovery_refresh_status(recovery, &state.hashi().committees)
+    }
+
+    async fn process_epoch_change(&mut self, epoch: u64, action: BackupAction) -> Result<()> {
         let hashi = self.inner.clone();
-        let archive = tokio::task::spawn_blocking(move || {
-            hashi.maintain_backups_after_epoch_change(epoch, write_backup)
+        let with_recovery = matches!(&action, BackupAction::SaveWithRecovery(_));
+        if let BackupAction::SaveWithRecovery(record) = &action {
+            record.validate()?;
+        }
+        let (archive, action) = tokio::task::spawn_blocking(move || {
+            let archive = hashi.maintain_backups_after_epoch_change(epoch, &action);
+            (archive, action)
         })
         .await
-        .context("Epoch backup maintenance failed to join")??;
+        .context("Epoch backup maintenance failed to join")?;
+        if let BackupAction::SaveWithRecovery(record) = action
+            && self.recovery_status(&record) != RecoveryRefreshStatus::Obsolete
+            && self.recovery.as_ref().is_none_or(|cached| {
+                let MpcRecoveryRecord::V1(cached) = cached.as_ref();
+                let MpcRecoveryRecord::V1(incoming) = record.as_ref();
+                incoming.epoch >= cached.epoch
+            })
+        {
+            // Keep validated material even when local creation or upload fails.
+            // The next daily check uses this same serialized maintenance path.
+            self.recovery = Some(record);
+        }
+        let archive = archive?;
         if let Some(archive) = archive {
             match upload(&self.inner.config, &mut self.s3_client, &archive).await {
                 Ok(Some((uri, _receipt))) => {
@@ -148,6 +251,13 @@ impl BackupService {
                     info!(epoch, %uri, "Scheduled remote backup completed");
                 }
                 Ok(None) => {}
+                Err(error) if with_recovery && is_precondition_failed(&error) => {
+                    info!(
+                        epoch,
+                        path = %archive.display(),
+                        "Scheduled remote backup already exists; remote contents not verified"
+                    );
+                }
                 Err(error) => {
                     self.inner.metrics.backup_scheduled_remote_failures.inc();
                     return Err(error);
@@ -156,6 +266,51 @@ impl BackupService {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryRefreshStatus {
+    Active,
+    AwaitingMirror,
+    Obsolete,
+}
+
+fn recovery_refresh_status(
+    recovery: &MpcRecoveryRecord,
+    committees: &crate::onchain::types::CommitteeSet,
+) -> RecoveryRefreshStatus {
+    let MpcRecoveryRecord::V1(record) = recovery;
+    // SaveWithRecovery is only produced for reconstructed or confirmed epochs.
+    // A successful end_reconfig transaction can precede our mirror update:
+    // retain that confirmed material, but do not periodically archive it yet.
+    if record.epoch > committees.epoch() && !record.key_shares.shares.is_empty() {
+        RecoveryRefreshStatus::AwaitingMirror
+    } else if recovery_matches_committee(recovery, committees) {
+        RecoveryRefreshStatus::Active
+    } else {
+        RecoveryRefreshStatus::Obsolete
+    }
+}
+
+fn recovery_matches_committee(
+    recovery: &MpcRecoveryRecord,
+    committees: &crate::onchain::types::CommitteeSet,
+) -> bool {
+    let MpcRecoveryRecord::V1(record) = recovery;
+    record.epoch == committees.epoch()
+        && !record.key_shares.shares.is_empty()
+        && committees
+            .current_committee()
+            .is_some_and(|committee| committee.index_of(&record.validator_address).is_some())
+}
+
+fn is_precondition_failed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<
+            aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+        >()
+        .and_then(|error| error.raw_response())
+        .is_some_and(|response| response.status().as_u16() == 412)
 }
 
 /// Upload a published local archive if S3 is configured. Initialization failures
@@ -222,6 +377,33 @@ fn create_file_strict(path: &Path) -> Result<File> {
 pub struct BackupManifest {
     pub paths: Vec<BackupManifestEntry>,
     pub db: DbManifestEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<PathBuf>,
+}
+
+pub const MPC_RECOVERY_FILE_NAME: &str = "hashi-mpc-recovery.bcs";
+
+fn validate_recovery_manifest(manifest: &BackupManifest) -> Result<()> {
+    if let Some(path) = &manifest.recovery {
+        anyhow::ensure!(
+            path.as_os_str() == std::ffi::OsStr::new(MPC_RECOVERY_FILE_NAME),
+            "Recovery entry must be at the fixed tar root path"
+        );
+    }
+    for path in manifest
+        .paths
+        .iter()
+        .map(|entry| &entry.archive_name)
+        .chain(manifest.db.archive_entries.iter())
+    {
+        anyhow::ensure!(
+            path.file_name().is_none_or(
+                |name| name != MPC_RECOVERY_FILE_NAME && name != BACKUP_MANIFEST_FILE_NAME
+            ),
+            "Reserved backup entry cannot be declared as a config or database entry"
+        );
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -243,6 +425,8 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
     // instead of silently colliding with a backed-up database entry.
     let mut archive_names = HashSet::new();
     archive_names.insert(DB_SNAPSHOT_TAR_PREFIX.to_string());
+    archive_names.insert(BACKUP_MANIFEST_FILE_NAME.to_string());
+    archive_names.insert(MPC_RECOVERY_FILE_NAME.to_string());
     for entry in &db_archive_entries {
         let name = entry.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
             anyhow::anyhow!(
@@ -298,6 +482,7 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
 
     Ok(BackupManifest {
         paths: manifest_paths,
+        recovery: None,
         db: DbManifestEntry {
             original_path: db_original_path.to_path_buf(),
             archive_entries: db_archive_entries,
@@ -310,7 +495,16 @@ pub fn encrypt_files_to_pgp_archive(
     db: &Database,
     recipient: &PgpPublicCert,
     output_path: &Path,
+    recovery: Option<&MpcRecoveryRecord>,
 ) -> Result<()> {
+    validate_recovery_manifest(manifest)?;
+    anyhow::ensure!(
+        manifest.recovery.is_some() == recovery.is_some(),
+        "Recovery declaration and payload must both be present or absent"
+    );
+    if let Some(record) = recovery {
+        record.validate()?;
+    }
     // Stage beside the destination so retention sees only fully finalized archives.
     let parent = output_path
         .parent()
@@ -329,6 +523,15 @@ pub fn encrypt_files_to_pgp_archive(
     {
         let mut archive = tar::Builder::new(&mut encrypted);
         append_backup_manifest(&mut archive, manifest)?;
+        if let Some(record) = recovery {
+            let bytes = bcs::to_bytes(record).context("Failed to serialize MPC recovery record")?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o600);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            archive.append_data(&mut header, MPC_RECOVERY_FILE_NAME, bytes.as_slice())?;
+        }
 
         for entry in &manifest.paths {
             archive.append_path_with_name(&entry.original_path, &entry.archive_name)?;
@@ -370,6 +573,8 @@ pub fn save(
     db: &Database,
     recipient: &PgpPublicCert,
     output_dir: &Path,
+    epoch: Option<u64>,
+    recovery: Option<&MpcRecoveryRecord>,
 ) -> Result<PathBuf> {
     let files = backup_file_paths(node_config_path, node_config)?;
 
@@ -389,7 +594,8 @@ pub fn save(
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = build_backup_manifest(&files, db_path)?;
+    let mut manifest = build_backup_manifest(&files, db_path)?;
+    manifest.recovery = recovery.map(|_| PathBuf::from(MPC_RECOVERY_FILE_NAME));
 
     info!(
         file_count = files.len(),
@@ -397,8 +603,12 @@ pub fn save(
         "Backing up files + database",
     );
 
-    let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path)?;
+    let kind = match recovery {
+        Some(MpcRecoveryRecord::V1(record)) => BackupKind::Mpc(record.epoch),
+        None => epoch.map_or(BackupKind::Manual, BackupKind::Node),
+    };
+    let output_path = output_dir.join(encrypted_backup_file_name(kind, recipient));
+    encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path, recovery)?;
 
     Ok(output_path)
 }
@@ -451,17 +661,130 @@ fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<V
     Ok(paths)
 }
 
-pub fn encrypted_backup_file_name() -> PathBuf {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackupKind {
+    Manual,
+    Node(u64),
+    Mpc(u64),
+}
+
+fn backup_recipient_hash(recipient: &PgpPublicCert) -> String {
+    hex::encode(Sha256::digest(recipient.armored().as_bytes()).digest)
+}
+
+fn encrypted_backup_file_name(kind: BackupKind, recipient: &PgpPublicCert) -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
     // common filesystem.
-    format!(
-        "{BACKUP_FILE_NAME_PREFIX}{}",
-        jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
-    )
+    let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+    let timestamp = now.strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT);
+    match kind {
+        BackupKind::Manual => format!("{BACKUP_FILE_NAME_PREFIX}{timestamp}"),
+        BackupKind::Node(epoch) => format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}{timestamp}"),
+        BackupKind::Mpc(epoch) => {
+            let hash = backup_recipient_hash(recipient);
+            format!("{BACKUP_FILE_NAME_PREFIX}-epoch-{epoch}-mpc-{hash}{timestamp}")
+        }
+    }
     .into()
+}
+
+fn parse_backup_file_name(name: &str) -> Option<(BackupKind, Option<&str>, jiff::Timestamp)> {
+    let suffix = name.strip_prefix(BACKUP_FILE_NAME_PREFIX)?;
+    let (kind, hash, suffix) = if let Some(rest) = suffix.strip_prefix("-epoch-") {
+        let (epoch, rest) = rest.split_once('-')?;
+        if epoch.is_empty()
+            || !epoch.bytes().all(|byte| byte.is_ascii_digit())
+            || (epoch.len() > 1 && epoch.starts_with('0'))
+        {
+            return None;
+        }
+        let epoch = epoch.parse().ok()?;
+        match rest.strip_prefix("mpc-") {
+            Some(rest) => {
+                let (hash, timestamp) = match rest.split_once('-') {
+                    Some((hash, timestamp)) => {
+                        if hash.len() != 64
+                            || !hash
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                        {
+                            return None;
+                        }
+                        (Some(hash), timestamp)
+                    }
+                    None => (None, rest),
+                };
+                (BackupKind::Mpc(epoch), hash, timestamp)
+            }
+            None => (BackupKind::Node(epoch), None, rest),
+        }
+    } else {
+        (BackupKind::Manual, None, suffix.strip_prefix('-')?)
+    };
+    let timestamp = suffix.strip_suffix(".tar.asc")?;
+    if timestamp.len() != 16
+        || timestamp.as_bytes()[8] != b'T'
+        || timestamp.as_bytes()[15] != b'Z'
+        || !timestamp
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let created_at = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", timestamp)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .ok()?
+        .timestamp();
+    Some((kind, hash, created_at))
+}
+
+pub(crate) fn find_mpc_backup(
+    output_dir: &Path,
+    epoch: u64,
+    recipient: &PgpPublicCert,
+) -> Result<Option<PathBuf>> {
+    find_fresh_mpc_backup(output_dir, epoch, recipient, jiff::Timestamp::now())
+}
+
+fn find_fresh_mpc_backup(
+    output_dir: &Path,
+    epoch: u64,
+    recipient: &PgpPublicCert,
+    now: jiff::Timestamp,
+) -> Result<Option<PathBuf>> {
+    let entries = match fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let recipient_hash = backup_recipient_hash(recipient);
+    let freshness_cutoff = now.checked_sub(MPC_RECOVERY_FRESHNESS)?;
+    let mut newest = None;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((kind, hash, timestamp)) = name.to_str().and_then(parse_backup_file_name) else {
+            continue;
+        };
+        if kind != BackupKind::Mpc(epoch)
+            || hash != Some(recipient_hash.as_str())
+            || timestamp > now
+            || timestamp <= freshness_cutoff
+            || !entry.file_type()?.is_file()
+        {
+            continue;
+        }
+        if newest
+            .as_ref()
+            .is_none_or(|(latest, _)| timestamp > *latest)
+        {
+            newest = Some((timestamp, entry.path()));
+        }
+    }
+    Ok(newest.map(|(_, path)| path))
 }
 
 #[derive(Default)]
@@ -475,6 +798,7 @@ pub(crate) fn cleanup_old_backups(
     output_dir: &Path,
     now: jiff::Timestamp,
     save_may_follow: bool,
+    current_epoch: Option<u64>,
 ) -> Result<CleanupStats> {
     let cutoff = now.checked_sub(BACKUP_RETENTION)?;
     let staging_cutoff: std::time::SystemTime = cutoff.into();
@@ -489,6 +813,8 @@ pub(crate) fn cleanup_old_backups(
         }
     };
     let mut newest: Option<(jiff::Timestamp, PathBuf)> = None;
+    let mut newest_mpc: Option<(jiff::Timestamp, PathBuf)> = None;
+    let mut newest_archive = None;
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -544,16 +870,13 @@ pub(crate) fn cleanup_old_backups(
             }
             continue;
         }
-        let Some(suffix) = file_name.strip_prefix(BACKUP_FILE_NAME_PREFIX.as_bytes()) else {
-            continue;
-        };
-        let Ok(created_at) =
-            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, suffix)
-                .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
+        let Some((kind, _, created_at)) = std::str::from_utf8(file_name)
+            .ok()
+            .and_then(parse_backup_file_name)
         else {
             continue;
         };
-        if created_at.timestamp() > now {
+        if created_at > now {
             continue;
         }
         let path = entry.path();
@@ -571,12 +894,20 @@ pub(crate) fn cleanup_old_backups(
         if !file_type.is_file() {
             continue;
         }
-        let candidate = (created_at.timestamp(), path);
+        newest_archive = Some(
+            newest_archive.map_or(created_at, |latest: jiff::Timestamp| latest.max(created_at)),
+        );
+        let candidate = (created_at, path);
+        let newest = if matches!(kind, BackupKind::Mpc(epoch) if Some(epoch) == current_epoch) {
+            &mut newest_mpc
+        } else {
+            &mut newest
+        };
         let (created_at, path) = match newest.as_mut() {
             Some(newest) if candidate.0 > newest.0 => std::mem::replace(newest, candidate),
             Some(_) => candidate,
             None => {
-                newest = Some(candidate);
+                *newest = Some(candidate);
                 continue;
             }
         };
@@ -584,6 +915,15 @@ pub(crate) fn cleanup_old_backups(
             continue;
         }
         remove_expired_backup(&mut stats, &path);
+    }
+    // Protect the newest current-epoch MPC archive independently. All other
+    // archives share the global newest-archive floor, regardless of their kind.
+    if let Some((created_at, path)) = newest.as_ref()
+        && newest_archive.is_some_and(|latest| latest > *created_at)
+        && *created_at < cutoff
+    {
+        remove_expired_backup(&mut stats, path);
+        newest = None;
     }
     if let Some((created_at, path)) = newest
         && !save_may_follow
@@ -779,13 +1119,9 @@ pub fn read_backup_manifest<R: Read>(
     mut entry: tar::Entry<'_, R>,
 ) -> Result<(BackupManifest, String)> {
     let path = entry.path()?.into_owned();
-    let file_name = path.file_name().ok_or_else(|| {
-        anyhow::anyhow!(
-            "First tar entry does not have a file name: {}",
-            path.display()
-        )
-    })?;
-    if file_name != BACKUP_MANIFEST_FILE_NAME {
+    if path.as_os_str() != std::ffi::OsStr::new(BACKUP_MANIFEST_FILE_NAME)
+        || entry.header().entry_type() != tar::EntryType::Regular
+    {
         anyhow::bail!(
             "Expected backup manifest {} as the first tar entry, found {}",
             BACKUP_MANIFEST_FILE_NAME,
@@ -796,6 +1132,7 @@ pub fn read_backup_manifest<R: Read>(
     let mut manifest_toml = String::new();
     entry.read_to_string(&mut manifest_toml)?;
     let manifest: BackupManifest = toml::from_str(&manifest_toml)?;
+    validate_recovery_manifest(&manifest)?;
 
     Ok((manifest, manifest_toml))
 }
@@ -814,6 +1151,8 @@ pub fn restore_backup_entries<R: Read>(
     output_dir: &Path,
     manifest: &BackupManifest,
 ) -> Result<()> {
+    validate_recovery_manifest(manifest)?;
+    let mut restored_recovery = false;
     let db_prefix = Path::new(DB_SNAPSHOT_TAR_PREFIX);
     let expected_files: HashSet<PathBuf> = manifest
         .paths
@@ -836,7 +1175,29 @@ pub fn restore_backup_entries<R: Read>(
         let mut entry = entry?;
         let archive_path = entry.path()?.into_owned();
 
-        if archive_path.starts_with(db_prefix) {
+        if archive_path
+            .file_name()
+            .is_some_and(|name| name == MPC_RECOVERY_FILE_NAME)
+        {
+            anyhow::ensure!(
+                archive_path.as_os_str() == std::ffi::OsStr::new(MPC_RECOVERY_FILE_NAME),
+                "Recovery entry must be at the fixed tar root path"
+            );
+            anyhow::ensure!(manifest.recovery.is_some(), "Undeclared recovery entry");
+            anyhow::ensure!(!restored_recovery, "Duplicate recovery entry");
+            anyhow::ensure!(
+                entry.header().entry_type() == tar::EntryType::Regular,
+                "Recovery entry must be a regular file"
+            );
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&bytes).context("Malformed MPC recovery record")?;
+            record.validate().context("Invalid MPC recovery record")?;
+            let mut file = create_file_strict(&output_dir.join(MPC_RECOVERY_FILE_NAME))?;
+            file.write_all(&bytes)?;
+            restored_recovery = true;
+        } else if archive_path.starts_with(db_prefix) {
             validate_db_archive_path(&archive_path)?;
             if !expected_db_entries.contains(&archive_path) {
                 anyhow::bail!(
@@ -856,6 +1217,10 @@ pub fn restore_backup_entries<R: Read>(
             restored_count += 1;
         }
     }
+    anyhow::ensure!(
+        restored_recovery == manifest.recovery.is_some(),
+        "Missing recovery entry"
+    );
 
     if restored_count != expected_files.len() {
         anyhow::bail!(
@@ -1046,11 +1411,161 @@ mod tests {
     fn db_only_manifest() -> BackupManifest {
         BackupManifest {
             paths: Vec::new(),
+            recovery: None,
             db: DbManifestEntry {
                 original_path: PathBuf::from("/var/lib/hashi/db"),
                 archive_entries: backup_keyspace_archive_entries(Path::new(DB_SNAPSHOT_TAR_PREFIX)),
             },
         }
+    }
+
+    #[test]
+    fn recovery_round_trip_is_encrypted_and_restores_a_private_standalone_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        let db = Database::open(src.path()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let record = recovery::test_record();
+        let expected = bcs::to_bytes(&record).unwrap();
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from(MPC_RECOVERY_FILE_NAME));
+        let (cert, secret_key) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(cert).unwrap();
+        let output_path = out.path().join("recovery.tar.asc");
+        encrypt_files_to_pgp_archive(&manifest, &db, &recipient, &output_path, Some(&record))
+            .unwrap();
+        let encrypted = fs::read(&output_path).unwrap();
+        assert!(encrypted.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        assert!(
+            !encrypted
+                .windows(expected.len())
+                .any(|window| window == expected)
+        );
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+
+        let homedir = temp_gnupg_home();
+        test_utils::gpg_import_secret_key(homedir.path(), &secret_key);
+        let decrypted = Command::new("gpg")
+            .env("GNUPGHOME", homedir.path())
+            .arg("--decrypt")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        test_utils::assert_command_success(&decrypted, "gpg --decrypt");
+        let mut archive = tar::Archive::new(Cursor::new(decrypted.stdout));
+        let mut entries = archive.entries().unwrap();
+        let (manifest, _) = read_backup_manifest(entries.next().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            manifest.recovery.as_deref(),
+            Some(Path::new(MPC_RECOVERY_FILE_NAME))
+        );
+        assert!(manifest.paths.is_empty());
+        let restored = tempfile::tempdir().unwrap();
+        restore_backup_entries(entries, restored.path(), &manifest).unwrap();
+        let recovery_path = restored.path().join(MPC_RECOVERY_FILE_NAME);
+        assert_eq!(fs::read(&recovery_path).unwrap(), expected);
+        assert_eq!(
+            fs::metadata(&recovery_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let reopened = Database::open(&restored.path().join(DB_SNAPSHOT_TAR_PREFIX)).unwrap();
+        assert!(reopened.get_encryption_key(7).unwrap().is_none());
+    }
+
+    #[test]
+    fn recovery_restore_rejects_invalid_archive_entries() {
+        let record = bcs::to_bytes(&recovery::test_record()).unwrap();
+        for (case, expected_error) in [
+            ("undeclared", "Undeclared"),
+            ("missing", "Missing"),
+            ("duplicate", "Duplicate"),
+            ("symlink", "regular file"),
+            ("nested", "tar root"),
+            ("malformed", "Malformed"),
+        ] {
+            let mut manifest = db_only_manifest();
+            manifest.db.archive_entries.clear();
+            manifest.recovery =
+                (case != "undeclared").then(|| PathBuf::from(MPC_RECOVERY_FILE_NAME));
+            let mut bytes = Vec::new();
+            {
+                let mut archive = tar::Builder::new(&mut bytes);
+                let copies = match case {
+                    "missing" => 0,
+                    "duplicate" => 2,
+                    _ => 1,
+                };
+                for _ in 0..copies {
+                    if case == "symlink" {
+                        let mut header = tar::Header::new_gnu();
+                        header.set_entry_type(tar::EntryType::Symlink);
+                        header.set_mode(0o777);
+                        header.set_size(0);
+                        header.set_link_name("outside").unwrap();
+                        header.set_cksum();
+                        archive
+                            .append_data(&mut header, MPC_RECOVERY_FILE_NAME, &[][..])
+                            .unwrap();
+                    } else {
+                        let path = if case == "nested" {
+                            "nested/hashi-mpc-recovery.bcs"
+                        } else {
+                            MPC_RECOVERY_FILE_NAME
+                        };
+                        let payload: &[u8] = if case == "malformed" { &[255] } else { &record };
+                        append_regular_file(&mut archive, path, payload);
+                    }
+                }
+                archive.finish().unwrap();
+            }
+            let dest = tempfile::tempdir().unwrap();
+            let mut archive = tar::Archive::new(Cursor::new(bytes));
+            let error = restore_backup_entries(archive.entries().unwrap(), dest.path(), &manifest)
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "{case}: {error:#}"
+            );
+            if case != "duplicate" {
+                assert!(!dest.path().join(MPC_RECOVERY_FILE_NAME).exists(), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_manifest_reserves_internal_names_and_rejects_aliases() {
+        let manifest = build_backup_manifest(
+            &[
+                PathBuf::from(MPC_RECOVERY_FILE_NAME),
+                PathBuf::from(BACKUP_MANIFEST_FILE_NAME),
+            ],
+            Path::new("db"),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.paths[0].archive_name,
+            Path::new("hashi-mpc-recovery-2.bcs")
+        );
+        assert_eq!(
+            manifest.paths[1].archive_name,
+            Path::new("hashi-backup-manifest-2.toml")
+        );
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from("nested/hashi-mpc-recovery.bcs"));
+        assert!(validate_recovery_manifest(&manifest).is_err());
+        manifest.recovery = None;
+        manifest.paths.push(BackupManifestEntry {
+            archive_name: PathBuf::from(MPC_RECOVERY_FILE_NAME),
+            original_path: PathBuf::from("config.toml"),
+        });
+        assert!(validate_recovery_manifest(&manifest).is_err());
+        manifest.paths.clear();
+        manifest
+            .db
+            .archive_entries
+            .push(PathBuf::from("hashi-db-snapshot/hashi-mpc-recovery.bcs"));
+        assert!(validate_recovery_manifest(&manifest).is_err());
     }
 
     fn append_regular_file<W: std::io::Write>(
@@ -1077,6 +1592,59 @@ mod tests {
             archive.finish().unwrap();
         }
         tar_bytes
+    }
+
+    #[test]
+    fn read_mpc_recovery_record_rejects_missing_and_duplicate_entries() {
+        let record = bcs::to_bytes(&recovery::test_record()).unwrap();
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from(MPC_RECOVERY_FILE_NAME));
+        for (entries, expected_error) in [
+            (vec![], "Missing recovery entry"),
+            (
+                vec![
+                    (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                    (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                ],
+                "Duplicate recovery entry",
+            ),
+        ] {
+            let bytes = build_archive_bytes(&manifest, &entries);
+            let error = read_mpc_recovery_record(bytes.as_slice()).err().unwrap();
+            assert!(error.to_string().contains(expected_error));
+        }
+    }
+
+    #[test]
+    fn read_mpc_recovery_record_checks_decrypted_reader_eof() {
+        struct FailAtEof(Cursor<Vec<u8>>);
+
+        impl Read for FailAtEof {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let count = self.0.read(buf)?;
+                if count == 0 && !buf.is_empty() {
+                    return Err(io::Error::other("late decryption failure"));
+                }
+                Ok(count)
+            }
+        }
+
+        let record = bcs::to_bytes(&recovery::test_record()).unwrap();
+        let mut manifest = db_only_manifest();
+        manifest.recovery = Some(PathBuf::from(MPC_RECOVERY_FILE_NAME));
+        let bytes = build_archive_bytes(
+            &manifest,
+            &[
+                (MPC_RECOVERY_FILE_NAME, record.as_slice()),
+                ("ignored/config.toml", b"not extracted"),
+            ],
+        );
+        let recovered = read_mpc_recovery_record(bytes.as_slice()).unwrap();
+        assert_eq!(bcs::to_bytes(&recovered).unwrap(), record);
+        let error = read_mpc_recovery_record(FailAtEof(Cursor::new(bytes)))
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("late decryption failure"));
     }
 
     fn backup_service_fixture(
@@ -1113,18 +1681,758 @@ mod tests {
         (service, directory)
     }
 
+    fn restart_backup_service(service: BackupService) -> BackupService {
+        let config = service.inner.config.clone();
+        let config_path = service.inner.config_path.clone();
+        drop(service);
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            config_path,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        BackupService::new(hashi).0
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_worker_checks_daily_without_mpc_requests() {
+        let (fixture, _directory) = backup_service_fixture(false, true);
+        let (mut worker, handle) = BackupService::new(fixture.inner.clone());
+        let mut refresh = tokio::time::interval(MPC_RECOVERY_CHECK_INTERVAL);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        assert!(matches!(
+            worker.next_request(&mut refresh).await,
+            Some(BackupMaintenanceRequest::RefreshRecovery),
+        ));
+        let next = tokio::spawn(async move { worker.next_request(&mut refresh).await });
+        tokio::time::advance(MPC_RECOVERY_CHECK_INTERVAL - std::time::Duration::from_secs(1)).await;
+        assert!(!next.is_finished());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(matches!(
+            next.await.unwrap(),
+            Some(BackupMaintenanceRequest::RefreshRecovery),
+        ));
+        drop(handle);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_worker_daily_cleanup_without_eligible_recovery() {
+        async fn wait_for_removal(path: &Path) {
+            // Blocking maintenance uses wall-clock time even with Tokio time paused.
+            // Yield rather than advancing the next daily tick while it finishes.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while path.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cleanup did not finish"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+
+        for obsolete_cache in [false, true] {
+            for newest_age_days in [20, 31] {
+                let (fixture, _directory) = backup_service_fixture(true, true);
+                let (mut worker, handle) = BackupService::new(fixture.inner.clone());
+                // This fixture has no on-chain mirror: cached material is obsolete,
+                // and housekeeping must still run without inventing a current epoch.
+                if obsolete_cache {
+                    worker.recovery = Some(Box::new(recovery::test_record()));
+                }
+                let directory = &fixture.inner.config.backup_dir;
+                fs::create_dir_all(directory).unwrap();
+                let hash = backup_recipient_hash(&fixture.inner.config.backup_pgp_cert);
+                let now = jiff::Timestamp::now();
+                let archive_path = |age_days: i64| {
+                    let timestamp = now
+                        .checked_sub(jiff::SignedDuration::from_hours(age_days * 24))
+                        .unwrap()
+                        .to_zoned(jiff::tz::TimeZone::UTC);
+                    directory.join(format!(
+                        "hashi-backup-epoch-42-mpc-{hash}{}",
+                        timestamp.strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
+                    ))
+                };
+                let startup = archive_path(50);
+                fs::write(&startup, b"expired startup archive").unwrap();
+                let task = tokio::spawn(async move {
+                    worker.run().await;
+                    worker
+                });
+                wait_for_removal(&startup).await;
+
+                let older = archive_path(newest_age_days + 1);
+                let newest = archive_path(newest_age_days);
+                fs::write(&older, b"older recovery").unwrap();
+                fs::write(&newest, b"newest recovery").unwrap();
+                tokio::time::advance(
+                    MPC_RECOVERY_CHECK_INTERVAL - std::time::Duration::from_secs(1),
+                )
+                .await;
+                tokio::task::yield_now().await;
+                assert!(older.exists());
+                assert!(newest.exists());
+                tokio::time::advance(std::time::Duration::from_secs(1)).await;
+                wait_for_removal(&older).await;
+                drop(handle);
+                let worker = task.await.unwrap();
+
+                assert_eq!(newest.exists(), newest_age_days < 30);
+                assert_eq!(
+                    fs::read_dir(directory).unwrap().count(),
+                    usize::from(newest_age_days < 30),
+                    "cleanup must not create a replacement archive"
+                );
+                assert!(worker.recovery.is_none());
+                assert!(worker.s3_client.is_none(), "cleanup must not initialize S3");
+                assert_eq!(
+                    fixture.inner.metrics.backup_scheduled_local_successes.get(),
+                    0
+                );
+                assert_eq!(
+                    fixture
+                        .inner
+                        .metrics
+                        .backup_scheduled_remote_successes
+                        .get(),
+                    0
+                );
+                assert_eq!(
+                    fixture.inner.metrics.backup_scheduled_remote_failures.get(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_refresh_tracks_active_epoch_not_pending_target_or_removed_members() {
+        use hashi_types::committee::Bls12381PrivateKey;
+        use hashi_types::committee::Committee;
+        use hashi_types::committee::CommitteeMember;
+        use hashi_types::committee::EncryptionPrivateKey;
+        use sui_sdk_types::Address;
+
+        let record = recovery::test_record();
+        let MpcRecoveryRecord::V1(current) = &record;
+        let member = CommitteeMember::new(
+            current.validator_address,
+            Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key(),
+            EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key(),
+            1,
+        );
+        let mut committees = crate::onchain::types::CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committees.set_epoch(42).set_committees(
+            [
+                (42, Committee::new(vec![member.clone()], 42, 0, 5_000)),
+                (43, Committee::new(vec![member], 43, 0, 5_000)),
+            ]
+            .into(),
+        );
+        assert!(recovery_matches_committee(&record, &committees));
+        committees.set_pending_epoch_change(Some(43));
+        assert!(recovery_matches_committee(&record, &committees));
+        let mut target = record.clone();
+        let MpcRecoveryRecord::V1(target_record) = &mut target;
+        target_record.epoch = 43;
+        assert!(!recovery_matches_committee(&target, &committees));
+        // A confirmed transaction can arrive while the mirror still reports
+        // the target pending. Keep it without refreshing until visibility.
+        assert_eq!(
+            recovery_refresh_status(&target, &committees),
+            RecoveryRefreshStatus::AwaitingMirror,
+        );
+        committees.set_epoch(43).set_pending_epoch_change(None);
+        assert!(!recovery_matches_committee(&record, &committees));
+        assert!(recovery_matches_committee(&target, &committees));
+        assert_eq!(
+            recovery_refresh_status(&record, &committees),
+            RecoveryRefreshStatus::Obsolete,
+        );
+        assert_eq!(
+            recovery_refresh_status(&target, &committees),
+            RecoveryRefreshStatus::Active,
+        );
+        let mut public_only = target.clone();
+        let MpcRecoveryRecord::V1(public_only_record) = &mut public_only;
+        public_only_record.key_shares.shares.clear();
+        assert!(!recovery_matches_committee(&public_only, &committees));
+        assert_eq!(
+            recovery_refresh_status(&public_only, &committees),
+            RecoveryRefreshStatus::Obsolete,
+        );
+        committees.set_committees(Default::default());
+        assert!(!recovery_matches_committee(&target, &committees));
+        assert_eq!(
+            recovery_refresh_status(&target, &committees),
+            RecoveryRefreshStatus::Obsolete,
+        );
+    }
+
+    #[test]
+    fn recovery_discovery_ignores_non_root_and_non_mpc_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("backups");
+        let recipient = mock_pgp_cert();
+        let hash = backup_recipient_hash(&recipient);
+        assert_eq!(find_mpc_backup(&root, 42, &recipient).unwrap(), None);
+        fs::create_dir(&root).unwrap();
+        for name in [
+            "hashi-backup-20260101T000000Z.tar.asc".to_owned(),
+            "hashi-backup-epoch-42-20260101T000000Z.tar.asc".to_owned(),
+            "hashi-backup-epoch-42-mpc-20260105T000000Z.tar.asc".to_owned(),
+            format!("hashi-backup-epoch-43-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-042-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-42-mpc-{hash}-20260230T000000Z.tar.asc"),
+            format!("hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc.partial"),
+            format!(".hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"),
+            format!(
+                "hashi-backup-epoch-42-mpc-{}-20260105T000000Z.tar.asc",
+                backup_recipient_hash(&mock_pgp_cert()),
+            ),
+        ] {
+            fs::write(root.join(name), b"not a completed matching archive").unwrap();
+        }
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let name = format!("hashi-backup-epoch-42-mpc-{hash}-20260103T000000Z.tar.asc");
+        fs::write(nested.join(&name), b"nested archive").unwrap();
+        std::os::unix::fs::symlink(nested.join(&name), root.join(&name)).unwrap();
+        fs::create_dir(root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260104T000000Z.tar.asc"
+        )))
+        .unwrap();
+        assert_eq!(find_mpc_backup(&root, 42, &recipient).unwrap(), None);
+        let older = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let newer = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260102T000000Z.tar.asc"
+        ));
+        fs::write(&newer, b"newer").unwrap();
+        fs::write(&older, b"older").unwrap();
+        assert_eq!(
+            find_fresh_mpc_backup(
+                &root,
+                42,
+                &recipient,
+                "2026-01-03T00:00:00Z".parse().unwrap()
+            )
+            .unwrap(),
+            Some(newer),
+        );
+    }
+
+    #[test]
+    fn recovery_freshness_excludes_future_and_three_day_old_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let recipient = mock_pgp_cert();
+        let hash = backup_recipient_hash(&recipient);
+        let archive = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        fs::write(&archive, b"published").unwrap();
+        let find = |now: &str| {
+            find_fresh_mpc_backup(directory.path(), 42, &recipient, now.parse().unwrap()).unwrap()
+        };
+        assert_eq!(find("2025-12-31T23:59:59Z"), None);
+        assert_eq!(find("2026-01-01T00:00:00Z"), Some(archive.clone()));
+        assert_eq!(find("2026-01-03T23:59:59Z"), Some(archive));
+        assert_eq!(find("2026-01-04T00:00:00Z"), None);
+        assert_eq!(find("2026-02-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn retention_protects_only_latest_mpc_independently_of_ordinary_archives() {
+        let directory = tempfile::tempdir().unwrap();
+        let hash = backup_recipient_hash(&mock_pgp_cert());
+        let previous = directory.path().join(format!(
+            "hashi-backup-epoch-41-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let older_current = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let latest = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260102T000000Z.tar.asc"
+        ));
+        let ordinary = directory
+            .path()
+            .join("hashi-backup-epoch-43-20260201T000000Z.tar.asc");
+        for path in [&previous, &older_current, &latest, &ordinary] {
+            fs::write(path, b"archive").unwrap();
+        }
+        cleanup_old_backups(
+            directory.path(),
+            "2026-03-15T00:00:00Z".parse().unwrap(),
+            false,
+            Some(42),
+        )
+        .unwrap();
+        assert!(!previous.exists());
+        assert!(!older_current.exists());
+        assert!(!ordinary.exists());
+        assert!(
+            latest.is_file(),
+            "last MPC archive does not expire after 30 days"
+        );
+    }
+
+    #[test]
+    fn retention_keeps_newest_historical_mpc_until_the_last_archive_floor() {
+        for current_epoch in [Some(43), None] {
+            for save_may_follow in [false, true] {
+                for (now, within_floor) in [
+                    ("2026-01-16T00:00:00Z", true),
+                    ("2026-01-31T00:00:00Z", true),
+                    ("2026-01-31T00:00:01Z", false),
+                ] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let hash = backup_recipient_hash(&mock_pgp_cert());
+                    let archive = directory.path().join(format!(
+                        "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+                    ));
+                    fs::write(&archive, b"historical recovery").unwrap();
+                    let stats = cleanup_old_backups(
+                        directory.path(),
+                        now.parse().unwrap(),
+                        save_may_follow,
+                        current_epoch,
+                    )
+                    .unwrap();
+                    let retained = save_may_follow || within_floor;
+                    assert_eq!(archive.exists(), retained);
+                    assert_eq!(stats.removed, usize::from(!retained));
+                    assert_eq!(stats.failed, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retention_expires_older_historical_mpc_only_after_fourteen_days() {
+        for current_epoch in [Some(43), None] {
+            for save_may_follow in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let hash = backup_recipient_hash(&mock_pgp_cert());
+                let archive = directory.path().join(format!(
+                    "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+                ));
+                let newer = directory
+                    .path()
+                    .join("hashi-backup-epoch-43-20260102T000000Z.tar.asc");
+                fs::write(&archive, b"historical recovery").unwrap();
+                fs::write(&newer, b"newer archive").unwrap();
+                cleanup_old_backups(
+                    directory.path(),
+                    "2026-01-15T00:00:00Z".parse().unwrap(),
+                    save_may_follow,
+                    current_epoch,
+                )
+                .unwrap();
+                assert!(archive.exists());
+                let stats = cleanup_old_backups(
+                    directory.path(),
+                    "2026-01-15T00:00:01Z".parse().unwrap(),
+                    save_may_follow,
+                    current_epoch,
+                )
+                .unwrap();
+                assert!(!archive.exists());
+                assert!(newer.exists());
+                assert_eq!(stats.removed, 1);
+                assert_eq!(stats.failed, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn retention_preserves_newest_historical_mpc_when_saves_fail() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let root = &service.inner.config.backup_dir;
+        fs::create_dir(root).unwrap();
+        let recipient = &service.inner.config.backup_pgp_cert;
+        let hash = backup_recipient_hash(recipient);
+        let archive = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20000101T000000Z.tar.asc"
+        ));
+        fs::write(&archive, b"historical recovery").unwrap();
+        let config_path = service.inner.config_path.as_ref().unwrap();
+        fs::remove_file(config_path).unwrap();
+        for _ in 0..2 {
+            cleanup_old_backups(root, jiff::Timestamp::now(), true, Some(43)).unwrap();
+            assert!(
+                save(
+                    config_path,
+                    &service.inner.config,
+                    service.inner.db.as_ref(),
+                    recipient,
+                    root,
+                    Some(43),
+                    None,
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&archive).unwrap(), b"historical recovery");
+        }
+    }
+
+    #[test]
+    fn retention_protects_current_mpc_despite_newer_pending_epoch_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let hash = backup_recipient_hash(&mock_pgp_cert());
+        let current = directory.path().join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20260101T000000Z.tar.asc"
+        ));
+        let pending = directory.path().join(format!(
+            "hashi-backup-epoch-43-mpc-{hash}-20260201T000000Z.tar.asc"
+        ));
+        fs::write(&current, b"current recovery").unwrap();
+        fs::write(&pending, b"pending recovery").unwrap();
+        cleanup_old_backups(
+            directory.path(),
+            "2026-02-02T00:00:00Z".parse().unwrap(),
+            false,
+            Some(42),
+        )
+        .unwrap();
+        assert!(current.exists());
+        assert!(pending.exists());
+        cleanup_old_backups(
+            directory.path(),
+            "2026-02-02T00:00:00Z".parse().unwrap(),
+            false,
+            Some(43),
+        )
+        .unwrap();
+        assert!(!current.exists());
+        assert!(pending.exists());
+    }
+
+    #[test]
+    fn scheduled_recovery_reuses_published_archive_after_restart() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let ordinary = service
+            .inner
+            .maintain_backups_after_epoch_change(42, &BackupAction::SaveNodeState)
+            .unwrap()
+            .unwrap();
+        let action = BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
+        let archive = service
+            .inner
+            .maintain_backups_after_epoch_change(99, &action)
+            .unwrap()
+            .unwrap();
+        assert_ne!(ordinary, archive);
+        assert!(
+            archive
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-42-mpc-")
+        );
+        let bytes = fs::read(&archive).unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            2
+        );
+        let original_archive = archive;
+        let original_bytes = bytes;
+        let (cert, secret_key) = mock_pgp_keypair();
+        let mut config = service.inner.config.clone();
+        config.backup_pgp_cert = PgpPublicCert::new(cert).unwrap();
+        let config_path = service.inner.config_path.clone();
+        config.save(config_path.as_ref().unwrap()).unwrap();
+        drop(service);
+        let hashi = Hashi::new_with_registry(
+            crate::ServerVersion::new("unknown", "unknown"),
+            config_path,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        let service = BackupService::new(hashi).0;
+        let archive = service
+            .inner
+            .maintain_backups_after_epoch_change(42, &action)
+            .unwrap()
+            .unwrap();
+        assert_ne!(archive, original_archive);
+        let homedir = temp_gnupg_home();
+        test_utils::gpg_import_secret_key(homedir.path(), &secret_key);
+        let decrypted = Command::new("gpg")
+            .env("GNUPGHOME", homedir.path())
+            .arg("--decrypt")
+            .arg(&archive)
+            .output()
+            .unwrap();
+        test_utils::assert_command_success(&decrypted, "gpg --decrypt");
+        let recovered = read_mpc_recovery_record(decrypted.stdout.as_slice()).unwrap();
+        assert_eq!(
+            bcs::to_bytes(&recovered).unwrap(),
+            bcs::to_bytes(&recovery::test_record()).unwrap(),
+        );
+        let bytes = fs::read(&archive).unwrap();
+        let service = restart_backup_service(service);
+        assert_eq!(
+            service
+                .inner
+                .maintain_backups_after_epoch_change(100, &action)
+                .unwrap(),
+            Some(archive.clone())
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .count(),
+            3
+        );
+        let mut invalid = recovery::test_record();
+        let MpcRecoveryRecord::V1(record) = &mut invalid;
+        record.chain_id.clear();
+        assert!(
+            service
+                .inner
+                .maintain_backups_after_epoch_change(
+                    42,
+                    &BackupAction::SaveWithRecovery(Box::new(invalid)),
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(archive).unwrap(), bytes);
+        assert_eq!(fs::read(original_archive).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn retention_preserves_expired_match_until_replacement_is_published() {
+        let (service, _directory) = backup_service_fixture(false, true);
+        let root = &service.inner.config.backup_dir;
+        fs::create_dir(root).unwrap();
+        let recipient = &service.inner.config.backup_pgp_cert;
+        let hash = backup_recipient_hash(recipient);
+        let expired = root.join(format!(
+            "hashi-backup-epoch-42-mpc-{hash}-20000101T000000Z.tar.asc"
+        ));
+        fs::write(&expired, b"expired recovery").unwrap();
+        let newer = root.join(encrypted_backup_file_name(BackupKind::Node(43), recipient));
+        fs::write(&newer, b"newer node archive").unwrap();
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
+        assert!(
+            expired.is_file(),
+            "ordinary archives must not displace MPC recovery"
+        );
+        let config_path = service.inner.config_path.as_ref().unwrap();
+        // This fixture has no onchain mirror, so exercise the save/cleanup
+        // sequence with an explicit current epoch rather than a housekeeping target.
+        let recovery = recovery::test_record();
+        let save_replacement = || {
+            save(
+                config_path,
+                &service.inner.config,
+                service.inner.db.as_ref(),
+                recipient,
+                root,
+                Some(42),
+                Some(&recovery),
+            )
+        };
+        let config = fs::read(config_path).unwrap();
+        fs::remove_file(config_path).unwrap();
+        cleanup_old_backups(root, jiff::Timestamp::now(), true, Some(42)).unwrap();
+        assert!(save_replacement().is_err());
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
+        assert_eq!(fs::read(&expired).unwrap(), b"expired recovery");
+        fs::write(config_path, config).unwrap();
+        let archive = save_replacement().unwrap();
+        cleanup_old_backups(root, jiff::Timestamp::now(), false, Some(42)).unwrap();
+        assert!(!expired.exists());
+        assert_ne!(archive, expired);
+        assert!(archive.is_file());
+        assert_eq!(find_mpc_backup(root, 42, recipient).unwrap(), Some(archive));
+    }
+
+    #[tokio::test]
+    async fn scheduled_recovery_restart_retries_same_object_and_classifies_collisions() {
+        use axum::body::Bytes;
+        use axum::http::HeaderMap;
+        use axum::http::StatusCode;
+        use axum::http::Uri;
+        use std::sync::Mutex;
+
+        let (mut service, _directory) = backup_service_fixture(true, true);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let router = axum::Router::new().fallback_service(axum::routing::put(
+            move |uri: Uri, headers: HeaderMap, body: Bytes| {
+                let captured = captured.clone();
+                async move {
+                    assert_eq!(headers.get("if-none-match").unwrap(), "*");
+                    let mut captured = captured.lock().unwrap();
+                    captured.push((uri.path().to_owned(), body));
+                    match captured.len() {
+                        1 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "<Error><Code>SlowDown</Code></Error>",
+                        ),
+                        2 => (StatusCode::OK, ""),
+                        3 | 5 | 6 => (
+                            StatusCode::PRECONDITION_FAILED,
+                            "<Error><Code>PreconditionFailed</Code></Error>",
+                        ),
+                        4 => (
+                            StatusCode::CONFLICT,
+                            "<Error><Code>ConditionalRequestConflict</Code></Error>",
+                        ),
+                        _ => panic!("unexpected additional request"),
+                    }
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        let recovery_action = || BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
+        assert!(
+            service
+                .process_epoch_change(42, recovery_action())
+                .await
+                .is_err()
+        );
+        let archive = find_mpc_backup(
+            &service.inner.config.backup_dir,
+            42,
+            &service.inner.config.backup_pgp_cert,
+        )
+        .unwrap()
+        .unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            1
+        );
+
+        service = restart_backup_service(service);
+        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        service
+            .process_epoch_change(42, recovery_action())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            service
+                .inner
+                .metrics
+                .backup_scheduled_remote_successes
+                .get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            0
+        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
+            assert!(
+                requests[0]
+                    .0
+                    .ends_with(archive.file_name().unwrap().to_str().unwrap())
+            );
+        }
+        service
+            .process_epoch_change(42, recovery_action())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            0
+        );
+        assert_eq!(
+            service
+                .inner
+                .metrics
+                .backup_scheduled_remote_successes
+                .get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            0
+        );
+        assert!(
+            service
+                .process_epoch_change(42, recovery_action())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            1
+        );
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
+        assert_eq!(
+            fs::read_dir(&service.inner.config.backup_dir)
+                .unwrap()
+                .count(),
+            1
+        );
+
+        // The same HTTP status remains an error for ordinary scheduled and manual uploads.
+        assert!(
+            service
+                .process_epoch_change(42, BackupAction::SaveNodeState)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_local_successes.get(),
+            1
+        );
+        assert_eq!(
+            service.inner.metrics.backup_scheduled_remote_failures.get(),
+            2
+        );
+        assert!(
+            upload(&service.inner.config, &mut service.s3_client, &archive)
+                .await
+                .is_err()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 6);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_remote_results() {
-        for (config_path_present, write_backup, remove_config) in [
-            (true, false, false),
-            (false, true, false),
-            (true, true, true),
+        for (config_path_present, action, remove_config) in [
+            (true, BackupAction::CleanupOnly, false),
+            (false, BackupAction::SaveNodeState, false),
+            (
+                false,
+                BackupAction::SaveWithRecovery(Box::new(recovery::test_record())),
+                false,
+            ),
+            (true, BackupAction::SaveNodeState, true),
         ] {
             let (mut service, directory) = backup_service_fixture(true, config_path_present);
             if remove_config {
                 fs::remove_file(directory.path().join("config.toml")).unwrap();
             }
-            let result = service.process_epoch_change(6, write_backup).await;
+            let result = service.process_epoch_change(6, action).await;
             assert_eq!(result.is_err(), remove_config);
             assert!(service.s3_client.is_none());
             assert_eq!(
@@ -1149,7 +2457,22 @@ mod tests {
     #[tokio::test]
     async fn scheduled_local_only_completes_without_initializing_s3() {
         let (mut service, _directory) = backup_service_fixture(false, true);
-        service.process_epoch_change(6, true).await.unwrap();
+        service
+            .process_epoch_change(6, BackupAction::SaveNodeState)
+            .await
+            .unwrap();
+        let archive = fs::read_dir(&service.inner.config.backup_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert!(
+            archive
+                .file_name()
+                .to_str()
+                .unwrap()
+                .starts_with("hashi-backup-epoch-6-")
+        );
         assert!(service.s3_client.is_none());
         assert_eq!(
             service.inner.metrics.backup_scheduled_local_successes.get(),
@@ -1231,7 +2554,9 @@ mod tests {
             let server = tokio::spawn(async move {
                 axum::serve(listener, router).await.unwrap();
             });
-            let result = service.process_epoch_change(6, true).await;
+            let result = service
+                .process_epoch_change(6, BackupAction::SaveNodeState)
+                .await;
             server.abort();
             assert_eq!(requests.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -1280,8 +2605,13 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let missing = tmpdir.path().join("missing");
 
-        let stats =
-            cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        let stats = cleanup_old_backups(
+            &missing,
+            "2026-09-08T12:00:00Z".parse().unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
 
@@ -1299,7 +2629,10 @@ mod tests {
                 .to_zoned(jiff::tz::TimeZone::UTC)
                 .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
         ));
-        let generated = tmpdir.path().join(encrypted_backup_file_name());
+        let generated = tmpdir.path().join(encrypted_backup_file_name(
+            BackupKind::Mpc(42),
+            &mock_pgp_cert(),
+        ));
         fs::write(&older, b"older archive").unwrap();
         fs::write(&generated, b"generated recovery archive").unwrap();
         let sweep_time = now
@@ -1308,10 +2641,39 @@ mod tests {
             .checked_add(jiff::SignedDuration::from_hours(24))
             .unwrap();
 
-        cleanup_old_backups(tmpdir.path(), sweep_time, false).unwrap();
+        cleanup_old_backups(tmpdir.path(), sweep_time, false, Some(42)).unwrap();
 
         assert!(!older.exists());
         assert_eq!(fs::read(generated).unwrap(), b"generated recovery archive");
+    }
+
+    #[test]
+    fn cleanup_old_backups_uses_timestamps_across_manual_and_epoch_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let cases = [
+            ("hashi-backup-epoch-10-20260817T000000Z.tar.asc", false),
+            ("hashi-backup-epoch-10-mpc-20260818T000000Z.tar.asc", true),
+            ("hashi-backup-20260819T000000Z.tar.asc", false),
+            ("hashi-backup-epoch-2-20260820T000000Z.tar.asc", true),
+            ("hashi-backup-epoch-invalid-20260821T000000Z.tar.asc", true),
+        ];
+        for (name, _) in cases {
+            fs::write(directory.path().join(name), b"archive").unwrap();
+        }
+
+        let stats = cleanup_old_backups(
+            directory.path(),
+            "2026-09-08T12:00:00Z".parse().unwrap(),
+            false,
+            Some(10),
+        )
+        .unwrap();
+
+        assert_eq!(stats.removed, 2);
+        assert_eq!(stats.failed, 0);
+        for (name, retained) in cases {
+            assert_eq!(directory.path().join(name).exists(), retained, "{name}");
+        }
     }
 
     #[test]
@@ -1347,7 +2709,7 @@ mod tests {
                 .unwrap();
         }
 
-        let stats = cleanup_old_backups(dir, now, false).unwrap();
+        let stats = cleanup_old_backups(dir, now, false, None).unwrap();
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
 
@@ -1381,7 +2743,13 @@ mod tests {
         let wrong_type = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}regular-file"));
         fs::write(&wrong_type, b"not a staging directory").unwrap();
         File::open(&wrong_type).unwrap().set_times(times).unwrap();
-        let completed = dir.join(extract_dir_name(&encrypted_backup_file_name()).unwrap());
+        let completed = dir.join(
+            extract_dir_name(&encrypted_backup_file_name(
+                BackupKind::Manual,
+                &mock_pgp_cert(),
+            ))
+            .unwrap(),
+        );
         let db_restore = dir.join(".hashi-db-restore-abandoned");
         for path in [&completed, &db_restore] {
             fs::create_dir(path).unwrap();
@@ -1389,7 +2757,7 @@ mod tests {
             File::open(path).unwrap().set_times(times).unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert!(!staging.exists());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -1423,7 +2791,7 @@ mod tests {
                 .unwrap();
         }
 
-        cleanup_old_backups(dir, now, false).unwrap();
+        cleanup_old_backups(dir, now, false, None).unwrap();
 
         assert!(!expired.exists());
         assert_eq!(fs::read(boundary).unwrap(), b"staged data");
@@ -1445,7 +2813,7 @@ mod tests {
         let link = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}symlink"));
         std::os::unix::fs::symlink(&nested_file, &link).unwrap();
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(fs::read(nested_file).unwrap(), b"nested data");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -1468,7 +2836,7 @@ mod tests {
             fs::write(dir.join(name), b"keep").unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert!(!expired.exists());
         for name in preserved {
@@ -1512,7 +2880,7 @@ mod tests {
         std::os::unix::fs::symlink(&newest, &link).unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
         assert_eq!(stats.removed, 3);
         assert_eq!(stats.failed, 0);
 
@@ -1536,7 +2904,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
@@ -1553,7 +2921,7 @@ mod tests {
         fs::write(&past_bound, b"past").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
@@ -1569,7 +2937,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), true, None).unwrap();
 
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
@@ -1588,7 +2956,7 @@ mod tests {
         fs::write(&older, b"older").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(fs::read(&real).unwrap(), b"real");
@@ -1603,7 +2971,7 @@ mod tests {
         fs::write(&last, b"last").unwrap();
 
         let stats =
-            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false, None).unwrap();
 
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
@@ -1798,6 +3166,7 @@ mod tests {
     fn restore_backup_entries_rejects_unknown_keyspace_file_name() {
         let manifest = BackupManifest {
             paths: Vec::new(),
+            recovery: None,
             db: DbManifestEntry {
                 original_path: PathBuf::from("/var/lib/hashi/db"),
                 archive_entries: vec![PathBuf::from("hashi-db-snapshot/something_else.bin")],
@@ -1879,7 +3248,7 @@ mod tests {
             archive_name: PathBuf::from("config.toml"),
         });
 
-        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert(), &output);
+        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert(), &output, None);
 
         assert!(result.is_err());
         assert_eq!(
@@ -1889,7 +3258,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![recovery.clone()],
         );
-        cleanup_old_backups(out.path(), "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
+        cleanup_old_backups(
+            out.path(),
+            "2026-09-08T12:00:00Z".parse().unwrap(),
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(fs::read(recovery).unwrap(), b"last recovery archive");
     }
 
@@ -1901,7 +3276,8 @@ mod tests {
         let output = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
         fs::write(&output, b"existing recovery archive").unwrap();
         let recipient = mock_pgp_cert();
-        let collision = encrypt_files_to_pgp_archive(&db_only_manifest(), &db, &recipient, &output);
+        let collision =
+            encrypt_files_to_pgp_archive(&db_only_manifest(), &db, &recipient, &output, None);
         assert!(collision.is_err());
         assert_eq!(fs::read(&output).unwrap(), b"existing recovery archive");
         assert_eq!(
@@ -1914,7 +3290,7 @@ mod tests {
     }
 
     #[test]
-    fn save_works_while_db_is_open() {
+    fn save_works_while_db_is_open_and_names_the_captured_epoch() {
         let src = tempfile::Builder::new().tempdir().unwrap();
         let db_path = src.path().join("db");
         let node_config_path = src.path().join("config.toml");
@@ -1924,12 +3300,33 @@ mod tests {
 
         let db = Database::open(&db_path).unwrap();
         let recipient = mock_pgp_cert();
-        let out = tempfile::Builder::new().tempdir().unwrap();
+        let recovery = recovery::test_record();
+        let mpc_prefix = format!(
+            "hashi-backup-epoch-42-mpc-{}",
+            backup_recipient_hash(&recipient)
+        );
+        for (epoch, recovery, prefix) in [
+            (None, None, "hashi-backup"),
+            (Some(43), None, "hashi-backup-epoch-43"),
+            (Some(43), Some(&recovery), mpc_prefix.as_str()),
+        ] {
+            let out = tempfile::tempdir().unwrap();
+            let output_path = save(
+                &node_config_path,
+                &node_config,
+                &db,
+                &recipient,
+                out.path(),
+                epoch,
+                recovery,
+            )
+            .unwrap();
 
-        let output_path =
-            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
-
-        assert!(output_path.is_file());
+            assert!(output_path.is_file());
+            let name = output_path.file_name().unwrap().to_str().unwrap();
+            let suffix = name.strip_prefix(prefix).unwrap();
+            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, suffix).unwrap();
+        }
     }
 
     #[test]
@@ -1947,8 +3344,16 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
-        let output_path =
-            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
+        let output_path = save(
+            &node_config_path,
+            &node_config,
+            &db,
+            &recipient,
+            out.path(),
+            None,
+            None,
+        )
+        .unwrap();
 
         let homedir = temp_gnupg_home();
         test_utils::gpg_import_secret_key(homedir.path(), &secret_key);

@@ -45,7 +45,6 @@ use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::ReconfigOutcome;
-use crate::mpc::types::RotationRole;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -129,6 +128,8 @@ pub struct MpcService {
     /// after a failed one, keyed by epoch; see `restore_current_manager`.
     next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
+    /// Last epoch whose recovery material was submitted, independently of signing recovery.
+    recovery_backup_epoch: Mutex<Option<u64>>,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
     presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
@@ -195,6 +196,7 @@ impl MpcService {
             next_batch_repair: Mutex::new(None),
             next_manager_restore: Mutex::new(None),
             backup_handle,
+            recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
             presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
@@ -220,6 +222,7 @@ impl MpcService {
         self.run_major_compaction(self.inner.onchain_state().epoch())
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
+        let pending = self.get_pending_epoch_change();
         if let Some(epoch) = pending {
             self.drive_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
@@ -351,7 +354,21 @@ impl MpcService {
         epoch_change_confirmed: bool,
         backup: Backup,
     ) {
-        let current_epoch = self.inner.onchain_state().epoch();
+        let (current_epoch, activation_confirmed) = {
+            let state = self.inner.onchain_state().state();
+            let committees = &state.hashi().committees;
+            let current_epoch = committees.epoch();
+            (
+                current_epoch,
+                reconfig_activation_confirmed(
+                    epoch_change_confirmed,
+                    committees.pending_epoch_change(),
+                    current_epoch,
+                    committees.committees().contains_key(&target_epoch),
+                    target_epoch,
+                ),
+            )
+        };
         let tombstoned = if epoch_change_confirmed || current_epoch >= target_epoch {
             let pruning_references = {
                 let state = self.inner.onchain_state().state();
@@ -378,8 +395,96 @@ impl MpcService {
         if tombstoned {
             self.run_major_compaction(target_epoch).await;
         }
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+        let action = match backup {
+            Backup::Write
+                if activation_confirmed && *recovery_backup_epoch != Some(target_epoch) =>
+            {
+                match self.capture_recovery_backup(target_epoch) {
+                    Ok(Some(recovery)) => {
+                        *recovery_backup_epoch = Some(target_epoch);
+                        crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery))
+                    }
+                    Ok(None) => crate::backup::BackupAction::SaveNodeState,
+                    Err(error) => {
+                        warn!(
+                            epoch = target_epoch,
+                            "MPC recovery capture failed; saving an ordinary epoch backup instead: {error:#}"
+                        );
+                        crate::backup::BackupAction::SaveNodeState
+                    }
+                }
+            }
+            Backup::Write => crate::backup::BackupAction::SaveNodeState,
+            Backup::Skip => crate::backup::BackupAction::CleanupOnly,
+        };
         self.backup_handle
-            .maintain_backups_after_epoch_change(target_epoch, backup == Backup::Write);
+            .maintain_backups_after_epoch_change(target_epoch, action);
+    }
+
+    fn capture_recovery_backup(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<Option<crate::backup::MpcRecoveryRecord>> {
+        let Some(manager) = self.inner.mpc_manager() else {
+            return Ok(None);
+        };
+        let manager = manager.read().unwrap();
+        let Some(output) = manager.recovery_output_for_epoch(epoch) else {
+            return Ok(None);
+        };
+        self.inner.capture_mpc_recovery(epoch, output)
+    }
+
+    fn backup_recovered_epoch(&self, epoch: u64) {
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+        if *recovery_backup_epoch == Some(epoch) {
+            return;
+        }
+        match self.capture_recovery_backup(epoch) {
+            Ok(Some(recovery)) => {
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+                );
+                *recovery_backup_epoch = Some(epoch);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    epoch,
+                    "MPC recovery capture failed; saving an ordinary backup for the recovered epoch instead: {error:#}"
+                );
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveNodeState,
+                );
+            }
+        }
+    }
+
+    fn backup_previous_output(&self, epoch: u64, output: &MpcOutput) {
+        if epoch != self.inner.onchain_state().epoch() || output.key_shares.shares.is_empty() {
+            return;
+        }
+        let mut recovery_backup_epoch = self.recovery_backup_epoch.lock().unwrap();
+        if *recovery_backup_epoch == Some(epoch) {
+            return;
+        }
+        match self.inner.capture_mpc_recovery(epoch, output) {
+            Ok(Some(recovery)) => {
+                self.backup_handle.maintain_backups_after_epoch_change(
+                    epoch,
+                    crate::backup::BackupAction::SaveWithRecovery(Box::new(recovery)),
+                );
+                *recovery_backup_epoch = Some(epoch);
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                epoch,
+                "Unable to capture previous MPC output for recovery backup: {error:#}"
+            ),
+        }
     }
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
@@ -570,11 +675,20 @@ impl MpcService {
         }
     }
 
-    async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
-        let onchain_state = self.inner.onchain_state().clone();
-        let epoch = onchain_state.epoch();
-        let is_key_rotation = onchain_state.is_key_rotation_epoch(epoch);
-        let onchain_mpc_key = onchain_state.mpc_public_key();
+    async fn recover_mpc_state(&self) -> anyhow::Result<(u64, MpcOutput)> {
+        let (epoch, is_key_rotation, onchain_mpc_key) = {
+            let state = self.inner.onchain_state().state();
+            let committees = &state.hashi().committees;
+            let epoch = committees.epoch();
+            (
+                epoch,
+                crate::onchain::OnchainState::epoch_after_first_committee(
+                    committees.committees().keys().next().copied(),
+                    epoch,
+                ),
+                committees.mpc_public_key().to_vec(),
+            )
+        };
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
              onchain_mpc_key_len={}",
@@ -589,7 +703,7 @@ impl MpcService {
             "recover_mpc_state: recovered vk={}",
             hex::encode(output.public_key.to_byte_array())
         );
-        Ok(output)
+        Ok((epoch, output))
     }
 
     async fn recover_current_dkg(
@@ -1195,8 +1309,9 @@ impl MpcService {
             return;
         }
         match self.recover_mpc_state().await {
-            Ok(_) => {
+            Ok((epoch, _)) => {
                 *self.next_manager_restore.lock().unwrap() = None;
+                self.backup_recovered_epoch(epoch);
                 info!(
                     "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
                      reconfiguration that did not complete had left it on {installed:?} \
@@ -1228,7 +1343,7 @@ impl MpcService {
             return;
         }
         info!("sync_if_stale: rebuilding SigningManager for epoch {epoch}");
-        let output = match self.recover_mpc_state().await {
+        let (epoch, output) = match self.recover_mpc_state().await {
             Ok(output) => output,
             Err(e) => {
                 if let Some(p) = self.get_pending_epoch_change() {
@@ -1243,6 +1358,9 @@ impl MpcService {
                 return;
             }
         };
+        // Private key recovery is sufficient: unavailable presignatures must
+        // not prevent archiving the completed epoch's key shares.
+        self.backup_recovered_epoch(epoch);
         match self.recover_presigning_state(&output).await {
             Ok(PresigRecovery::Installed) => {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
@@ -2186,20 +2304,16 @@ impl MpcService {
              onchain_epoch={onchain_epoch}, onchain_mpc_key={}",
             hex::encode(&onchain_mpc_key),
         );
-        let role = {
+        {
             let mgr = mpc_manager.read().unwrap();
-            if mgr.is_committee_member() {
-                RotationRole::DealerAndParty
-            } else if mgr.is_previous_committee_member() {
-                RotationRole::DealerOnly
-            } else {
+            if !mgr.is_committee_member() && !mgr.is_previous_committee_member() {
                 info!(
                     "run_key_rotation: in neither the epoch {target_epoch} committee nor its \
                      predecessor, no role in this rotation"
                 );
                 return Ok(ReconfigOutcome::NoRole);
             }
-        };
+        }
         let previous_certs = key_generation_certificates(&onchain_state, previous_epoch)
             .map_err(|e| anyhow::anyhow!("Failed to read previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -2245,7 +2359,7 @@ impl MpcService {
             &p2p_channel,
             &mut tob_channel,
             &self.inner.metrics,
-            role,
+            |epoch, output| self.backup_previous_output(epoch, output),
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;
@@ -2847,6 +2961,22 @@ fn reconfig_target_live(
     pending == Some(target_epoch) || (current_epoch == target_epoch && current_committee_exists)
 }
 
+/// A completed output is safe to archive only after activation, not merely
+/// while its committee is pending. A retained historical committee proves
+/// activation too; a skipped or aborted target has no such committee.
+fn reconfig_activation_confirmed(
+    own_end_confirmed: bool,
+    pending_epoch: Option<u64>,
+    current_epoch: u64,
+    target_committee_exists: bool,
+    target_epoch: u64,
+) -> bool {
+    own_end_confirmed
+        || (pending_epoch != Some(target_epoch)
+            && current_epoch >= target_epoch
+            && target_committee_exists)
+}
+
 /// `start_reconfig` pins the pending committee to Sui's epoch, and the chain
 /// refuses to complete it once Sui's epoch has moved on. `latest_sui_epoch`
 /// is the watcher's checkpoint view, which can lag the chain but never lead
@@ -3105,9 +3235,40 @@ mod reconfig_submission_classifier_tests {
 
 #[cfg(test)]
 mod reconfig_target_tests {
+    use super::reconfig_activation_confirmed;
     use super::reconfig_target_live;
     use super::reconfig_target_pending;
     use super::reconfig_window_closed;
+
+    #[test]
+    fn pending_aborted_and_skipped_targets_are_not_activated() {
+        // Pending committee exists but has never become current.
+        assert!(!reconfig_activation_confirmed(false, Some(6), 5, true, 6));
+        // Abort removes the target committee and leaves the current epoch.
+        assert!(!reconfig_activation_confirmed(false, None, 5, false, 6));
+        // Advancing past a skipped target does not prove it was activated.
+        assert!(!reconfig_activation_confirmed(false, None, 7, false, 6));
+        // Aborted genesis shares epoch zero with the pre-genesis state.
+        assert!(!reconfig_activation_confirmed(false, None, 0, false, 0));
+    }
+
+    #[test]
+    fn confirmed_observed_and_historical_targets_are_activated() {
+        // Our successful end submission is sufficient before the mirror catches up.
+        assert!(reconfig_activation_confirmed(true, Some(6), 5, true, 6));
+        assert!(reconfig_activation_confirmed(true, None, 5, false, 6));
+        // A peer completed the target, or the mirror has already advanced again.
+        assert!(reconfig_activation_confirmed(false, None, 6, true, 6));
+        assert!(reconfig_activation_confirmed(false, None, 7, true, 6));
+        assert!(reconfig_activation_confirmed(false, Some(8), 7, true, 6));
+        assert!(reconfig_activation_confirmed(false, None, 0, true, 0));
+    }
+
+    #[test]
+    fn pending_genesis_is_not_activated_until_confirmed() {
+        assert!(!reconfig_activation_confirmed(false, Some(0), 0, true, 0));
+        assert!(reconfig_activation_confirmed(true, Some(0), 0, true, 0));
+    }
 
     #[test]
     fn live_while_pending_or_current_only() {

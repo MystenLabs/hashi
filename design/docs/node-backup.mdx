@@ -301,18 +301,19 @@ backup-dir = "/var/lib/hashi/backups"
 Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
 
-On epoch housekeeping, before the save, cleanup deletes archives older than 14 days by
-filename timestamp. The newest is kept while the node is still attempting saves; a node
-with no role attempts none, so its last archive expires at 30 days. A powered-off node
-sweeps nothing, so delete a decommissioned host's archives yourself, and copy them
-elsewhere before restarting a long-offline node.
+Automatic backup maintenance deletes archives older than 14 days by filename
+timestamp, but preserves the newest current-epoch MPC recovery archive until a
+newer one is successfully saved or its epoch ends. Ordinary backups cannot replace
+that recovery copy. The newest archive of any kind is kept while saves are attempted,
+or up to 30 days otherwise; older unprotected archives expire after 14 days.
+A powered-off node sweeps nothing; remove decommissioned hosts' archives yourself.
 
 Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`
 counts; expiring the newest archive also warns. Unrelated files are preserved, entry errors
 do not stop the sweep, and a cleanup failure does not prevent the backup attempt.
 
 Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
-the same policy. Keep longer-term copies elsewhere.
+the same automatic policy. Apply [backup expiry](#backup-expiry) to all copies.
 
 Archives are staged in `backup-dir`, finalized and synced to disk before publication;
 the directory is synced afterward on a best-effort basis. A directory sync failure
@@ -326,6 +327,36 @@ contain decrypted keys and database data; use a private restore output directory
 Completed restores, `.hashi-db-restore-*` staging directories beside the destination
 database, and restore output elsewhere are not swept by automatic backup cleanup.
 Operators must remove these plaintext copies when no longer needed.
+
+### Backup expiry
+
+Use a **14-day retention target**, measured from the archive's original creation,
+for every backup copy: local archives (including the newest), off-machine copies,
+and all S3 object versions. Copying or re-uploading must not reset this target;
+S3's versioning and deletion timing are described [below](#cloud-backup).
+
+Active nodes check daily and refresh their current-epoch MPC recovery backup once
+it is 3 days old, even during stalled reconfiguration. This intentionally preserves
+recovery of the active shares; it does not extend retention for historical epochs.
+If refresh is failing, preserve the last usable recovery copy and follow the
+incident guidance below rather than deleting it to meet the target.
+
+Old shares can still reconstruct the active MPC key after resharing. Keeping
+backups indefinitely gives an attacker more time to collect enough decryptable
+backups from the same epoch to recover that key. Expiry limits this opportunity
+while preserving a recent disaster-recovery window.
+
+Operators must configure deletion for each storage location; Hashi's
+newest-backup exception alone does not enforce this policy. Account for Object
+Lock and monitor deletion failures or delays. Remove temporary decrypted copies
+immediately after use.
+
+During an incident, pause expiry for backups needed for recovery: disable the
+applicable S3 lifecycle rules and other off-machine deletion jobs. Hashi's local
+cleanup still runs, so preserve encrypted copies outside `backup-dir` in a
+restricted location exempt from deletion. Confirm the copies are accessible;
+changing lifecycle rules is not instantaneous. Resume expiry and remove incident
+copies when recovery no longer needs them.
 
 ## Restoring from a backup
 
@@ -361,12 +392,18 @@ requires operators to configure:
   retained in an independent audit store outside backup writers' permissions.
   Use per-node credentials for attribution: events identify the credential
   principal, not a trusted archive creator.
-- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)
-  for current **and noncurrent** versions, coordinated with Object Lock.
-  Expiring only current objects can leave historical versions behind. This is
-  an operational default, not guaranteed deletion on day 14 or a guaranteed
-  recovery window: Object Lock sets a minimum protected period, expiration is
-  asynchronous, and recovery depends on epoch-limited certificate history.
+- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html):
+  - Expire current objects after **14 days** (`Expiration.Days: 14`).
+  - Delete noncurrent versions after **1 day** (`NoncurrentVersionExpiration.NoncurrentDays: 1`),
+    without retaining a minimum number of newer versions.
+  - Remove expired delete markers with a separate rule
+    (`Expiration.ExpiredObjectDeleteMarker: true`).
+  Apply these rules to the backup prefix (or the whole dedicated backup bucket).
+  Current expiry creates a delete marker; the data becomes noncurrent and is
+  eligible for deletion 1 day later, not another 14 days later. Lifecycle uses S3
+  upload time, so late uploads need separate expiry tracking. Object Lock can delay
+  deletion, and lifecycle processing is asynchronous: this is not a hard deadline
+  or a guaranteed recovery window.
 
 Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
 configuration defines the bucket and audit safeguards, but leaves read access
@@ -376,8 +413,11 @@ provisioning is separate.
 The destination is derived from the node identity, with no custom prefix:
 
 ```text
-s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-<timestamp>.tar.asc
+s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
 ```
+
+If the `-mpc-` marker is present after the epoch number, it identifies backups
+containing MPC key-recovery information.
 
 Scheduled backups upload the completed encrypted local archive once, without
 retries or a queue. Failures preserve local backups and retention, and log the
@@ -466,3 +506,44 @@ For a **single compromised node with sufficient healthy peers**:
 Suspected quorum-wide or global MPC key compromise requires coordinated incident
 response, not this single-node procedure. Resharing preserves the global Bitcoin
 key; it does not repair a stolen global private key.
+
+## Catastrophic MPC key recovery
+
+A zero-day compromise could steal and delete MPC key shares across the validator
+fleet. Catastrophic data loss could also leave every node without its shares.
+Backups allow the existing MPC key to be recovered when no functioning committee
+remains.
+
+Scheduled backups include `hashi-mpc-recovery.bcs` when the node holds MPC shares.
+This file contains the node's shares and the information needed to combine them
+with other nodes' backups to recover the MPC key. Recovery needs a sufficient set
+of backups from the same epoch and works even after old onchain certificates have
+been deleted. Manual backups do not include this file.
+
+Operators should preserve off-machine encrypted backups and keep access to their
+backup decryption keys separate from the validator fleet. MPC key recovery is
+an incident-response operation, not part of ordinary node restoration.
+
+Recovery assembles the full MPC private key and writes it PGP-encrypted. It must
+still be handled as a highly sensitive secret. Recovering it does not invalidate
+a copy already stolen by an attacker.
+
+### Sharing recovery records
+
+For a coordinated recovery, use `hashi backup export-mpc-recovery-record` to
+decrypt your backup locally and export only its recovery information, encrypted
+to the coordinator's public PGP certificate. The command prints the recipient
+certificate's fingerprint; verify it through a trusted channel before sharing
+the export.
+
+```bash
+hashi backup export-mpc-recovery-record backup.tar.asc \
+  --backup-pgp-secret-key /secure/operator-secret.asc \
+  --output-pgp-cert coordinator.asc --output recovery-record.bcs.asc
+```
+
+Use `--use-gpg-agent` instead of `--backup-pgp-secret-key` for agent-backed keys.
+Send only the encrypted `.bcs.asc` file; neither your backup decryption key nor
+the full backup needs to be shared. The command never writes a plaintext record.
+The coordinator can pass these files to `hashi backup recover-mpc-key` and decrypt
+them with their own key.

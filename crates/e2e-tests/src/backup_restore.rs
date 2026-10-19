@@ -16,26 +16,38 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::path::Path;
     use std::path::PathBuf;
 
     use anyhow::Context;
     use anyhow::Result;
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto_tbls::threshold_schnorr::G;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
+    use hashi::backup::MPC_RECOVERY_FILE_NAME;
+    use hashi::backup::MpcRecoveryRecord;
+    use hashi::backup::RecoveredMpcKey;
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
+    use hashi::cli::config::CliConfig;
     use hashi::config::BackupS3Config;
     use hashi::config::Config as HashiConfig;
     use hashi::config::HashiIds;
     use hashi::db::Database;
+    use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::move_types::ProtocolType;
+    use hashi_types::move_types::TobKey;
     use hashi_types::pgp::PgpPublicCert;
+    use hashi_types::pgp::decrypt_with_secret_key;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use sui_sdk_types::Address;
 
     use crate::HashiNodeHandle;
     use crate::TestNetworksBuilder;
+    use crate::test_helpers::fetch_tob_certs_from_chain;
 
     // Duplicated from the main `lib.rs` tests module so this file is
     // self-contained. The values must stay in sync with `lib.rs`.
@@ -93,7 +105,7 @@ mod tests {
             .value()
     }
 
-    async fn wait_for_scheduled_backup(node: &HashiNodeHandle) -> Result<()> {
+    async fn wait_for_scheduled_backup(node: &HashiNodeHandle, expected: f64) -> Result<()> {
         tokio::time::timeout(ROTATION_TIMEOUT, async {
             let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
             loop {
@@ -102,15 +114,668 @@ mod tests {
                     scheduled_successes(node, "hashi_backup_scheduled_local_successes_total");
                 let remote =
                     scheduled_successes(node, "hashi_backup_scheduled_remote_successes_total");
-                if local >= 1.0 && remote >= 1.0 {
-                    assert_eq!(local, 1.0, "Expected one scheduled local backup");
-                    assert_eq!(remote, 1.0, "Expected one scheduled S3 upload");
+                if local >= expected && remote >= expected {
+                    assert_eq!(local, expected, "Unexpected scheduled local backup count");
+                    assert_eq!(remote, expected, "Unexpected scheduled S3 upload count");
                     return;
                 }
             }
         })
         .await
         .context("Scheduled local backup and S3 upload did not both complete")
+    }
+
+    fn scheduled_archives(config: &HashiConfig) -> Result<Vec<PathBuf>> {
+        Ok(std::fs::read_dir(&config.backup_dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|path| path.to_string_lossy().ends_with(".tar.asc"))
+            .collect())
+    }
+
+    async fn wait_for_local_backup(node: &HashiNodeHandle, expected: f64) -> Result<()> {
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                let actual =
+                    scheduled_successes(node, "hashi_backup_scheduled_local_successes_total");
+                if actual >= expected {
+                    assert_eq!(actual, expected, "Expected one backup per recovered epoch");
+                    return;
+                }
+            }
+        })
+        .await
+        .context("Scheduled local recovery backup did not complete")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_automatic_recovery_backup_on_startup_and_rotation() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_batch_size_per_weight(1)
+            .build()
+            .await?;
+        for node in networks.hashi_network().nodes() {
+            node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        }
+        let recovery_dir = tempfile::tempdir()?;
+        let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
+        let node = &mut networks.hashi_network_mut().nodes_mut()[0];
+        let initial_epoch = node.current_epoch().unwrap();
+        let public_key = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+        let predecessor_threshold = node
+            .hashi()
+            .mpc_manager()
+            .unwrap()
+            .read()
+            .unwrap()
+            .mpc_config
+            .threshold;
+        node.shutdown().await;
+        node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient)?;
+        // Keep this test local even when the surrounding environment has S3 credentials.
+        node.config_mut().backup_s3 = None;
+        node.config_path = Some(write_node_config_to_disk(
+            node.config(),
+            recovery_dir.path(),
+        ));
+        node.start().await?;
+        node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        wait_for_local_backup(node, 1.0).await?;
+        let startup_archives = scheduled_archives(node.config())?;
+        assert_eq!(startup_archives.len(), 1);
+        let startup_archive = startup_archives.into_iter().next().unwrap();
+        let startup_ciphertext = std::fs::read(&startup_archive)?;
+
+        // A fresh worker must reuse the completed same-epoch recovery archive,
+        // rather than relying on the previous process's in-memory guard.
+        node.shutdown().await;
+        node.start().await?;
+        node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        assert_eq!(
+            scheduled_successes(node, "hashi_backup_scheduled_local_successes_total"),
+            0.0,
+            "Reusing an archive must not count as a new local backup",
+        );
+
+        // Recover a late missing manager through the production sync path.
+        // This must not schedule another archive for the already captured epoch.
+        node.hashi().clear_signing_manager_for_test();
+        tokio::time::timeout(DKG_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if node.hashi().signing_manager_for(initial_epoch).is_some() {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Late signing manager restoration did not complete")?;
+
+        // Change the active epoch's threshold so recovering it with its
+        // predecessor's threshold cannot accidentally produce a valid backup.
+        {
+            let nodes = networks.hashi_network().nodes();
+            let latest_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .context("No active Hashi package")?;
+            let mut executors: Vec<SuiTxExecutor> = nodes
+                .iter()
+                .map(|node| {
+                    let hashi = node.hashi();
+                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+                })
+                .collect::<Result<_>>()?;
+            let target = executors[3].sender();
+            let hashi_ids = networks.hashi_network().ids();
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
+            let ignore_member_type_tag =
+                sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("ignore_member"),
+                    sui_sdk_types::Identifier::from_static("IgnoreMember"),
+                    vec![],
+                )));
+            crate::submit_proposal_through_quorum(
+                hashi_ids,
+                hashi_isv,
+                latest_package_id,
+                &mut executors,
+                hashi::cli::client::CreateProposalParams::IgnoreMember {
+                    target_validator_address: target,
+                    ignored: true,
+                    metadata: vec![],
+                },
+                ignore_member_type_tag,
+                "ignore_member",
+                "IgnoreMember",
+            )
+            .await?;
+        }
+        networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(&networks.hashi_network().nodes()[..3], initial_epoch + 1).await;
+        let node = &networks.hashi_network().nodes()[0];
+        // Waiting for the next epoch's archive also lets the serialized worker
+        // finish the startup reuse before checking files and fresh-process counts.
+        let rotation_archive = tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            let prefix = format!("hashi-backup-epoch-{}-mpc-", initial_epoch + 1);
+            loop {
+                poll.tick().await;
+                if let Some(archive) = scheduled_archives(node.config())?.into_iter().find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&prefix)
+                }) {
+                    return Ok::<_, anyhow::Error>(archive);
+                }
+            }
+        })
+        .await
+        .context("Rotation recovery archive did not appear")??;
+        wait_for_local_backup(node, 1.0).await?;
+        let active_threshold = node
+            .hashi()
+            .mpc_manager()
+            .unwrap()
+            .read()
+            .unwrap()
+            .mpc_config
+            .threshold;
+        assert_ne!(
+            active_threshold, predecessor_threshold,
+            "The active epoch must have a different threshold from its predecessor",
+        );
+        let archives = scheduled_archives(node.config())?;
+        assert_eq!(
+            archives.len(),
+            2,
+            "Restart and late restoration must not duplicate an epoch"
+        );
+        assert!(
+            archives.contains(&startup_archive),
+            "Restart must preserve the original recovery archive path",
+        );
+        assert_eq!(
+            std::fs::read(&startup_archive)?,
+            startup_ciphertext,
+            "Restart must reuse the original encrypted bytes",
+        );
+
+        // Inspect the actual encrypted archives through the normal restore command,
+        // not an in-memory record or a synthetic MPC fixture.
+        for (archive, expected_epoch, expected_threshold) in [
+            (&startup_archive, initial_epoch, predecessor_threshold),
+            (&rotation_archive, initial_epoch + 1, active_threshold),
+        ] {
+            assert!(
+                archive
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("hashi-backup-epoch-{expected_epoch}-mpc-"))
+            );
+            let restored = tempfile::tempdir()?;
+            commands::backup::restore(
+                archive,
+                RestoreDecryptor::LocalSecretKey {
+                    secret_key_path: secret_key_path.clone(),
+                },
+                restored.path(),
+            )?;
+            let root = restored.path().join(extract_dir_name(archive)?);
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
+            record.validate()?;
+            let MpcRecoveryRecord::V1(record) = record;
+            assert_eq!(record.chain_id, node.config().sui_chain_id());
+            assert_eq!(
+                record.hashi_object_id,
+                node.config().hashi_ids().hashi_object_id,
+            );
+            assert_eq!(record.validator_address, node.config().validator_address()?);
+            assert_eq!(record.epoch, expected_epoch);
+            assert_eq!(record.public_key, public_key);
+            assert_eq!(record.threshold, expected_threshold);
+            assert!(!record.key_shares.shares.is_empty());
+            assert!(!record.commitments.is_empty());
+        }
+        assert_nodes_agree_on_mpc_key(&networks.hashi_network().nodes()[..3]);
+
+        // Reaching the new on-chain epoch precedes signing preparation. Keep
+        // every peer online until the initial presignatures are installed,
+        // otherwise the survivor cannot advance to the next reconfiguration.
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if networks.hashi_network().nodes()[..3].iter().all(|node| {
+                    node.hashi()
+                        .signing_manager_for(initial_epoch + 1)
+                        .is_some()
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Rotated nodes did not finish signing preparation before isolation")?;
+
+        // Keep one real node running while the next reconfiguration cannot reach
+        // quorum. The backup worker must not depend on MPC making progress.
+        for node in networks.hashi_network_mut().nodes_mut().iter_mut().skip(1) {
+            node.shutdown().await;
+        }
+        networks.sui_network.force_close_epoch().await?;
+        let node = &networks.hashi_network().nodes()[0];
+        tokio::time::timeout(ROTATION_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                poll.tick().await;
+                if node.hashi().onchain_state().pending_epoch_change() == Some(initial_epoch + 2) {
+                    break;
+                }
+            }
+        })
+        .await
+        .context("Isolated node did not observe the pending reconfiguration")?;
+        assert_eq!(node.current_epoch(), Some(initial_epoch + 1));
+
+        // Age genuine encrypted archives through their durable timestamp, without
+        // sleeping for days or injecting synthetic recovery material.
+        let mut expired_archives = Vec::new();
+        for archive in [&startup_archive, &rotation_archive] {
+            let name = archive.file_name().unwrap().to_str().unwrap();
+            let (prefix, _) = name.rsplit_once('-').unwrap();
+            let expired = archive.with_file_name(format!("{prefix}-20000101T000000Z.tar.asc"));
+            std::fs::rename(archive, &expired)?;
+            expired_archives.push(expired);
+        }
+
+        let node = &mut networks.hashi_network_mut().nodes_mut()[0];
+        for restart in [false, true] {
+            if restart {
+                // Boot while reconfiguration is still blocked. Rotation must seed
+                // the worker with active recovery material before awaiting peers.
+                node.shutdown().await;
+                for archive in scheduled_archives(node.config())?
+                    .into_iter()
+                    .filter(|path| !expired_archives.contains(path))
+                {
+                    let name = archive.file_name().unwrap().to_str().unwrap();
+                    let (prefix, _) = name.rsplit_once('-').unwrap();
+                    let expired =
+                        archive.with_file_name(format!("{prefix}-20000101T000000Z.tar.asc"));
+                    std::fs::rename(archive, &expired)?;
+                }
+                node.start().await?;
+                wait_for_local_backup(node, 1.0).await?;
+            } else {
+                // Wake the same serialized refresh path used by the daily timer.
+                // Paused-clock worker tests cover scheduling; this exercises a
+                // running node stalled in a real reconfiguration.
+                node.hashi().refresh_mpc_recovery_for_test();
+                wait_for_local_backup(node, 2.0).await?;
+            }
+            assert_eq!(node.current_epoch(), Some(initial_epoch + 1));
+            assert_eq!(
+                node.hashi().onchain_state().pending_epoch_change(),
+                Some(initial_epoch + 2),
+            );
+            let fresh_archives: Vec<_> = scheduled_archives(node.config())?
+                .into_iter()
+                .filter(|path| !expired_archives.contains(path))
+                .collect();
+            assert_eq!(
+                fresh_archives.len(),
+                1,
+                "Refresh must renew only the active epoch, not historical or pending epochs",
+            );
+            let refreshed_archive = &fresh_archives[0];
+            assert!(
+                refreshed_archive
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("hashi-backup-epoch-{}-mpc-", initial_epoch + 1)),
+            );
+            let restored = tempfile::tempdir()?;
+            commands::backup::restore(
+                refreshed_archive,
+                RestoreDecryptor::LocalSecretKey {
+                    secret_key_path: secret_key_path.clone(),
+                },
+                restored.path(),
+            )?;
+            let root = restored.path().join(extract_dir_name(refreshed_archive)?);
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
+            record.validate()?;
+            let MpcRecoveryRecord::V1(record) = record;
+            assert_eq!(record.epoch, initial_epoch + 1);
+            assert_eq!(record.threshold, active_threshold);
+            assert_eq!(record.public_key, public_key);
+            assert_eq!(record.validator_address, node.config().validator_address()?);
+        }
+        Ok(())
+    }
+
+    /// Recover from scheduled rotation archives after both the live nodes and
+    /// their historical on-chain key-generation certificates have been lost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_historical_mpc_recovery_after_certificate_gc_and_total_node_loss() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_batch_size_per_weight(1)
+            .build()
+            .await?;
+        for node in networks.hashi_network().nodes() {
+            node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+        }
+        let genesis_epoch = networks.hashi_network().nodes()[0].current_epoch().unwrap();
+        let original_public_key = networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .onchain_verifying_key_g()?;
+        let chain_id = networks.hashi_network().nodes()[0]
+            .config()
+            .sui_chain_id()
+            .to_owned();
+        let ids = networks.hashi_network().ids();
+
+        // Operator-held media is separate from every node's DB, configuration,
+        // and rolling archive directory. No restored DB is used for recovery.
+        let recovery_dir = tempfile::tempdir()?;
+        let config_dir = tempfile::tempdir()?;
+        let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
+        for (index, node) in networks
+            .hashi_network_mut()
+            .nodes_mut()
+            .iter_mut()
+            .enumerate()
+        {
+            node.shutdown().await;
+            node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient.clone())?;
+            node.config_mut().backup_s3 = None;
+            let directory = config_dir.path().join(index.to_string());
+            std::fs::create_dir(&directory)?;
+            node.config_path = Some(write_node_config_to_disk(node.config(), &directory));
+            node.start().await?;
+            node.wait_for_mpc_key(DKG_TIMEOUT).await?;
+            wait_for_local_backup(node, 1.0).await?;
+        }
+
+        // Capture real reshared outputs, not just the genesis DKG output.
+        networks.sui_network.force_close_epoch().await?;
+        let historical_epoch = genesis_epoch + 1;
+        wait_for_rotation(networks.hashi_network().nodes(), historical_epoch).await;
+        let mut archives = Vec::new();
+        let mut share_counts = Vec::new();
+        let mut threshold = None;
+        for (index, node) in networks.hashi_network().nodes().iter().enumerate() {
+            let archive = tokio::time::timeout(ROTATION_TIMEOUT, async {
+                let mut poll = tokio::time::interval(std::time::Duration::from_millis(100));
+                loop {
+                    poll.tick().await;
+                    let prefix = format!("hashi-backup-epoch-{historical_epoch}-mpc-");
+                    if let Some(archive) =
+                        scheduled_archives(node.config())?.into_iter().find(|path| {
+                            path.file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .starts_with(&prefix)
+                        })
+                    {
+                        return Ok::<_, anyhow::Error>(archive);
+                    }
+                }
+            })
+            .await
+            .context("Historical scheduled archive did not appear")??;
+            let saved = recovery_dir.path().join(format!("node-{index}.tar.asc"));
+            std::fs::copy(&archive, &saved)?;
+
+            // Inspect only to derive the weighted quorum and validate provenance.
+            // This temporary extraction and its private records are dropped before
+            // advancing epochs; recovery later receives encrypted paths only.
+            let restored = tempfile::tempdir()?;
+            commands::backup::restore(
+                &saved,
+                RestoreDecryptor::LocalSecretKey {
+                    secret_key_path: secret_key_path.clone(),
+                },
+                restored.path(),
+            )?;
+            let root = restored.path().join(extract_dir_name(&saved)?);
+            let record: MpcRecoveryRecord =
+                bcs::from_bytes(&std::fs::read(root.join(MPC_RECOVERY_FILE_NAME))?)?;
+            record.validate()?;
+            let MpcRecoveryRecord::V1(record) = record;
+            assert_eq!(record.epoch, historical_epoch);
+            assert_eq!(record.chain_id, chain_id);
+            assert_eq!(record.hashi_object_id, ids.hashi_object_id);
+            assert_eq!(record.validator_address, node.config().validator_address()?);
+            assert_eq!(record.public_key, original_public_key);
+            if let Some(expected) = threshold {
+                assert_eq!(record.threshold, expected);
+            } else {
+                threshold = Some(record.threshold);
+            }
+            share_counts.push(record.key_shares.shares.len());
+            archives.push(saved);
+        }
+        let threshold = usize::from(threshold.context("No recovery threshold")?);
+        let mut shares = 0;
+        let subset_len = share_counts
+            .iter()
+            .position(|count| {
+                shares += count;
+                shares >= threshold
+            })
+            .context("Scheduled archives do not contain a recovery quorum")?
+            + 1;
+        assert!(
+            subset_len < archives.len(),
+            "Recovery must use a proper subset"
+        );
+        assert!(share_counts[..subset_len - 1].iter().sum::<usize>() < threshold);
+
+        let historical_buckets = [
+            TobKey {
+                epoch: genesis_epoch,
+                batch_index: None,
+                protocol_type: ProtocolType::Dkg,
+            },
+            TobKey {
+                epoch: historical_epoch,
+                batch_index: None,
+                protocol_type: ProtocolType::KeyRotation,
+            },
+        ];
+        for key in &historical_buckets {
+            let certificates = fetch_tob_certs_from_chain(&networks, *key).await?;
+            assert!(
+                certificates.is_some_and(|certificates| !certificates.is_empty()),
+                "Historical key-generation bucket must first exist on-chain"
+            );
+        }
+
+        // Complete an intervening committee so the archived epoch will no longer
+        // be the protected previous committee after the final rotation.
+        networks.sui_network.force_close_epoch().await?;
+        wait_for_rotation(networks.hashi_network().nodes(), historical_epoch + 1).await;
+        for node in networks.hashi_network().nodes() {
+            wait_for_local_backup(node, 3.0).await?;
+        }
+        for node in networks.hashi_network_mut().nodes_mut() {
+            node.shutdown().await;
+        }
+
+        // Age the archives with real Sui transitions, but avoid six unnecessary
+        // MPC rotations. Restarted nodes catch up directly to the latest epoch.
+        for _ in 0..7 {
+            networks.sui_network.force_close_epoch().await?;
+        }
+        for node in networks.hashi_network_mut().nodes_mut() {
+            node.start().await?;
+        }
+        wait_for_rotation(networks.hashi_network().nodes(), historical_epoch + 8).await;
+        tokio::time::timeout(DKG_TIMEOUT, async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+            loop {
+                poll.tick().await;
+                let mut all_deleted = true;
+                for key in &historical_buckets {
+                    // None means the dynamic-field bucket is deleted on Sui,
+                    // not merely missing from a node's in-memory TOB mirror.
+                    all_deleted &= fetch_tob_certs_from_chain(&networks, *key).await?.is_none();
+                }
+                if all_deleted {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        })
+        .await
+        .context("Historical key-generation certificates were not garbage collected")??;
+
+        // Obtain the trusted key from a fresh online CLI client after all rotations.
+        let public_key_path = recovery_dir.path().join("trusted-public-key.bcs");
+        commands::backup::export_mpc_public_key(
+            &CliConfig {
+                sui_rpc_url: networks.sui_network().rpc_url.clone(),
+                package_id: Some(ids.package_id),
+                hashi_object_id: Some(ids.hashi_object_id),
+                ..Default::default()
+            },
+            &public_key_path,
+        )
+        .await?;
+        let exported: G = bcs::from_bytes(&std::fs::read(&public_key_path)?)?;
+        assert_eq!(exported, original_public_key);
+
+        for node in networks.hashi_network_mut().nodes_mut() {
+            node.shutdown().await;
+        }
+        let mut deleted_paths = Vec::new();
+        for node in networks.hashi_network().nodes() {
+            assert!(!node.is_running());
+            // Wait for service tasks to release the database before destroying it.
+            drop(node.open_db()?);
+            let db = node.config().db.as_ref().context("Node has no DB path")?;
+            std::fs::remove_dir_all(db)?;
+            std::fs::remove_dir_all(&node.config().backup_dir)?;
+            deleted_paths.push(db.clone());
+            deleted_paths.push(node.config().backup_dir.clone());
+            deleted_paths.push(
+                node.config_path
+                    .clone()
+                    .context("Node has no config path")?,
+            );
+        }
+        let config_path = config_dir.path().to_owned();
+        config_dir.close()?;
+        deleted_paths.push(config_path);
+        for path in &deleted_paths {
+            assert!(
+                !path.exists(),
+                "Live node artifact survived: {}",
+                path.display()
+            );
+        }
+        // Also discard all fixture handles/configuration and stop Sui/Bitcoin.
+        // Nothing below this boundary can consult a peer or an MPC manager.
+        drop(networks);
+
+        // Keep the distinct output secret in memory; do not replace the archive
+        // decryption key stored in backup-secret-key.asc.
+        let (output_cert, output_secret) = mock_pgp_keypair();
+        let output_recipient = PgpPublicCert::new(output_cert)?;
+        let insufficient_output = recovery_dir.path().join("insufficient.bcs.asc");
+        assert!(
+            commands::backup::recover_mpc_key(
+                &archives[..subset_len - 1],
+                &public_key_path,
+                &insufficient_output,
+                &output_recipient,
+                Some(&secret_key_path),
+                false,
+                None,
+            )
+            .is_err()
+        );
+        assert!(!insufficient_output.exists());
+
+        let subset = archives[..subset_len].to_vec();
+        archives.reverse();
+        for (name, inputs) in [("quorum", &subset), ("reversed-surplus", &archives)] {
+            let output = recovery_dir.path().join(format!("{name}.bcs.asc"));
+            commands::backup::recover_mpc_key(
+                inputs,
+                &public_key_path,
+                &output,
+                &output_recipient,
+                Some(&secret_key_path),
+                false,
+                None,
+            )?;
+            let ciphertext = std::fs::read(&output)?;
+            assert!(ciphertext.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+            let mut plaintext = Vec::new();
+            decrypt_with_secret_key(std::fs::File::open(&output)?, output_secret.as_bytes())?
+                .read_to_end(&mut plaintext)?;
+            let input_secret = std::fs::read(&secret_key_path)?;
+            let wrong_key_result =
+                decrypt_with_secret_key(std::fs::File::open(&output)?, &input_secret).and_then(
+                    |mut reader| {
+                        let mut bytes = Vec::new();
+                        reader.read_to_end(&mut bytes)?;
+                        Ok(bytes)
+                    },
+                );
+            assert!(
+                wrong_key_result.is_err(),
+                "Archive decryption key must not decrypt recovered root output"
+            );
+            let recovered: RecoveredMpcKey = bcs::from_bytes(&plaintext)?;
+            let RecoveredMpcKey::V1(recovered) = recovered;
+            assert_eq!(recovered.chain_id, chain_id);
+            assert_eq!(recovered.hashi_object_id, ids.hashi_object_id);
+            assert_eq!(recovered.epoch, historical_epoch);
+            assert_eq!(recovered.public_key, original_public_key);
+            // Never format or compare private scalar bytes in assertion output.
+            assert_eq!(G::generator() * recovered.private_key, original_public_key);
+            let root_bytes = bcs::to_bytes(&recovered.private_key)?;
+            assert!(
+                !ciphertext
+                    .windows(root_bytes.len())
+                    .any(|window| window == root_bytes),
+                "Encrypted output exposed the recovered private scalar"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(output)?.permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        Ok(())
     }
 
     fn live_s3_config() -> Result<BackupS3Config> {
@@ -267,6 +932,7 @@ mod tests {
             .tempdir()?;
         let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
         let node_config_path = config_dir.path().join("node-config.toml");
+        let mut startup_archive = None;
         if let Some(s3) = &s3 {
             let node = &mut test_networks.hashi_network_mut().nodes_mut()[0];
             node.shutdown().await;
@@ -276,12 +942,10 @@ mod tests {
             node.config_path = Some(node_config_path.clone());
             node.start().await?;
             node.wait_for_mpc_key(DKG_TIMEOUT).await?;
-            for name in [
-                "hashi_backup_scheduled_local_successes_total",
-                "hashi_backup_scheduled_remote_successes_total",
-            ] {
-                assert_eq!(scheduled_successes(node, name), 0.0);
-            }
+            wait_for_scheduled_backup(node, 1.0).await?;
+            let archives = scheduled_archives(node.config())?;
+            assert_eq!(archives.len(), 1, "Expected the startup archive only");
+            startup_archive = archives.into_iter().next();
         }
         let initial_epoch = test_networks.hashi_network().nodes()[0]
             .current_epoch()
@@ -294,7 +958,7 @@ mod tests {
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
         if s3.is_some() {
             // Observe the real epoch-change worker, not a direct backup call.
-            wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0]).await?;
+            wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0], 2.0).await?;
         }
 
         // The on-chain epoch can advance before node 0 prepares its next
@@ -358,11 +1022,12 @@ mod tests {
             .clone();
 
         let (tarball, remote_uri) = if let Some(s3) = &s3 {
-            let archives = std::fs::read_dir(&node0_config.backup_dir)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<std::io::Result<Vec<_>>>()?;
-            assert_eq!(archives.len(), 1, "Expected the scheduled archive only");
-            let tarball = archives.into_iter().next().unwrap();
+            let archives = scheduled_archives(&node0_config)?;
+            assert_eq!(archives.len(), 2, "Expected startup and rotation archives");
+            let tarball = archives
+                .into_iter()
+                .find(|path| Some(path) != startup_archive.as_ref())
+                .expect("Rotation must produce a distinct archive");
             assert!(tarball.to_string_lossy().ends_with(".tar.asc"));
             let uri = format!(
                 "s3://{}/{}{}",
