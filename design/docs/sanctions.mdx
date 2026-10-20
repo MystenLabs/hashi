@@ -71,6 +71,9 @@ A node does not vote for a deposit or withdrawal when:
 - The deposit's transfer raises an alert at High or Severe.
 - TRM cannot screen the transfer, or rejects the request.
 
+The node logs why. The leader asking for its vote learns only that the node's
+AML screening has not approved the request.
+
 Transaction Monitoring is asynchronous. A node waits up to 10 seconds for TRM
 to finish screening a deposit's transfer; if TRM is still processing it, the
 node declines the deposit for now and the leader retries on the next Bitcoin

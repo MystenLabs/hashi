@@ -1965,30 +1965,43 @@ impl Hashi {
             &result,
             started.elapsed().as_secs_f64(),
         );
-        match result {
-            Ok(trm::Verdict::Approved) => Ok(()),
-            Ok(trm::Verdict::Pending) => Err(WithdrawalApprovalError::AmlServiceError(anyhow!(
-                "TRM has not finished screening withdrawal request {}",
-                request.id
-            ))),
-            Ok(trm::Verdict::Rejected(reason)) => {
-                tracing::warn!(
-                    request_id = %request.id,
-                    "TRM rejected withdrawal request: {reason}"
-                );
-                Err(WithdrawalApprovalError::NeverRetry(anyhow!(
-                    "AML screening rejected withdrawal request {}: {reason}",
-                    request.id
-                )))
-            }
-            Err(trm::TrmError::Transient(e)) => Err(WithdrawalApprovalError::AmlServiceError(e)),
-            Err(trm::TrmError::Permanent(e)) => {
-                tracing::warn!(
-                    request_id = %request.id,
-                    "TRM could not screen withdrawal request: {e:#}"
-                );
-                Err(WithdrawalApprovalError::NeverRetry(e))
-            }
+        withdrawal_screening_outcome(request.id, result)
+    }
+}
+
+/// Peers learn only `AML_REFUSAL_MSG` (`withdrawal_approval_refusal_status`),
+/// so this node's logs are the only record of why it didn't vote.
+fn withdrawal_screening_outcome(
+    request_id: Address,
+    result: Result<trm::Verdict, trm::TrmError>,
+) -> Result<(), WithdrawalApprovalError> {
+    match result {
+        Ok(trm::Verdict::Approved) => Ok(()),
+        Ok(trm::Verdict::Pending) => {
+            let e = anyhow!("TRM has not finished screening withdrawal request {request_id}");
+            tracing::info!(request_id = %request_id, "{e}");
+            Err(WithdrawalApprovalError::AmlServiceError(e))
+        }
+        Ok(trm::Verdict::Rejected(reason)) => {
+            tracing::warn!(
+                request_id = %request_id,
+                "TRM rejected withdrawal request: {reason}"
+            );
+            Err(WithdrawalApprovalError::AmlRejected(anyhow!(reason)))
+        }
+        Err(trm::TrmError::Transient(e)) => {
+            tracing::warn!(
+                request_id = %request_id,
+                "TRM is unavailable to screen withdrawal request: {e:#}"
+            );
+            Err(WithdrawalApprovalError::AmlServiceError(e))
+        }
+        Err(trm::TrmError::Permanent(e)) => {
+            tracing::warn!(
+                request_id = %request_id,
+                "TRM could not screen withdrawal request: {e:#}"
+            );
+            Err(WithdrawalApprovalError::AmlRejected(e))
         }
     }
 }
@@ -2042,6 +2055,9 @@ pub enum WithdrawalApprovalError {
     #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
+    #[error("AML checks rejected withdrawal request: {0}")]
+    AmlRejected(#[source] anyhow::Error),
+
     #[error("Never retry: {0}")]
     NeverRetry(#[source] anyhow::Error),
 }
@@ -2051,7 +2067,7 @@ impl WithdrawalApprovalError {
         match self {
             Self::AlreadyApproved(_) => WithdrawalApprovalErrorKind::AlreadyApproved,
             Self::AmlServiceError(_) => WithdrawalApprovalErrorKind::AmlServiceError,
-            Self::NeverRetry(_) => WithdrawalApprovalErrorKind::NeverRetry,
+            Self::AmlRejected(_) | Self::NeverRetry(_) => WithdrawalApprovalErrorKind::NeverRetry,
         }
     }
 }
@@ -2688,6 +2704,51 @@ mod tests {
         let status =
             withdrawal_input_signing_status(7, SigningError::CryptoError("boom".to_string()));
         assert_eq!(status.code(), tonic::Code::Internal);
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn screening_details_are_logged_here_and_never_sent_to_peers() {
+        use crate::grpc::bridge_service::AML_REFUSAL_MSG;
+        use crate::grpc::bridge_service::withdrawal_approval_refusal_status;
+
+        let details =
+            "bitcoin address bc1qx is attributed to Ransomware (7) (https://trm.example/bc1qx)";
+        let request_id = Address::new([1; 32]);
+        assert!(withdrawal_screening_outcome(request_id, Ok(trm::Verdict::Approved)).is_ok());
+        for (result, logged, kind) in [
+            (
+                Ok(trm::Verdict::Rejected(details.to_owned())),
+                details,
+                WithdrawalApprovalErrorKind::NeverRetry,
+            ),
+            (
+                Err(trm::TrmError::Transient(anyhow!(
+                    "TRM returned 401 Unauthorized: {details}"
+                ))),
+                "TRM returned 401 Unauthorized",
+                WithdrawalApprovalErrorKind::AmlServiceError,
+            ),
+            (
+                Err(trm::TrmError::Permanent(anyhow!(
+                    "TRM returned no screening result for bitcoin address bc1qx"
+                ))),
+                "TRM returned no screening result",
+                WithdrawalApprovalErrorKind::NeverRetry,
+            ),
+        ] {
+            let err = withdrawal_screening_outcome(request_id, result).unwrap_err();
+            assert_eq!(err.kind(), kind, "{err:#}");
+            assert!(logs_contain(logged), "not logged: {logged}");
+            let status = withdrawal_approval_refusal_status(err);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(status.message(), AML_REFUSAL_MSG);
+        }
+
+        let status = withdrawal_approval_refusal_status(WithdrawalApprovalError::NeverRetry(
+            anyhow!("Withdrawal request {request_id} not found in queue"),
+        ));
+        assert!(status.message().contains("not found in queue"), "{status}");
     }
 
     fn input(amount: u64) -> Utxo {
