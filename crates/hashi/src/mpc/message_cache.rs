@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::mpc::rpc::response_checks::Refused;
 use crate::mpc::stored_rows;
 use crate::mpc::types::EXPECT_SERIALIZATION_SUCCESS;
 use crate::mpc::types::MessagesHash;
@@ -45,15 +46,16 @@ impl<T: CachedPayload> Cached<T> {
         Arc::new(Self { value, bytes, hash })
     }
 
-    pub fn certified(bytes: &[u8], expected: MessagesHash) -> Result<Arc<Self>, String>
+    pub(crate) fn certified(bytes: &[u8], expected: MessagesHash) -> Result<Arc<Self>, Refused>
     where
         T: DeserializeOwned,
     {
         if T::payload_hash(bytes) != expected {
-            return Err("bytes don't match the certificate's hash".into());
+            return Err(Refused::Hash);
         }
         let bytes = Bytes::copy_from_slice(bytes);
-        let value = bcs::from_bytes(&bytes).map_err(|e| format!("certified bytes: {e}"))?;
+        let value = bcs::from_bytes(&bytes)
+            .map_err(|e| Refused::Decode(format!("certified bytes: {e}")))?;
         Ok(Arc::new(Self {
             value,
             bytes,

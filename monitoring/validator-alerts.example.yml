@@ -191,6 +191,12 @@ groups:
               and timestamp(hashi_peer_requests_over_connection_limit_total) >= ignoring (budget) group_left () hashi_peer_first_seen_timestamp_seconds),
             "limit", "connections", "", "")
           or label_replace(
+            (increase(hashi_peer_store_reads_shed_total[1h]) > 0)
+            or (hashi_peer_store_reads_shed_total > 0
+              and time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_store_reads_shed_total) >= hashi_peer_first_seen_timestamp_seconds),
+            "limit", "store_reads", "", "")
+          or label_replace(
             (increase(hashi_withdrawal_signing_refused_total{reason=~"busy|shape"}[1h]) > 0)
             or (hashi_withdrawal_signing_refused_total{reason=~"busy|shape"} > 0
               and ignoring (reason) time() - hashi_peer_first_seen_timestamp_seconds < 3600
@@ -235,6 +241,51 @@ groups:
           description: >-
             Usually this node is slow, not the peers, though colluding members
             can also cause it. Check hashi_request_latency.
+
+      - alert: HashiMpcPeerRefused
+        expr: |
+          (increase(hashi_mpc_peer_refusals_total[1h]) > 0)
+          or (hashi_mpc_peer_refusals_total > 0
+            and time() - hashi_mpc_peer_refusals_first_timestamp_seconds < 3600
+            and timestamp(hashi_mpc_peer_refusals_total) >= hashi_mpc_peer_refusals_first_timestamp_seconds)
+        labels:
+          severity: warning
+        annotations:
+          summary: "MPC {{ $labels.side }}s from peer {{ $labels.peer }} refused"
+          description: >-
+            The peer is likely faulty or on a broken build; a hash mismatch can also
+            be an honest signer that lost its row. Look the peer up with
+            `hashi committee -c hashi-cli.toml view {{ $labels.peer }}`.
+
+      - alert: HashiMpcPeersRefusedAtOnce
+        expr: |
+          count without (peer) (max without (side) (
+            (increase(hashi_mpc_peer_refusals_total[10m]) > 0)
+            or (hashi_mpc_peer_refusals_total > 0
+              and time() - hashi_mpc_peer_refusals_first_timestamp_seconds < 600
+              and timestamp(hashi_mpc_peer_refusals_total) >= hashi_mpc_peer_refusals_first_timestamp_seconds)
+          )) > clamp_min(hashi_mpc_committee_members / 2, 2)
+        labels:
+          severity: critical
+        annotations:
+          summary: "MPC messages from {{ $value }} peers refused within 10 minutes"
+          description: >-
+            Usually a build mismatch: compare this node's build with the peers'
+            (GetServiceInfo). Each peer also has a HashiMpcPeerRefused alert.
+
+      - alert: HashiMpcStoredRowsRefused
+        expr: |
+          (increase(hashi_mpc_stored_rows_refused_total[1h]) > 0)
+          or (hashi_mpc_stored_rows_refused_total > 0
+            and time() - hashi_mpc_stored_rows_refused_first_timestamp_seconds < 3600
+            and timestamp(hashi_mpc_stored_rows_refused_total) >= hashi_mpc_stored_rows_refused_first_timestamp_seconds)
+        labels:
+          severity: warning
+        annotations:
+          summary: "this node refused its own stored {{ $labels.protocol }} rows ({{ $labels.phase }})"
+          description: >-
+            A damaged store or, if several nodes see this after an upgrade, a build
+            refusing rows an earlier one wrote. A rotation needing the row can fail.
 
       - alert: HashiMpcWorkUnguarded
         expr: increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0

@@ -386,6 +386,16 @@ pub enum ProtocolTypeIndicator {
     NonceGeneration,
 }
 
+impl ProtocolTypeIndicator {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Dkg => crate::metrics::MPC_LABEL_DKG,
+            Self::KeyRotation => crate::metrics::MPC_LABEL_KEY_ROTATION,
+            Self::NonceGeneration => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveMessagesRequest {
     pub dealer: Address,
@@ -1126,6 +1136,9 @@ pub enum MpcError {
 
     #[error("Invalid message from {sender}: {reason}")]
     InvalidMessage { sender: Address, reason: String },
+
+    #[error("Invalid message from {sender}: count check: {reason}")]
+    CountCheckRefused { sender: Address, reason: String },
 
     #[error("Protocol timeout after {seconds} seconds")]
     Timeout { seconds: u64 },

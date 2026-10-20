@@ -225,9 +225,9 @@ fn weighted_party(committee: &CommitteeShape, address: Address, role: &str) -> M
 }
 
 fn count_checked(sender: Address, checked: Result<(), CountCheckError>) -> MpcResult<()> {
-    checked.map_err(|e| MpcError::InvalidMessage {
+    checked.map_err(|e| MpcError::CountCheckRefused {
         sender,
-        reason: format!("count check: {e}"),
+        reason: e.to_string(),
     })
 }
 

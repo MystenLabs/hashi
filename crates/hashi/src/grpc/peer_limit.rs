@@ -18,6 +18,7 @@ use prometheus::Counter;
 use prometheus::Histogram;
 use prometheus::IntCounter;
 use prometheus::IntGauge;
+use prometheus::IntGaugeVec;
 use sui_sdk_types::Address;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
@@ -231,6 +232,10 @@ impl PeerInflightLimiter {
                 }
                 metrics
                     .peer_bridge_work_seconds_total
+                    .with_label_values(&[&label]);
+                metrics.peer_store_reads_max.with_label_values(&[&label]);
+                metrics
+                    .peer_store_reads_shed_total
                     .with_label_values(&[&label]);
                 Arc::new(Peer {
                     inflight: AtomicU32::new(0),
@@ -488,7 +493,7 @@ impl Drop for Guarded {
 #[derive(Clone)]
 pub(crate) struct CallerTaskLimiter {
     tasks: Arc<Mutex<HashMap<Address, CallerTasks>>>,
-    metrics: Arc<Metrics>,
+    high_water: IntGaugeVec,
 }
 
 #[derive(Default)]
@@ -503,10 +508,10 @@ pub(crate) struct CallerTaskSlot {
 }
 
 impl CallerTaskLimiter {
-    pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
+    pub(crate) fn new(high_water: IntGaugeVec) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            metrics,
+            high_water,
         }
     }
 
@@ -519,8 +524,7 @@ impl CallerTaskLimiter {
         entry.active += 1;
         if entry.active > entry.high_water {
             entry.high_water = entry.active;
-            self.metrics
-                .withdrawal_signing_tasks_max
+            self.high_water
                 .with_label_values(&[&caller.to_string()])
                 .set(entry.high_water as i64);
         }
@@ -1212,7 +1216,7 @@ mod tests {
     fn a_caller_at_its_signing_cap_is_refused_until_one_of_its_tasks_ends() {
         let limit = 4;
         let registry = prometheus::Registry::new();
-        let limiter = CallerTaskLimiter::new(Arc::new(Metrics::new(&registry)));
+        let limiter = CallerTaskLimiter::new(Metrics::new(&registry).withdrawal_signing_tasks_max);
 
         let mut held: Vec<_> = (0..limit)
             .map(|_| limiter.try_admit(peer(b'a'), limit).unwrap())
@@ -1224,8 +1228,7 @@ mod tests {
         assert!(limiter.try_admit(peer(b'a'), limit).is_some());
         assert_eq!(
             limiter
-                .metrics
-                .withdrawal_signing_tasks_max
+                .high_water
                 .with_label_values(&[&peer(b'a').to_string()])
                 .get(),
             limit as i64

@@ -4,6 +4,7 @@
 use super::caller_membership;
 use super::gates;
 use crate::grpc::HttpService;
+use crate::metrics::STORED_ROW_SERVE;
 use crate::mpc::PreparedMessages;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::RetrieveReply;
@@ -28,8 +29,14 @@ use hashi_types::proto::RetrieveMessagesResponse;
 use hashi_types::proto::SendMessagesRequest;
 use hashi_types::proto::SendMessagesResponse;
 use hashi_types::proto::mpc_service_server::MpcService;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use sui_sdk_types::Address;
 use tonic::Status;
+
+/// Concurrent store reads per requester.
+const STORE_READ_PERMITS: usize = 4;
 
 #[tonic::async_trait]
 impl MpcService for HttpService {
@@ -47,12 +54,21 @@ impl MpcService for HttpService {
             .mpc_rpc_handler_process_duration_seconds
             .clone();
         let rotation_received = self.metrics().mpc_rotation_messages_received_total.clone();
+        let refusals = self.metrics().refusal_counters();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let shape = service.shape_params()?;
             let epoch = external_request.epoch;
             validate_epoch(shape.epoch(), epoch)?;
-            gates::check_send_messages(&shape, sender, &external_request)
-                .map_err(|e| send_messages_error(sender, e))?;
+            gates::check_send_messages(&shape, sender, &external_request).map_err(|e| {
+                if matches!(e, MpcError::CountCheckRefused { .. }) {
+                    refusals.request(
+                        &sender,
+                        "send_messages",
+                        send_messages_protocol(&external_request),
+                    );
+                }
+                send_messages_error(sender, e)
+            })?;
             let internal_request = types::SendMessagesRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             if let Some(wire_shape) = rotation_wire_shape(&external_request) {
@@ -98,20 +114,39 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
+        let store_reads = self.store_reads();
+        let store_reads_shed = self.metrics().peer_store_reads_shed_total.clone();
+        let stored_rows = self.metrics().stored_row_refusals();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let _abandon_on_drop = SetOnDrop(Arc::clone(&abandoned));
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let to_status = |e: MpcError| {
-                match &e {
-                    MpcError::NotFound(_) => {
-                        tracing::debug!("retrieve_messages: {e}");
-                    }
-                    _ => {
-                        tracing::warn!("retrieve_messages failed: {e}");
-                    }
+            let to_status = |e: MpcError| match e {
+                MpcError::StoredRowRefused { dealer, reason } => {
+                    stored_rows.record(internal_request.protocol_type.label(), STORED_ROW_SERVE);
+                    tracing::warn!(
+                        "Stored row for dealer {dealer:?} refused ({reason}); not served"
+                    );
+                    mpc_error_to_status(MpcError::NotFound(format!(
+                        "stored row for dealer {dealer:?} refused: {reason}"
+                    )))
                 }
-                mpc_error_to_status(e)
+                e => {
+                    match &e {
+                        MpcError::NotFound(_) => {
+                            tracing::debug!("retrieve_messages: {e}");
+                        }
+                        _ => {
+                            tracing::warn!("retrieve_messages failed: {e}");
+                        }
+                    }
+                    mpc_error_to_status(e)
+                }
             };
             let (outcome, store, shape) = {
                 let mgr = mpc_manager.read().unwrap();
+                if abandoned.load(Ordering::Relaxed) {
+                    return Err(Status::cancelled("the caller abandoned this retrieval"));
+                }
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
@@ -142,6 +177,22 @@ impl MpcService for HttpService {
                     mgr.shape_params(),
                 )
             };
+            let _permit = outcome
+                .reads_store()
+                .then(|| {
+                    store_reads
+                        .try_admit(requester, STORE_READ_PERMITS)
+                        .ok_or_else(|| {
+                            store_reads_shed
+                                .with_label_values(&[&requester.to_string()])
+                                .inc();
+                            Status::unavailable(format!(
+                                "{} (store reads)",
+                                crate::grpc::PEER_INFLIGHT_LIMIT_MSG
+                            ))
+                        })
+                })
+                .transpose()?;
             let reply = match outcome {
                 RetrieveOutcome::Ready(reply) => reply,
                 RetrieveOutcome::NeedsStore => {
@@ -164,6 +215,7 @@ impl MpcService for HttpService {
     ) -> Result<tonic::Response<ComplainResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
+        let protocol = proto_protocol_label(external_request.protocol_type);
         let mpc_manager = self.mpc_manager()?;
         let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
@@ -204,6 +256,11 @@ impl MpcService for HttpService {
             if matches!(e, MpcError::ComplaintWithheld { .. }) {
                 self.metrics().mpc_complaints_withheld_total.inc();
             } else {
+                if matches!(e, MpcError::CountCheckRefused { .. }) {
+                    self.metrics()
+                        .refusal_counters()
+                        .request(&caller, "complain", protocol);
+                }
                 tracing::warn!("complain failed: {e}");
             }
             mpc_error_to_status(e)
@@ -387,6 +444,36 @@ fn send_messages_error(sender: Address, e: MpcError) -> Status {
     mpc_error_to_status(e)
 }
 
+fn send_messages_protocol(request: &SendMessagesRequest) -> &'static str {
+    use hashi_types::proto::send_messages_request::Messages;
+    match &request.messages {
+        Some(Messages::DkgMessage(_)) => crate::metrics::MPC_LABEL_DKG,
+        Some(Messages::RotationMessages(_) | Messages::RotationMessagesBcs(_)) => {
+            crate::metrics::MPC_LABEL_KEY_ROTATION
+        }
+        Some(Messages::AvidNonceMessage(_)) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+        None => "unspecified",
+    }
+}
+
+fn proto_protocol_label(protocol_type: Option<i32>) -> &'static str {
+    use hashi_types::proto::MpcProtocolType;
+    match protocol_type.and_then(|value| MpcProtocolType::try_from(value).ok()) {
+        Some(MpcProtocolType::Dkg) => crate::metrics::MPC_LABEL_DKG,
+        Some(MpcProtocolType::KeyRotation) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+        Some(MpcProtocolType::NonceGeneration) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+        Some(MpcProtocolType::Unspecified) | None => "unspecified",
+    }
+}
+
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 fn rotation_wire_shape(request: &SendMessagesRequest) -> Option<&'static str> {
     use hashi_types::proto::send_messages_request::Messages;
     match &request.messages {
@@ -442,9 +529,10 @@ pub(crate) fn signing_error_to_status(err: SigningError) -> Status {
 fn mpc_error_to_status(err: MpcError) -> Status {
     use types::MpcError::*;
     match &err {
-        InvalidThreshold(_) | InvalidMessage { .. } | InvalidCertificate(_) => {
-            Status::invalid_argument(err.to_string())
-        }
+        InvalidThreshold(_)
+        | InvalidMessage { .. }
+        | CountCheckRefused { .. }
+        | InvalidCertificate(_) => Status::invalid_argument(err.to_string()),
         Timeout { .. } => Status::deadline_exceeded(err.to_string()),
         NotEnoughParticipants { .. }
         | NotEnoughApprovals { .. }
