@@ -158,7 +158,8 @@ enum RotateKpSetCommand {
         /// The slot, which a stack with two slots requires.
         #[arg(long)]
         slot: Option<Slot>,
-        /// A signer's submission file, from key-provisioner rotate-kp-set; repeat per signer.
+        /// A signer's submission file, from key-provisioner rotate-kp-set; repeat per signer. Without any, takes what
+        /// the signers uploaded to the KP bucket.
         #[arg(long = "submission", value_name = "FILE")]
         submissions: Vec<PathBuf>,
     },
