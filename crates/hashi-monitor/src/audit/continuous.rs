@@ -109,9 +109,7 @@ impl ContinuousAuditor {
         );
         // Fail now on a bucket that is missing or read-only: a missing one
         // loads as empty.
-        store
-            .save(&Snapshot::new(cfg, start, Some(pool.clone())))
-            .await?;
+        store.save(&Snapshot::new(cfg, start, pool.clone())).await?;
 
         let mut inner = AuditorCore::new(cfg, start, pool).await?;
         // A pruned start would leave the pool incomplete for good.
@@ -133,7 +131,7 @@ impl ContinuousAuditor {
         let snapshot = Snapshot::new(
             &self.inner.cfg,
             restart_start,
-            Some(self.inner.utxo_pool().clone()),
+            self.inner.utxo_pool().clone(),
         );
         match self.store.save(&snapshot).await {
             Ok(()) => tracing::debug!(
@@ -306,8 +304,8 @@ impl ContinuousAuditor {
     }
 }
 
-/// The start and pool the snapshot resumes, if it is this deployment's and
-/// holds a pool. Otherwise `None`: the audit is a first run.
+/// The start and pool the snapshot resumes, if it is this deployment's.
+/// Otherwise `None`: the audit is a first run.
 fn resume_point(cfg: &Config, snapshot: Option<Snapshot>) -> Option<(UnixSeconds, UtxoPool)> {
     let snapshot = match snapshot {
         Some(snapshot) if snapshot.is_for(cfg) => snapshot,
@@ -324,25 +322,18 @@ fn resume_point(cfg: &Config, snapshot: Option<Snapshot>) -> Option<(UnixSeconds
             return None;
         }
     };
-    let restart_start = snapshot.restart_start;
-    match snapshot.pool {
-        Some(pool) => {
-            tracing::info!(
-                restart_start = %utc_timestamp(restart_start),
-                utxos_held = pool.len(),
-                utxos_spent = pool.spent_len(),
-                "loaded the snapshot; resuming with its UTXO pool"
-            );
-            Some((restart_start, pool))
-        }
-        None => {
-            tracing::warn!(
-                restart_start = %utc_timestamp(restart_start),
-                "the snapshot has no UTXO pool; ignoring it"
-            );
-            None
-        }
-    }
+    let Snapshot {
+        restart_start,
+        pool,
+        ..
+    } = snapshot;
+    tracing::info!(
+        restart_start = %utc_timestamp(restart_start),
+        utxos_held = pool.len(),
+        utxos_spent = pool.spent_len(),
+        "loaded the snapshot; resuming with its UTXO pool"
+    );
+    Some((restart_start, pool))
 }
 
 #[cfg(test)]
@@ -468,7 +459,10 @@ mod tests {
 
         auditor.tick_state_checks_and_gc().await;
         let saved = auditor.store.load().await.unwrap();
-        assert_eq!(saved, Some(Snapshot::new(&cfg, resumed_from, None)));
+        assert_eq!(
+            saved,
+            Some(Snapshot::new(&cfg, resumed_from, UtxoPool::default()))
+        );
 
         // The approval's flow ends before the next check, which still saves a
         // start that reads it again.
@@ -477,7 +471,7 @@ mod tests {
         let saved = auditor.store.load().await.unwrap();
         assert_eq!(
             saved,
-            Some(Snapshot::new(&cfg, approved_at, Some(UtxoPool::default())))
+            Some(Snapshot::new(&cfg, approved_at, UtxoPool::default()))
         );
     }
 
@@ -497,24 +491,21 @@ mod tests {
         auditor.tick_state_checks_and_gc().await;
 
         let saved = auditor.store.load().await.unwrap().unwrap();
-        assert_eq!(saved.pool, Some(pool));
+        assert_eq!(saved.pool, pool);
     }
 
     #[test]
-    fn only_this_deployment_snapshot_with_a_pool_is_resumed() {
+    fn only_this_deployments_snapshot_is_resumed() {
         let cfg = Config::for_tests();
         let pool = UtxoPool::default();
 
         assert_eq!(resume_point(&cfg, None), None);
 
-        let without_pool = Snapshot::new(&cfg, 500, None);
-        assert_eq!(resume_point(&cfg, Some(without_pool)), None);
-
-        let mut other = Snapshot::new(&cfg, 500, Some(pool.clone()));
+        let mut other = Snapshot::new(&cfg, 500, pool.clone());
         other.package_id = format!("0x{}", "22".repeat(32));
         assert_eq!(resume_point(&cfg, Some(other)), None);
 
-        let ours = Snapshot::new(&cfg, 500, Some(pool.clone()));
+        let ours = Snapshot::new(&cfg, 500, pool.clone());
         assert_eq!(resume_point(&cfg, Some(ours)), Some((500, pool)));
     }
 }

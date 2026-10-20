@@ -49,14 +49,13 @@ pub struct Snapshot {
     /// Kept as a UTC timestamp string, so an operator can read and edit it.
     #[serde(with = "crate::time::utc_timestamp_serde")]
     pub restart_start: UnixSeconds,
-    /// The UTXO pool. Absent in a snapshot saved before the pool existed;
-    /// a restart from one is a first run.
-    #[serde(default)]
-    pub pool: Option<UtxoPool>,
+    /// The UTXO pool. A snapshot without one does not load. Delete it to
+    /// start again from genesis.
+    pub pool: UtxoPool,
 }
 
 impl Snapshot {
-    pub fn new(cfg: &Config, restart_start: UnixSeconds, pool: Option<UtxoPool>) -> Self {
+    pub fn new(cfg: &Config, restart_start: UnixSeconds, pool: UtxoPool) -> Self {
         Self {
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
             package_id: cfg.sui.package_id.clone(),
@@ -162,7 +161,7 @@ mod tests {
         let store = SnapshotStore::in_memory();
         assert_eq!(store.load().await.unwrap(), None);
 
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000, Some(pool_with_a_utxo()));
+        let snapshot = Snapshot::new(&cfg, 1_700_000_000, pool_with_a_utxo());
         store.save(&snapshot).await.unwrap();
 
         assert_eq!(store.load().await.unwrap(), Some(snapshot));
@@ -174,7 +173,7 @@ mod tests {
             "guardian_bucket": "bucket",
             "package_id": "0x1",
             "restart_start": "2023-11-14T22:13:20Z",
-            "pool": null,
+            "pool": serde_json::to_value(UtxoPool::default()).unwrap(),
             "guardian_cursor": 1_700_000_000,
         }))
         .await;
@@ -185,7 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snapshot_saved_before_the_pool_existed_loads_without_one() {
+    async fn a_snapshot_without_a_pool_is_an_error() {
         let store = store_holding(serde_json::json!({
             "guardian_bucket": "bucket",
             "package_id": "0x1",
@@ -193,10 +192,9 @@ mod tests {
         }))
         .await;
 
-        let loaded = store.load().await.unwrap().unwrap();
+        let error = format!("{:#}", store.load().await.unwrap_err());
 
-        assert_eq!(loaded.restart_start, 1_700_000_000);
-        assert_eq!(loaded.pool, None);
+        assert!(error.contains("failed to parse the snapshot"), "{error}");
     }
 
     #[tokio::test]
@@ -216,7 +214,7 @@ mod tests {
     #[test]
     fn a_snapshot_is_only_for_the_deployment_that_saved_it() {
         let cfg = Config::for_tests();
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000, None);
+        let snapshot = Snapshot::new(&cfg, 1_700_000_000, UtxoPool::default());
         assert!(snapshot.is_for(&cfg));
 
         let mut redeployed = cfg.clone();
