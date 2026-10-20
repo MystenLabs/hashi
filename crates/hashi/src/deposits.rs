@@ -682,7 +682,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[test]
     fn screening_details_are_logged_here_and_never_sent_to_peers() {
-        use crate::grpc::bridge_service::AML_REFUSAL_MSG;
+        use crate::grpc::bridge_service::SANCTIONS_CHECK_REFUSAL_MSG;
         use crate::grpc::bridge_service::deposit_refusal_status;
 
         let details = "sui address 0x3 is attributed to Ransomware (7) (https://trm.example/0x3)";
@@ -719,7 +719,7 @@ mod tests {
             assert!(logs_contain(logged), "not logged: {logged}");
             let status = deposit_refusal_status(err);
             assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-            assert_eq!(status.message(), AML_REFUSAL_MSG);
+            assert_eq!(status.message(), SANCTIONS_CHECK_REFUSAL_MSG);
         }
 
         let status = deposit_refusal_status(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(

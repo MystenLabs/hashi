@@ -470,9 +470,10 @@ impl HttpService {
     }
 }
 
-/// All a peer learns when this node's AML screening has not approved a request:
-/// the screening details are the operator's own.
-pub(crate) const AML_REFUSAL_MSG: &str = "AML screening has not approved this request";
+/// All a peer learns when this node's sanctions check has not approved a request:
+/// its details are the operator's own.
+pub(crate) const SANCTIONS_CHECK_REFUSAL_MSG: &str =
+    "Sanctions check has not approved this request";
 
 /// `AlreadyExists` tells the leader another leader already landed this epoch's
 /// approval, so it can drop the deposit instead of retrying it.
@@ -480,7 +481,7 @@ pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
     match err {
         UnapprovedDepositError::AlreadyApprovedThisEpoch => Status::already_exists(err.to_string()),
         UnapprovedDepositError::AmlRejected(_) | UnapprovedDepositError::AmlServiceError(_) => {
-            Status::failed_precondition(AML_REFUSAL_MSG)
+            Status::failed_precondition(SANCTIONS_CHECK_REFUSAL_MSG)
         }
         err => Status::failed_precondition(err.to_string()),
     }
@@ -491,8 +492,9 @@ pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
 pub(crate) fn withdrawal_approval_refusal_status(err: WithdrawalApprovalError) -> Status {
     match err {
         WithdrawalApprovalError::AlreadyApproved(_) => Status::already_exists(err.to_string()),
-        WithdrawalApprovalError::AmlRejected(_) | WithdrawalApprovalError::AmlServiceError(_) => {
-            Status::failed_precondition(AML_REFUSAL_MSG)
+        WithdrawalApprovalError::SanctionsCheckRejected(_)
+        | WithdrawalApprovalError::AmlServiceError(_) => {
+            Status::failed_precondition(SANCTIONS_CHECK_REFUSAL_MSG)
         }
         WithdrawalApprovalError::NeverRetry(_) => Status::failed_precondition(err.to_string()),
     }
