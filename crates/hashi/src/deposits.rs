@@ -66,28 +66,7 @@ impl Hashi {
             &result,
             started.elapsed().as_secs_f64(),
         );
-        match result {
-            Ok(trm::Verdict::Approved) => Ok(()),
-            Ok(trm::Verdict::Pending) => Err(UnapprovedDepositError::AmlServiceError(anyhow!(
-                "TRM is still screening deposit transaction {}",
-                deposit_request.utxo.id.txid
-            ))),
-            Ok(trm::Verdict::Rejected(reason)) => {
-                tracing::warn!(
-                    deposit_id = %deposit_request.id,
-                    "TRM rejected deposit: {reason}"
-                );
-                Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))
-            }
-            Err(trm::TrmError::Transient(e)) => Err(UnapprovedDepositError::AmlServiceError(e)),
-            Err(trm::TrmError::Permanent(e)) => {
-                tracing::warn!(
-                    deposit_id = %deposit_request.id,
-                    "TRM could not screen deposit: {e:#}"
-                );
-                Err(UnapprovedDepositError::AmlRejected(e))
-            }
-        }
+        deposit_screening_outcome(deposit_request, result)
     }
 
     /// Validate that the deposit request exists on Sui
@@ -400,6 +379,44 @@ impl Hashi {
     }
 }
 
+fn deposit_screening_outcome(
+    deposit_request: &DepositRequest,
+    result: Result<trm::Verdict, trm::TrmError>,
+) -> Result<(), UnapprovedDepositError> {
+    match result {
+        Ok(trm::Verdict::Approved) => Ok(()),
+        Ok(trm::Verdict::Pending) => {
+            let e = anyhow!(
+                "TRM is still screening deposit transaction {}",
+                deposit_request.utxo.id.txid
+            );
+            tracing::info!(deposit_id = %deposit_request.id, "{e}");
+            Err(UnapprovedDepositError::AmlServiceError(e))
+        }
+        Ok(trm::Verdict::Rejected(reason)) => {
+            tracing::warn!(
+                deposit_id = %deposit_request.id,
+                "TRM rejected deposit: {reason}"
+            );
+            Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))
+        }
+        Err(trm::TrmError::Transient(e)) => {
+            tracing::warn!(
+                deposit_id = %deposit_request.id,
+                "TRM is unavailable to screen deposit: {e:#}"
+            );
+            Err(UnapprovedDepositError::AmlServiceError(e))
+        }
+        Err(trm::TrmError::Permanent(e)) => {
+            tracing::warn!(
+                deposit_id = %deposit_request.id,
+                "TRM could not screen deposit: {e:#}"
+            );
+            Err(UnapprovedDepositError::AmlRejected(e))
+        }
+    }
+}
+
 /// `tr(NUMS, {multi_a(2, guardian_btc_pubkey, h), and_v(v:older(delay), pk(h))})`
 /// where `h = derive(mpc_pubkey, path)`: an immediate guardian+MPC 2-of-2 leaf,
 /// plus an MPC-only recovery leaf spendable after
@@ -660,5 +677,57 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(err.kind(), UnapprovedDepositErrorKind::NeverRetry);
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn screening_details_are_logged_here_and_never_sent_to_peers() {
+        use crate::grpc::bridge_service::SANCTIONS_CHECK_REFUSAL_MSG;
+        use crate::grpc::bridge_service::deposit_refusal_status;
+
+        let details = "sui address 0x3 is attributed to Ransomware (7) (https://trm.example/0x3)";
+        let request = deposit_request(Address::new([3; 32]));
+        assert!(deposit_screening_outcome(&request, Ok(trm::Verdict::Approved)).is_ok());
+        for (result, logged, kind) in [
+            (
+                Ok(trm::Verdict::Rejected(details.to_owned())),
+                details,
+                UnapprovedDepositErrorKind::NeverRetry,
+            ),
+            (
+                Ok(trm::Verdict::Pending),
+                "TRM is still screening deposit transaction",
+                UnapprovedDepositErrorKind::RetryOnNextBlock,
+            ),
+            (
+                Err(trm::TrmError::Transient(anyhow!(
+                    "TRM returned 401 Unauthorized: {details}"
+                ))),
+                "TRM returned 401 Unauthorized",
+                UnapprovedDepositErrorKind::RetryOnNextBlock,
+            ),
+            (
+                Err(trm::TrmError::Permanent(anyhow!(
+                    "TRM could not screen transfer 1 (status FAILED, reason none) ({details})"
+                ))),
+                "TRM could not screen transfer 1",
+                UnapprovedDepositErrorKind::NeverRetry,
+            ),
+        ] {
+            let err = deposit_screening_outcome(&request, result).unwrap_err();
+            assert_eq!(err.kind(), kind, "{err:#}");
+            assert!(logs_contain(logged), "not logged: {logged}");
+            let status = deposit_refusal_status(err);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(status.message(), SANCTIONS_CHECK_REFUSAL_MSG);
+        }
+
+        let status = deposit_refusal_status(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
+            "1 of 2 confirmations"
+        )));
+        assert!(
+            status.message().contains("1 of 2 confirmations"),
+            "{status}"
+        );
     }
 }
