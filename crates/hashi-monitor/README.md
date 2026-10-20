@@ -139,18 +139,17 @@ derivation path, is invisible to the monitor and out of scope. A later check
 of the pool against Move's records will report a withheld deposit on the
 first day instead of at the warn age.
 
-### Modes
-1. **Batch**: one-time audit over a guardian time range `[start, end]`.
-2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
+### Mode
+The monitor runs continuously. It polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
 
 ### Timeline semantics (withdrawals)
-- User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui withdrawal events are polled from one E1 delay before the guardian
-  window, since an E1 older than that is a late E2 in its own right. An E1
+- The start is on the **guardian (E2)** timeline.
+- Sui withdrawal events are polled from one E1 delay before the start,
+  since an E1 older than that is a late E2 in its own right. An E1
   outside the scan is still read from Sui by its withdrawal id.
-- Continuous mode reads the guardian from one E1 skew before its start, since
+- The guardian is read from one E1 skew before the start, since
   an E1 at the start may follow its E2 by that much.
-- Orphan E1 findings are currently still reported when E1 falls in the user window.
+- Orphan E1 findings are reported when E1 falls in the window.
 - Deposits are audited over the derived Sui range rather than gated by the
   withdrawal audit-window logic.
 
@@ -163,17 +162,6 @@ JSON-RPC endpoint.
 
 Run the examples below from `crates/hashi-monitor`, or prefix the configuration
 path with `crates/hashi-monitor/` when running from the repository root.
-
-### Batch audit
-```bash
-cargo run -p hashi-monitor -- batch \
-  --config audit.sample.yaml \
-  --start 2026-08-04T18:00:00Z \
-  --end 2026-08-04T19:00:00Z
-```
-CLI timestamps use whole-second UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`). `--end`
-defaults to the current time if omitted. A batch audit fails if the Sui node has
-pruned the start of its Sui range.
 
 ### Continuous monitoring
 ```bash
@@ -218,7 +206,7 @@ from genesis, on a node that still serves it.
 
 ## Config
 The config file holds the identity of one deployment. See `audit.sample.yaml`
-for a complete batch/continuous example. The deployment in sui-operations
+for a complete example. The deployment in sui-operations
 stores that shape verbatim.
 
 - The required `deployment` block contains the expected Bitcoin network, S3

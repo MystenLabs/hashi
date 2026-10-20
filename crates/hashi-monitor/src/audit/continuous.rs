@@ -148,7 +148,7 @@ impl ContinuousAuditor {
             guardian: audit_window.guardian_start,
         };
 
-        let mut inner = AuditorCore::new(cfg, cursors, Some(pool)).await?;
+        let mut inner = AuditorCore::new(cfg, cursors, pool).await?;
         // A pruned start would leave the pool incomplete for good.
         inner.ensure_sui_serves_start().await?;
         metrics.set_checked_through(SOURCE_SUI, inner.sui_cursor());
@@ -169,7 +169,7 @@ impl ContinuousAuditor {
         let snapshot = Snapshot::new(
             &self.inner.cfg,
             restart_start,
-            self.inner.utxo_pool().cloned(),
+            Some(self.inner.utxo_pool().clone()),
         );
         match self.store.save(&snapshot).await {
             Ok(()) => tracing::debug!(
@@ -445,7 +445,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
-            utxo_pool: None,
+            utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
             sui_poller: poller_scanned(window.sui_start, guardian_cursor + 600).await,
@@ -468,7 +468,7 @@ mod tests {
 
     /// An auditor over an in-memory store that holds `utxo_pool`, started a
     /// day before `looked_up_approval` with the guardian two hours past it.
-    async fn auditor_with(cfg: &Config, utxo_pool: Option<UtxoPool>) -> ContinuousAuditor {
+    async fn auditor_with(cfg: &Config, utxo_pool: UtxoPool) -> ContinuousAuditor {
         let approved_at = looked_up_approval().timestamp_secs;
         let guardian_cursor = approved_at + 7_200;
         let window = ContinuousAuditWindow::new(&cfg.timing, approved_at - 86_400);
@@ -496,7 +496,7 @@ mod tests {
         let cfg = Config::for_tests();
         let approval = looked_up_approval();
         let approved_at = approval.timestamp_secs;
-        let mut auditor = auditor_with(&cfg, None).await;
+        let mut auditor = auditor_with(&cfg, UtxoPool::default()).await;
         let resumed_from = auditor.window.user_start;
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(approval)]);
 
@@ -509,7 +509,10 @@ mod tests {
         auditor.inner.pending_withdrawals.clear();
         auditor.tick_state_checks_and_gc().await;
         let saved = auditor.store.load().await.unwrap();
-        assert_eq!(saved, Some(Snapshot::new(&cfg, approved_at, None)));
+        assert_eq!(
+            saved,
+            Some(Snapshot::new(&cfg, approved_at, Some(UtxoPool::default())))
+        );
     }
 
     #[tokio::test]
@@ -523,7 +526,7 @@ mod tests {
             block_time: 1_700_000_000,
         };
         assert!(pool.add_deposit(&deposit).is_none());
-        let mut auditor = auditor_with(&cfg, Some(pool.clone())).await;
+        let mut auditor = auditor_with(&cfg, pool.clone()).await;
 
         auditor.tick_state_checks_and_gc().await;
 

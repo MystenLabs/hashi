@@ -30,7 +30,7 @@ use serde::Deserialize;
 
 use crate::timing::Timing;
 
-/// Configuration shared by the batch and continuous monitor modes.
+/// Configuration of the continuous monitor.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

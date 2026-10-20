@@ -143,14 +143,6 @@ impl Timing {
             .expect("E1 has a successor")
     }
 
-    /// How far after the guardian audit end to scan Sui for E1. An E1 may
-    /// be recorded after its E2 by at most the E1 skew.
-    pub fn sui_lookahead(&self) -> u64 {
-        self.predecessor_skews
-            .get(WithdrawalEventType::E1HashiApproved)
-            .expect("E1 is a predecessor")
-    }
-
     /// How far before the audit start to read the guardian for E2. An E1 in
     /// the window may be recorded after its E2 by at most the E1 skew.
     pub fn guardian_lookback(&self) -> u64 {
@@ -244,14 +236,6 @@ mod tests {
     #[test]
     fn the_sui_lookback_is_the_e1_delay() {
         assert_eq!(Timing::default().sui_lookback(), WITHDRAWAL_E1_TO_E2_DELAY);
-    }
-
-    #[test]
-    fn the_sui_lookahead_is_the_e1_skew() {
-        assert_eq!(
-            Timing::default().sui_lookahead(),
-            WITHDRAWAL_E1_AFTER_E2_SKEW
-        );
     }
 
     #[test]

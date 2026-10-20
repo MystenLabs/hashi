@@ -1,17 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `hashi-monitor` command: a batch audit or a continuous monitor.
+//! The `hashi-monitor` command: a continuous monitor.
 //!
 //! How it works:
-//! 1. `batch` loads the config file and audits one guardian time range. It
-//!    exits with an error if the audit produced findings.
-//! 2. `continuous` loads the config file, binds the metrics port, and
+//! 1. `continuous` loads the config file, binds the metrics port, and
 //!    monitors from where its snapshot says the last run stopped, or on a
 //!    first run from the bridge's genesis on Sui.
 //!
 //! Assumptions:
-//! - Timestamps on the command line are whole-second UTC RFC 3339.
 //! - The metrics port must bind before the audit starts, since alerting
 //!   reads it.
 
@@ -24,8 +21,6 @@ use clap::Parser;
 use clap::Subcommand;
 use hashi_monitor::metrics::MonitorMetrics;
 use hashi_monitor::store::SnapshotStore;
-use hashi_monitor::time::parse_utc_timestamp;
-use hashi_types::guardian::time::now_timestamp_secs;
 
 #[derive(Debug, Parser)]
 #[command(name = "hashi-monitor")]
@@ -37,20 +32,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run a one-time batch audit over guardian [start, end].
-    Batch {
-        /// Path to YAML config file.
-        #[arg(long)]
-        config: PathBuf,
-
-        /// Start of guardian audit window as UTC, for example 2026-08-04T19:00:00Z.
-        #[arg(long, value_parser = parse_utc_timestamp)]
-        start: u64,
-
-        /// End of guardian audit window as UTC. Defaults to the current time.
-        #[arg(long, value_parser = parse_utc_timestamp)]
-        end: Option<u64>,
-    },
     /// Run continuous monitoring on guardian timeline.
     Continuous {
         /// Path to YAML config file.
@@ -80,16 +61,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Batch { config, start, end } => {
-            let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let end = end.unwrap_or_else(now_timestamp_secs);
-            let mut auditor = hashi_monitor::audit::BatchAuditor::new(&cfg, start, end).await?;
-            auditor.run().await?;
-            anyhow::ensure!(
-                !auditor.violation_found,
-                "audit produced findings: see logs"
-            );
-        }
         Command::Continuous {
             config,
             snapshot_bucket,

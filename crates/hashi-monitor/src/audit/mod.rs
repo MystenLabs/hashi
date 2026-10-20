@@ -1,12 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The auditor core, shared by the batch and continuous auditors.
+//! The auditor core, driven by the continuous auditor.
 //!
-//! Why it exists: both auditors read the same sources and judge the same
-//! flows. They differ only in when they poll and when they stop. The core
-//! holds one state machine per pending withdrawal and per pending deposit,
-//! and the auditors drive it.
+//! Why it exists: the continuous auditor decides when to poll. The core
+//! reads the sources and judges the flows. It holds one state machine per
+//! pending withdrawal and per pending deposit.
 //!
 //! How it works:
 //! 1. The Sui and guardian pollers return events, and the core ingests each
@@ -27,9 +26,9 @@
 //!    check once the Sui cursor is past the time Bitcoin was asked.
 //!
 //! Assumptions:
-//! - The user's window is on the guardian timeline. A withdrawal is in the
-//!   window if any of its events is, so an orphan E1 in the window is
-//!   reported too.
+//! - The window starts at the restart start, on the guardian timeline. A
+//!   withdrawal is in the window if any of its events is, so an orphan E1
+//!   in the window is reported too.
 //! - Deposits are checked over the Sui range the window derives, not gated
 //!   by the window.
 
@@ -49,7 +48,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
-pub mod batch;
 pub mod continuous;
 pub mod pool;
 
@@ -64,7 +62,6 @@ use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositRequestStateMachine;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
-pub use batch::BatchAuditor;
 use bitcoin::OutPoint;
 use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
@@ -176,10 +173,9 @@ pub struct AuditorCore {
     /// request id, so a replayed event is ignored and each request has its
     /// own.
     pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
-    /// The UTXOs the bridge holds, by Bitcoin's account. See `pool`. `None`
-    /// keeps no pool: batch mode has none, and continuous mode keeps one in
-    /// its snapshot.
-    utxo_pool: Option<UtxoPool>,
+    /// The UTXOs the bridge holds, by Bitcoin's account. See `pool`. The
+    /// snapshot keeps it between runs.
+    utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint. Not in the snapshot:
     /// the next pool check finds them again.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
@@ -189,12 +185,7 @@ pub struct AuditorCore {
 }
 
 impl AuditorCore {
-    /// `utxo_pool` is the pool to keep, or `None` to keep none.
-    pub async fn new(
-        cfg: &Config,
-        cursors: Cursors,
-        utxo_pool: Option<UtxoPool>,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config, cursors: Cursors, utxo_pool: UtxoPool) -> anyhow::Result<Self> {
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?;
         let hashi_btc_keys = guardian_poller
             .read_hashi_btc_keys(cfg.deployment.bitcoin_network)
@@ -226,13 +217,11 @@ impl AuditorCore {
     }
 
     /// Ask Bitcoin about every coin held in the UTXO pool and return the
-    /// findings. Nothing when no pool is kept. The spends the pool cannot
-    /// explain are kept as suspects for `judge_suspect_spends`.
+    /// findings. The spends the pool cannot explain are kept as suspects
+    /// for `judge_suspect_spends`.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
-        let Some(pool) = &self.utxo_pool else {
-            return Ok(Vec::new());
-        };
         self.btc_client.ensure_synced()?;
+        let pool = &self.utxo_pool;
         let outpoints = pool.outpoints();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
         // Before the lookups, so a withdrawal committed during them still
@@ -280,11 +269,7 @@ impl AuditorCore {
     /// Until the cursor is past, the suspect waits.
     pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let named = self.pending_inputs();
-        let taken = |outpoint: &OutPoint| {
-            self.utxo_pool
-                .as_ref()
-                .is_some_and(|pool| pool.is_spent(outpoint))
-        };
+        let taken = |outpoint: &OutPoint| self.utxo_pool.is_spent(outpoint);
         let sui_cursor = self.sui_cursor();
         let mut findings = Vec::new();
         let mut judged = Vec::new();
@@ -576,12 +561,10 @@ impl AuditorCore {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_confirmed_deposits();
         let confirmed_withdrawals = self.complete_withdrawals(window);
-        if let Some(pool) = &mut self.utxo_pool {
-            for deposit in &confirmed_deposits {
-                findings.extend(pool.add_deposit(deposit));
-            }
-            findings.extend(pool.add_withdrawals(&confirmed_withdrawals));
+        for deposit in &confirmed_deposits {
+            findings.extend(self.utxo_pool.add_deposit(deposit));
         }
+        findings.extend(self.utxo_pool.add_withdrawals(&confirmed_withdrawals));
 
         self.pending_withdrawals.retain(|wid, sm| {
             if !sm.is_in_audit_window(window) || sm.is_expecting_events() {
@@ -701,9 +684,8 @@ impl AuditorCore {
         self.sui_poller.ensure_start_is_served().await
     }
 
-    /// The UTXO pool, if one is kept.
-    pub fn utxo_pool(&self) -> Option<&UtxoPool> {
-        self.utxo_pool.as_ref()
+    pub fn utxo_pool(&self) -> &UtxoPool {
+        &self.utxo_pool
     }
 
     fn cursors(&self) -> Cursors {
@@ -717,16 +699,8 @@ impl AuditorCore {
         self.sui_poller.cursor_seconds()
     }
 
-    fn sui_scan_start(&self) -> UnixSeconds {
-        self.sui_poller.start_seconds()
-    }
-
     fn guardian_cursor(&self) -> UnixSeconds {
         self.guardian_poller.cursor_seconds()
-    }
-
-    fn guardian_next_partition_ready_at(&self) -> UnixSeconds {
-        self.guardian_poller.next_partition_ready_at()
     }
 }
 
@@ -767,7 +741,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
-            utxo_pool: None,
+            utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
@@ -928,7 +902,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
-            utxo_pool: None,
+            utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
@@ -961,7 +935,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
-            utxo_pool: Some(UtxoPool::default()),
+            utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at).await,
@@ -1151,7 +1125,7 @@ mod tests {
         // The withdrawal completed after the check: the pool took it, and
         // the auditor no longer follows it.
         let withdrawal = complete_withdrawal(7, 7, vec![outpoint], &timing);
-        let pool = auditor.utxo_pool.as_mut().unwrap();
+        let pool = &mut auditor.utxo_pool;
         assert!(
             pool.add_deposit(&ConfirmedDeposit {
                 deposit_id: DepositId::new(txid(0x51), 1),
