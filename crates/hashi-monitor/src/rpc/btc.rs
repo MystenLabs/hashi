@@ -11,13 +11,14 @@
 //! 1. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
 //!    since a lagging node reports recent transactions as unconfirmed.
 //! 2. `prefetch_confirmations` looks all pending txids up in batches of
-//!    `HTTP_JSON_RPC_BATCH_SIZE`, and `lookup_confirmation` serves each one
-//!    from that cache. The cache is cleared at the start of each pass, so an
+//!    `HTTP_JSON_RPC_BATCH_SIZE`, with `HTTP_JSON_RPC_BATCHES_IN_FLIGHT`
+//!    batches sent at once, and `lookup_confirmation` serves each one from
+//!    that cache. The cache is cleared at the start of each pass, so an
 //!    unconfirmed transaction is looked up again next pass.
 //! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
 //!    returned with the time of its own block and the time of the block that
 //!    gave it `MIN_CONFIRMATIONS`.
-//! 4. Requests are paced by `HTTP_JSON_RPC_BATCH_DELAY`, and a rate-limited
+//! 4. Requests are not paced: the node is the bridge's own. A rate-limited
 //!    request is retried with exponential backoff.
 //!
 //! Assumptions:
@@ -31,6 +32,9 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
@@ -51,8 +55,13 @@ use tracing::warn;
 use crate::config::Config;
 use crate::domain::BtcConfirmation;
 
-const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
-const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
+/// Calls per JSON-RPC batch request.
+const HTTP_JSON_RPC_BATCH_SIZE: usize = 100;
+/// Confirmation batches sent at the same time. A probe of the testnet node
+/// (2026-10-19) served eight batches of 100 at once fastest, with no errors.
+const HTTP_JSON_RPC_BATCHES_IN_FLIGHT: usize = 8;
+/// Txids between two progress log lines of a confirmation lookup.
+const LOOKUP_PROGRESS_EVERY: usize = 10_000;
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
 
@@ -298,9 +307,8 @@ impl HttpJsonRpcTransport {
             .context("failed to decode bitcoin JSON-RPC batch response")
     }
 
-    /// Pace requests so a historical audit does not exhaust a provider's
-    /// rolling throughput bucket, and retry the standard HTTP/JSON-RPC 429
-    /// responses with bounded exponential backoff.
+    /// Send one request, and retry the standard HTTP/JSON-RPC 429 responses
+    /// with bounded exponential backoff.
     // TODO: Classify and retry transient non-rate-limit failures, such as
     // timeouts, connection errors, and HTTP 5xx responses. They currently
     // abort a batch audit or defer a continuous retry until the next BTC tick.
@@ -330,7 +338,6 @@ impl HttpJsonRpcTransport {
                 continue;
             }
 
-            thread::sleep(HTTP_JSON_RPC_BATCH_DELAY);
             return Ok(response_body);
         }
 
@@ -399,21 +406,45 @@ impl HttpJsonRpcTransport {
         }))
     }
 
+    /// Look every txid up, `HTTP_JSON_RPC_BATCHES_IN_FLIGHT` batches at a
+    /// time. Each worker takes the next batch until none is left. The first
+    /// failure stops the others at their next batch and fails the lookup.
     fn lookup_confirmations(
         &self,
         txids: &[Txid],
     ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
-        let mut confirmations = HashMap::with_capacity(txids.len());
-        for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
-            confirmations.extend(self.lookup_confirmation_batch(chunk)?);
-            let processed_txids = ((batch_index + 1) * HTTP_JSON_RPC_BATCH_SIZE).min(txids.len());
-            if processed_txids.is_multiple_of(200) || processed_txids == txids.len() {
-                info!(
-                    processed_txids,
-                    total_txids = txids.len(),
-                    "bitcoin confirmation lookup progress"
-                );
+        let batches = txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).collect::<Vec<_>>();
+        let next_batch = AtomicUsize::new(0);
+        let processed = AtomicUsize::new(0);
+        let results = Mutex::new(Vec::with_capacity(batches.len()));
+        thread::scope(|scope| {
+            for _ in 0..HTTP_JSON_RPC_BATCHES_IN_FLIGHT.min(batches.len()) {
+                scope.spawn(|| {
+                    while let Some(batch) = batches.get(next_batch.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let result = self.lookup_confirmation_batch(batch);
+                        if result.is_err() {
+                            next_batch.store(batches.len(), Ordering::Relaxed);
+                        }
+                        let processed_txids =
+                            processed.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
+                        if processed_txids.is_multiple_of(LOOKUP_PROGRESS_EVERY)
+                            || processed_txids == txids.len()
+                        {
+                            info!(
+                                processed_txids,
+                                total_txids = txids.len(),
+                                "bitcoin confirmation lookup progress"
+                            );
+                        }
+                        results.lock().expect("a worker never panics").push(result);
+                    }
+                });
             }
+        });
+        let mut confirmations = HashMap::with_capacity(txids.len());
+        for result in results.into_inner().expect("a worker never panics") {
+            confirmations.extend(result?);
         }
         Ok(confirmations)
     }
