@@ -25,9 +25,9 @@ Findings are tagged as:
 - **liveness** when a successor is late or still missing after its deadline;
 - **safety** for a contradictory event, a late predecessor, a predecessor
   still missing after its source cursor passes the deadline, an event the
-  Sui scan covered but never returned, a Hashi approval whose txid does not
-  match its inputs and outputs or whose inputs and outputs differ from the
-  guardian's, a confirmed deposit
+  Sui scan covered but never returned, a Hashi approval or a guardian log
+  whose txid does not match its inputs and outputs, a Hashi approval whose
+  inputs and outputs differ from the guardian's, a confirmed deposit
   whose Bitcoin output does not match the Sui request, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
@@ -49,10 +49,95 @@ output with the Sui request: the same amount, and the same script as the bridge
 address of the claimed derivation path. Without this, a compromised committee
 can mint hBTC against any confirmed transaction.
 
+The monitor also follows every `DepositRequested`, the user's own claim that a
+Bitcoin output pays the bridge. The committee cannot suppress it. Bitcoin is
+asked about the transaction for the watch period of two days. Assumption: an
+honest deposit confirms on Bitcoin within it. Move marks a request expired
+after a day and an honest leader deletes it, so a slow deposit is requested
+again. Move does not refuse to confirm an older request, though, so a UTXO
+that confirms after the watch is seen only when the committee confirms it.
+An output that pays the bridge script of a
+claimed derivation path is bridge money, whatever Move does with the request
+later; the monitor's UTXO pool takes it (IOP-747). A UTXO Move never confirms,
+whether the committee withholds it or a member's sanctions screening rejected
+it, shows up in the pool's checks. A claim no output matches is the user's
+problem and is dropped. Each request has its own lookup, so a corrected
+request for the same UTXO is followed on its own.
+
 Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 `WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
 lookback still matches. An E1 found this way inside the range the Sui scan
 already covered also raises `SuiScanMissedEvent`.
+
+### UTXO pool (continuous mode)
+Each bridge UTXO is a 2-of-2 between the MPC committee and the guardian, plus
+a recovery leaf that lets the committee spend alone 60 days after the UTXO
+confirms. A compromised committee can mark a UTXO spent on Move without
+spending it on Bitcoin, or keep a deposit out of Move, then wait for that day.
+So the monitor keeps its own pool of the UTXOs the bridge holds, and only a
+Bitcoin fact changes it:
+
+- A UTXO enters when Bitcoin confirms a deposit request's output at the
+  bridge script of the claimed path. The committee is not needed.
+- When a withdrawal flow is complete, E1, E2 and E3 seen, its change
+  outputs enter and its inputs move to a spent record, with the spending
+  txid. The inputs and amounts come from the confirmed Bitcoin transaction.
+  Which outputs are change comes from E2: the guardian labels each output
+  from paths it derives itself. A withdrawal that never completes never
+  touches the pool.
+- The pool is fed right after the Bitcoin lookups, before any other poll.
+  Bitcoin confirms a withdrawal only after the deposits and withdrawals that
+  made its inputs, and one round of lookups answers them all, so a
+  withdrawal's inputs enter the pool before the withdrawal spends them. The
+  Sui scan can deliver a deposit request and the withdrawal that spends it in
+  one poll; the pool waits for the lookups that follow.
+
+Every operation is strict. One the pool already applied is a repeat and is
+skipped, so a restart can replay any range of events. One that contradicts
+the pool is a finding: **safety** `RpcInconsistency`, for `UtxoMismatch`
+when Bitcoin confirms a known outpoint with a second amount or script, and
+`UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
+transaction already spent, since Bitcoin cannot produce either; **safety**
+`UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
+never held, since the bridge spent a coin that no verified deposit or change
+brought in; the pool records nothing for that spend. In one Bitcoin pass
+every add comes before every spend, so a pass
+that answers a deposit and the withdrawal that spends it is right in any
+order.
+
+Move's records are never read for the pool. The pool starts empty on the
+first run, which starts at the bridge's genesis on a fullnode that still
+serves the history, so every UTXO is seen enter. The spent record is never
+pruned; a spent UTXO is a few dozen bytes. The pool is kept between runs in
+the monitor's snapshot, so a restart resumes with the pool the last run
+built. See "Continuous monitoring" below.
+
+Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
+held. It first logs the twenty UTXOs held longest, by block time, with each
+one's age, amount and origin. Then it reports:
+
+- **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
+  (31 days, since honest coin selection refreshes UTXOs older than 30);
+- **safety** `UtxoTooOld` past `UTXO_AGE_CRITICAL` (45 days), and
+  `UtxoUnexpectedSpend` when a UTXO was spent by a transaction that is not a
+  confirmed Hashi withdrawal. This one is not reported at once: a withdrawal
+  committed since the last Sui poll can be mined already. The spend waits,
+  and a state check reports it once the Sui cursor is past the time Bitcoin
+  was asked and still no withdrawal explains it: none the monitor follows
+  names the UTXO, and the pool took none that spent it;
+- **safety** `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
+  confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
+  entered, so a missing answer is a reorg, a node without the transaction
+  index, or a monitor bug.
+
+A UTXO that a withdrawal the monitor follows spends is not checked. Bitcoin
+spends it about an hour before the flow completes, and an incomplete flow
+has its own finding.
+
+A UTXO paid to a bridge address with no `DepositRequested`, or with a wrong
+derivation path, is invisible to the monitor and out of scope. A later check
+of the pool against Move's records will report a withheld deposit on the
+first day instead of at the warn age.
 
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
@@ -94,26 +179,42 @@ pruned the start of its Sui range.
 ```bash
 cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
-  --start 2026-08-04T19:00:00Z
+  --snapshot-bucket my-hashi-monitor-snapshot
 ```
-Without `--start` or a snapshot, the audit starts far enough back to cover a
-monitor outage of up to a week, including checks that were still pending when
-it began. Findings from that period are reported again after a restart. If the
-Sui node has pruned part of that range (the public testnet fullnode keeps under
-six days), the Sui scan starts near its oldest checkpoint: withdrawal approvals
-from before it are still read by withdrawal id if the guardian signed them, but
-deposits and unsigned approvals from before it are not audited.
+The monitor keeps a snapshot at `gs://<BUCKET>/snapshot.json` and saves it
+after every state check: the `restart_start` its previous state check logged,
+the UTXO pool as it is now, and the deployment it audits. The monitor needs
+read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
+or, on GKE, its workload identity, and fails to start without it. It must be
+the bucket's only writer.
 
-With `--snapshot-bucket <BUCKET>`, the monitor saves a snapshot to
-`gs://<BUCKET>/snapshot.json` after every state check: the `restart_start` its
-previous state check logged, and the deployment it audits. A restart resumes
-from the snapshot, or from `--start` if that is earlier, and ignores another
-deployment's snapshot; delete the object to start over. A flow that never
-completes holds the restart start back, so a restart replays everything since
-that flow began, subject to the Sui pruning above. The monitor needs read and
-write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS` or, on
-GKE, its workload identity, and fails to start without it. It must be the
-bucket's only writer.
+The first run has no snapshot. It starts at the bridge's genesis on Sui, the
+checkpoint time of the transaction that published the Hashi package in the
+config, with an empty pool, so every UTXO is seen enter. That needs a Sui
+node that keeps the history from genesis; the public testnet fullnode keeps
+about ten days, and `archive.<network>.sui.io` keeps everything. The monitor
+fails to start on a node that has pruned the start, on a first run or a
+restart, since a pruned start would leave the pool incomplete for good.
+
+The scan from genesis runs in ranges of 10,000 checkpoints, about an hour of
+Sui each, and the state checks wait for it. On a busy network it takes hours.
+
+A restart resumes from the snapshot: the audit from `restart_start`, and the
+pool as saved. The replay changes nothing in the pool, since the pool skips
+every operation it already applied. Findings since `restart_start` are
+reported again. A snapshot of another deployment, or one saved by a monitor
+before the pool existed, is ignored and the run is a first run. Delete the
+object to start over from genesis.
+
+A flow holds `restart_start` back until the pool takes it, at the Bitcoin
+tick after it completes. A flow that never completes holds it back for good,
+so every restart replays everything since that flow began. To move the restart point past it,
+edit `restart_start` in the object by hand while the monitor is stopped; the
+flow is then no longer audited. The field is a UTC timestamp such as
+`2026-10-05T23:30:36Z`.
+
+The snapshot is a durable asset, not a cache. Losing it means a new first run
+from genesis, on a node that still serves it.
 
 ## Config
 The config file holds the identity of one deployment. See `audit.sample.yaml`
@@ -142,6 +243,9 @@ are constants in `src/timing.rs`, each with its reason:
 | E1 after E2 skew | 5 min | the guardian's request clock tolerance |
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
 | deposit confirmation skew | 2 h | a deposit's confirmation time may be after its Hashi confirmation by this; a miner may date a block two hours ahead |
+| deposit request watch | 2 d | Bitcoin is asked about a deposit request's transaction for this; an honest deposit is assumed to confirm within it |
+| UTXO warn age | 31 d | an unspent bridge UTXO older than this is a liveness finding; honest coin selection refreshes UTXOs older than 30 days |
+| UTXO critical age | 45 d | an unspent bridge UTXO older than this is a safety finding; the recovery leaf opens at 60 days |
 
 ```yaml
 # Deployment identity and builds accepted when auditing Guardian logs.
@@ -159,8 +263,8 @@ deployment:
       pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until a restart no longer re-audits its records: a week
-    # and 1 hour 25 minutes plus the longest next-event delay and clock skew.
+    # replaced build until the snapshot's restart start, logged at every state
+    # check, passes its last record: a restart re-audits everything from there.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

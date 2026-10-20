@@ -16,16 +16,24 @@
 //!   `WithdrawalTx`, so the sources can be compared as a whole.
 //! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
 //!   Hashi's `DepositConfirmed` on Sui.
+//! - A deposit request is the user's `DepositRequested` on Sui, followed on
+//!   its own until Bitcoin confirms the coin it names.
 //!
 //! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
 pub mod deposit;
 pub mod withdrawal;
 
+use bitcoin::OutPoint;
 use bitcoin::TxOut;
+pub use deposit::ConfirmedDeposit;
 pub use deposit::DepositEventType;
 pub use deposit::DepositId;
 pub use deposit::MonitorDepositEvent;
+pub use deposit::SuiDepositRequestedEvent;
+use serde::Deserialize;
+use serde::Serialize;
+pub use withdrawal::ConfirmedWithdrawal;
 pub use withdrawal::MonitorWithdrawalEvent;
 pub use withdrawal::WithdrawalEventType;
 pub use withdrawal::WithdrawalTx;
@@ -42,6 +50,7 @@ use crate::time::utc_timestamp;
 pub enum MonitorEvent {
     Withdrawal(MonitorWithdrawalEvent),
     Deposit(MonitorDepositEvent),
+    DepositRequested(SuiDepositRequestedEvent),
 }
 
 impl fmt::Display for MonitorEvent {
@@ -59,6 +68,15 @@ impl fmt::Display for MonitorEvent {
                 formatter,
                 "Deposit(type={:?}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
                 event.event_type,
+                event.deposit_id,
+                utc_timestamp(event.timestamp_secs),
+                event.amount,
+                event.script_pubkey,
+            ),
+            Self::DepositRequested(event) => write!(
+                formatter,
+                "DepositRequested(request_id={}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
+                event.request_id,
                 event.deposit_id,
                 utc_timestamp(event.timestamp_secs),
                 event.amount,
@@ -95,13 +113,24 @@ pub enum MonitorEventType {
 #[derive(Clone, Debug)]
 pub struct BtcConfirmation {
     /// The time of the block that holds the transaction. The recovery leaf's
-    /// clock starts at this block, so a coin's age counts from here.
+    /// clock starts at this block, so a UTXO's age counts from here.
     pub block_time: UnixSeconds,
     /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
     /// The bridge acts on that block, so the Bitcoin events carry this time.
     pub confirmed_time: UnixSeconds,
+    /// The outpoints the transaction spends, in order.
+    pub inputs: Vec<OutPoint>,
     /// The transaction's outputs, in order.
     pub outputs: Vec<TxOut>,
+}
+
+/// How a UTXO entered the monitor's UTXO pool.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum UtxoOrigin {
+    /// A deposit Bitcoin confirmed at a bridge address.
+    Deposit,
+    /// A change output of a withdrawal Bitcoin confirmed.
+    Change,
 }
 
 /// The time through which each source has been read.

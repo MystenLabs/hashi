@@ -54,6 +54,7 @@ pub fn confirmation(paid: u64, script_pubkey: ScriptBuf) -> BtcConfirmation {
     BtcConfirmation {
         block_time: 30,
         confirmed_time: 90,
+        inputs: vec![],
         outputs: vec![
             TxOut {
                 value: Amount::from_sat(1_000),
