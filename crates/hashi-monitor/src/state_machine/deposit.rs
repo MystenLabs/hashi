@@ -189,17 +189,10 @@ impl DepositStateMachine {
         self.confirmed = Some(deposit);
     }
 
-    /// Hashi confirmed the deposit, and Bitcoin still had not confirmed the
-    /// transaction at a lookup past the deadline. Reported until the machine
-    /// closes; the auditor then checks the confirmation against the pool.
-    ///
-    /// E1 (DepositRequested) and E2 (Bitcoin confirmation) currently do not trigger a timing violation.
-    /// A valid E2 could create an expectation over E3 (DepositConfirmed).
-    /// We do not currently enforce it since sanctions and user mistakes can legitimately
-    /// cause this case.
-    ///
-    /// For now, we only enforce E3 induced expectations.
-    /// An E3 event causes a timing expectation on E2
+    /// E3 (`DepositConfirmed`) expects E2 (Bitcoin's confirmation) by E3 plus
+    /// `DEPOSIT_CONFIRMATION_SKEW`; this reports it missing while the machine
+    /// is open, and the pool check judges it after. E2 does not expect E3:
+    /// sanctions and user mistakes leave valid deposits unconfirmed.
     pub fn timing_violations(&self) -> Vec<MonitorFinding> {
         let (Some(sui), Some(cursor)) = (&self.sui_confirmation, self.btc_checked_at) else {
             return Vec::new();
