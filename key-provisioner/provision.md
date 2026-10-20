@@ -305,3 +305,17 @@ the step again.
 After each step, tell the operator that it finished and post the last line it
 printed. If a step fails for any other reason, send the operator its last lines
 instead of working around it.
+
+## Taking part in a rotation
+
+A rotation moves the guardian's key to a fresh guardian. The operator posts a
+guardian commit and a configuration digest for the new guardian's
+configuration: download it and compare its digest as described above. The
+digest covers the configuration and every KP's certificate in it. If the
+operator also posts fingerprints, the guardian's commit digests the
+configuration file alone: then compare every fingerprint the download prints
+with them, not only your own.
+
+### Provision the new guardian
+
+Run the provisioning command above, without `--do-genesis`.

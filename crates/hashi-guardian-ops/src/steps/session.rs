@@ -24,6 +24,7 @@ use crate::print_info;
 use crate::print_success;
 use crate::print_warning;
 use crate::render::require_fresh;
+use crate::stack::Role;
 use crate::stack::Slot;
 use crate::stack::SlotView;
 use crate::steps::slot;
@@ -104,6 +105,10 @@ pub fn operator(ctx: &Ctx, arg: Option<Slot>, step: OperatorStep) -> Result<()> 
         }
         OperatorStep::Ceremony => format!(
             "once every key provisioner has confirmed and this prints the guardian's BTC key, new-session --slot {}",
+            view.slot
+        ),
+        OperatorStep::Provision { .. } if view.role == Role::Standby => format!(
+            "once a threshold of key provisioners has provisioned it, switchover --slot {}",
             view.slot
         ),
         OperatorStep::Provision { .. } => format!(
@@ -227,7 +232,7 @@ pub fn new_session(ctx: &Ctx, arg: Option<Slot>, abandon: bool) -> Result<()> {
             "Slot {slot}'s guardian is initialized for a ceremony that has not dealt yet. Restarting it ends that session, so that step starts again."
         )),
         "withdraw/ACTIVATED" if stack.slots()?.len() > 1 => bail!(
-            "slot {slot}'s guardian serves withdrawals while the stack has two slots; restarting it would leave neither serving"
+            "slot {slot}'s guardian serves withdrawals while the stack has two slots; move its key with the switchover step instead"
         ),
         // It holds the key in memory, which a restart loses until a threshold of key provisioners provision it again.
         held @ ("withdraw/ACTIVATED" | "withdraw/PROVISIONER_INITIALIZED") => {
@@ -611,7 +616,7 @@ mod tests {
         let exec = world("withdraw/ACTIVATED", 1);
         assert_eq!(
             run(&exec, &["i-0bbb"], false).unwrap_err().to_string(),
-            "slot b's guardian serves withdrawals while the stack has two slots; restarting it would leave neither serving"
+            "slot b's guardian serves withdrawals while the stack has two slots; move its key with the switchover step instead"
         );
     }
 

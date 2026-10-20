@@ -24,6 +24,7 @@ pub mod proxy;
 pub mod render;
 pub mod stack;
 pub mod steps;
+pub mod sui;
 #[cfg(test)]
 mod world;
 

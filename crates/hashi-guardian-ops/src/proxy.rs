@@ -14,7 +14,7 @@ use anyhow::bail;
 use serde_json::Value;
 
 use crate::Ctx;
-use crate::ask::NOTHING_CHANGED;
+use crate::ask::Unchanged;
 use crate::ask::confirm;
 use crate::commit::Tree;
 use crate::exec::Cmd;
@@ -91,7 +91,15 @@ impl fmt::Display for Urls {
 }
 
 /// Applies the proxy stack so it follows the enclave stack's slots. It builds no image: the proxy step does.
-pub fn update_proxy(ctx: &Ctx, stack: &Stack, tree: &Tree) -> Result<()> {
+/// `unchanged` says what declining leaves, and `last_check` runs right before the update applies, after every other
+/// check, so a caller's deadline holds.
+pub fn update_proxy(
+    ctx: &Ctx,
+    stack: &Stack,
+    tree: &Tree,
+    unchanged: &Unchanged,
+    last_check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let dir = proxy_dir(ctx)?;
     require_pulumi_version(ctx)?;
     let configured = config(ctx, &dir, stack, "proxy-image-tag")?;
@@ -113,6 +121,7 @@ pub fn update_proxy(ctx: &Ctx, stack: &Stack, tree: &Tree) -> Result<()> {
     let relay = ecs.urls.relay();
     let relay_left = relay != following.backend && Some(relay) != following.standby.as_deref();
     require_no_kp_round(ctx, tree, relay_left)?;
+    last_check()?;
     print_info(&format!("The proxy will send {following}."));
     print_warning(
         "Updating the proxy restarts it: the guardian's address is down for some minutes, and nodes retry their requests.",
@@ -120,17 +129,18 @@ pub fn update_proxy(ctx: &Ctx, stack: &Stack, tree: &Tree) -> Result<()> {
     confirm(
         ctx.ask,
         &format!("Update the proxy of stack {}?", stack.name),
-        &NOTHING_CHANGED,
+        unchanged,
     )?;
     // The question can wait any time, while a workflow or a round starts.
     let now = settled_service(ctx, &dir, stack, &region)?;
     if now != ecs || checked_plan(ctx, &dir, stack, &configured, &now, &following)? != plan {
         bail!(
-            "the proxy's service or plan changed while this step waited for you; nothing was changed: run this step again"
+            "the proxy's service or plan changed while this step waited for you; the proxy was not updated: run this step again"
         );
     }
     require_no_kp_round(ctx, tree, relay_left)?;
     require_no_guardian_runs(ctx)?;
+    last_check()?;
     if !up(ctx, &dir, &stack.name, None)? {
         bail!("the proxy update did not finish; run this step again: it reads what ECS runs first");
     }
@@ -178,7 +188,7 @@ fn checked_plan(
     let changes = plan.changes();
     if changes.is_empty() {
         bail!(
-            "the proxy plan changes nothing, but the proxy sends {} and stack {}'s slots need it to send {following}; nothing was changed: check which enclave stack the proxy program reads",
+            "the proxy plan changes nothing, but the proxy sends {} and stack {}'s slots need it to send {following}; the proxy was not updated: check which enclave stack the proxy program reads",
             ecs.urls,
             stack.name
         );
@@ -190,19 +200,19 @@ fn checked_plan(
         .collect();
     if !unexpected.is_empty() {
         bail!(
-            "the proxy plan changes more than its task definition and service; nothing was changed; find out why first: {}",
+            "the proxy plan changes more than its task definition and service; the proxy was not updated; find out why first: {}",
             unexpected.join("\n")
         );
     }
     let planned = guardian_urls(&plan).map_err(|error| {
         anyhow!(
-            "{error} Nothing was changed: read pulumi preview --diff for stack {} in {dir}",
+            "{error}; the proxy was not updated: read pulumi preview --diff for stack {} in {dir}",
             stack.name
         )
     })?;
     if planned != *following {
         bail!(
-            "the proxy plan sends {planned}, but stack {}'s slots need it to send {following}; nothing was changed",
+            "the proxy plan sends {planned}, but stack {}'s slots need it to send {following}; the proxy was not updated",
             stack.name
         );
     }

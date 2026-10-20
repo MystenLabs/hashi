@@ -39,8 +39,12 @@ pub struct Session {
 
 pub struct Host {
     pub ip: String,
+    /// The commit its guardian is built from.
+    pub commit: String,
     /// Whether the guardian's unit is enabled or active.
     pub running: bool,
+    /// Whether an enclave runs, which a failed terminate leaves after the unit stops.
+    pub enclave: bool,
     pub session: Session,
 }
 
@@ -68,6 +72,14 @@ pub struct State {
     pub ec2_states: BTreeMap<String, String>,
     /// Workflow runs that haven't completed: their repository, status and workflow path.
     pub workflow_runs: Vec<(String, String, String)>,
+    /// Each session's operator-init record, by session.
+    pub init_records: BTreeMap<String, Value>,
+    pub sui_epoch: u64,
+    /// When the epoch began and when the one before it began, as seconds before now.
+    pub epoch_age: (i64, i64),
+    pub activate_false_failure: bool,
+    /// Whether stopping a guardian's unit leaves its enclave running.
+    pub terminate_fails: bool,
     /// A change every enclave plan also holds, such as drift elsewhere in the stack.
     pub extra_change: Option<(String, String)>,
     /// The enclave stack's `rotation:*` tags.
@@ -187,11 +199,19 @@ impl State {
                     let id = format!("i-0{slot}{:03}", self.counter);
                     let session = self.new_session();
                     let ip = format!("192.0.2.{}", self.counter);
+                    let launched = if slot == "b" { Slot::B } else { Slot::A };
+                    let commit = self
+                        .config
+                        .get(&format!("hashi-commit{}", launched.suffix()))
+                        .cloned()
+                        .unwrap_or_default();
                     self.hosts.insert(
                         id.clone(),
                         Host {
                             ip,
+                            commit,
                             running: true,
+                            enclave: true,
                             session,
                         },
                     );
@@ -286,6 +306,8 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         lifecycle: "withdraw/ACTIVATED".to_owned(),
         epoch: Some(1253),
     };
+    let mut init_records = BTreeMap::new();
+    init_records.insert("aa".repeat(8), init_record(&"cf".repeat(32)));
     Rc::new(RefCell::new(State {
         config,
         deployed: [("a".to_owned(), "i-0aaa".to_owned())]
@@ -296,7 +318,9 @@ pub fn serving_world() -> Rc<RefCell<State>> {
             "i-0aaa".to_owned(),
             Host {
                 ip: "192.0.2.10".to_owned(),
+                commit: COMMIT.to_owned(),
                 running: true,
+                enclave: true,
                 session: serving,
             },
         )]
@@ -314,6 +338,11 @@ pub fn serving_world() -> Rc<RefCell<State>> {
         standby_output: None,
         ec2_states: BTreeMap::new(),
         workflow_runs: Vec::new(),
+        init_records,
+        sui_epoch: 1253,
+        epoch_age: (3 * 3600, 27 * 3600),
+        activate_false_failure: false,
+        terminate_fails: false,
         extra_change: None,
         rotation_tags: Vec::new(),
         counter: 0,
@@ -442,6 +471,21 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                     None => fail(),
                 }
             }
+            ["aws", "ec2", "describe-instance-attribute", .., "--instance-id", id, "--attribute", "userData", "--query", _, "--output", "text"] => {
+                match s.hosts.get(*id) {
+                    Some(host) => ok(crate::stack::tests::user_data(&host.commit)),
+                    None => fail(),
+                }
+            }
+            ["curl", .., "-d", body, _graphql] => {
+                let now = crate::sui::now();
+                let at = |age: i64| jiff::Timestamp::from_second(now - age).unwrap().to_string();
+                if body.contains("epochId:") {
+                    ok(json!({ "data": { "epoch": { "startTimestamp": at(s.epoch_age.1) } } }).to_string())
+                } else {
+                    ok(json!({ "data": { "epoch": { "epochId": s.sui_epoch, "startTimestamp": at(s.epoch_age.0) } } }).to_string())
+                }
+            }
             ["aws", "ecs", "describe-services", ..] => {
                 let (desired, running, deployments) = s.service_counts;
                 let revision = s.running_task().0;
@@ -449,15 +493,34 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
             }
             ["aws", "ecs", "describe-task-definition", ..] => ok(s.running_task().1.to_string()),
             ["aws", "sts", "get-caller-identity", ..] => ok(format!("{ACCOUNT}\n")),
+            ["aws", "s3", "cp", .., source, "-"] => {
+                let session = source.split("/init/").nth(1)?.split('/').next()?.to_owned();
+                match s.init_records.get(&session) {
+                    Some(record) => ok(json!({ "message": { "Init": { "OIGuardianInfo": record } } }).to_string()),
+                    None => fail(),
+                }
+            }
+            ["aws", "s3api", "list-object-versions", .., "--prefix", key, "--query", _, "--output", "text"] => {
+                let session = key.strip_prefix("init/")?.split('/').next()?;
+                ok(if s.init_records.contains_key(session) { "1\t0\n" } else { "0\t0\n" }.to_owned())
+            }
             ["aws", "ssm", "send-command", .., "--parameters", parameters] => {
                 let instance = w[w.iter().position(|word| *word == "--instance-ids")? + 1];
                 if s.ec2_states.contains_key(instance) {
                     return fail();
                 }
-                let host = s.hosts.get(instance)?;
-                let out = if parameters.contains("GUARDIAN_RUNNING") {
+                let script = parameters.to_owned();
+                let terminate_fails = s.terminate_fails;
+                let host = s.hosts.get_mut(instance)?;
+                if script.contains("disable --now") {
+                    host.running = false;
+                    host.enclave = terminate_fails;
+                }
+                let out = if script.contains("GUARDIAN_RUNNING") {
                     let state = if host.running { "GUARDIAN_RUNNING" } else { "GUARDIAN_STOPPED" };
                     (state.to_owned(), true)
+                } else if script.contains("an enclave still runs") && (host.running || host.enclave) {
+                    ("an enclave still runs".to_owned(), false)
                 } else {
                     (String::new(), true)
                 };
@@ -482,6 +545,23 @@ pub fn exec(state: &Rc<RefCell<State>>) -> Fake {
                     .collect())
             }
             ["cargo", "build", ..] => ok(r#"{"reason":"compiler-artifact","target":{"name":"hashi-guardian-init"},"executable":"/x/hashi-guardian-init"}"#.to_owned()),
+            ["/x/hashi-guardian-init", "operator", "activate", ..] => {
+                let others_quiet = s.hosts.values().all(|host| {
+                    !(host.running || host.enclave)
+                        || !host.session.lifecycle.starts_with("withdraw/ACTIVATED")
+                });
+                let active = s.outputs_active.to_string();
+                let epoch = s.sui_epoch;
+                let false_failure = s.activate_false_failure;
+                let id = s.deployed.get(&active)?.clone();
+                if !others_quiet {
+                    return fail();
+                }
+                let host = s.hosts.get_mut(&id)?;
+                host.session.lifecycle = "withdraw/ACTIVATED".to_owned();
+                host.session.epoch = Some(epoch);
+                Some((!false_failure, String::new()))
+            }
             _ => None,
         }
     })
@@ -499,6 +579,30 @@ pub fn provision(state: &Rc<RefCell<State>>, slot: Slot) {
     host.session.btc = Some(BTC.to_owned());
     host.session.config_hash = Some("cf".repeat(32));
     host.session.lifecycle = "withdraw/PROVISIONER_INITIALIZED".to_owned();
+    let session = host.session.key[..16].to_owned();
+    s.init_records
+        .insert(session, init_record(&"cf".repeat(32)));
+}
+
+/// A withdraw session's operator-init record, as the serving world's stack renders it.
+pub fn init_record(config_hash: &str) -> Value {
+    json!({
+        "deployment": {
+            "bucket_info": { "name": "guardian-bucket", "region": "us-west-2" },
+            "retention_environment": "testnet",
+            "bitcoin_network": "signet",
+            "pcr_allowlist": {
+                "current_build": { "git_revision": COMMIT, "pcr0": "0c".repeat(48) },
+                "prev_builds": [],
+            },
+        },
+        "mode": {
+            "Withdraw": {
+                "config_hash": config_hash,
+                "limiter_config": { "refill_rate": 11574, "max_bucket_capacity": 1000000000 },
+            },
+        },
+    })
 }
 
 /// Steps run against a serving world, from a checkout in a temporary directory.
@@ -589,6 +693,7 @@ pub fn env(repo: &std::path::Path) -> Vec<(String, String)> {
         ("HASHI_OBJECT_ID", "0x2"),
         ("BITCOIN_NETWORK", "signet"),
         ("RETENTION_ENVIRONMENT", "testnet"),
+        ("SUI_GRAPHQL_URL", "https://graphql.testnet.sui.io/graphql"),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
