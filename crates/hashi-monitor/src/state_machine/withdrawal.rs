@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_e1_outside_window_e2_inside_is_still_valid() {
+    fn an_e1_before_the_window_start_with_an_e2_inside_it_is_still_valid() {
         let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 31, 90, 1),

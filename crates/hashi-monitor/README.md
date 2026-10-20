@@ -110,7 +110,7 @@ first run, which starts at the bridge's genesis on a fullnode that still
 serves the history, so every UTXO is seen enter. The spent record is never
 pruned; a spent UTXO is a few dozen bytes. The pool is kept between runs in
 the monitor's snapshot, so a restart resumes with the pool the last run
-built. See "Continuous monitoring" below.
+built. See "Running the monitor" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
 held. It first logs the twenty UTXOs held longest, by block time, with each
@@ -139,10 +139,10 @@ derivation path, is invisible to the monitor and out of scope. A later check
 of the pool against Move's records will report a withheld deposit on the
 first day instead of at the warn age.
 
-### Mode
-The monitor runs continuously. It polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
-
 ### Timeline semantics (withdrawals)
+The monitor polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports
+findings as they appear.
+
 - The start is on the **guardian (E2)** timeline.
 - Sui withdrawal events are polled from one E1 delay before the start,
   since an E1 older than that is a late E2 in its own right. An E1
@@ -163,7 +163,7 @@ JSON-RPC endpoint.
 Run the examples below from `crates/hashi-monitor`, or prefix the configuration
 path with `crates/hashi-monitor/` when running from the repository root.
 
-### Continuous monitoring
+### Running the monitor
 ```bash
 cargo run -p hashi-monitor -- \
   --config audit.sample.yaml \
