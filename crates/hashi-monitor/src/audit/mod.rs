@@ -369,13 +369,9 @@ impl AuditorCore {
         window: &impl AuditWindow,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
         self.btc_client.ensure_synced()?;
-        // The cache dedupes lookups inside one pass. It is cleared because a
-        // "not confirmed yet" answer goes stale.
-        // TODO: keep confirmed answers across passes, and evict an entry at
-        // GC once no machine names its txid. A deposit's transaction is then
-        // looked up once, not once for the request and once for the
-        // confirmation.
-        self.btc_client.clear_confirmation_cache();
+        // A "not confirmed yet" answer goes stale. A confirmed one is kept
+        // until no flow names its txid.
+        self.btc_client.forget_unconfirmed();
         let withdrawal_count = self
             .pending_withdrawals
             .values()
