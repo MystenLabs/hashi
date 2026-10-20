@@ -14,6 +14,7 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::rotate;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -106,6 +107,20 @@ enum Command {
         #[arg(long)]
         slot: Option<Slot>,
     },
+    /// Create a standby guardian host in a slot, next to the serving guardian in the other.
+    Arm {
+        /// The slot to arm.
+        #[arg(long)]
+        slot: Slot,
+    },
+    /// Apply the proxy stack so the proxy follows the enclave stack's slots.
+    ProxyUpdate,
+    /// Destroy a standby slot's host.
+    Teardown {
+        /// The standby's slot.
+        #[arg(long)]
+        slot: Slot,
+    },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -134,6 +149,9 @@ fn main() -> anyhow::Result<()> {
             session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
         }
         Command::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
+        Command::Arm { slot } => rotate::arm(&ctx, slot),
+        Command::ProxyUpdate => rotate::proxy_update(&ctx),
+        Command::Teardown { slot } => rotate::teardown(&ctx, slot),
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }
@@ -192,5 +210,16 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn steps_that_change_one_slot_require_it() {
+        for step in ["arm", "teardown"] {
+            assert!(Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", step]).is_err());
+            assert!(
+                Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", step, "--slot", "b"])
+                    .is_ok()
+            );
+        }
     }
 }
