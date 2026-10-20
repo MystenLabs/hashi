@@ -15,6 +15,8 @@ use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
 use hashi_guardian_ops::steps::rotate;
+use hashi_guardian_ops::steps::rotate_kp_set;
+use hashi_guardian_ops::steps::rotate_kp_set::Action;
 use hashi_guardian_ops::steps::session;
 use hashi_guardian_ops::steps::session::OperatorStep;
 
@@ -62,6 +64,9 @@ enum Command {
         /// The slot, which a stack with two slots requires.
         #[arg(long)]
         slot: Option<Slot>,
+        /// Publish the KP-set rotation's configuration for the signers instead.
+        #[arg(long)]
+        rotate_kp_set: bool,
     },
     /// Measure a slot's build on GitHub's two runners, or check a run.
     Measure {
@@ -127,11 +132,41 @@ enum Command {
         #[arg(long)]
         slot: Slot,
     },
+    /// Re-deal the key to a new KP set on a standby.
+    RotateKpSet {
+        #[command(subcommand)]
+        command: RotateKpSetCommand,
+    },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
         #[arg(long)]
         out_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RotateKpSetCommand {
+    /// Initialize the standby's ceremony session for the current key provisioners to sign.
+    Init {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
+    /// Submit the signers' submissions, then wait for every new key provisioner to confirm.
+    Submit {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+        /// A signer's submission file, from key-provisioner rotate-kp-set; repeat per signer.
+        #[arg(long = "submission", value_name = "FILE")]
+        submissions: Vec<PathBuf>,
+    },
+    /// Resume an interrupted submit: wait for every new key provisioner to confirm.
+    Wait {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
     },
 }
 
@@ -145,7 +180,10 @@ fn main() -> anyhow::Result<()> {
         Command::Host { slot } => inspect::host(&ctx, slot),
         Command::Tunnel { slot } => inspect::tunnel(&ctx, slot),
         Command::Render { slot } => configs::render(&ctx, slot),
-        Command::Publish { slot } => configs::publish(&ctx, slot),
+        Command::Publish {
+            slot,
+            rotate_kp_set,
+        } => configs::publish(&ctx, slot, rotate_kp_set),
         Command::Measure { slot, run_id } => deploy::measure(&ctx, slot, run_id),
         Command::Deploy => deploy::deploy(&ctx),
         Command::Proxy => deploy::proxy(&ctx),
@@ -159,6 +197,16 @@ fn main() -> anyhow::Result<()> {
         Command::ProxyUpdate => rotate::proxy_update(&ctx),
         Command::Switchover { slot } => rotate::switchover(&ctx, slot),
         Command::Teardown { slot } => rotate::teardown(&ctx, slot),
+        Command::RotateKpSet { command } => {
+            let (slot, action) = match command {
+                RotateKpSetCommand::Init { slot } => (slot, Action::Init),
+                RotateKpSetCommand::Submit { slot, submissions } => {
+                    (slot, Action::Submit(submissions))
+                }
+                RotateKpSetCommand::Wait { slot } => (slot, Action::Wait),
+            };
+            rotate_kp_set::rotate_kp_set(&ctx, slot, action)
+        }
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }
@@ -226,6 +274,64 @@ mod tests {
             assert!(
                 Cli::try_parse_from(["hashi-guardian-ops", "--env-file", "e", step, "--slot", "b"])
                     .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn rotate_kp_set_submit_collects_repeated_submissions() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-ops",
+            "--env-file",
+            "e",
+            "rotate-kp-set",
+            "submit",
+            "--slot",
+            "b",
+            "--submission",
+            "kp1.rotation",
+            "--submission",
+            "kp3.rotation",
+        ])
+        .unwrap();
+        let Command::RotateKpSet {
+            command: RotateKpSetCommand::Submit { slot, submissions },
+        } = cli.command
+        else {
+            panic!("expected rotate-kp-set submit");
+        };
+        assert_eq!(slot, Some(Slot::B));
+        assert_eq!(
+            submissions,
+            [PathBuf::from("kp1.rotation"), PathBuf::from("kp3.rotation")]
+        );
+        // Unlike hashi-guardian-init's, submit parses with no submission, and the step decides what that means.
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-ops",
+            "--env-file",
+            "e",
+            "rotate-kp-set",
+            "submit",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::RotateKpSet {
+                command: RotateKpSetCommand::Submit { slot: None, submissions }
+            } if submissions.is_empty()
+        ));
+        for action in ["init", "wait"] {
+            assert!(
+                Cli::try_parse_from([
+                    "hashi-guardian-ops",
+                    "--env-file",
+                    "e",
+                    "rotate-kp-set",
+                    action,
+                    "--submission",
+                    "kp1.rotation",
+                ])
+                .is_err()
             );
         }
     }

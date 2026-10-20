@@ -308,14 +308,60 @@ instead of working around it.
 
 ## Taking part in a rotation
 
-A rotation moves the guardian's key to a fresh guardian. The operator posts a
-guardian commit and a configuration digest for the new guardian's
-configuration: download it and compare its digest as described above. The
-digest covers the configuration and every KP's certificate in it. If the
+A rotation moves the guardian's key to a fresh guardian, and a KP-set rotation
+also re-deals it to a new set of KPs. The operator says which step below to
+run, and posts a guardian commit and a configuration digest for each new
+configuration. Download each one and compare its digest as described above.
+The digest covers the configuration and every KP's certificate in it. If the
 operator also posts fingerprints, the guardian's commit digests the
 configuration file alone: then compare every fingerprint the download prints
 with them, not only your own.
 
+For a KP-set rotation, each KP of the new set first hands the operator their
+public files, as in
+[Provide the public artifacts to the operator](#provide-the-public-artifacts-to-the-operator),
+with the bucket and key the operator shares. A KP who stays may be asked to
+upload theirs again, and a KP with a new YubiKey uploads under a user ID they
+have not used before. Then confirm your row in the new roster the operator
+posts, as in [Verify the operator's roster](#verify-the-operators-roster).
+
 ### Provision the new guardian
 
-Run the provisioning command above, without `--do-genesis`.
+Run the provisioning command above, without `--do-genesis`. After a KP-set
+rotation, run it with the configuration you confirmed your share with: the
+operator posts no new one.
+
+### Sign a KP-set rotation
+
+When the operator asks you to sign, run from the configuration directory:
+
+```sh
+cargo run --release --locked -p hashi-guardian-init -- key-provisioner rotate-kp-set \
+  --config guardian-init.yaml --submission-path <user-id>.rotation
+```
+
+Before your YubiKey asks for its User PIN, the command prints the new set it
+would authorize: its number of KPs and threshold, and each `proposed new KP set
+entry` fingerprint. Compare them with the new roster the operator posted. If
+they differ, press Ctrl-C and tell the operator.
+
+Your YubiKey asks for its User PIN and a touch to decrypt your share, and again
+to sign. Send the operator the file it writes; it holds nothing secret.
+
+### Confirm your share in the new set
+
+Every KP of the new set runs this once the operator publishes the new set's
+configuration, including KPs who were in the old set. Download that
+configuration first, even if you signed: the signers' configuration has the
+old set as its `kp_roster`, and with it the command fails, for example with
+`is not among the configured kp_roster.kp_pgp_cert_paths` or
+`differs from expected`. Then:
+
+```sh
+cargo run --release --locked -p hashi-guardian-init -- key-provisioner ceremony \
+  --config guardian-init.yaml --encrypted-shares-path kp-shares-<date>.json
+```
+
+Name the file after the day, for example `kp-shares-2026-10-15.json`, so it does
+not overwrite the `kp-shares.json` an earlier ceremony saved. Keep both. The
+re-deal completes once every KP of the new set has confirmed.

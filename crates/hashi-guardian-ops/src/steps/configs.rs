@@ -15,6 +15,7 @@ use crate::ask::confirm;
 use crate::commit::Tree;
 use crate::exec::Cmd;
 use crate::exec::read;
+use crate::guardian::require_reached;
 use crate::kp_bucket::CONFIG_PREFIX;
 use crate::kp_bucket::DigestScheme;
 use crate::kp_bucket::REGION;
@@ -29,14 +30,18 @@ use crate::print_success;
 use crate::print_warning;
 use crate::render::Rendered;
 use crate::render::SlotRender;
+use crate::stack::Role;
 use crate::stack::Slot;
+use crate::stack::SlotView;
 use crate::steps::rotate::require_keeps_serving;
 use crate::steps::rotate::require_lists_log_builds;
+use crate::steps::rotate_kp_set::re_deal_step;
 use crate::steps::slot;
 
 /// Writes the slot's configuration, then has the guardian's own tools load it as the ceremony will.
 pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
     let (stack, view) = slot(ctx, arg)?;
+    require_re_deal_standby(ctx, &view)?;
     print_info(&format!(
         "Rendering slot {}'s guardian configuration",
         view.slot
@@ -95,25 +100,53 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
     println!("Bitcoin network:  {}", settings.bitcoin_network);
     println!("Retention class:  {}", settings.retention_environment);
     let dir = view.dir.display();
-    println!(
-        "Key provisioners: {}, any {} provision",
-        render.dealt.kp_count(),
-        render.dealt.threshold
-    );
+    match &render.new {
+        Some(new) => {
+            println!(
+                "KP-set rotation:  {} key provisioners, any {} sign, re-deal to {}, any {} provision",
+                render.dealt.kp_count(),
+                render.dealt.threshold,
+                new.kp_count(),
+                new.threshold
+            );
+            println!("For the signers:      {dir}/rotate-kp-set/guardian-init.yaml");
+            println!("For the re-deal:      {dir}/rotate-kp-set/operator.yaml");
+        }
+        None => println!(
+            "Key provisioners: {}, any {} provision",
+            render.dealt.kp_count(),
+            render.dealt.threshold
+        ),
+    }
     println!("For key provisioners: {dir}/guardian-init.yaml");
     println!("For the operator:     {dir}/operator.yaml");
-    next(&format!("publish --slot {}", view.slot));
+    next(&match render.new {
+        Some(_) => format!("publish --slot {} --rotate-kp-set", view.slot),
+        None => format!("publish --slot {}", view.slot),
+    });
     Ok(())
 }
 
-/// Publishes the slot's configuration for key provisioners to the KP bucket's `_config/`, and prints the digest they
-/// compare with the operator's post.
-pub fn publish(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
+/// Publishes the slot's configuration for key provisioners to the KP bucket's `_config/`, or a KP-set rotation's
+/// with `rotate_kp_set`, and prints the digest they compare with the operator's post.
+pub fn publish(ctx: &Ctx, arg: Option<Slot>, rotate_kp_set: bool) -> Result<()> {
     if !ctx.ask.interactive() {
         bail!("this publication is interactive and must run in a terminal");
     }
     let (stack, view) = slot(ctx, arg)?;
-    let config_dir = &view.dir;
+    require_re_deal_standby(ctx, &view)?;
+    let prefix = if rotate_kp_set {
+        if ctx.env.get("NEW_KP_ROSTER_DIR").is_none() {
+            bail!(
+                "set NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD in {} and render again to publish a KP-set rotation",
+                ctx.env.path().display()
+            );
+        }
+        "rotate-kp-set/"
+    } else {
+        ""
+    };
+    let config_dir = view.dir.join(prefix);
     let config_file = config_dir.join("guardian-init.yaml");
     let config = config_file.display();
     if !config_file.is_file() {
@@ -123,13 +156,9 @@ pub fn publish(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
         );
     }
     // What goes out is this render, which the slot's files are shown to equal, so nothing written to them in between
-    // can mix in. The operator's own file is never published, so it doesn't count.
+    // can mix in. The operator's own files are never published, so they don't count.
     let render = SlotRender::new(ctx, &stack, &view)?;
-    let published: Vec<(&str, &[u8])> = render
-        .rendered
-        .files()
-        .filter(|(path, _)| !path.ends_with("operator.yaml"))
-        .collect();
+    let published = published(&render.rendered, rotate_kp_set);
     let stale: Vec<&str> = published
         .iter()
         .filter(|(path, bytes)| {
@@ -158,6 +187,28 @@ pub fn publish(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
         &view.commit,
         &format!("the commit slot {}'s guardian runs", view.slot),
     )?;
+    // A re-deal's signers sign before `submit`, and the new set confirms once its proposal is out.
+    let re_deal_stage = || -> Result<()> {
+        if ctx.env.get("NEW_KP_ROSTER_DIR").is_none() {
+            return Ok(());
+        }
+        let slot = view.slot;
+        let lifecycle = require_reached(ctx, &stack, &view, &tree)?.info.lifecycle;
+        let next = re_deal_step(&lifecycle, slot);
+        if rotate_kp_set && !lifecycle.is("none") && !lifecycle.is("ceremony/OPERATOR_INITIALIZED")
+        {
+            bail!(
+                "slot {slot}'s guardian is {lifecycle}; the signers' configuration goes out before rotate-kp-set submit --slot {slot}; next: {next}"
+            );
+        }
+        if !rotate_kp_set && !lifecycle.is("ceremony/AWAITING_KEY_PROVISIONER_CONFIRMATIONS") {
+            bail!(
+                "slot {slot}'s guardian is {lifecycle}; during a re-deal, the new set's configuration goes out once rotate-kp-set submit --slot {slot} logs `ceremony proposal published`; next: {next}"
+            );
+        }
+        Ok(())
+    };
+    re_deal_stage()?;
     // Key provisioners run download-config.sh at the guardian's commit, so this digest must be the one it computes.
     let scheme = DigestScheme::of(&tree)?;
     let guardian_init = tree.guardian_init(ctx)?;
@@ -241,6 +292,8 @@ pub fn publish(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
             declined: "publication not confirmed; nothing was published",
         },
     )?;
+    // The question can wait any time, while another terminal moves a re-deal on.
+    re_deal_stage()?;
 
     print_info("Uploading the configuration");
     let prefix = format!("s3://{bucket}/{CONFIG_PREFIX}/");
@@ -294,8 +347,44 @@ pub fn publish(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
     print_success(&format!(
         "Configuration published successfully! It lists {count} key provisioners."
     ));
-    next("the step this configuration is for, once every key provisioner has downloaded it");
+    next(&if rotate_kp_set {
+        format!(
+            "rotate-kp-set init --slot {}, once the key provisioners who sign have downloaded it",
+            view.slot
+        )
+    } else {
+        "the step this configuration is for, once every key provisioner has downloaded it"
+            .to_owned()
+    });
     Ok(())
+}
+
+/// Stops while `NEW_KP_ROSTER_DIR` is set unless the slot is the standby the KP-set rotation re-deals on: any other slot
+/// would render the new set, which holds no shares until the re-deal completes.
+fn require_re_deal_standby(ctx: &Ctx, view: &SlotView) -> Result<()> {
+    if ctx.env.get("NEW_KP_ROSTER_DIR").is_some() && view.role != Role::Standby {
+        bail!(
+            "{} sets NEW_KP_ROSTER_DIR for a KP-set rotation, which re-deals on a standby, and slot {} is the {}; render and publish only the standby until the re-deal completes",
+            ctx.env.path().display(),
+            view.slot,
+            view.role
+        );
+    }
+    Ok(())
+}
+
+/// What `publish` sends, by its path under the KP bucket's prefix: the slot's own files, or with `rotate_kp_set` the
+/// re-deal's. The operator's files never go out.
+fn published(rendered: &Rendered, rotate_kp_set: bool) -> Vec<(&str, &[u8])> {
+    let prefix = if rotate_kp_set { "rotate-kp-set/" } else { "" };
+    rendered
+        .files()
+        .filter_map(|(path, bytes)| {
+            let path = path.strip_prefix(prefix)?;
+            let own = rotate_kp_set || !path.starts_with("rotate-kp-set/");
+            (own && !path.ends_with("operator.yaml")).then_some((path, bytes))
+        })
+        .collect()
 }
 
 fn files_holding_access_keys(dir: &Path) -> Result<Vec<String>> {
@@ -458,14 +547,14 @@ mod tests {
         let declined = Scripted::new(&["no"]);
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs).with_ask(&declined);
         assert_eq!(
-            publish(&ctx, None).unwrap_err().to_string(),
+            publish(&ctx, None, false).unwrap_err().to_string(),
             "publication not confirmed; nothing was published"
         );
         assert!(!exec.ran(&["aws", "s3", "rm"]));
 
         let confirmed = Scripted::new(&["yes"]);
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs).with_ask(&confirmed);
-        publish(&ctx, None).unwrap();
+        publish(&ctx, None, false).unwrap();
         assert_eq!(
             confirmed.prompts.borrow()[0],
             "Publish this configuration to s3://kp-bucket/_config/? [y/N] "
@@ -488,8 +577,8 @@ mod tests {
         let exec = world();
         let repo = tempfile::tempdir().unwrap();
         let env = rendered(repo.path(), &exec, "#!/bin/bash\n# no digest here\n");
-        let ctx = Ctx::for_test(repo.path(), &exec, &pairs(&env));
-        let error = publish(&ctx, None).unwrap_err().to_string();
+        let interactive = Ctx::for_test(repo.path(), &exec, &pairs(&env));
+        let error = publish(&interactive, None, false).unwrap_err().to_string();
         assert!(
             error.starts_with(&format!(
                 "download-config.sh at {COMMIT} computes the configuration digest in a way this tool does not"
@@ -500,8 +589,14 @@ mod tests {
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs(&env))
             .with_ask(&crate::ask::scripted::NoTerminal);
         assert_eq!(
-            publish(&ctx, None).unwrap_err().to_string(),
+            publish(&ctx, None, false).unwrap_err().to_string(),
             "this publication is interactive and must run in a terminal"
+        );
+        assert!(
+            publish(&interactive, None, true)
+                .unwrap_err()
+                .to_string()
+                .starts_with("set NEW_KP_ROSTER_DIR and NEW_KP_THRESHOLD")
         );
 
         let mut log_bucket = env.clone();
@@ -509,12 +604,57 @@ mod tests {
         log_bucket.push(("KP_BUCKET".to_owned(), "guardian-bucket".to_owned()));
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs(&log_bucket));
         assert!(
-            publish(&ctx, None)
+            publish(&ctx, None, false)
                 .unwrap_err()
                 .to_string()
                 .starts_with("KP_BUCKET names the guardian's log bucket")
         );
         assert!(!exec.ran(&["aws", "s3"]));
+    }
+
+    #[test]
+    fn publishes_each_re_deal_configuration_with_its_own_certificates() {
+        use crate::render::Roster;
+        let scratch = tempfile::tempdir().unwrap();
+        let dealt = Roster::load(
+            &roster_dir(&scratch.path().join("dealt"), &["alice", "bob"], "v1"),
+            2,
+        )
+        .unwrap();
+        let new = Roster::load(
+            &roster_dir(&scratch.path().join("new"), &["alice", "carol"], "v1"),
+            2,
+        )
+        .unwrap();
+        let rendered =
+            Rendered::new(&crate::render::tests::settings(), &dealt, Some(&new)).unwrap();
+        let paths = |rotate_kp_set| -> Vec<String> {
+            published(&rendered, rotate_kp_set)
+                .into_iter()
+                .map(|(path, _)| path.to_owned())
+                .collect()
+        };
+        // The signers' configuration lists both sets, so every certificate in either goes with it.
+        let signers = paths(true);
+        for id in ["alice", "bob", "carol"] {
+            assert!(
+                signers.contains(&format!("certs/{id}-kp-pubkey.asc")),
+                "{id}"
+            );
+        }
+        // The new set's lists only that set.
+        let new_set = paths(false);
+        assert!(new_set.contains(&"certs/carol-kp-pubkey.asc".to_owned()));
+        assert!(!new_set.contains(&"certs/bob-kp-pubkey.asc".to_owned()));
+        for paths in [signers, new_set] {
+            assert!(paths.contains(&"guardian-init.yaml".to_owned()));
+            assert!(
+                paths
+                    .iter()
+                    .all(|path| !path.contains("operator") && !path.starts_with("rotate-kp-set/")),
+                "{paths:?}"
+            );
+        }
     }
 
     #[test]
@@ -529,7 +669,7 @@ mod tests {
         std::fs::write(dir.join("operator.yaml"), "edited").unwrap();
         let confirmed = Scripted::new(&["yes"]);
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs(&env)).with_ask(&confirmed);
-        publish(&ctx, None).unwrap();
+        publish(&ctx, None, false).unwrap();
         let uploaded = uploaded.borrow();
         assert!(uploaded.contains(&"guardian-init.yaml".to_owned()));
         assert!(uploaded.contains(&"certs/alice-kp-pubkey.asc".to_owned()));
@@ -544,7 +684,7 @@ mod tests {
         let exec = world();
         let ctx = Ctx::for_test(repo.path(), &exec, &pairs(&env)).with_ask(&confirmed);
         assert!(
-            publish(&ctx, None)
+            publish(&ctx, None, false)
                 .unwrap_err()
                 .to_string()
                 .contains(": certs/alice-kp-pubkey.asc; the stack,")
