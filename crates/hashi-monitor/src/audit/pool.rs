@@ -59,7 +59,8 @@
 //!
 //! Invariants:
 //! - An outpoint is held or spent, never both.
-//! - The spent record is never pruned. A spent UTXO is a few dozen bytes.
+//! - The spent record is never pruned, and it only grows: an entry is added
+//!   once and never changes. The snapshot keeps it in files by that order.
 //! - The pool is a function of Bitcoin facts alone: a UTXO's time is its
 //!   block time, so two monitors build the same pool.
 //!
@@ -117,69 +118,77 @@ pub struct SuspectSpend {
 }
 
 /// The UTXOs the bridge holds and the UTXOs it spent, by Bitcoin's account.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(from = "UtxoPoolWire", into = "UtxoPoolWire")]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UtxoPool {
     utxos: BTreeMap<OutPoint, Utxo>,
     spent: BTreeMap<OutPoint, SpentUtxo>,
+    /// The spent outpoints in the order the pool spent them. The record
+    /// only grows, so a prefix of this list never changes.
+    spent_order: Vec<OutPoint>,
 }
 
-/// The pool as serialized: two lists, since a JSON map needs string keys.
+/// A held UTXO as stored: a JSON map needs string keys, so a list.
 #[derive(Deserialize, Serialize)]
-struct UtxoPoolWire {
-    utxos: Vec<UtxoWire>,
-    spent: Vec<SpentUtxoWire>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct UtxoWire {
+pub struct UtxoWire {
     outpoint: OutPoint,
     #[serde(flatten)]
     utxo: Utxo,
 }
 
+/// A spent UTXO as stored.
 #[derive(Deserialize, Serialize)]
-struct SpentUtxoWire {
-    outpoint: OutPoint,
+pub struct SpentUtxoWire {
+    pub outpoint: OutPoint,
     #[serde(flatten)]
-    spent: SpentUtxo,
-}
-
-impl From<UtxoPoolWire> for UtxoPool {
-    fn from(wire: UtxoPoolWire) -> Self {
-        Self {
-            utxos: wire
-                .utxos
-                .into_iter()
-                .map(|wire| (wire.outpoint, wire.utxo))
-                .collect(),
-            spent: wire
-                .spent
-                .into_iter()
-                .map(|wire| (wire.outpoint, wire.spent))
-                .collect(),
-        }
-    }
-}
-
-impl From<UtxoPool> for UtxoPoolWire {
-    fn from(pool: UtxoPool) -> Self {
-        Self {
-            utxos: pool
-                .utxos
-                .into_iter()
-                .map(|(outpoint, utxo)| UtxoWire { outpoint, utxo })
-                .collect(),
-            spent: pool
-                .spent
-                .into_iter()
-                .map(|(outpoint, spent)| SpentUtxoWire { outpoint, spent })
-                .collect(),
-        }
-    }
+    pub spent: SpentUtxo,
 }
 
 impl UtxoPool {
+    /// The held UTXOs, ready to store.
+    pub fn held_to_wire(&self) -> Vec<UtxoWire> {
+        self.utxos
+            .iter()
+            .map(|(outpoint, utxo)| UtxoWire {
+                outpoint: *outpoint,
+                utxo: utxo.clone(),
+            })
+            .collect()
+    }
+
+    /// The spent UTXOs at positions `range` of the order the pool spent
+    /// them in, ready to store.
+    pub fn spent_to_wire(&self, range: std::ops::Range<usize>) -> Vec<SpentUtxoWire> {
+        self.spent_order[range]
+            .iter()
+            .map(|outpoint| SpentUtxoWire {
+                outpoint: *outpoint,
+                spent: self.spent[outpoint].clone(),
+            })
+            .collect()
+    }
+
+    /// A pool from stored parts. `spent` is in the order the pool spent them.
+    pub fn from_wire(held: Vec<UtxoWire>, spent: Vec<SpentUtxoWire>) -> Self {
+        let mut pool = Self {
+            utxos: held
+                .into_iter()
+                .map(|wire| (wire.outpoint, wire.utxo))
+                .collect(),
+            ..Self::default()
+        };
+        for wire in spent {
+            pool.record_spent(wire.outpoint, wire.spent);
+        }
+        pool
+    }
+
+    /// Add to the spent record. A UTXO already in it keeps its entry.
+    fn record_spent(&mut self, outpoint: OutPoint, spent: SpentUtxo) {
+        if self.spent.insert(outpoint, spent).is_none() {
+            self.spent_order.push(outpoint);
+        }
+    }
+
     /// Whether a withdrawal the pool took spent the UTXO.
     pub fn is_spent(&self, outpoint: &OutPoint) -> bool {
         self.spent.contains_key(outpoint)
@@ -297,7 +306,7 @@ impl UtxoPool {
     /// repeat. One spent by another transaction, or never held, is a finding.
     fn spend(&mut self, outpoint: OutPoint, txid: Txid) -> Option<MonitorFinding> {
         if let Some(utxo) = self.utxos.remove(&outpoint) {
-            self.spent.insert(
+            self.record_spent(
                 outpoint,
                 SpentUtxo {
                     utxo,
@@ -735,17 +744,28 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_round_trips_through_json() {
+    fn a_pool_round_trips_through_its_stored_parts() {
         let mut pool = pool_with_one();
         pool.add_deposit(&deposit(2, 2_000, 1_500));
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
-        let json = serde_json::to_vec(&pool).unwrap();
-        let loaded: UtxoPool = serde_json::from_slice(&json).unwrap();
+        let loaded =
+            UtxoPool::from_wire(pool.held_to_wire(), pool.spent_to_wire(0..pool.spent_len()));
 
-        assert_eq!(loaded.outpoints(), pool.outpoints());
-        assert_eq!(loaded.get(&outpoint(2)), pool.get(&outpoint(2)));
-        assert_eq!(loaded.get(&change_of(7)), pool.get(&change_of(7)));
-        assert_eq!(loaded.get_spent(&outpoint(1)), pool.get_spent(&outpoint(1)));
+        assert_eq!(loaded, pool);
+    }
+
+    #[test]
+    fn the_spent_record_keeps_the_order_the_pool_spent_in() {
+        let mut pool = pool_with_one();
+        pool.add_deposit(&deposit(2, 2_000, 1_500));
+        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(2)])]);
+        pool.add_withdrawals(&[withdrawal(8, vec![outpoint(1)])]);
+
+        let spent = pool.spent_to_wire(0..2);
+
+        assert_eq!(spent[0].outpoint, outpoint(2));
+        assert_eq!(spent[1].outpoint, outpoint(1));
+        assert_eq!(pool.spent_to_wire(1..2)[0].outpoint, outpoint(1));
     }
 }
