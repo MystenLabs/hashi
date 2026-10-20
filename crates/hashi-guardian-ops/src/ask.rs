@@ -49,6 +49,12 @@ pub struct Unchanged {
     pub declined: &'static str,
 }
 
+/// The usual wording, for steps that would have changed anything.
+pub const NOTHING_CHANGED: Unchanged = Unchanged {
+    no_input: "no input received; nothing was changed",
+    declined: "not confirmed; nothing was changed",
+};
+
 /// Asks for y or yes, and stops on anything else.
 pub fn confirm(ask: &dyn Ask, question: &str, unchanged: &Unchanged) -> Result<()> {
     let answer = ask
@@ -57,6 +63,20 @@ pub fn confirm(ask: &dyn Ask, question: &str, unchanged: &Unchanged) -> Result<(
     match answer.as_deref() {
         None => bail!("{}", unchanged.no_input),
         Some("y" | "yes") => Ok(()),
+        Some(_) => bail!("{}", unchanged.declined),
+    }
+}
+
+/// Asks the operator to type `expected`, such as the instance ID a step would destroy, and stops on anything else.
+pub fn confirm_typed(
+    ask: &dyn Ask,
+    expected: &str,
+    purpose: &str,
+    unchanged: &Unchanged,
+) -> Result<()> {
+    match ask.line(&format!("Type {expected} {purpose}: "))? {
+        None => bail!("{}", unchanged.no_input),
+        Some(typed) if typed == expected => Ok(()),
         Some(_) => bail!("{}", unchanged.declined),
     }
 }
@@ -126,16 +146,12 @@ pub mod scripted {
 
     #[test]
     fn confirms_only_y_or_yes() {
-        let unchanged = Unchanged {
-            no_input: "no input received; nothing was changed",
-            declined: "not confirmed; nothing was changed",
-        };
-        assert!(confirm(&Scripted::new(&["yes"]), "Go?", &unchanged).is_ok());
-        assert!(confirm(&Scripted::new(&["y"]), "Go?", &unchanged).is_ok());
-        assert!(confirm(&Scripted::new(&[" Y "]), "Go?", &unchanged).is_ok());
+        assert!(confirm(&Scripted::new(&["yes"]), "Go?", &NOTHING_CHANGED).is_ok());
+        assert!(confirm(&Scripted::new(&["y"]), "Go?", &NOTHING_CHANGED).is_ok());
+        assert!(confirm(&Scripted::new(&[" Y "]), "Go?", &NOTHING_CHANGED).is_ok());
         for answer in ["yes please", "", "no", "n"] {
             assert_eq!(
-                confirm(&Scripted::new(&[answer]), "Go?", &unchanged)
+                confirm(&Scripted::new(&[answer]), "Go?", &NOTHING_CHANGED)
                     .unwrap_err()
                     .to_string(),
                 "not confirmed; nothing was changed"
@@ -143,9 +159,29 @@ pub mod scripted {
         }
         let ask = Scripted::new(&[]);
         assert_eq!(
-            confirm(&ask, "Go?", &unchanged).unwrap_err().to_string(),
+            confirm(&ask, "Go?", &NOTHING_CHANGED)
+                .unwrap_err()
+                .to_string(),
             "no input received; nothing was changed"
         );
         assert_eq!(ask.prompts.borrow()[0], "Go? [y/N] ");
+        assert!(
+            confirm_typed(
+                &Scripted::new(&["i-0aaa"]),
+                "i-0aaa",
+                "to stop it",
+                &NOTHING_CHANGED
+            )
+            .is_ok()
+        );
+        assert!(
+            confirm_typed(
+                &Scripted::new(&["i-0aab"]),
+                "i-0aaa",
+                "to stop it",
+                &NOTHING_CHANGED
+            )
+            .is_err()
+        );
     }
 }

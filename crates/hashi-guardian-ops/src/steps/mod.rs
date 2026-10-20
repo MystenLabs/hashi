@@ -12,6 +12,7 @@ use crate::stack::SlotView;
 use crate::stack::Stack;
 
 pub mod configs;
+pub mod deploy;
 pub mod inspect;
 pub mod kp_keys;
 

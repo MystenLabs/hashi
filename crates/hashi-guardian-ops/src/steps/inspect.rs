@@ -246,8 +246,6 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
-    use base64ct::Base64;
-    use base64ct::Encoding;
     use serde_json::json;
 
     use super::*;
@@ -256,14 +254,10 @@ mod tests {
     use crate::stack::tests::COMMIT;
     use crate::stack::tests::ENCLAVE;
     use crate::stack::tests::stack_env;
+    use crate::stack::tests::user_data;
 
     const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const KEY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    /// What `aws ec2 describe-instance-attribute` prints for a host launched to build `commit`.
-    fn user_data(commit: &str) -> String {
-        Base64::encode_string(format!("#!/bin/bash\ngit checkout {commit}\n").as_bytes())
-    }
 
     /// A two-slot stack whose hosts build `COMMIT`, whose tunnels reach guardians with `KEY_A` and `KEY_B`, and whose
     /// proxy fronts `fronted` and relays to `relayed`.
