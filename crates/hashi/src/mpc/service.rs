@@ -131,6 +131,9 @@ pub struct MpcService {
     /// Last epoch whose recovery material was submitted, independently of signing recovery.
     recovery_backup_epoch: Mutex<Option<u64>>,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
+    /// Target epoch of the last attempt to write next-epoch keys for a
+    /// registration that had none; see `register_unset_keys`.
+    unset_keys_target_epoch: Mutex<Option<u64>>,
     presig_seal_tasks: Mutex<tokio::task::JoinSet<()>>,
 }
 
@@ -198,6 +201,7 @@ impl MpcService {
             backup_handle,
             recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
+            unset_keys_target_epoch: Mutex::new(None),
             presig_seal_tasks: Mutex::new(tokio::task::JoinSet::new()),
         };
         let handle = MpcHandle { key_ready_rx };
@@ -318,6 +322,7 @@ impl MpcService {
                 }
                 _ = reconcile_tick.tick() => {
                     self.sync_if_stale().await;
+                    self.register_unset_keys().await;
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let request = *self.refill_rx.borrow();
@@ -1656,6 +1661,44 @@ impl MpcService {
             "replacement keys still excluded after {MAX_KEY_REREGISTRATION_BUMPS} registration \
              attempts; will retry next tick"
         );
+    }
+
+    /// `hashi register` leaves a registration without next-epoch keys, and
+    /// committee formation skips such a member. Write them now rather than at
+    /// the next Sui epoch change, where the write races `start_reconfig`.
+    async fn register_unset_keys(&self) {
+        let Ok(me) = self.inner.config.validator_address() else {
+            return;
+        };
+        let Some(member) = self.inner.onchain_state().committee_member(&me) else {
+            return;
+        };
+        if member.next_epoch_encryption_public_key().is_some() {
+            return;
+        }
+        let target = match self.inner.next_reconfig_epoch().await {
+            Ok(target) => target,
+            Err(e) => {
+                warn!("cannot determine next reconfig epoch to register next-epoch keys: {e}");
+                return;
+            }
+        };
+        // One attempt per target epoch: the epoch-change path retries a failure.
+        if self.unset_keys_target_epoch.lock().unwrap().replace(target) == Some(target) {
+            return;
+        }
+        match self.inner.prepare_and_register_keys(target).await {
+            Ok(Some(_)) => info!(
+                "this node's registration had no next-epoch keys; registered them for epoch \
+                 {target}"
+            ),
+            // The chain already holds them and the mirror has yet to show it.
+            Ok(None) => {}
+            Err(e) => warn!(
+                "failed to register next-epoch keys for epoch {target}: {e}; will retry at the \
+                 next Sui epoch change"
+            ),
+        }
     }
 
     async fn refill_presignatures(&self, request: RefillRequest) -> anyhow::Result<()> {
