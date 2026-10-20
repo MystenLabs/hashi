@@ -69,7 +69,7 @@ Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 lookback still matches. An E1 found this way inside the range the Sui scan
 already covered also raises `SuiScanMissedEvent`.
 
-### UTXO pool (continuous mode)
+### UTXO pool
 Each bridge UTXO is a 2-of-2 between the MPC committee and the guardian, plus
 a recovery leaf that lets the committee spend alone 60 days after the UTXO
 confirms. A compromised committee can mark a UTXO spent on Move without
@@ -165,7 +165,7 @@ path with `crates/hashi-monitor/` when running from the repository root.
 
 ### Continuous monitoring
 ```bash
-cargo run -p hashi-monitor -- continuous \
+cargo run -p hashi-monitor -- \
   --config audit.sample.yaml \
   --snapshot-bucket my-hashi-monitor-snapshot
 ```

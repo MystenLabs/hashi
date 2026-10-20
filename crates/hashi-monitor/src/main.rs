@@ -4,9 +4,9 @@
 //! The `hashi-monitor` command: a continuous monitor.
 //!
 //! How it works:
-//! 1. `continuous` loads the config file, binds the metrics port, and
-//!    monitors from where its snapshot says the last run stopped, or on a
-//!    first run from the bridge's genesis on Sui.
+//! 1. It loads the config file, binds the metrics port, and monitors from
+//!    where its snapshot says the last run stopped, or on a first run from
+//!    the bridge's genesis on Sui.
 //!
 //! Assumptions:
 //! - The metrics port must bind before the audit starts, since alerting
@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use clap::Subcommand;
 use hashi_monitor::metrics::MonitorMetrics;
 use hashi_monitor::store::SnapshotStore;
 
@@ -26,29 +25,20 @@ use hashi_monitor::store::SnapshotStore;
 #[command(name = "hashi-monitor")]
 #[command(about = "Monitor correlating Hashi / Guardian / Sui events")]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+    /// Path to YAML config file.
+    #[arg(long)]
+    config: PathBuf,
 
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Run continuous monitoring on guardian timeline.
-    Continuous {
-        /// Path to YAML config file.
-        #[arg(long)]
-        config: PathBuf,
+    /// GCS bucket that keeps the monitor's snapshot: the restart start and the
+    /// UTXO pool. A restart resumes from it. Without a snapshot, the monitor
+    /// starts from the bridge's genesis on Sui with an empty pool, which needs
+    /// a Sui node that keeps the history from there.
+    #[arg(long)]
+    snapshot_bucket: String,
 
-        /// GCS bucket that keeps the monitor's snapshot: the restart start and the
-        /// UTXO pool. A restart resumes from it. Without a snapshot, the monitor
-        /// starts from the bridge's genesis on Sui with an empty pool, which needs
-        /// a Sui node that keeps the history from there.
-        #[arg(long)]
-        snapshot_bucket: String,
-
-        /// Address serving Prometheus metrics at `/metrics`.
-        #[arg(long, default_value = "0.0.0.0:9184")]
-        metrics_listen_addr: SocketAddr,
-    },
+    /// Address serving Prometheus metrics at `/metrics`.
+    #[arg(long, default_value = "0.0.0.0:9184")]
+    metrics_listen_addr: SocketAddr,
 }
 
 #[tokio::main]
@@ -60,33 +50,24 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Continuous {
-            config,
-            snapshot_bucket,
-            metrics_listen_addr,
-        } => {
-            let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let store = SnapshotStore::gcs(&snapshot_bucket)?;
-            let metrics = Arc::new(MonitorMetrics::new());
-            // Alerting reads this port, so a monitor that cannot serve it is
-            // unobservable. Bind before auditing anything and fail if it can't.
-            let listener = tokio::net::TcpListener::bind(metrics_listen_addr)
-                .await
-                .with_context(|| format!("failed to bind metrics on {metrics_listen_addr}"))?;
-            tokio::spawn({
-                let metrics = metrics.clone();
-                async move {
-                    if let Err(error) = metrics.serve(listener).await {
-                        tracing::error!(?error, "metrics server exited");
-                    }
-                }
-            });
-            let mut auditor =
-                hashi_monitor::audit::ContinuousAuditor::new(&cfg, metrics, store).await?;
-            auditor.run().await?;
+    let cfg = hashi_monitor::config::Config::load_yaml(&cli.config)?;
+    let store = SnapshotStore::gcs(&cli.snapshot_bucket)?;
+    let metrics = Arc::new(MonitorMetrics::new());
+    // Alerting reads this port, so a monitor that cannot serve it is
+    // unobservable. Bind before auditing anything and fail if it can't.
+    let listener = tokio::net::TcpListener::bind(cli.metrics_listen_addr)
+        .await
+        .with_context(|| format!("failed to bind metrics on {}", cli.metrics_listen_addr))?;
+    tokio::spawn({
+        let metrics = metrics.clone();
+        async move {
+            if let Err(error) = metrics.serve(listener).await {
+                tracing::error!(?error, "metrics server exited");
+            }
         }
-    }
+    });
+    let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(&cfg, metrics, store).await?;
+    auditor.run().await?;
 
     Ok(())
 }

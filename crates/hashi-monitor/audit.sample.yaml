@@ -1,4 +1,4 @@
-# Sample configuration for `hashi-monitor continuous`.
+# Sample configuration for `hashi-monitor`.
 #
 # The file holds the identity of one deployment. The timing bounds of the
 # withdrawal and deposit flows describe the protocol and live in the code, in
