@@ -1523,7 +1523,7 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ### 10.1 What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](node-backup.mdx#monthly-off-machine-copy) for which one. Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it. Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Each archive holds:
 
