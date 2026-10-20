@@ -20,6 +20,8 @@ use futures::stream::StreamExt;
 use hashi_types::committee::RuntimeCommittee;
 use hashi_types::move_types::PresigSealV1;
 use itertools::Itertools;
+use prometheus::Histogram;
+use prometheus::IntCounterVec;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -34,6 +36,7 @@ use tokio::time::Instant;
 use crate::communication::ChannelError;
 use crate::communication::P2PChannel;
 use crate::communication::with_timeout_and_retry_budget;
+use crate::grpc::RunGate;
 use crate::metrics::MPC_LABEL_SIGNING;
 use crate::metrics::Metrics;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -50,7 +53,7 @@ const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100
 const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Per-attempt timeout for one `get_partial_signatures` poll. Deliberately
-/// small: the collection loop in [`SigningManager::sign`] is itself the retry
+/// small: the collection loop in [`SigningManager::complete`] is itself the retry
 /// mechanism, so a slow peer costs at most one bounded probe per round instead
 /// of the default 10 x 30 s transport-retry budget.
 const PARTIAL_SIGS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -116,6 +119,61 @@ impl SigningEpochConfig {
         let dropped = (before - sigs.len()) as u64;
         (sigs, dropped)
     }
+
+    fn flag_mismatched(
+        &self,
+        blame: Blame,
+        flagged: &mut HashSet<ShareIndex>,
+        mismatch_total: &IntCounterVec,
+    ) -> bool {
+        let share_owners = &self.share_owners;
+        let per_owner: HashMap<Address, usize> = match &blame {
+            Blame::Nobody => return false,
+            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
+                .iter()
+                .filter_map(|idx| share_owners.get(idx).copied())
+                .counts(),
+        };
+        match &blame {
+            Blame::Certain(indices) => {
+                for (owner, count) in &per_owner {
+                    mismatch_total
+                        .with_label_values(&[&owner.to_string()])
+                        .inc_by(*count as u64);
+                }
+                let local: Vec<ShareIndex> = indices
+                    .iter()
+                    .copied()
+                    .filter(|idx| share_owners.get(idx) == Some(&self.address))
+                    .collect();
+                if !local.is_empty() {
+                    tracing::warn!(
+                        "Locally generated partial signatures at share indices {local:?} disagree \
+                         with the RS-recovered polynomial, so the local presig or key state may be \
+                         corrupt"
+                    );
+                }
+            }
+            Blame::Inconclusive(_) | Blame::Nobody => {}
+        }
+        let before = flagged.len();
+        flagged.extend(
+            share_owners
+                .iter()
+                .filter(|(_, owner)| per_owner.contains_key(*owner))
+                .map(|(idx, _)| *idx),
+        );
+        let grew = flagged.len() > before;
+        if grew {
+            tracing::debug!(
+                "Flagged {} share index(es) after RS recovery; the retries on the other \
+                 pending inputs also leave out their owners' partials for the rest of this \
+                 call",
+                flagged.len() - before,
+            );
+        }
+        grew
+    }
 }
 
 fn owned_counts_by_member(share_owners: &HashMap<ShareIndex, Address>) -> HashMap<Address, usize> {
@@ -127,9 +185,17 @@ fn owned_counts_by_member(share_owners: &HashMap<ShareIndex, Address>) -> HashMa
         })
 }
 
+type LocalPartials = (G, Vec<Eval<S>>, S, [u8; POINT_SIZE_IN_BYTES]);
+
 enum CacheOrPresig {
-    Cached(G, Vec<Eval<S>>, S),
-    Presig((Vec<S>, G), S),
+    Cached(PartialSigningOutput, u32),
+    Presig {
+        presig: (Vec<S>, G),
+        randomness: [u8; 32],
+        dealer_set_digest: [u8; 32],
+        batch_index: u32,
+        position: usize,
+    },
 }
 
 struct SigningPoolState {
@@ -614,9 +680,20 @@ impl SigningManager {
         metrics: &Metrics,
         result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
     ) {
-        let params = self.config.params;
-        let threshold = params.t;
-        let verifying_key = self.config.verifying_key;
+        let local = self.prepare_local(inputs, seals, timeout, metrics, &result_tx);
+        self.complete(p2p_channel, local, &RunGate::Unbounded, metrics, result_tx)
+            .await;
+    }
+
+    pub(crate) fn prepare_local(
+        &self,
+        inputs: Vec<SignInput>,
+        seals: &BTreeMap<u32, PresigSealV1>,
+        timeout: Duration,
+        metrics: &Metrics,
+        result_tx: &tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
+    ) -> LocalSigning {
+        let threshold = self.config.params.t;
         let self_address = self.config.address;
         let all_peers: HashSet<Address> = self
             .config
@@ -631,28 +708,28 @@ impl SigningManager {
         let mut request_changed: Vec<Address> = Vec::new();
         let mut seal_mismatched: BTreeMap<u32, usize> = BTreeMap::new();
         for input in inputs {
-            match self
-                .prepare_local_partial_signatures(
-                    input.signing_id,
-                    &input.message,
-                    input.global_presig_index,
-                    &input.message_delta,
-                    seals,
-                    input.derivation_address.as_ref(),
-                    metrics,
-                )
-                .await
-            {
-                Ok((public_nonce, partials, beacon)) => pending.push(InputSigningState::new(
-                    input.signing_id,
-                    input.message,
-                    public_nonce,
-                    &beacon,
-                    input.derivation_address,
-                    partials,
-                    threshold as usize,
-                    all_peers.clone(),
-                )),
+            match self.prepare_local_partial_signatures(
+                input.signing_id,
+                &input.message,
+                input.global_presig_index,
+                &input.message_delta,
+                seals,
+                input.derivation_address.as_ref(),
+                metrics,
+            ) {
+                Ok((public_nonce, partials, beacon, signing_nonce_bytes)) => {
+                    pending.push(InputSigningState::new(
+                        input.signing_id,
+                        input.message,
+                        public_nonce,
+                        &beacon,
+                        signing_nonce_bytes,
+                        input.derivation_address,
+                        partials,
+                        threshold as usize,
+                        all_peers.clone(),
+                    ))
+                }
                 Err(e) => {
                     match &e {
                         SigningError::RequestChanged { .. } => {
@@ -681,6 +758,24 @@ impl SigningManager {
                  (batch index: inputs): {seal_mismatched:?}",
             );
         }
+        LocalSigning { pending, deadline }
+    }
+
+    pub(crate) async fn complete(
+        &self,
+        p2p_channel: &impl P2PChannel,
+        local: LocalSigning,
+        gate: &RunGate,
+        metrics: &Metrics,
+        result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
+    ) {
+        let LocalSigning {
+            mut pending,
+            deadline,
+        } = local;
+        let threshold = self.config.params.t;
+        let t = threshold as usize;
+        let sweep_metrics = SweepMetrics::new(metrics);
         let _collection_timer = metrics
             .mpc_sign_collection_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
@@ -688,15 +783,41 @@ impl SigningManager {
         let mut flagged: HashSet<ShareIndex> = HashSet::new();
         let mut backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
         while !pending.is_empty() {
-            self.finalize_sweep(
-                &mut pending,
-                &mut flagged,
-                params,
-                &verifying_key,
-                metrics,
-                &result_tx,
-            )
-            .await;
+            if !pending.iter().any(|st| st.would_aggregate(t, &flagged)) {
+                finalize_sweep(
+                    &self.config,
+                    &mut pending,
+                    &mut flagged,
+                    &sweep_metrics,
+                    &result_tx,
+                );
+            } else if let Some(run) = gate.admit(deadline).await {
+                let config = self.config.clone();
+                let sweep_metrics = sweep_metrics.clone();
+                let result_tx = result_tx.clone();
+                let mut swept = std::mem::take(&mut pending);
+                let mut swept_flags = std::mem::take(&mut flagged);
+                (pending, flagged) = run
+                    .run_blocking(move || {
+                        finalize_sweep(
+                            &config,
+                            &mut swept,
+                            &mut swept_flags,
+                            &sweep_metrics,
+                            &result_tx,
+                        );
+                        (swept, swept_flags)
+                    })
+                    .await;
+            } else {
+                let waiting = pending
+                    .iter()
+                    .filter(|st| st.would_aggregate(t, &flagged))
+                    .count();
+                tracing::warn!(
+                    "{waiting} input(s) timed out waiting for a run permit to aggregate"
+                );
+            }
             if pending.is_empty() {
                 break;
             }
@@ -736,147 +857,13 @@ impl SigningManager {
         drop(_collection_timer);
     }
 
-    async fn finalize_sweep(
-        &self,
-        pending: &mut Vec<InputSigningState>,
-        flagged: &mut HashSet<ShareIndex>,
-        params: Parameters,
-        verifying_key: &G,
-        metrics: &Metrics,
-        result_tx: &tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
-    ) {
-        loop {
-            let mut grew = false;
-            let mut exhausted: Vec<Address> = Vec::new();
-            let mut i = 0;
-            while i < pending.len() {
-                let peers_exhausted = pending[i].peers_remaining.is_empty();
-                let outcome = try_finalize_signature(
-                    &mut pending[i],
-                    params,
-                    verifying_key,
-                    peers_exhausted,
-                    flagged,
-                    metrics,
-                )
-                .await;
-                match outcome {
-                    FinalizeOutcome::NeedMore => i += 1,
-                    FinalizeOutcome::Exhausted => {
-                        exhausted.push(pending[i].signing_id);
-                        i += 1;
-                    }
-                    FinalizeOutcome::Done(sig, blame) => {
-                        let st = pending.swap_remove(i);
-                        let _ = result_tx.send((st.signing_id, Ok(sig)));
-                        grew |= self.flag_mismatched(blame, flagged, metrics);
-                    }
-                    FinalizeOutcome::Failed(e) => {
-                        let st = pending.swap_remove(i);
-                        let _ = result_tx.send((st.signing_id, Err(e)));
-                    }
-                }
-            }
-            if grew {
-                continue;
-            }
-            pending.retain(|st| {
-                if !exhausted.contains(&st.signing_id) {
-                    return true;
-                }
-                let _ = result_tx.send((
-                    st.signing_id,
-                    Err(SigningError::TooManyInvalidSignatures {
-                        collected: st.partials.len(),
-                        threshold: params.t,
-                    }),
-                ));
-                false
-            });
-            return;
-        }
-    }
-
-    /// Flag every share index whose owner `blame` names, so the retries that follow can leave
-    /// their partial signatures out for the rest of this call, and count the certain ones
-    /// against their owners. Returns whether anything new was flagged.
-    ///
-    /// The blame comes from an input that already finished, so the flags only help the inputs
-    /// still pending in this call.
-    ///
-    /// The full Reed-Solomon attempt is still given every partial signature, flagged ones
-    /// included, since its decoding is what corrects them.
-    ///
-    /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
-    /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
-    fn flag_mismatched(
-        &self,
-        blame: Blame,
-        flagged: &mut HashSet<ShareIndex>,
-        metrics: &Metrics,
-    ) -> bool {
-        let share_owners = &self.config.share_owners;
-
-        // Whose partial signatures to skip, and how many indices each of them was named for.
-        // Both verdicts name contributors to leave out.
-        let per_owner: HashMap<Address, usize> = match &blame {
-            Blame::Nobody => return false,
-            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
-                .iter()
-                .filter_map(|idx| share_owners.get(idx).copied())
-                .counts(),
-        };
-
-        // Report metrics.
-        match &blame {
-            Blame::Certain(indices) => {
-                for (owner, count) in &per_owner {
-                    metrics
-                        .mpc_partial_sig_mismatch_total
-                        .with_label_values(&[&owner.to_string()])
-                        .inc_by(*count as u64);
-                }
-                let local: Vec<ShareIndex> = indices
-                    .iter()
-                    .copied()
-                    .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
-                    .collect();
-                if !local.is_empty() {
-                    tracing::warn!(
-                        "Locally generated partial signatures at share indices {local:?} disagree \
-                         with the RS-recovered polynomial, so the local presig or key state may be \
-                         corrupt"
-                    );
-                }
-            }
-            Blame::Inconclusive(_) | Blame::Nobody => {}
-        }
-        let before = flagged.len();
-        flagged.extend(
-            share_owners
-                .iter()
-                .filter(|(_, owner)| per_owner.contains_key(*owner))
-                .map(|(idx, _)| *idx),
-        );
-        let grew = flagged.len() > before;
-        if grew {
-            tracing::debug!(
-                "Flagged {} share index(es) after RS recovery; the retries on the other \
-                 pending inputs also leave out their owners' partials for the rest of this \
-                 call",
-                flagged.len() - before,
-            );
-        }
-        grew
-    }
-
     #[tracing::instrument(
         level = "info",
         skip_all,
         fields(signing_id = %signing_id, global_presig_index),
     )]
     #[allow(clippy::too_many_arguments)]
-    async fn prepare_local_partial_signatures(
+    fn prepare_local_partial_signatures(
         &self,
         signing_id: Address,
         message: &[u8],
@@ -885,27 +872,14 @@ impl SigningManager {
         seals: &BTreeMap<u32, PresigSealV1>,
         derivation_address: Option<&DerivationAddress>,
         metrics: &Metrics,
-    ) -> SigningResult<(G, Vec<Eval<S>>, S)> {
+    ) -> SigningResult<LocalPartials> {
         let config = &self.config;
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
-                let digest = signing_request_digest(message, derivation_address);
-                let beacon = signing_delta(message_delta, &existing.presig_delta());
-                let nonce = signing_nonce_bytes(&existing.public_nonce(), &beacon);
-                if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
-                {
-                    return Err(SigningError::RequestChanged { signing_id });
-                }
-                tracing::info!(
-                    "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
-                     reusing cached partial sigs (batch_index={})",
-                    state.batches.last().map_or(0, |b| b.batch_index),
-                );
                 CacheOrPresig::Cached(
-                    existing.public_nonce(),
-                    existing.partial_sigs.clone(),
-                    existing.presig_delta(),
+                    existing.clone(),
+                    state.batches.last().map_or(0, |b| b.batch_index),
                 )
             } else {
                 // Find the batch containing this presig index, advancing
@@ -966,10 +940,11 @@ impl SigningManager {
                             let next = state.batches.last().map_or(0, |b| b.batch_index) + 1;
                             self.request_refill(next);
                         }
+                        let active = state.batches.len();
+                        drop(state);
                         tracing::error!(
                             "Presig index {global_presig_index} not found in any \
-                             batch ({} batch(es) active).",
-                            state.batches.len(),
+                             batch ({active} batch(es) active).",
                         );
                         return Err(SigningError::PoolExhausted);
                     }
@@ -992,32 +967,20 @@ impl SigningManager {
                         }
                     })?;
                 let target_position = (global_presig_index - batch.start_index) as usize;
-                let presig = batch
+                let batch_index = batch.batch_index;
+                let dealer_set_digest = batch.dealer_set_digest;
+                let Some(presig) = batch
                     .pool
                     .get_mut(target_position)
                     .and_then(|slot| slot.take())
-                    .ok_or_else(|| {
-                        tracing::error!(
-                            "Presig at position {target_position} unavailable for \
-                             batch {} (already consumed or out of range).",
-                            batch.batch_index,
-                        );
-                        SigningError::PoolExhausted
-                    })?;
-                let presig_delta = presig_delta(
-                    randomness,
-                    global_presig_index,
-                    &presig.1,
-                    &batch.dealer_set_digest,
-                );
-                let used_batch_index = batch.batch_index;
-                tracing::info!(
-                    "Cache miss for {signing_id}, using presig \
-                     (address={}, global_presig_index={global_presig_index}, \
-                     batch_index={used_batch_index}, \
-                     position={target_position})",
-                    config.address,
-                );
+                else {
+                    drop(state);
+                    tracing::error!(
+                        "Presig at position {target_position} unavailable for \
+                         batch {batch_index} (already consumed or out of range).",
+                    );
+                    return Err(SigningError::PoolExhausted);
+                };
                 // Trigger refill based on the latest batch's consumption.
                 if let Some(latest) = state.batches.last() {
                     let remaining = latest.remaining();
@@ -1032,12 +995,55 @@ impl SigningManager {
                 while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
                     state.batches.remove(0);
                 }
-                CacheOrPresig::Presig(presig, presig_delta)
+                CacheOrPresig::Presig {
+                    presig,
+                    randomness: *randomness,
+                    dealer_set_digest,
+                    batch_index,
+                    position: target_position,
+                }
             }
         }; // state write lock released
-        let (public_nonce, partial_sigs, presig_delta) = match taken {
-            CacheOrPresig::Cached(nonce, sigs, presig_delta) => (nonce, sigs, presig_delta),
-            CacheOrPresig::Presig(presig, presig_delta) => {
+        match taken {
+            CacheOrPresig::Cached(existing, batch_index) => {
+                let digest = signing_request_digest(message, derivation_address);
+                let beacon = signing_delta(message_delta, &existing.presig_delta());
+                let nonce = signing_nonce_bytes(&existing.public_nonce(), &beacon);
+                if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
+                {
+                    return Err(SigningError::RequestChanged { signing_id });
+                }
+                tracing::info!(
+                    "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
+                     reusing cached partial sigs (batch_index={batch_index})",
+                );
+                Ok((
+                    existing.public_nonce(),
+                    existing.partial_sigs,
+                    beacon,
+                    nonce,
+                ))
+            }
+            CacheOrPresig::Presig {
+                presig,
+                randomness,
+                dealer_set_digest,
+                batch_index,
+                position,
+            } => {
+                tracing::info!(
+                    "Cache miss for {signing_id}, using presig \
+                     (address={}, global_presig_index={global_presig_index}, \
+                     batch_index={batch_index}, \
+                     position={position})",
+                    config.address,
+                );
+                let presig_delta = presig_delta(
+                    &randomness,
+                    global_presig_index,
+                    &presig.1,
+                    &dealer_set_digest,
+                );
                 let beacon = signing_delta(message_delta, &presig_delta);
                 let _timer = metrics
                     .mpc_sign_partial_gen_duration_seconds
@@ -1053,25 +1059,23 @@ impl SigningManager {
                 )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
                 drop(_timer);
-                self.state.write().unwrap().partial_signing_outputs.insert(
-                    signing_id,
-                    PartialSigningOutput::new(
-                        public_nonce,
-                        message_delta,
-                        presig_delta,
-                        message,
-                        derivation_address,
-                        partial_sigs.clone(),
-                    ),
+                let output = PartialSigningOutput::new(
+                    public_nonce,
+                    message_delta,
+                    presig_delta,
+                    message,
+                    derivation_address,
+                    partial_sigs.clone(),
                 );
-                (public_nonce, partial_sigs, presig_delta)
+                let nonce = *output.signing_nonce_bytes();
+                self.state
+                    .write()
+                    .unwrap()
+                    .partial_signing_outputs
+                    .insert(signing_id, output);
+                Ok((public_nonce, partial_sigs, beacon, nonce))
             }
-        };
-        Ok((
-            public_nonce,
-            partial_sigs,
-            signing_delta(message_delta, &presig_delta),
-        ))
+        }
     }
 }
 
@@ -1082,6 +1086,11 @@ pub struct SignInput {
     pub derivation_address: Option<DerivationAddress>,
     /// This input's term of the signing delta, from its withdrawal's randomness.
     pub message_delta: S,
+}
+
+pub(crate) struct LocalSigning {
+    pending: Vec<InputSigningState>,
+    deadline: Instant,
 }
 
 struct InputSigningState {
@@ -1113,6 +1122,7 @@ impl InputSigningState {
         message: Vec<u8>,
         public_nonce: G,
         beacon: &S,
+        signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
         derivation_address: Option<DerivationAddress>,
         partials: Vec<Eval<S>>,
         early_exit_floor: usize,
@@ -1123,7 +1133,7 @@ impl InputSigningState {
             message,
             public_nonce,
             derivation_address,
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            signing_nonce_bytes,
             beacon: *beacon,
             early_exit_floor,
             partials,
@@ -1180,8 +1190,11 @@ impl InputSigningState {
     }
 
     fn can_attempt(&self, t: usize, flagged: &HashSet<ShareIndex>) -> bool {
-        let n = self.partials.len();
-        if n < self.early_exit_floor || n < t {
+        self.partials.len() >= self.early_exit_floor && self.would_aggregate(t, flagged)
+    }
+
+    fn would_aggregate(&self, t: usize, flagged: &HashSet<ShareIndex>) -> bool {
+        if self.partials.len() < t {
             return false;
         }
         if !self.clean_attempted {
@@ -1218,46 +1231,108 @@ struct AggregationContext {
 }
 
 impl AggregationContext {
-    async fn aggregate(
+    fn aggregate(
         &self,
-        sigs: Vec<Eval<S>>,
-        metrics: &Metrics,
+        sigs: &[Eval<S>],
+        duration: &Histogram,
     ) -> Result<(SchnorrSignature, Blame), FastCryptoError> {
-        let _timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        let (message, nonce, beacon, vk, deriv, params) = (
-            self.message.clone(),
-            self.nonce,
-            self.beacon,
-            self.vk,
-            self.deriv,
+        let _timer = duration.start_timer();
+        aggregate_signatures(
+            &self.message,
+            &self.nonce,
+            &self.beacon,
+            sigs,
             self.params,
-        );
-        let (signature, blame) = super::spawn_blocking(move || {
-            aggregate_signatures(
-                &message,
-                &nonce,
-                &beacon,
-                &sigs,
-                params,
-                &vk,
-                deriv.as_ref(),
-            )
-        })
-        .await?;
-        Ok((signature, blame))
+            &self.vk,
+            self.deriv.as_ref(),
+        )
     }
 }
 
-async fn try_finalize_signature(
+#[derive(Clone)]
+struct SweepMetrics {
+    aggregation_duration: Histogram,
+    partial_sig_mismatch_total: IntCounterVec,
+}
+
+impl SweepMetrics {
+    fn new(metrics: &Metrics) -> Self {
+        Self {
+            aggregation_duration: metrics
+                .mpc_sign_aggregation_duration_seconds
+                .with_label_values(&[MPC_LABEL_SIGNING]),
+            partial_sig_mismatch_total: metrics.mpc_partial_sig_mismatch_total.clone(),
+        }
+    }
+}
+
+fn finalize_sweep(
+    config: &SigningEpochConfig,
+    pending: &mut Vec<InputSigningState>,
+    flagged: &mut HashSet<ShareIndex>,
+    metrics: &SweepMetrics,
+    result_tx: &tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
+) {
+    let params = config.params;
+    loop {
+        let mut grew = false;
+        let mut exhausted: Vec<Address> = Vec::new();
+        let mut i = 0;
+        while i < pending.len() {
+            let peers_exhausted = pending[i].peers_remaining.is_empty();
+            let outcome = try_finalize_signature(
+                &mut pending[i],
+                params,
+                &config.verifying_key,
+                peers_exhausted,
+                flagged,
+                &metrics.aggregation_duration,
+            );
+            match outcome {
+                FinalizeOutcome::NeedMore => i += 1,
+                FinalizeOutcome::Exhausted => {
+                    exhausted.push(pending[i].signing_id);
+                    i += 1;
+                }
+                FinalizeOutcome::Done(sig, blame) => {
+                    let st = pending.swap_remove(i);
+                    let _ = result_tx.send((st.signing_id, Ok(sig)));
+                    grew |=
+                        config.flag_mismatched(blame, flagged, &metrics.partial_sig_mismatch_total);
+                }
+                FinalizeOutcome::Failed(e) => {
+                    let st = pending.swap_remove(i);
+                    let _ = result_tx.send((st.signing_id, Err(e)));
+                }
+            }
+        }
+        if grew {
+            continue;
+        }
+        pending.retain(|st| {
+            if !exhausted.contains(&st.signing_id) {
+                return true;
+            }
+            let _ = result_tx.send((
+                st.signing_id,
+                Err(SigningError::TooManyInvalidSignatures {
+                    collected: st.partials.len(),
+                    threshold: params.t,
+                }),
+            ));
+            false
+        });
+        return;
+    }
+}
+
+fn try_finalize_signature(
     st: &mut InputSigningState,
     params: Parameters,
     verifying_key: &G,
     peers_exhausted: bool,
     flagged: &HashSet<ShareIndex>,
-    metrics: &Metrics,
+    aggregation_duration: &Histogram,
 ) -> FinalizeOutcome {
     let t = params.t as usize;
     let n = st.partials.len();
@@ -1268,7 +1343,7 @@ async fn try_finalize_signature(
             FinalizeOutcome::NeedMore
         }
     };
-    if n < t {
+    if !st.would_aggregate(t, flagged) {
         return need_more_or_fail();
     }
     let ctx = AggregationContext {
@@ -1293,7 +1368,7 @@ async fn try_finalize_signature(
     };
     if !st.clean_attempted {
         st.clean_attempted = true;
-        match ctx.aggregate(st.partials[..t].to_vec(), metrics).await {
+        match ctx.aggregate(&st.partials[..t], aggregation_duration) {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
@@ -1302,14 +1377,14 @@ async fn try_finalize_signature(
     let unflagged = st.unflagged(flagged);
     if let Some(key) = st.unflagged_prefix_key(t, &unflagged, flagged) {
         st.unflagged_prefix_attempted = Some(key);
-        match ctx.aggregate(unflagged[..t].to_vec(), metrics).await {
+        match ctx.aggregate(&unflagged[..t], aggregation_duration) {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
     }
     if st.recovery_attemptable(t) {
-        match ctx.aggregate(st.partials.clone(), metrics).await {
+        match ctx.aggregate(&st.partials, aggregation_duration) {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
@@ -1319,7 +1394,7 @@ async fn try_finalize_signature(
     if let Some(key) = st.erased_key(t, &unflagged) {
         let n_unflagged = unflagged.len();
         st.erased_attempted = Some(key);
-        match ctx.aggregate(unflagged, metrics).await {
+        match ctx.aggregate(&unflagged, aggregation_duration) {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
@@ -1334,10 +1409,10 @@ impl SigningManager {
     /// signatures.
     ///
     /// The round is bounded twice over: each peer poll gets a small
-    /// timeout-and-retry budget (the outer loop in [`SigningManager::sign`]
+    /// timeout-and-retry budget (the outer loop in [`SigningManager::complete`]
     /// is the real retry mechanism), and the round as a whole stops at
     /// `deadline` rather than draining slow peers' probes — otherwise one
-    /// black-holed peer makes the deadline check in `sign` unreachable for
+    /// black-holed peer makes the deadline check in `complete` unreachable for
     /// its duration. Peers in cooldown are skipped for the round entirely.
     ///
     /// Returns whether any new partials were merged.
@@ -3025,6 +3100,7 @@ pub(crate) mod tests {
             b"m".to_vec(),
             G::generator(),
             &S::zero(),
+            signing_nonce_bytes(&G::generator(), &S::zero()),
             None,
             partials,
             // Helper-driven collect tests exercise full rounds; the
@@ -3073,6 +3149,7 @@ pub(crate) mod tests {
             message.to_vec(),
             public_nonce,
             &beacon,
+            signing_nonce_bytes(&public_nonce, &beacon),
             None,
             all_sigs[0].clone(),
             usize::MAX,
@@ -3110,9 +3187,10 @@ pub(crate) mod tests {
             &setup.verifying_key,
             true,
             &HashSet::new(),
-            &metrics,
-        )
-        .await;
+            &metrics
+                .mpc_sign_aggregation_duration_seconds
+                .with_label_values(&[MPC_LABEL_SIGNING]),
+        );
         match outcome {
             FinalizeOutcome::Done(sig, mismatched) => {
                 assert_eq!(mismatched, Blame::Nobody, "no share should mismatch");
@@ -3148,7 +3226,6 @@ pub(crate) mod tests {
                 None,
                 &metrics,
             )
-            .await
             .unwrap();
 
         setup.set_next_batch_on_all();
@@ -3165,7 +3242,6 @@ pub(crate) mod tests {
             None,
             &metrics,
         )
-        .await
         .unwrap();
         assert!(
             mgr.state
@@ -3186,7 +3262,6 @@ pub(crate) mod tests {
                 None,
                 &metrics,
             )
-            .await
             .unwrap();
         assert_eq!(retried.0, first.0);
         assert_eq!(
@@ -3202,17 +3277,15 @@ pub(crate) mod tests {
         let metrics = test_metrics();
         let message_delta = S::from(5u128);
 
-        let unsealed = mgr
-            .prepare_local_partial_signatures(
-                test_request_id(),
-                b"not sealed yet",
-                0,
-                &message_delta,
-                &BTreeMap::new(),
-                None,
-                &metrics,
-            )
-            .await;
+        let unsealed = mgr.prepare_local_partial_signatures(
+            test_request_id(),
+            b"not sealed yet",
+            0,
+            &message_delta,
+            &BTreeMap::new(),
+            None,
+            &metrics,
+        );
         assert!(matches!(
             unsealed,
             Err(SigningError::PresigBatchNotSealed { batch_index: 0 })
@@ -3228,7 +3301,6 @@ pub(crate) mod tests {
                 None,
                 &metrics,
             )
-            .await
             .unwrap();
         assert_eq!(
             sealed.2,
@@ -3248,21 +3320,118 @@ pub(crate) mod tests {
             },
         )]);
 
-        let result = mgr
-            .prepare_local_partial_signatures(
-                test_request_id(),
-                b"foreign seal",
-                0,
-                &S::from(5u128),
-                &seals,
-                None,
-                &test_metrics(),
-            )
-            .await;
+        let result = mgr.prepare_local_partial_signatures(
+            test_request_id(),
+            b"foreign seal",
+            0,
+            &S::from(5u128),
+            &seals,
+            None,
+            &test_metrics(),
+        );
         assert!(matches!(
             result,
             Err(SigningError::SealDealerSetMismatch { batch_index: 0 })
         ));
+    }
+
+    #[test]
+    fn test_prepare_local_caches_every_inputs_partials() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let inputs: Vec<SignInput> = (0..3u64)
+            .map(|i| SignInput {
+                signing_id: test_address(100 + i as usize),
+                message: format!("input {i}").into_bytes(),
+                global_presig_index: i,
+                derivation_address: None,
+                message_delta: S::from(5u128),
+            })
+            .collect();
+        let ids: Vec<Address> = inputs.iter().map(|input| input.signing_id).collect();
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let local = mgr.prepare_local(
+            inputs,
+            &seals_for_test(),
+            Duration::from_secs(5),
+            &test_metrics(),
+            &result_tx,
+        );
+
+        assert_eq!(local.pending.len(), ids.len());
+        assert!(result_rx.try_recv().is_err());
+        let state = mgr.state.read().unwrap();
+        for id in &ids {
+            assert!(state.partial_signing_outputs.contains_key(id));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_complete_aggregates_only_under_a_caller_run_permit() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let message = b"gated";
+        let message_delta = S::from(5u128);
+        let req_id = test_request_id();
+        setup.prepare_all(message, &message_delta, req_id, 0, Some(0));
+        let metrics = test_metrics();
+        let limiter = crate::grpc::SigningWorkLimiter::default();
+        let caller = test_address(9);
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            held.push(limiter.try_take_place(caller).unwrap().run().await);
+        }
+        let work_seconds = metrics
+            .peer_bridge_work_seconds_total
+            .with_label_values(&[&caller.to_string()]);
+        let gate = limiter
+            .try_take_place(caller)
+            .unwrap()
+            .run_gate(work_seconds.clone());
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let timeout = Duration::from_secs(5);
+        let started = Instant::now();
+
+        let local = mgr.prepare_local(
+            vec![SignInput {
+                signing_id: req_id,
+                message: message.to_vec(),
+                global_presig_index: 0,
+                derivation_address: None,
+                message_delta,
+            }],
+            &seals_for_test(),
+            timeout,
+            &metrics,
+            &result_tx,
+        );
+        mgr.complete(&setup.mock_p2p_for(0), local, &gate, &metrics, result_tx)
+            .await;
+
+        assert!(started.elapsed() >= timeout);
+        let Some((
+            id,
+            Err(SigningError::Timeout {
+                collected,
+                threshold,
+            }),
+        )) = result_rx.recv().await
+        else {
+            panic!("the input must time out waiting for a run permit");
+        };
+        assert_eq!(id, req_id);
+        assert!(collected >= threshold as usize);
+        assert!(result_rx.recv().await.is_none());
+        assert_eq!(
+            metrics
+                .mpc_sign_aggregation_duration_seconds
+                .with_label_values(&[MPC_LABEL_SIGNING])
+                .get_sample_count(),
+            0
+        );
+        assert_eq!(work_seconds.get(), 0.0);
+        drop(held);
     }
 
     #[tokio::test]
@@ -3371,6 +3540,7 @@ pub(crate) mod tests {
             b"m".to_vec(),
             G::generator(),
             &S::zero(),
+            signing_nonce_bytes(&G::generator(), &S::zero()),
             None,
             vec![
                 eval_at(1, S::zero()),
@@ -3431,6 +3601,7 @@ pub(crate) mod tests {
             b"m".to_vec(),
             G::generator(),
             &S::zero(),
+            signing_nonce_bytes(&G::generator(), &S::zero()),
             None,
             vec![
                 eval_at(4, S::rand(&mut rng)),
@@ -4346,6 +4517,7 @@ pub(crate) mod tests {
             message.to_vec(),
             data.public_nonce,
             &data.beacon,
+            signing_nonce_bytes(&data.public_nonce, &data.beacon),
             None,
             partials,
             data.t as usize,
@@ -4360,9 +4532,10 @@ pub(crate) mod tests {
             &data.vk,
             true,
             flagged,
-            &test_metrics(),
+            &test_metrics()
+                .mpc_sign_aggregation_duration_seconds
+                .with_label_values(&[MPC_LABEL_SIGNING]),
         )
-        .await
     }
 
     #[tokio::test]

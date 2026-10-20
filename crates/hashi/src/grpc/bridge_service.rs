@@ -254,23 +254,30 @@ impl BridgeService for HttpService {
         tokio::spawn(
             async move {
                 let _slot = slot;
+                let gate = place.run_gate(work_seconds.clone());
                 let run = tokio::select! {
                     biased;
                     () = tx.closed() => return,
                     run = place.run() => run,
                 };
                 let job_inner = inner.clone();
-                let (prepared, place) = run
+                let (signing, place) = run
                     .run_blocking(work_seconds, move || {
-                        job_inner.prepare_withdrawal_signing(
-                            &withdrawal_txn_id,
-                            &requested_input_indices,
-                        )
+                        job_inner
+                            .prepare_withdrawal_signing(
+                                &withdrawal_txn_id,
+                                &requested_input_indices,
+                            )
+                            .map(|prepared| job_inner.sign_withdrawal_locally(prepared))
                     })
                     .await;
                 drop(place);
-                let signed = match prepared {
-                    Ok(prepared) => inner.mpc_sign_withdrawal_tx(prepared, tx.clone()).await,
+                let signed = match signing {
+                    Ok(signing) => {
+                        inner
+                            .mpc_sign_withdrawal_tx(signing, &gate, tx.clone())
+                            .await
+                    }
                     Err(e) => Err(e),
                 };
                 if let Err(e) = signed {

@@ -23,13 +23,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
+use tracing::Instrument;
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
+use crate::grpc::RunGate;
 use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
+use crate::mpc::signing::LocalSigning;
 use crate::onchain::types::DUST_RELAY_MIN_VALUE;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -1477,7 +1480,6 @@ impl Hashi {
             });
         }
         Ok(PreparedWithdrawalSigning {
-            txn_id,
             epoch,
             signing_manager,
             requests,
@@ -1544,54 +1546,80 @@ impl Hashi {
         Ok(witness)
     }
 
-    /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        fields(withdrawal_txn_id = %prepared.txn_id, selected_inputs = prepared.requests.len()),
-    )]
-    pub async fn mpc_sign_withdrawal_tx(
+    pub(crate) fn sign_withdrawal_locally(
         &self,
         prepared: PreparedWithdrawalSigning,
-        sink: tokio::sync::mpsc::Sender<
-            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
-        >,
-    ) -> anyhow::Result<()> {
+    ) -> LocalWithdrawalSigning {
         let PreparedWithdrawalSigning {
             epoch,
             signing_manager,
             requests,
             index_by_id,
-            ..
         } = prepared;
+        let seals = self.onchain_state().presig_seals(epoch);
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let batch_start = std::time::Instant::now();
+        let span = tracing::info_span!(
+            target: "hashi::mpc::signing",
+            "sign",
+            num_inputs = requests.len()
+        );
+        let local = span.in_scope(|| {
+            signing_manager.prepare_local(
+                requests,
+                &seals,
+                WITHDRAWAL_SIGNING_TIMEOUT,
+                &self.metrics,
+                &result_tx,
+            )
+        });
+        LocalWithdrawalSigning {
+            epoch,
+            signing_manager,
+            index_by_id,
+            local,
+            batch_start,
+            span,
+            result_tx,
+            result_rx,
+        }
+    }
+
+    pub(crate) async fn mpc_sign_withdrawal_tx(
+        &self,
+        signing: LocalWithdrawalSigning,
+        gate: &RunGate,
+        sink: tokio::sync::mpsc::Sender<
+            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+        >,
+    ) -> anyhow::Result<()> {
+        let LocalWithdrawalSigning {
+            epoch,
+            signing_manager,
+            index_by_id,
+            local,
+            batch_start,
+            span,
+            result_tx,
+            mut result_rx,
+        } = signing;
         let p2p_channel = RpcP2PChannel::new(
             self.onchain_state().clone(),
             epoch,
             crate::metrics::MPC_LABEL_SIGNING,
         )
         .with_max_owned_shares(signing_manager.max_owned_count());
-        let seals = self.onchain_state().presig_seals(epoch);
-        let signing_manager_ref = &signing_manager;
-        let p2p_channel_ref = &p2p_channel;
-        let metrics_ref = &*self.metrics;
-        let sink_ref = &sink;
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
-        let batch_start = std::time::Instant::now();
-        let collect = signing_manager_ref.sign(
-            p2p_channel_ref,
-            requests,
-            &seals,
-            WITHDRAWAL_SIGNING_TIMEOUT,
-            metrics_ref,
-            result_tx,
-        );
+        let metrics = &*self.metrics;
+        let collect = signing_manager
+            .complete(&p2p_channel, local, gate, metrics, result_tx)
+            .instrument(span);
         let forward = forward_signing_results(
             &mut result_rx,
             &index_by_id,
-            sink_ref,
-            metrics_ref,
+            &sink,
+            metrics,
             batch_start,
-            || signing_manager_ref.presignatures_remaining() as i64,
+            || signing_manager.presignatures_remaining() as i64,
         );
         tokio::join!(collect, forward);
         Ok(())
@@ -2043,11 +2071,27 @@ pub struct VerifiedWithdrawalTxSigning {
 }
 
 pub struct PreparedWithdrawalSigning {
-    txn_id: Address,
     epoch: u64,
     signing_manager: Arc<crate::mpc::SigningManager>,
     requests: Vec<crate::mpc::SignInput>,
     index_by_id: HashMap<Address, usize>,
+}
+
+pub(crate) struct LocalWithdrawalSigning {
+    epoch: u64,
+    signing_manager: Arc<crate::mpc::SigningManager>,
+    index_by_id: HashMap<Address, usize>,
+    local: LocalSigning,
+    batch_start: std::time::Instant,
+    span: tracing::Span,
+    result_tx: tokio::sync::mpsc::UnboundedSender<(
+        Address,
+        crate::mpc::types::SigningResult<SchnorrSignature>,
+    )>,
+    result_rx: tokio::sync::mpsc::UnboundedReceiver<(
+        Address,
+        crate::mpc::types::SigningResult<SchnorrSignature>,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
