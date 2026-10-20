@@ -26,7 +26,6 @@
 //! - Findings are returned to the caller and not kept. A complete machine
 //!   may have reported findings earlier.
 
-use crate::audit::AuditWindow;
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
@@ -128,7 +127,7 @@ impl WithdrawalStateMachine {
     /// Are any expected neighboring events still outstanding?
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
-    /// Callers must ensure `is_in_audit_window()` is true before using this for
+    /// Callers must ensure `is_since()` is true before using this for
     /// garbage collection. Out-of-window withdrawals with pending expectations
     /// may remain in memory, but they arise only from the bounded lookback or
     /// lookahead ranges.
@@ -143,11 +142,11 @@ impl WithdrawalStateMachine {
             .collect()
     }
 
-    /// Whether any seen event falls in `window`.
-    pub fn is_in_audit_window(&self, window: &impl AuditWindow) -> bool {
+    /// Whether any seen event is at or after `window_start`.
+    pub fn is_since(&self, window_start: UnixSeconds) -> bool {
         self.seen_events
             .iter()
-            .any(|e| window.in_window(e.timestamp_secs))
+            .any(|e| e.timestamp_secs >= window_start)
     }
 
     /// The time of the earliest event seen.
@@ -290,7 +289,7 @@ impl WithdrawalStateMachine {
 
     /// Check for violations given per-source cursors.
     /// Only reports a missing event if its deadline has passed relative to the relevant cursor.
-    /// Callers must ensure is_in_audit_window() is true before calling this function.
+    /// Callers must ensure is_since() is true before calling this function.
     pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
         let mut out = Vec::new();
         for (event_type, deadline, relation) in &self.expected_events {
@@ -385,17 +384,6 @@ mod tests {
     use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::witness_program_from_address;
-
-    struct TestWindow {
-        start: UnixSeconds,
-        end: UnixSeconds,
-    }
-
-    impl AuditWindow for TestWindow {
-        fn in_window(&self, timestamp_secs: UnixSeconds) -> bool {
-            timestamp_secs >= self.start && timestamp_secs <= self.end
-        }
-    }
 
     fn event(
         source: WithdrawalEventType,
@@ -746,16 +734,12 @@ mod tests {
     }
 
     #[test]
-    fn backfill_e1_outside_window_e2_inside_is_still_valid() {
+    fn an_e1_before_the_window_start_with_an_e2_inside_it_is_still_valid() {
         let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 31, 90, 1),
             &timing,
         );
-        let window = TestWindow {
-            start: 100,
-            end: 200,
-        };
 
         assert!(
             sm.add_event(
@@ -764,7 +748,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(sm.is_in_audit_window(&window));
+        assert!(sm.is_since(100));
 
         let findings = sm.violations(&Cursors {
             sui: 1_000,
@@ -781,12 +765,8 @@ mod tests {
             event(WithdrawalEventType::E1HashiApproved, 88, 120, 2),
             &timing,
         );
-        let window = TestWindow {
-            start: 100,
-            end: 200,
-        };
 
-        assert!(sm.is_in_audit_window(&window));
+        assert!(sm.is_since(100));
     }
 
     #[test]

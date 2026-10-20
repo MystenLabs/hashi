@@ -13,7 +13,7 @@ pub mod time;
 /// The withdrawal and deposit state machines.
 pub mod state_machine;
 
-/// The batch and continuous auditors.
+/// The auditor core and the continuous auditor.
 pub mod audit;
 
 /// The Sui, guardian S3 and Bitcoin pollers.

@@ -69,7 +69,7 @@ Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
 lookback still matches. An E1 found this way inside the range the Sui scan
 already covered also raises `SuiScanMissedEvent`.
 
-### UTXO pool (continuous mode)
+### UTXO pool
 Each bridge UTXO is a 2-of-2 between the MPC committee and the guardian, plus
 a recovery leaf that lets the committee spend alone 60 days after the UTXO
 confirms. A compromised committee can mark a UTXO spent on Move without
@@ -110,7 +110,7 @@ first run, which starts at the bridge's genesis on a fullnode that still
 serves the history, so every UTXO is seen enter. The spent record is never
 pruned; a spent UTXO is a few dozen bytes. The pool is kept between runs in
 the monitor's snapshot, so a restart resumes with the pool the last run
-built. See "Continuous monitoring" below.
+built. See "Running the monitor" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
 held. It first logs the twenty UTXOs held longest, by block time, with each
@@ -139,18 +139,17 @@ derivation path, is invisible to the monitor and out of scope. A later check
 of the pool against Move's records will report a withheld deposit on the
 first day instead of at the warn age.
 
-### Modes
-1. **Batch**: one-time audit over a guardian time range `[start, end]`.
-2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
-
 ### Timeline semantics (withdrawals)
-- User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui withdrawal events are polled from one E1 delay before the guardian
-  window, since an E1 older than that is a late E2 in its own right. An E1
+The monitor polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports
+findings as they appear.
+
+- The start is on the **guardian (E2)** timeline.
+- Sui withdrawal events are polled from one E1 delay before the start,
+  since an E1 older than that is a late E2 in its own right. An E1
   outside the scan is still read from Sui by its withdrawal id.
-- Continuous mode reads the guardian from one E1 skew before its start, since
+- The guardian is read from one E1 skew before the start, since
   an E1 at the start may follow its E2 by that much.
-- Orphan E1 findings are currently still reported when E1 falls in the user window.
+- Orphan E1 findings are reported when E1 falls in the window.
 - Deposits are audited over the derived Sui range rather than gated by the
   withdrawal audit-window logic.
 
@@ -164,20 +163,9 @@ JSON-RPC endpoint.
 Run the examples below from `crates/hashi-monitor`, or prefix the configuration
 path with `crates/hashi-monitor/` when running from the repository root.
 
-### Batch audit
+### Running the monitor
 ```bash
-cargo run -p hashi-monitor -- batch \
-  --config audit.sample.yaml \
-  --start 2026-08-04T18:00:00Z \
-  --end 2026-08-04T19:00:00Z
-```
-CLI timestamps use whole-second UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`). `--end`
-defaults to the current time if omitted. A batch audit fails if the Sui node has
-pruned the start of its Sui range.
-
-### Continuous monitoring
-```bash
-cargo run -p hashi-monitor -- continuous \
+cargo run -p hashi-monitor -- \
   --config audit.sample.yaml \
   --snapshot-bucket my-hashi-monitor-snapshot
 ```
@@ -218,7 +206,7 @@ from genesis, on a node that still serves it.
 
 ## Config
 The config file holds the identity of one deployment. See `audit.sample.yaml`
-for a complete batch/continuous example. The deployment in sui-operations
+for a complete example. The deployment in sui-operations
 stores that shape verbatim.
 
 - The required `deployment` block contains the expected Bitcoin network, S3
