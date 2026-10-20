@@ -205,17 +205,17 @@ impl ContinuousAuditor {
         let findings = self.inner.fetch_btc_info()?;
         self.report_findings("btc", &findings);
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
-        let pool_findings = self.inner.add_to_pool();
+        let pool_findings = self.inner.add_to_pool_and_gc();
         self.report_findings("pool", &pool_findings);
         Ok(())
     }
 
-    async fn tick_state_checks_and_gc(&mut self) {
+    async fn tick_state_checks(&mut self) {
         let lookup_findings = self.inner.fetch_missing_hashi_approvals().await;
         self.report_findings("lookup", &lookup_findings);
-        let violations = self.inner.detect_violations();
+        let violations = self.inner.detect_timing_violations();
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
-        self.report_findings("violations", &violations);
+        self.report_findings("timing", &violations);
         let spends = self.inner.judge_suspect_spends();
         self.report_findings(SOURCE_UTXO, &spends);
 
@@ -251,7 +251,7 @@ impl ContinuousAuditor {
         // deposits through the pool.
         let utxo = self.tick_utxo_check().await;
         Self::log_initial_catch_up(SOURCE_UTXO, utxo);
-        self.tick_state_checks_and_gc().await;
+        self.tick_state_checks().await;
 
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
@@ -291,7 +291,7 @@ impl ContinuousAuditor {
                     }
                 }
                 _ = state_checks_ticker.tick() => {
-                    self.tick_state_checks_and_gc().await;
+                    self.tick_state_checks().await;
                 }
                 _ = utxo_ticker.tick() => {
                     if let Err(error) = self.tick_utxo_check().await {
@@ -400,7 +400,6 @@ mod tests {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            pending_deposit_requests: HashMap::new(),
             window_start,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
@@ -413,7 +412,7 @@ mod tests {
                 .ingest_batch(vec![MonitorEvent::Withdrawal(approval)])
                 .is_empty()
         );
-        assert_eq!(inner.detect_violations().len(), 1);
+        assert_eq!(inner.detect_timing_violations().len(), 1);
 
         let restart_start = inner.progress_watermarks().restart_start;
 
@@ -433,7 +432,6 @@ mod tests {
                 cfg: cfg.clone(),
                 pending_withdrawals: HashMap::new(),
                 pending_deposits: HashMap::new(),
-                pending_deposit_requests: HashMap::new(),
                 window_start,
                 utxo_pool,
                 suspect_spends: HashMap::new(),
@@ -456,7 +454,7 @@ mod tests {
         let resumed_from = auditor.inner.window_start;
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(approval)]);
 
-        auditor.tick_state_checks_and_gc().await;
+        auditor.tick_state_checks().await;
         let saved = auditor.store.load().await.unwrap();
         assert_eq!(
             saved,
@@ -466,7 +464,7 @@ mod tests {
         // The approval's flow ends before the next check, which still saves a
         // start that reads it again.
         auditor.inner.pending_withdrawals.clear();
-        auditor.tick_state_checks_and_gc().await;
+        auditor.tick_state_checks().await;
         let saved = auditor.store.load().await.unwrap();
         assert_eq!(
             saved,
@@ -487,7 +485,7 @@ mod tests {
         assert!(pool.add_deposit(&deposit).is_none());
         let mut auditor = auditor_with(&cfg, pool.clone()).await;
 
-        auditor.tick_state_checks_and_gc().await;
+        auditor.tick_state_checks().await;
 
         let saved = auditor.store.load().await.unwrap().unwrap();
         assert_eq!(saved.pool, pool);

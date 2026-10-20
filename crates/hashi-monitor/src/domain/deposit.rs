@@ -48,61 +48,6 @@ impl fmt::Display for DepositId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MonitorDepositEvent {
-    pub event_type: DepositEventType,
-    pub timestamp_secs: UnixSeconds,
-    pub deposit_id: DepositId,
-    /// Satoshis in the deposit output. Sui gives the claimed amount, Bitcoin
-    /// the paid amount.
-    pub amount: u64,
-    /// Script the deposit output pays. Sui gives the bridge address of the
-    /// claimed derivation path, Bitcoin the paid script.
-    pub script_pubkey: ScriptBuf,
-}
-
-impl MonitorDepositEvent {
-    /// E2 from Hashi's `DepositConfirmed`. Its Move payload has no
-    /// timestamp, so the containing checkpoint's time is used. The claim's
-    /// derivation path becomes the bridge script the state machine compares
-    /// with the paid output.
-    pub fn from_sui(
-        event: DepositConfirmed,
-        checkpoint_timestamp_secs: UnixSeconds,
-        keys: &HashiBTCKeys,
-    ) -> Self {
-        Self {
-            event_type: DepositEventType::E2HashiDeposited,
-            timestamp_secs: checkpoint_timestamp_secs,
-            deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
-            amount: event.utxo.amount,
-            script_pubkey: keys.script_pubkey(event.utxo.derivation_path.as_ref()),
-        }
-    }
-
-    /// E1 from Bitcoin's confirmation: the output at `deposit_id`'s vout, or
-    /// `None` if the transaction has no output there.
-    pub fn from_btc(confirmation: &BtcConfirmation, deposit_id: DepositId) -> Option<Self> {
-        let output = confirmation.outputs.get(deposit_id.vout() as usize)?;
-        Some(Self {
-            event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: confirmation.confirmed_time,
-            deposit_id,
-            amount: output.value.to_sat(),
-            script_pubkey: output.script_pubkey.clone(),
-        })
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DepositEventType {
-    /// deposit confirmed event on btc
-    E1BtcConfirmed,
-    /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
-    /// timestamp, supplied with the transaction by Sui gRPC.
-    E2HashiDeposited,
-}
-
 /// The monitor's view of `DepositRequested` on Sui: the user's claim that a
 /// Bitcoin output pays the bridge. The public `deposit` entry emits it, so
 /// the committee cannot suppress it. Its timestamp is the request's own.
@@ -124,7 +69,7 @@ pub struct SuiDepositRequestedEvent {
 impl SuiDepositRequestedEvent {
     /// Keep the claim and derive its bridge script. The requester and the
     /// digest are not used.
-    pub fn from_sui(event: DepositRequested, keys: &HashiBTCKeys) -> Self {
+    pub fn new(event: DepositRequested, keys: &HashiBTCKeys) -> Self {
         Self {
             request_id: event.request_id,
             timestamp_secs: unix_millis_to_seconds(event.timestamp_ms),
@@ -132,6 +77,50 @@ impl SuiDepositRequestedEvent {
             amount: event.amount,
             script_pubkey: keys.script_pubkey(event.derivation_path.as_ref()),
         }
+    }
+}
+
+/// The monitor's view of Hashi's `DepositConfirmed` on Sui: the committee's
+/// claim that a deposit is paid, on which Move mints hBTC. Move copies the
+/// UTXO from the request, so it names the request's outpoint, amount and
+/// path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuiDepositConfirmedEvent {
+    /// The containing checkpoint's time: the Move payload has none.
+    pub timestamp_secs: UnixSeconds,
+    /// The Sui `DepositRequest` the confirmation answers.
+    pub request_id: Address,
+    pub deposit_id: DepositId,
+    /// Satoshis minted.
+    pub amount: u64,
+    /// The bridge script of the claimed derivation path.
+    pub script_pubkey: ScriptBuf,
+}
+
+impl SuiDepositConfirmedEvent {
+    /// The claim's derivation path becomes the bridge script the pool check
+    /// compares with the paid output.
+    pub fn new(
+        event: DepositConfirmed,
+        checkpoint_timestamp_secs: UnixSeconds,
+        keys: &HashiBTCKeys,
+    ) -> Self {
+        Self {
+            timestamp_secs: checkpoint_timestamp_secs,
+            request_id: event.request_id,
+            deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
+            amount: event.utxo.amount,
+            script_pubkey: keys.script_pubkey(event.utxo.derivation_path.as_ref()),
+        }
+    }
+
+    /// Whether the confirmation names `request` and its UTXO: the same
+    /// outpoint, amount and path. Move copies the UTXO from the request.
+    pub fn matches_request(&self, request: &SuiDepositRequestedEvent) -> bool {
+        self.request_id == request.request_id
+            && self.deposit_id == request.deposit_id
+            && self.amount == request.amount
+            && self.script_pubkey == request.script_pubkey
     }
 }
 

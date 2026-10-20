@@ -54,9 +54,9 @@ use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::StructTag;
 
-use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::SuiDepositConfirmedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
@@ -134,15 +134,13 @@ pub fn parse_event(
         Some(HashiEvent::DepositConfirmed(event)) => {
             // ListTransactions supplies the containing checkpoint's timestamp
             // alongside the nested events.
-            events.push(MonitorEvent::Deposit(MonitorDepositEvent::from_sui(
-                event,
-                transaction_timestamp_secs,
-                hashi_btc_keys,
-            )));
+            events.push(MonitorEvent::DepositConfirmed(
+                SuiDepositConfirmedEvent::new(event, transaction_timestamp_secs, hashi_btc_keys),
+            ));
         }
         Some(HashiEvent::DepositRequested(event)) => {
             events.push(MonitorEvent::DepositRequested(
-                SuiDepositRequestedEvent::from_sui(event, hashi_btc_keys),
+                SuiDepositRequestedEvent::new(event, hashi_btc_keys),
             ));
         }
         Some(_) | None => {}

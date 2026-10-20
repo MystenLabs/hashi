@@ -5,20 +5,23 @@
 //!
 //! Why it exists: the continuous auditor decides when to poll. The core
 //! reads the sources and judges the flows. It holds one state machine per
-//! pending withdrawal and per pending deposit.
+//! pending withdrawal and per pending deposit request.
 //!
 //! How it works:
 //! 1. The Sui and guardian pollers return events, and the core ingests each
 //!    one into its withdrawal's or deposit's state machine. A contradictory
-//!    event is reported and dropped.
+//!    event is reported and dropped. A `DepositConfirmed` whose request has
+//!    no open machine is checked against the UTXO pool at once.
 //! 2. Each tick, the core looks up on Bitcoin every machine that expects a
 //!    Bitcoin event, and ingests the confirmations it finds.
 //! 3. A Sui approval still missing after its deadline is fetched by its
 //!    withdrawal id, since the Sui scan may have started after it.
-//! 4. Each tick, the core reports the violations of every machine in the
-//!    audit window: the expected events whose deadline a cursor has passed.
+//! 4. Each tick, the core reports the timing violations of every machine
+//!    in the audit window: the expected events whose deadline a cursor has
+//!    passed.
 //! 5. Complete flows are added to the UTXO pool: it takes the UTXOs they
-//!    moved, and the flows are dropped.
+//!    moved, and the flows are dropped. A `DepositConfirmed` a closed
+//!    deposit machine held is then checked against the pool.
 //! 6. The progress watermarks give the time through which every flow is
 //!    verified, which is where a restart starts.
 //! 7. The UTXO pool check asks Bitcoin about every held UTXO. A spend no
@@ -35,11 +38,10 @@
 use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
-use crate::domain::DepositId;
-use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
+use crate::domain::SuiDepositConfirmedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalEventType;
 use crate::time::human_timestamp_delta;
@@ -59,7 +61,6 @@ use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::approval::HashiApproval;
 use crate::state_machine::BtcFetchOutcome;
-use crate::state_machine::DepositRequestStateMachine;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::OutPoint;
@@ -164,11 +165,10 @@ pub struct AuditorCore {
     cfg: Config,
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
-    pending_deposits: HashMap<DepositId, DepositStateMachine>,
     /// Deposit requests Bitcoin is still asked about. Keyed by the Sui
     /// request id, so a replayed event is ignored and each request has its
     /// own.
-    pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
+    pending_deposits: HashMap<Address, DepositStateMachine>,
     /// A flow is audited only if one of its events is at or after this time.
     /// The earlier ones come from the lookbacks and were judged before the
     /// last restart.
@@ -202,7 +202,6 @@ impl AuditorCore {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            pending_deposit_requests: HashMap::new(),
             window_start,
             utxo_pool,
             suspect_spends: HashMap::new(),
@@ -225,7 +224,7 @@ impl AuditorCore {
             .collect()
     }
 
-    /// Ask Bitcoin about every coin held in the UTXO pool and return the
+    /// Ask Bitcoin about every UTXO held in the UTXO pool and return the
     /// findings. The spends the pool cannot explain are kept as suspects
     /// for `judge_suspect_spends`.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
@@ -305,18 +304,19 @@ impl AuditorCore {
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
         match event {
             MonitorEvent::Withdrawal(event) => self.ingest_withdrawal(event),
-            MonitorEvent::Deposit(event) => self.ingest_deposit(event),
-            MonitorEvent::DepositRequested(event) => {
-                self.ingest_deposit_request(event);
-                Vec::new()
-            }
+            MonitorEvent::DepositConfirmed(event) => self.ingest_deposit_confirmed(event),
+            MonitorEvent::DepositRequested(event) => self.ingest_deposit_request(event),
         }
     }
 
-    fn ingest_deposit_request(&mut self, event: SuiDepositRequestedEvent) {
-        self.pending_deposit_requests
-            .entry(event.request_id)
-            .or_insert_with(|| DepositRequestStateMachine::new(event, &self.cfg.timing));
+    fn ingest_deposit_request(&mut self, event: SuiDepositRequestedEvent) -> Vec<MonitorFinding> {
+        match self.pending_deposits.entry(event.request_id) {
+            Entry::Occupied(entry) => entry.get().add_sui_request(&event).into_iter().collect(),
+            Entry::Vacant(entry) => {
+                entry.insert(DepositStateMachine::new(event, &self.cfg.timing));
+                Vec::new()
+            }
+        }
     }
 
     fn ingest_withdrawal(&mut self, event: MonitorWithdrawalEvent) -> Vec<MonitorFinding> {
@@ -330,22 +330,16 @@ impl AuditorCore {
         }
     }
 
-    fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Vec<MonitorFinding> {
-        let deposit_id = event.deposit_id;
-        match self.pending_deposits.entry(deposit_id) {
-            Entry::Occupied(entry) => {
-                if entry.get().sui_event() != &event {
-                    return vec![MonitorFinding::InvalidEventAdded(
-                        "duplicate deposit event for same outpoint with different contents"
-                            .to_string(),
-                    )];
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(DepositStateMachine::new(event, &self.cfg.timing));
-            }
+    /// Hashi's `DepositConfirmed`. Move confirms only a request it holds, so
+    /// the request came first. While its machine is open, the machine keeps
+    /// the confirmation. Once it closed, the pool has its answer.
+    fn ingest_deposit_confirmed(&mut self, event: SuiDepositConfirmedEvent) -> Vec<MonitorFinding> {
+        match self.pending_deposits.get_mut(&event.request_id) {
+            Some(sm) => sm.add_sui_confirmation(event).into_iter().collect(),
+            None => self
+                .utxo_pool
+                .check_sui_confirmation(&event, self.cfg.timing.deposit_confirmation_skew),
         }
-        Vec::new()
     }
 
     pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) -> Vec<MonitorFinding> {
@@ -373,12 +367,7 @@ impl AuditorCore {
         let deposit_count = self
             .pending_deposits
             .values()
-            .filter(|sm| sm.is_expecting_events())
-            .count();
-        let deposit_request_count = self
-            .pending_deposit_requests
-            .values()
-            .filter(|sm| sm.is_expecting_events())
+            .filter(|sm| sm.expects_btc())
             .count();
         let unique_txids = self
             .pending_withdrawals
@@ -390,14 +379,8 @@ impl AuditorCore {
             .chain(
                 self.pending_deposits
                     .values()
-                    .filter(|sm| sm.is_expecting_events())
+                    .filter(|sm| sm.expects_btc())
                     .map(DepositStateMachine::btc_txid),
-            )
-            .chain(
-                self.pending_deposit_requests
-                    .values()
-                    .filter(|sm| sm.is_expecting_events())
-                    .map(DepositRequestStateMachine::btc_txid),
             )
             .collect::<HashSet<_>>()
             .into_iter()
@@ -405,7 +388,6 @@ impl AuditorCore {
         tracing::info!(
             withdrawal_count,
             deposit_count,
-            deposit_request_count,
             unique_txids = unique_txids.len(),
             "starting bitcoin confirmation lookups"
         );
@@ -426,16 +408,7 @@ impl AuditorCore {
         }
 
         for sm in self.pending_deposits.values_mut() {
-            if sm.is_expecting_events()
-                && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.btc_client)?
-            {
-                findings.extend(new_findings);
-            }
-        }
-
-        for sm in self.pending_deposit_requests.values_mut() {
-            if sm.is_expecting_events() {
+            if sm.expects_btc() {
                 sm.try_fetch_btc_tx(&self.btc_client)?;
             }
         }
@@ -443,36 +416,50 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// The deposits Bitcoin confirmed for deposit requests since the last
-    /// call. Each is removed from the pending requests.
-    fn take_confirmed_deposits(&mut self) -> Vec<ConfirmedDeposit> {
-        let confirmed = self
-            .pending_deposit_requests
+    /// Remove the deposit machines that closed since the last call. Returns
+    /// the deposits Bitcoin confirmed, and the `DepositConfirmed` events the
+    /// machines held, to check against the pool once it took the deposits.
+    fn take_closed_deposits(&mut self) -> (Vec<ConfirmedDeposit>, Vec<SuiDepositConfirmedEvent>) {
+        let closed = self
+            .pending_deposits
             .iter()
-            .filter(|(_, sm)| sm.confirmed().is_some())
+            .filter(|(_, sm)| sm.is_ready_for_gc())
             .map(|(request_id, _)| *request_id)
             .collect::<Vec<_>>();
-        let deposits = confirmed
-            .into_iter()
-            .filter_map(|request_id| self.pending_deposit_requests.remove(&request_id))
-            .filter_map(DepositRequestStateMachine::into_confirmed)
-            .collect::<Vec<_>>();
-        for deposit in &deposits {
-            tracing::info!(
-                deposit_id = %deposit.deposit_id,
-                amount = deposit.amount,
-                block_time = %utc_timestamp(deposit.block_time),
-                "deposit request confirmed on Bitcoin at a bridge address"
-            );
+        let mut deposits = Vec::new();
+        let mut sui_confirmations = Vec::new();
+        for request_id in closed {
+            let sm = self
+                .pending_deposits
+                .remove(&request_id)
+                .expect("closed request is pending");
+            let deposit_id = sm.deposit_id();
+            let (deposit, sui_confirmation) = sm.into_parts();
+            match &deposit {
+                Some(deposit) => tracing::info!(
+                    deposit_id = %deposit.deposit_id,
+                    amount = deposit.amount,
+                    block_time = %utc_timestamp(deposit.block_time),
+                    "deposit request confirmed on Bitcoin at a bridge address"
+                ),
+                // Bitcoin answered without a UTXO, or the request lapsed.
+                None => tracing::debug!(
+                    %request_id,
+                    %deposit_id,
+                    "deposit request closed without a UTXO"
+                ),
+            }
+            deposits.extend(deposit);
+            sui_confirmations.extend(sui_confirmation);
         }
-        deposits
+        (deposits, sui_confirmations)
     }
 
     /// The complete withdrawals in the window: the ones the UTXO pool takes.
     fn complete_withdrawals(&self) -> Vec<ConfirmedWithdrawal> {
         self.pending_withdrawals
             .values()
-            .filter(|sm| sm.is_since(self.window_start) && !sm.is_expecting_events())
+            .filter(|sm| sm.is_since(self.window_start) && sm.is_ready_for_gc())
             .filter_map(|sm| sm.confirmed().cloned())
             .collect()
     }
@@ -527,23 +514,25 @@ impl AuditorCore {
         findings
     }
 
-    pub fn detect_violations(&self) -> Vec<MonitorFinding> {
+    pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_since(self.window_start) {
                 continue;
             }
 
-            findings.extend(sm.violations(&self.cursors()));
+            findings.extend(sm.timing_violations(&self.cursors()));
         }
         for sm in self.pending_deposits.values() {
-            findings.extend(sm.violations());
+            findings.extend(sm.timing_violations());
         }
         findings
     }
 
-    /// Add every complete flow in the window to the UTXO pool: it takes the
-    /// UTXOs the flow moved, then the flow is dropped and logged. The pool takes
+    /// Add every complete flow in the window to the UTXO pool, then drop it:
+    /// the pool takes the UTXOs the flow moved. A closed deposit machine is
+    /// dropped too, and the `DepositConfirmed` it held is checked against the
+    /// pool. The pool takes
     /// every deposit before any withdrawal, and a withdrawal's change before
     /// its inputs, so the order the flows completed in does not matter.
     /// Call it right after the Bitcoin lookups and before any other poll:
@@ -556,17 +545,23 @@ impl AuditorCore {
     /// never completes never reaches the pool: its inputs stay held, and
     /// the daily check reports them once they are too old, on top of the
     /// finding for its missing event.
-    pub fn add_to_pool(&mut self) -> Vec<MonitorFinding> {
+    pub fn add_to_pool_and_gc(&mut self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
-        let confirmed_deposits = self.take_confirmed_deposits();
+        let (confirmed_deposits, sui_confirmations) = self.take_closed_deposits();
         let confirmed_withdrawals = self.complete_withdrawals();
         for deposit in &confirmed_deposits {
             findings.extend(self.utxo_pool.add_deposit(deposit));
         }
         findings.extend(self.utxo_pool.add_withdrawals(&confirmed_withdrawals));
+        for sui in &sui_confirmations {
+            findings.extend(
+                self.utxo_pool
+                    .check_sui_confirmation(sui, self.cfg.timing.deposit_confirmation_skew),
+            );
+        }
 
         self.pending_withdrawals.retain(|wid, sm| {
-            if !sm.is_since(self.window_start) || sm.is_expecting_events() {
+            if !sm.is_since(self.window_start) || !sm.is_ready_for_gc() {
                 return true;
             }
             let e1 = sm
@@ -590,33 +585,12 @@ impl AuditorCore {
             false
         });
 
-        self.pending_deposits.retain(|deposit_id, sm| {
-            if sm.is_expecting_events() {
-                return true;
-            }
-            tracing::debug!(%deposit_id, "deposit flow is complete");
-            false
-        });
-
-        // A request Bitcoin answered without a UTXO, or that lapsed. One
-        // with a UTXO was taken above.
-        self.pending_deposit_requests.retain(|request_id, sm| {
-            if sm.is_expecting_events() {
-                return true;
-            }
-            tracing::debug!(
-                %request_id,
-                deposit_id = %sm.deposit_id(),
-                "deposit request closed without a UTXO"
-            );
-            false
-        });
         findings
     }
 
     /// Where a restart can start and still replay every flow the auditor
     /// holds: an open flow, and a complete one the pool has not taken yet.
-    /// A complete flow leaves the auditor only when `add_to_pool` takes it,
+    /// A complete flow leaves the auditor only when `add_to_pool_and_gc` takes it,
     /// in the Bitcoin tick, so it pins the floor until then. Otherwise a
     /// snapshot saved in between would skip it, and its UTXOs would never
     /// move in the pool.
@@ -648,12 +622,7 @@ impl AuditorCore {
         let unresolved_deposit_floor = self
             .pending_deposits
             .values()
-            .map(|sm| sm.sui_event().timestamp_secs)
-            .chain(
-                self.pending_deposit_requests
-                    .values()
-                    .map(DepositRequestStateMachine::requested_at),
-            )
+            .map(DepositStateMachine::requested_at)
             .min()
             .unwrap_or(u64::MAX);
 
@@ -707,6 +676,7 @@ impl AuditorCore {
 mod tests {
     use super::*;
     use crate::domain::BtcConfirmation;
+    use crate::domain::DepositId;
     use crate::rpc::sui::approval::tests::with_wrong_txid;
     use crate::rpc::sui::approval::tests::withdrawal_transaction;
     use crate::rpc::sui::tests::looked_up_approval;
@@ -731,7 +701,6 @@ mod tests {
         let mut auditor = AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            pending_deposit_requests: HashMap::new(),
             window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
@@ -778,7 +747,18 @@ mod tests {
                 .ingest(MonitorEvent::DepositRequested(request.clone()))
                 .is_empty()
         );
-        assert_eq!(auditor.pending_deposit_requests.len(), 1);
+        assert_eq!(auditor.pending_deposits.len(), 1);
+
+        // The same request id with other contents is a contradiction.
+        let contradiction = SuiDepositRequestedEvent {
+            amount: 2,
+            ..request.clone()
+        };
+        assert!(matches!(
+            &auditor.ingest(MonitorEvent::DepositRequested(contradiction))[..],
+            [MonitorFinding::InvalidEventAdded(_)]
+        ));
+        assert_eq!(auditor.pending_deposits.len(), 1);
 
         // Another request for the same UTXO has its own machine.
         let again = SuiDepositRequestedEvent {
@@ -790,7 +770,7 @@ mod tests {
                 .ingest(MonitorEvent::DepositRequested(again))
                 .is_empty()
         );
-        assert_eq!(auditor.pending_deposit_requests.len(), 2);
+        assert_eq!(auditor.pending_deposits.len(), 2);
     }
 
     #[tokio::test]
@@ -812,7 +792,7 @@ mod tests {
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
         // The approval is ingested, so it is not also reported missing.
-        assert!(auditor.detect_violations().is_empty());
+        assert!(auditor.detect_timing_violations().is_empty());
     }
 
     #[tokio::test]
@@ -823,7 +803,7 @@ mod tests {
             auditor_missing_approval(approved_at + 1, approved_at + 3_600, approval.btc_txid).await;
 
         assert!(auditor.fetch_missing_hashi_approvals().await.is_empty());
-        assert!(auditor.detect_violations().is_empty());
+        assert!(auditor.detect_timing_violations().is_empty());
     }
 
     #[tokio::test]
@@ -849,8 +829,8 @@ mod tests {
         );
         // The rejected approval is not ingested, so the E1 stays missing.
         assert!(matches!(
-            auditor.detect_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            auditor.detect_timing_violations()[..],
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 
@@ -870,8 +850,8 @@ mod tests {
             )]
         );
         assert!(matches!(
-            auditor.detect_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            auditor.detect_timing_violations()[..],
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 
@@ -888,7 +868,6 @@ mod tests {
         let mut auditor = AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            pending_deposit_requests: HashMap::new(),
             window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
@@ -922,7 +901,6 @@ mod tests {
         AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            pending_deposit_requests: HashMap::new(),
             window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
@@ -931,6 +909,110 @@ mod tests {
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
             cfg,
         }
+    }
+
+    /// A deposit request for `txid(9):1` of `amount` to `p2wpkh(0x54)`, and
+    /// Hashi's confirmation of it.
+    fn deposit_request_and_confirmation(
+        amount: u64,
+    ) -> (SuiDepositRequestedEvent, SuiDepositConfirmedEvent) {
+        let request = SuiDepositRequestedEvent {
+            request_id: Address::new([0x61; 32]),
+            timestamp_secs: 100,
+            deposit_id: DepositId::new(txid(9), 1),
+            amount,
+            script_pubkey: p2wpkh(0x54),
+        };
+        let confirmation = SuiDepositConfirmedEvent {
+            timestamp_secs: 200,
+            request_id: request.request_id,
+            deposit_id: request.deposit_id,
+            amount,
+            script_pubkey: request.script_pubkey.clone(),
+        };
+        (request, confirmation)
+    }
+
+    #[tokio::test]
+    async fn a_sui_confirmation_after_its_request_closed_is_checked_against_the_pool() {
+        let mut auditor = auditor_with_pool().await;
+        let (_, sui) = deposit_request_and_confirmation(50_000);
+        let unbacked = auditor.ingest(MonitorEvent::DepositConfirmed(sui.clone()));
+        assert!(matches!(
+            &unbacked[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked, block_time: None, .. }] if *unbacked == sui
+        ));
+
+        assert!(
+            auditor
+                .utxo_pool
+                .add_deposit(&ConfirmedDeposit {
+                    deposit_id: sui.deposit_id,
+                    amount: 50_000,
+                    script_pubkey: sui.script_pubkey.clone(),
+                    block_time: 150,
+                })
+                .is_none()
+        );
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositConfirmed(sui))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_request_keeps_its_sui_confirmation_until_bitcoin_answers() {
+        let mut auditor = auditor_with_pool().await;
+        // The request claims more than Bitcoin pays, and Hashi confirms it.
+        let (request, sui) = deposit_request_and_confirmation(60_000);
+        let request_id = request.request_id;
+        assert!(
+            auditor
+                .ingest_batch(vec![
+                    MonitorEvent::DepositRequested(request),
+                    MonitorEvent::DepositConfirmed(sui.clone()),
+                ])
+                .is_empty()
+        );
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+
+        auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_confirmation(&crate::test_utils::confirmation(50_000, p2wpkh(0x54)));
+        let findings = auditor.add_to_pool_and_gc();
+
+        assert!(
+            matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, btc }] if *claimed == sui && btc.amount == 50_000)
+        );
+        assert!(auditor.pending_deposits.is_empty());
+        assert_eq!(auditor.utxo_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sui_confirmation_of_a_request_bitcoin_did_not_back_is_unbacked() {
+        let mut auditor = auditor_with_pool().await;
+        let (request, sui) = deposit_request_and_confirmation(50_000);
+        let request_id = request.request_id;
+        auditor.ingest_batch(vec![
+            MonitorEvent::DepositRequested(request),
+            MonitorEvent::DepositConfirmed(sui.clone()),
+        ]);
+
+        // The output pays another script.
+        auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_confirmation(&crate::test_utils::confirmation(50_000, p2wpkh(0x55)));
+
+        assert!(matches!(
+            &auditor.add_to_pool_and_gc()[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked, block_time: None, .. }] if *unbacked == sui
+        ));
+        assert!(auditor.utxo_pool.is_empty());
     }
 
     /// A complete withdrawal `txid(fill)` for `wid_seed`, spending `inputs`,
@@ -979,7 +1061,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![unknown], &timing),
         );
 
-        let findings = auditor.add_to_pool();
+        let findings = auditor.add_to_pool_and_gc();
 
         assert_eq!(
             findings,
@@ -1011,7 +1093,7 @@ mod tests {
             [blocker] if blocker.waiting_for.is_empty()
         ));
 
-        auditor.add_to_pool();
+        auditor.add_to_pool_and_gc();
 
         let taken = auditor.progress_watermarks();
         let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());

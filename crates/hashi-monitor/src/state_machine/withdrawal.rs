@@ -18,8 +18,8 @@
 //! 3. A consistent event is kept. It is judged against each neighbor the
 //!    machine has seen, and it removes itself from the expected events.
 //! 4. The auditor looks the transaction up on Bitcoin while E3 is expected,
-//!    and asks for violations each tick: an expected event whose deadline the
-//!    source's cursor has passed is reported missing.
+//!    and asks for timing violations each tick: an expected event whose
+//!    deadline the source's cursor has passed is reported missing.
 //!
 //! Invariants:
 //! - `expected_events` never holds an event type in `seen_events`.
@@ -28,9 +28,6 @@
 
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
-use crate::domain::MonitorEvent;
-use crate::domain::MonitorEventId;
-use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
@@ -124,15 +121,16 @@ impl WithdrawalStateMachine {
             })
     }
 
-    /// Are any expected neighboring events still outstanding?
+    /// Whether every expected event was seen, so the pool can take the flow
+    /// and the auditor can drop it.
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
     /// Callers must ensure `is_since()` is true before using this for
     /// garbage collection. Out-of-window withdrawals with pending expectations
     /// may remain in memory, but they arise only from the bounded lookback or
     /// lookahead ranges.
-    pub fn is_expecting_events(&self) -> bool {
-        !self.expected_events.is_empty()
+    pub fn is_ready_for_gc(&self) -> bool {
+        self.expected_events.is_empty()
     }
 
     pub fn expected_event_types(&self) -> Vec<WithdrawalEventType> {
@@ -290,7 +288,7 @@ impl WithdrawalStateMachine {
     /// Check for violations given per-source cursors.
     /// Only reports a missing event if its deadline has passed relative to the relevant cursor.
     /// Callers must ensure is_since() is true before calling this function.
-    pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
+    pub fn timing_violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
         let mut out = Vec::new();
         for (event_type, deadline, relation) in &self.expected_events {
             let cursor = match event_type {
@@ -305,9 +303,9 @@ impl WithdrawalStateMachine {
                 _ => cursors.for_event_type(*event_type),
             };
             if *deadline <= cursor {
-                out.push(MonitorFinding::ExpectedEventMissing {
-                    event_id: MonitorEventId::Withdrawal(self.wid),
-                    event_type: MonitorEventType::Withdrawal(*event_type),
+                out.push(MonitorFinding::WithdrawalEventMissing {
+                    wid: self.wid,
+                    event_type: *event_type,
                     relation: *relation,
                     deadline: *deadline,
                     cursor,
@@ -327,8 +325,8 @@ fn neighbor_timing_findings(
     let mut findings = Vec::new();
     let deadline = timing.successor_deadline(predecessor);
     if deadline < successor.timestamp_secs {
-        findings.push(MonitorFinding::EventOccurredAfterDeadline {
-            event: MonitorEvent::Withdrawal(successor.clone()),
+        findings.push(MonitorFinding::WithdrawalEventLate {
+            event: successor.clone(),
             relation: EventRelation::Successor,
             deadline,
             occurred_at: successor.timestamp_secs,
@@ -336,8 +334,8 @@ fn neighbor_timing_findings(
     }
     let deadline = timing.predecessor_deadline(successor);
     if deadline < predecessor.timestamp_secs {
-        findings.push(MonitorFinding::EventOccurredAfterDeadline {
-            event: MonitorEvent::Withdrawal(predecessor.clone()),
+        findings.push(MonitorFinding::WithdrawalEventLate {
+            event: predecessor.clone(),
             relation: EventRelation::Predecessor,
             deadline,
             occurred_at: predecessor.timestamp_secs,
@@ -370,7 +368,7 @@ impl WithdrawalStateMachine {
         assert!(sm.add_event(e2.clone(), timing).is_empty());
         assert!(sm.add_event(e3, timing).is_empty());
         sm.confirmed = Some(ConfirmedWithdrawal::from_confirmation(&e2, confirmation));
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
         sm
     }
 }
@@ -477,7 +475,7 @@ mod tests {
             .is_empty()
         );
 
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
     }
 
     #[test]
@@ -492,8 +490,8 @@ mod tests {
         let findings = sm.add_event(event.clone(), &timing);
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(event),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event,
                 relation: EventRelation::Successor,
                 deadline: 200,
                 occurred_at: 201,
@@ -520,29 +518,29 @@ mod tests {
         assert_eq!(
             findings,
             vec![
-                MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(guardian_approval),
+                MonitorFinding::WithdrawalEventLate {
+                    event: guardian_approval,
                     relation: EventRelation::Successor,
                     deadline: 200,
                     occurred_at: 311,
                 },
-                MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(btc_confirmed),
+                MonitorFinding::WithdrawalEventLate {
+                    event: btc_confirmed,
                     relation: EventRelation::Successor,
                     deadline: 511,
                     occurred_at: 600,
                 },
             ]
         );
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
     }
 
     #[test]
     fn timing_findings_do_not_depend_on_ingestion_order() {
         let timing = Timing::for_tests();
         let late = |event: &MonitorWithdrawalEvent, relation, deadline| {
-            MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(event.clone()),
+            MonitorFinding::WithdrawalEventLate {
+                event: event.clone(),
                 relation,
                 deadline,
                 occurred_at: event.timestamp_secs,
@@ -607,7 +605,7 @@ mod tests {
                     expected.iter().all(|finding| findings.contains(finding)),
                     "{order:?}: {findings:?}"
                 );
-                assert!(!sm.is_expecting_events(), "{order:?}");
+                assert!(sm.is_ready_for_gc(), "{order:?}");
             }
         }
     }
@@ -620,22 +618,22 @@ mod tests {
             &timing,
         );
 
-        let no_violation = sm.violations(&Cursors {
+        let no_violation = sm.timing_violations(&Cursors {
             sui: 0,
             guardian: 199,
         });
         assert!(no_violation.is_empty());
 
-        let violations = sm.violations(&Cursors {
+        let violations = sm.timing_violations(&Cursors {
             sui: 0,
             guardian: 200,
         });
         assert_eq!(violations.len(), 1);
         assert_eq!(
             violations[0],
-            MonitorFinding::ExpectedEventMissing {
-                event_id: MonitorEventId::Withdrawal(WithdrawalID::new([1; 32])),
-                event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E2GuardianApproved),
+            MonitorFinding::WithdrawalEventMissing {
+                wid: WithdrawalID::new([1; 32]),
+                event_type: WithdrawalEventType::E2GuardianApproved,
                 relation: EventRelation::Successor,
                 deadline: 200,
                 cursor: 200,
@@ -666,7 +664,7 @@ mod tests {
             .is_empty()
         );
         assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
-        assert!(sm.violations(&cursors(1_000)).is_empty());
+        assert!(sm.timing_violations(&cursors(1_000)).is_empty());
     }
 
     #[test]
@@ -679,8 +677,8 @@ mod tests {
         let findings = late.add_event(approval.clone(), &timing);
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(approval),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event: approval,
                 relation: EventRelation::Predecessor,
                 deadline: 110,
                 occurred_at: 111,
@@ -723,8 +721,8 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(guardian_approval),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event: guardian_approval,
                 relation: EventRelation::Predecessor,
                 deadline: 149,
                 occurred_at: 150,
@@ -750,7 +748,7 @@ mod tests {
         );
         assert!(sm.is_since(100));
 
-        let findings = sm.violations(&Cursors {
+        let findings = sm.timing_violations(&Cursors {
             sui: 1_000,
             guardian: 1_000,
         });

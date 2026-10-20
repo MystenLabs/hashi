@@ -17,7 +17,7 @@
 //! - Withdrawals: each successor must follow its predecessor within its
 //!   delay. Each predecessor may be recorded after its successor by at most
 //!   its skew.
-//! - Deposits: the Bitcoin confirmation time may be after the Hashi
+//! - Deposits: the deposit's block time may be after the Hashi
 //!   confirmation by at most the skew. The Bitcoin event is the user's
 //!   payment, so no delay bounds it.
 //! - Deposit requests: Bitcoin is asked about a request's transaction for
@@ -53,9 +53,8 @@ pub const WITHDRAWAL_E1_AFTER_E2_SKEW: u64 = 5 * 60;
 /// median of the last 11 blocks, which lags real time by about an hour.
 pub const WITHDRAWAL_E2_AFTER_E3_SKEW: u64 = 2 * 60 * 60;
 
-/// Deposit E1 after E2. E1 is timed by the block that gave the deposit its
-/// confirmations, and a miner may date a block up to two hours ahead of
-/// real time.
+/// A deposit's Bitcoin block after Hashi's `DepositConfirmed`. A miner may
+/// date a block up to two hours ahead of real time.
 pub const DEPOSIT_CONFIRMATION_SKEW: u64 = 2 * 60 * 60;
 
 /// How long Bitcoin is asked about a deposit request's transaction.
