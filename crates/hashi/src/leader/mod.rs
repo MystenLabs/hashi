@@ -16,6 +16,7 @@ use crate::config::ForceRunAsLeader;
 use crate::deposits::ApprovedDepositError;
 use crate::deposits::ApprovedDepositErrorKind;
 use crate::grpc::BoxedChannel;
+use crate::grpc::bridge_service::SANCTIONS_CHECK_REFUSAL_MSG;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::leader::withdrawal_transactions::WithdrawalBroadcastResult;
@@ -639,6 +640,17 @@ fn is_already_approved_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::AlreadyExists
 }
 
+/// Older peers send their sanctions check details in the refusal, so the leader
+/// logs any refusal that mentions AML or TRM as `SANCTIONS_CHECK_REFUSAL_MSG`.
+fn without_sanctions_check_details(status: tonic::Status) -> tonic::Status {
+    let message = status.message();
+    if message.contains("AML") || message.contains("TRM") {
+        tonic::Status::new(status.code(), SANCTIONS_CHECK_REFUSAL_MSG)
+    } else {
+        status
+    }
+}
+
 enum NoQuorum {
     AlreadyApproved,
     StaleCommittee { epoch: u64, peer_epoch: u64 },
@@ -731,6 +743,8 @@ mod tests {
     use super::is_already_approved_refusal;
     use super::is_retriable_transport;
     use super::retry_peer_call;
+    use super::without_sanctions_check_details;
+    use crate::grpc::bridge_service::SANCTIONS_CHECK_REFUSAL_MSG;
     use crate::withdrawals::WithdrawalAlreadyFinalized;
     use crate::withdrawals::WithdrawalApprovalError;
     use crate::withdrawals::WithdrawalRequestApproval;
@@ -777,6 +791,32 @@ mod tests {
         assert!(!is_already_approved_refusal(&Status::failed_precondition(
             WithdrawalAlreadyFinalized(Address::ZERO).to_string()
         )));
+    }
+
+    #[test]
+    fn logs_no_sanctions_check_details_from_older_peers() {
+        // Refusals mainnet-1.0 peers send when their sanctions check has not approved.
+        for message in [
+            "AML checks rejected deposit: sui address 0x3 is attributed to Ransomware (7) (https://trm.example/1)",
+            "AML checks rejected deposit: TRM returned 401 Unauthorized: invalid credentials",
+            "AML service error: TRM screening timed out after 20s",
+            "Never retry: AML screening rejected withdrawal request 0x1: bitcoin address bc1qx is attributed to Ransomware (7) (https://trm.example/1)",
+            "Never retry: TRM returned 400 Bad Request: invalid address",
+            "Never retry: TRM returned no screening result for bitcoin address bc1qx",
+            "Never retry: unexpected TRM response: EOF while parsing a value at line 1 column 0",
+        ] {
+            let logged = without_sanctions_check_details(Status::failed_precondition(message));
+            assert_eq!(logged.code(), Code::FailedPrecondition);
+            assert_eq!(logged.message(), SANCTIONS_CHECK_REFUSAL_MSG, "{message}");
+        }
+
+        for kept in [
+            "Bitcoin deposit is not yet confirmed: 1 of 2 confirmations",
+            "Never retry: Withdrawal request 0x1 not found in queue",
+        ] {
+            let logged = without_sanctions_check_details(Status::failed_precondition(kept));
+            assert_eq!(logged.message(), kept);
+        }
     }
 
     fn aggregator(committee: &Committee) -> BlsSignatureAggregator<'_, WithdrawalRequestApproval> {

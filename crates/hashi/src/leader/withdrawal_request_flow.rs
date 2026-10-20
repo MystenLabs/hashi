@@ -9,6 +9,7 @@ use super::collect_signatures;
 use super::is_already_approved_refusal;
 use super::parse_member_signature;
 use super::retry_peer_call;
+use super::without_sanctions_check_details;
 use crate::Hashi;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
@@ -365,6 +366,7 @@ impl LeaderService {
                 return Err(NoSignature::AlreadyApproved);
             }
             Err(e) => {
+                let e = without_sanctions_check_details(e);
                 error!(
                     "Failed to get withdrawal request approval signature from {validator_address}: {e}"
                 );
