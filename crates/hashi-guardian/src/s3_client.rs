@@ -383,7 +383,7 @@ pub(crate) enum ImmutabilityCheck {
     /// still reject the object unless its Compliance lock is unexpired.
     MutationAlreadyChecked,
     /// Do not claim S3 immutability. Used for signed records whose short locks
-    /// are expected to expire, such as KP-share state.
+    /// are expected to expire, such as KP-share state from older builds.
     Skipped,
 }
 
