@@ -13,8 +13,12 @@
 //! 2. `prefetch_confirmations` looks all pending txids up in batches of
 //!    `HTTP_JSON_RPC_BATCH_SIZE`, with `HTTP_JSON_RPC_BATCHES_IN_FLIGHT`
 //!    batches sent at once, and `lookup_confirmation` serves each one from
-//!    that cache. The cache is cleared at the start of each pass, so an
-//!    unconfirmed transaction is looked up again next pass.
+//!    that cache. A confirmed answer is kept across passes: a confirmation
+//!    `MIN_CONFIRMATIONS` deep does not change. `forget_unconfirmed` drops
+//!    the rest at the start of each pass, so an unconfirmed transaction is
+//!    looked up again. An answer for a txid no longer asked for is dropped.
+//!    When a lookup fails, the batches that finished are kept, so the next
+//!    pass asks only about the rest.
 //! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
 //!    returned with the time of its own block and the time of the block that
 //!    gave it `MIN_CONFIRMATIONS`.
@@ -144,6 +148,13 @@ impl BlockchainInfo {
     }
 }
 
+/// The answers of a confirmation lookup, and the first error if a batch
+/// failed. The answers of the batches that finished are kept either way.
+struct LookupOutcome {
+    confirmations: HashMap<Txid, Option<BtcConfirmation>>,
+    error: Option<anyhow::Error>,
+}
+
 /// A transaction mined at least `MIN_CONFIRMATIONS` deep, before its block
 /// header is read.
 struct ConfirmedTx {
@@ -219,17 +230,39 @@ impl BtcRpcClient {
         info.ensure_synced()
     }
 
-    /// Start a fresh lookup cycle. Confirmed and unconfirmed results are shared
-    /// by all outpoints from the same transaction within one audit tick, while
-    /// later ticks still retry transactions that were previously unconfirmed.
-    pub fn clear_confirmation_cache(&self) {
-        self.confirmation_cache.borrow_mut().clear();
+    /// Drop the unconfirmed answers, so the next lookup asks again. The
+    /// confirmed ones stay: a confirmation `MIN_CONFIRMATIONS` deep does not
+    /// change.
+    pub fn forget_unconfirmed(&self) {
+        self.confirmation_cache
+            .borrow_mut()
+            .retain(|_, confirmation| confirmation.is_some());
     }
 
+    /// Look up every txid the cache has no confirmed answer for, and keep
+    /// the answers. An answer for a txid not in `txids` is dropped: no flow
+    /// names it anymore. When the lookup fails, the batches that finished
+    /// are kept before the error is returned.
     pub fn prefetch_confirmations(&self, txids: &[Txid]) -> anyhow::Result<()> {
-        let confirmations = self.transport.lookup_confirmations(txids)?;
-        self.confirmation_cache.borrow_mut().extend(confirmations);
-        Ok(())
+        let asked = txids.iter().copied().collect::<HashSet<_>>();
+        let missing = {
+            let cache = self.confirmation_cache.borrow();
+            txids
+                .iter()
+                .filter(|txid| !matches!(cache.get(*txid), Some(Some(_))))
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        info!(
+            cached = txids.len() - missing.len(),
+            looked_up = missing.len(),
+            "bitcoin confirmations served from the cache"
+        );
+        let outcome = self.transport.lookup_confirmations(&missing);
+        let mut cache = self.confirmation_cache.borrow_mut();
+        cache.extend(outcome.confirmations);
+        cache.retain(|txid, _| asked.contains(txid));
+        outcome.error.map_or(Ok(()), Err)
     }
 
     /// Query BTC RPC to check if a transaction is confirmed.
@@ -249,7 +282,7 @@ impl BtcRpcClient {
     }
 
     /// The state of each outpoint on Bitcoin. The transactions are fetched
-    /// fresh, so the result does not depend on the confirmation cache.
+    /// fresh, and the confirmation cache is not touched.
     pub fn lookup_outpoint_states(
         &self,
         outpoints: &[OutPoint],
@@ -260,13 +293,20 @@ impl BtcRpcClient {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        self.prefetch_confirmations(&txids)?;
+        let outcome = self.transport.lookup_confirmations(&txids);
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
 
         // Only an output that exists can be in the UTXO set.
         let mut states = HashMap::with_capacity(outpoints.len());
         let mut existing = Vec::new();
         for outpoint in outpoints {
-            match self.lookup_confirmation(outpoint.txid)? {
+            let confirmation = outcome
+                .confirmations
+                .get(&outpoint.txid)
+                .with_context(|| format!("missing bitcoin lookup result for {}", outpoint.txid))?;
+            match confirmation {
                 Some(confirmation) if (outpoint.vout as usize) < confirmation.outputs.len() => {
                     existing.push((*outpoint, confirmation.block_time));
                 }
@@ -290,6 +330,13 @@ impl BtcRpcClient {
             states.insert(outpoint, state);
         }
         Ok(states)
+    }
+}
+
+#[cfg(test)]
+impl BtcRpcClient {
+    fn cached_confirmations(&self) -> usize {
+        self.confirmation_cache.borrow().len()
     }
 }
 
@@ -415,11 +462,9 @@ impl HttpJsonRpcTransport {
 
     /// Look every txid up, `HTTP_JSON_RPC_BATCHES_IN_FLIGHT` batches at a
     /// time. Each worker takes the next batch until none is left. The first
-    /// failure stops the others at their next batch and fails the lookup.
-    fn lookup_confirmations(
-        &self,
-        txids: &[Txid],
-    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
+    /// failure stops the others at their next batch. The answers of the
+    /// batches that finished are returned with that error.
+    fn lookup_confirmations(&self, txids: &[Txid]) -> LookupOutcome {
         let batches = txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).collect::<Vec<_>>();
         let next_batch = AtomicUsize::new(0);
         let processed = AtomicUsize::new(0);
@@ -449,11 +494,19 @@ impl HttpJsonRpcTransport {
                 });
             }
         });
-        let mut confirmations = HashMap::with_capacity(txids.len());
+        let mut outcome = LookupOutcome {
+            confirmations: HashMap::with_capacity(txids.len()),
+            error: None,
+        };
         for result in results.into_inner().expect("a worker never panics") {
-            confirmations.extend(result?);
+            match result {
+                Ok(confirmations) => outcome.confirmations.extend(confirmations),
+                Err(error) => {
+                    outcome.error.get_or_insert(error);
+                }
+            }
         }
-        Ok(confirmations)
+        outcome
     }
 
     fn lookup_confirmation_batch(
@@ -850,9 +903,11 @@ mod tests {
 
         let unconfirmed = btc_rpc_client.lookup_confirmation(txid)?;
         assert!(unconfirmed.is_none(), "expected unconfirmed transaction");
+        assert_eq!(btc_rpc_client.cached_confirmations(), 2);
 
         node.generate_blocks(1)?;
-        btc_rpc_client.clear_confirmation_cache();
+        btc_rpc_client.forget_unconfirmed();
+        assert_eq!(btc_rpc_client.cached_confirmations(), 0);
 
         let insufficiently_confirmed = btc_rpc_client.lookup_confirmation(txid)?;
         assert!(
@@ -861,11 +916,21 @@ mod tests {
         );
 
         node.generate_blocks(MIN_CONFIRMATIONS - 1)?;
-        btc_rpc_client.clear_confirmation_cache();
+        btc_rpc_client.forget_unconfirmed();
 
         let confirmed = btc_rpc_client
             .lookup_confirmation(txid)?
             .expect("expected confirmed transaction");
+        // A confirmed answer survives a forget, and a prefetch keeps only
+        // the txids asked for.
+        btc_rpc_client.forget_unconfirmed();
+        assert_eq!(btc_rpc_client.cached_confirmations(), 1);
+        btc_rpc_client.prefetch_confirmations(&[txid])?;
+        assert_eq!(btc_rpc_client.cached_confirmations(), 1);
+        btc_rpc_client.prefetch_confirmations(&[])?;
+        assert_eq!(btc_rpc_client.cached_confirmations(), 0);
+        btc_rpc_client.prefetch_confirmations(&[txid])?;
+        assert_eq!(btc_rpc_client.cached_confirmations(), 1);
         assert!(
             confirmed.outputs.iter().any(|output| {
                 output.value == Amount::from_sat(50_000)
