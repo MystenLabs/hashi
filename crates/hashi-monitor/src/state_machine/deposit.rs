@@ -189,10 +189,14 @@ impl DepositStateMachine {
         self.confirmed = Some(deposit);
     }
 
-    /// E3 (`DepositConfirmed`) expects E2 (Bitcoin's confirmation) by E3 plus
-    /// `DEPOSIT_CONFIRMATION_SKEW`; this reports it missing while the machine
-    /// is open, and the pool check judges it after. E2 does not expect E3:
-    /// sanctions and user mistakes leave valid deposits unconfirmed.
+    /// The timing rules between a deposit's events: E1 is `DepositRequested`,
+    /// E2 is Bitcoin's confirmation, and E3 is `DepositConfirmed`.
+    /// - E1 does not expect E2. A user may never pay, so a request that
+    ///   lapses is not a finding.
+    /// - E2 does not expect E3. Sanctions and user mistakes leave valid
+    ///   deposits unminted, so a missing E3 is not a finding yet.
+    /// - E3 expects E2 by E3 plus `DEPOSIT_CONFIRMATION_SKEW`. This reports
+    ///   E2 missing while the machine is open; the pool check judges it after.
     pub fn timing_violations(&self) -> Vec<MonitorFinding> {
         let (Some(sui), Some(cursor)) = (&self.sui_confirmation, self.btc_checked_at) else {
             return Vec::new();
