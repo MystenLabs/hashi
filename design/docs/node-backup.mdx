@@ -270,7 +270,8 @@ counts; expiring the newest archive also warns. Unrelated files are preserved, e
 do not stop the sweep, and a cleanup failure does not prevent the backup attempt.
 
 Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
-the same automatic policy. Apply [backup expiry](#backup-expiry) to all copies.
+the same automatic policy. Apply [backup expiry](#backup-expiry) to all copies
+except the [monthly off-machine copies](#monthly-off-machine-copy).
 
 Archives are staged in `backup-dir`, finalized and synced to disk before publication;
 the directory is synced afterward on a best-effort basis. A directory sync failure
@@ -288,9 +289,10 @@ Operators must remove these plaintext copies when no longer needed.
 ### Backup expiry
 
 Use a **14-day retention target**, measured from the archive's original creation,
-for every backup copy: local archives (including the newest), off-machine copies,
-and all S3 object versions. Copying or re-uploading must not reset this target;
-S3's versioning and deletion timing are described [below](#cloud-backup).
+for every backup copy except the [monthly off-machine copies](#monthly-off-machine-copy):
+local archives (including the newest), other off-machine copies, and all versions of
+the node's S3 uploads. Copying or re-uploading must not reset this target; S3's
+versioning and deletion timing are described [below](#cloud-backup).
 
 Active nodes check daily and refresh their current-epoch MPC recovery backup once
 it is 3 days old, even during stalled reconfiguration. This intentionally preserves
@@ -301,12 +303,14 @@ incident guidance below rather than deleting it to meet the target.
 Old shares can still reconstruct the active MPC key after resharing. Keeping
 backups indefinitely gives an attacker more time to collect enough decryptable
 backups from the same epoch to recover that key. Expiry limits this opportunity
-while preserving a recent disaster-recovery window.
+while preserving a recent disaster-recovery window. The monthly off-machine copies
+are kept despite this risk, so that the key can be recovered even if an attacker
+wipes every node.
 
-Operators must configure deletion for each storage location; Hashi's
-newest-backup exception alone does not enforce this policy. Account for Object
-Lock and monitor deletion failures or delays. Remove temporary decrypted copies
-immediately after use.
+Operators must configure deletion in each storage location, leaving out only the
+monthly copies; Hashi's newest-backup exception alone does not enforce this
+policy. Account for Object Lock and monitor deletion failures or delays. Remove
+temporary decrypted copies immediately after use.
 
 During an incident, pause expiry for backups needed for recovery: disable the
 applicable S3 lifecycle rules and other off-machine deletion jobs. Hashi's local
@@ -314,6 +318,19 @@ cleanup still runs, so preserve encrypted copies outside `backup-dir` in a
 restricted location exempt from deletion. Confirm the copies are accessible;
 changing lifecycle rules is not instantaneous. Resume expiry and remove incident
 copies when recovery no longer needs them.
+
+### Monthly off-machine copy
+
+Once a month, copy the backup from the first epoch that starts in that month (UTC)
+to storage that none of your nodes can reach, since anyone who takes over a node
+can delete what it can reach. Do not put it in the S3 bucket that receives
+automatic backups. Use that epoch's `-mpc-` archive, which holds the
+node's [recovery record](#catastrophic-mpc-key-recovery). Recovery only combines
+records from the same epoch, so every operator should copy the same epoch. Copy it
+within 14 days, before local cleanup and S3 lifecycle rules remove it. The 14-day
+[backup expiry](#backup-expiry) does not apply to these copies, so keep them out
+of every deletion rule. Keep a way to decrypt them too, even after you replace
+`backup-pgp-cert`.
 
 ## Restoring from a backup
 
@@ -471,15 +488,16 @@ fleet. Catastrophic data loss could also leave every node without its shares.
 Backups allow the existing MPC key to be recovered when no functioning committee
 remains.
 
-Scheduled backups include `hashi-mpc-recovery.bcs` when the node holds MPC shares.
+Scheduled backups with the `-mpc-` marker include `hashi-mpc-recovery.bcs`.
 This file contains the node's shares and the information needed to combine them
 with other nodes' backups to recover the MPC key. Recovery needs a sufficient set
 of backups from the same epoch and works even after old onchain certificates have
 been deleted. Manual backups do not include this file.
 
-Operators should preserve off-machine encrypted backups and keep access to their
-backup decryption keys separate from the validator fleet. MPC key recovery is
-an incident-response operation, not part of ordinary node restoration.
+Operators should keep their [monthly off-machine copies](#monthly-off-machine-copy)
+and keep access to their backup decryption keys separate from the validator fleet.
+MPC key recovery is an incident-response operation, not part of ordinary node
+restoration.
 
 Recovery assembles the full MPC private key and writes it PGP-encrypted. It must
 still be handled as a highly sensitive secret. Recovering it does not invalidate
