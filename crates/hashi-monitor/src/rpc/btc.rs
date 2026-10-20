@@ -18,14 +18,16 @@
 //! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
 //!    returned with the time of its own block and the time of the block that
 //!    gave it `MIN_CONFIRMATIONS`.
-//! 4. Requests are not paced: the node is the bridge's own. A rate-limited
-//!    request is retried with exponential backoff.
+//! 4. Requests are not paced: the node is the bridge's own. A request that
+//!    fails to send, gets an HTTP 502, 503 or 504, or is rate limited is
+//!    retried with exponential backoff, `MAX_REQUEST_RETRIES` times. Core
+//!    answers a JSON-RPC error with HTTP 500, so 500 is not retried.
 //!
 //! Assumptions:
 //! - The endpoint serves `getrawtransaction` with verbose output, which
 //!   needs `txindex` or a hosted provider.
-//! - Only rate limits are retried. Other transient failures fail the pass
-//!   and are retried on the next tick.
+//! - A request that still fails after the retries fails the pass, which
+//!   is retried on the next tick.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -62,7 +64,9 @@ const HTTP_JSON_RPC_BATCH_SIZE: usize = 100;
 const HTTP_JSON_RPC_BATCHES_IN_FLIGHT: usize = 8;
 /// Txids between two progress log lines of a confirmation lookup.
 const LOOKUP_PROGRESS_EVERY: usize = 10_000;
-const MAX_RATE_LIMIT_RETRIES: usize = 6;
+/// Retries of one request. The delays double from one second, so the
+/// last retry comes about a minute after the first failure.
+const MAX_REQUEST_RETRIES: usize = 6;
 const MIN_CONFIRMATIONS: u64 = 6;
 
 /// What Bitcoin holds at an outpoint. `Missing` and `Spent` differ by the
@@ -307,23 +311,27 @@ impl HttpJsonRpcTransport {
             .context("failed to decode bitcoin JSON-RPC batch response")
     }
 
-    /// Send one request, and retry the standard HTTP/JSON-RPC 429 responses
-    /// with bounded exponential backoff.
-    // TODO: Classify and retry transient non-rate-limit failures, such as
-    // timeouts, connection errors, and HTTP 5xx responses. They currently
-    // abort a batch audit or defer a continuous retry until the next BTC tick.
+    /// Send one request. A send that fails, a timeout among them, an HTTP
+    /// 502, 503 or 504 and a rate limit are retried with bounded exponential
+    /// backoff. Core sends 503 when its work queue is full. Any other status
+    /// goes to the JSON-RPC decoding: Core answers an RPC error with 500.
     fn post_json(&self, body: &Value) -> anyhow::Result<Value> {
-        for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
-            let response = minreq::post(&self.rpc_url)
+        for attempt in 0..=MAX_REQUEST_RETRIES {
+            let request = minreq::post(&self.rpc_url)
                 .with_timeout(60)
                 .with_headers(self.headers.clone())
                 .with_json(body)
-                .context("failed to encode bitcoin JSON-RPC request")?
-                .send()
-                .context("bitcoin JSON-RPC request failed")?;
+                .context("failed to encode bitcoin JSON-RPC request")?;
+            let response = match request.send() {
+                Ok(response) => response,
+                Err(error) => {
+                    Self::wait_before_retry(attempt, &format!("request failed: {error}"))?;
+                    continue;
+                }
+            };
 
-            if response.status_code == 429 {
-                Self::wait_before_rate_limit_retry(attempt)?;
+            if matches!(response.status_code, 429 | 502 | 503 | 504) {
+                Self::wait_before_retry(attempt, &format!("HTTP {}", response.status_code))?;
                 continue;
             }
 
@@ -334,29 +342,28 @@ impl HttpJsonRpcTransport {
                 )
             })?;
             if json_rpc_rate_limited(&response_body) {
-                Self::wait_before_rate_limit_retry(attempt)?;
+                Self::wait_before_retry(attempt, "rate limited")?;
                 continue;
             }
 
             return Ok(response_body);
         }
 
-        unreachable!("rate-limit retry loop either returns or errors")
+        unreachable!("the retry loop either returns or errors")
     }
 
-    fn wait_before_rate_limit_retry(attempt: usize) -> anyhow::Result<()> {
-        if attempt == MAX_RATE_LIMIT_RETRIES {
-            anyhow::bail!(
-                "bitcoin JSON-RPC remained rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
-            );
+    fn wait_before_retry(attempt: usize, reason: &str) -> anyhow::Result<()> {
+        if attempt == MAX_REQUEST_RETRIES {
+            anyhow::bail!("bitcoin JSON-RPC {reason} after {MAX_REQUEST_RETRIES} retries");
         }
 
         let delay = Duration::from_secs(1 << attempt.min(5));
         warn!(
             retry = attempt + 1,
-            max_retries = MAX_RATE_LIMIT_RETRIES,
+            max_retries = MAX_REQUEST_RETRIES,
             delay_secs = delay.as_secs(),
-            "bitcoin JSON-RPC rate limited; retrying"
+            reason,
+            "bitcoin JSON-RPC request will be retried"
         );
         thread::sleep(delay);
         Ok(())
@@ -981,30 +988,66 @@ mod tests {
         );
     }
 
+    /// Accept one connection, read its request, and answer `response`.
+    fn respond(listener: &TcpListener, response: &str) {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let line = line.to_ascii_lowercase();
+            if let Some(value) = line.strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        reader.read_exact(&mut vec![0; content_length]).unwrap();
+        reader.into_inner().write_all(response.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn a_server_error_is_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            respond(
+                &listener,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            );
+            let body = r#"{"result":7,"error":null,"id":"hashi-monitor"}"#;
+            respond(
+                &listener,
+                &format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                ),
+            );
+        });
+        let transport = HttpJsonRpcTransport {
+            rpc_url,
+            headers: BTreeMap::new(),
+        };
+
+        let response = transport
+            .call("getblockcount", serde_json::json!([]))
+            .expect("the second answer is good");
+
+        server.join().unwrap();
+        assert_eq!(response.result, Some(serde_json::json!(7)));
+    }
+
     #[test]
     fn undecodable_response_error_names_the_http_status() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let rpc_url = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut content_length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                let line = line.to_ascii_lowercase();
-                if let Some(value) = line.strip_prefix("content-length:") {
-                    content_length = value.trim().parse().unwrap();
-                }
-            }
-            reader.read_exact(&mut vec![0; content_length]).unwrap();
-            reader
-                .into_inner()
-                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
+            respond(
+                &listener,
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+            );
         });
         let transport = HttpJsonRpcTransport {
             rpc_url,
