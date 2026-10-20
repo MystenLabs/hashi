@@ -379,8 +379,6 @@ impl Hashi {
     }
 }
 
-/// Peers learn only `AML_REFUSAL_MSG` (`deposit_refusal_status`), so this
-/// node's logs are the only record of why it didn't vote.
 fn deposit_screening_outcome(
     deposit_request: &DepositRequest,
     result: Result<trm::Verdict, trm::TrmError>,

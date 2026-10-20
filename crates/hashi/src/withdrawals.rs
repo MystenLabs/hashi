@@ -1969,8 +1969,6 @@ impl Hashi {
     }
 }
 
-/// Peers learn only `AML_REFUSAL_MSG` (`withdrawal_approval_refusal_status`),
-/// so this node's logs are the only record of why it didn't vote.
 fn withdrawal_screening_outcome(
     request_id: Address,
     result: Result<trm::Verdict, trm::TrmError>,
