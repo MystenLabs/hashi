@@ -14,6 +14,8 @@ use hashi_guardian_ops::steps::configs;
 use hashi_guardian_ops::steps::deploy;
 use hashi_guardian_ops::steps::inspect;
 use hashi_guardian_ops::steps::kp_keys;
+use hashi_guardian_ops::steps::session;
+use hashi_guardian_ops::steps::session::OperatorStep;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-ops")]
@@ -73,6 +75,37 @@ enum Command {
     Deploy,
     /// Build the proxy at the active slot's commit and roll it, through the workflow GUARDIAN_PROXY_WORKFLOW names.
     Proxy,
+    /// Run the key ceremony on a slot's fresh guardian.
+    Ceremony {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
+    /// Restart a slot's enclave, so its guardian starts a fresh session.
+    NewSession {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+        /// Restart even a guardian that holds the key or is in a round with key provisioners, or one in a stage this tool
+        /// doesn't know.
+        #[arg(long)]
+        abandon: bool,
+    },
+    /// Initialize a slot's guardian for the key provisioners to provision.
+    Provision {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+        /// For the guardian's first deployment only.
+        #[arg(long)]
+        do_genesis: bool,
+    },
+    /// Activate a slot's provisioned guardian.
+    Activate {
+        /// The slot, which a stack with two slots requires.
+        #[arg(long)]
+        slot: Option<Slot>,
+    },
     /// Download and verify every key provisioner's uploaded public key, then write the roster.
     DownloadKpPubkeys {
         /// A directory that doesn't exist yet. Defaults to .hashi/kp-pubkeys/<KP_BUCKET>-<UTC time>.
@@ -95,6 +128,12 @@ fn main() -> anyhow::Result<()> {
         Command::Measure { slot, run_id } => deploy::measure(&ctx, slot, run_id),
         Command::Deploy => deploy::deploy(&ctx),
         Command::Proxy => deploy::proxy(&ctx),
+        Command::Ceremony { slot } => session::operator(&ctx, slot, OperatorStep::Ceremony),
+        Command::NewSession { slot, abandon } => session::new_session(&ctx, slot, abandon),
+        Command::Provision { slot, do_genesis } => {
+            session::operator(&ctx, slot, OperatorStep::Provision { do_genesis })
+        }
+        Command::Activate { slot } => session::operator(&ctx, slot, OperatorStep::Activate),
         Command::DownloadKpPubkeys { out_dir } => kp_keys::download_kp_pubkeys(&ctx, out_dir),
     }
 }
