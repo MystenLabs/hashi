@@ -108,7 +108,7 @@ order.
 Move's records are never read for the pool. The pool starts empty on the
 first run, which starts at the bridge's genesis on a fullnode that still
 serves the history, so every UTXO is seen enter. The spent record is never
-pruned; a spent UTXO is a few dozen bytes. The pool is kept between runs in
+pruned; a spent UTXO is about 400 bytes. The pool is kept between runs in
 the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Running the monitor" below.
 
@@ -169,9 +169,12 @@ cargo run -p hashi-monitor -- \
   --config audit.sample.yaml \
   --snapshot-bucket my-hashi-monitor-snapshot
 ```
-The monitor keeps a snapshot at `gs://<BUCKET>/snapshot.json` and saves it
-after every state check: the `restart_start` its previous state check logged,
-the UTXO pool as it is now, and the deployment it audits. The monitor needs
+The monitor keeps a snapshot in the bucket and saves it after every state
+check: the `restart_start` its previous state check logged, the UTXO pool as
+it is now, and the deployment it audits. `snapshot.json` holds the
+`restart_start`, the held UTXOs and the number of spent entries. The spent
+record only grows, so it lives in `spent/NNNNN.json` files of 10,000 entries
+each. A save writes only the files with new entries, then `snapshot.json`. The monitor needs
 read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
 or, on GKE, its workload identity, and fails to start without it. It must be
 the bucket's only writer.
@@ -190,9 +193,9 @@ Sui each, and the state checks wait for it. On a busy network it takes hours.
 A restart resumes from the snapshot: the audit from `restart_start`, and the
 pool as saved. The replay changes nothing in the pool, since the pool skips
 every operation it already applied. Findings since `restart_start` are
-reported again. A snapshot of another deployment, or one saved by a monitor
-before the pool existed, is ignored and the run is a first run. Delete the
-object to start over from genesis.
+reported again. A snapshot of another deployment is ignored and the run is a first
+run. A snapshot that does not parse, or that lacks a spent file, stops the
+monitor at startup. Delete the objects to start over from genesis.
 
 A flow holds `restart_start` back until the pool takes it, at the Bitcoin
 tick after it completes. A flow that never completes holds it back for good,

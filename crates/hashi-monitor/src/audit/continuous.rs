@@ -109,7 +109,7 @@ impl ContinuousAuditor {
         );
         // Fail now on a bucket that is missing or read-only: a missing one
         // loads as empty.
-        store.save(&Snapshot::new(cfg, start, pool.clone())).await?;
+        store.save(cfg, start, &pool).await?;
 
         let mut inner = AuditorCore::new(cfg, start, pool).await?;
         // A pruned start would leave the pool incomplete for good.
@@ -128,12 +128,11 @@ impl ContinuousAuditor {
     /// save is logged and does not stop the audit; the next state check
     /// saves again.
     async fn save_snapshot(&self, restart_start: UnixSeconds) {
-        let snapshot = Snapshot::new(
-            &self.inner.cfg,
-            restart_start,
-            self.inner.utxo_pool().clone(),
-        );
-        match self.store.save(&snapshot).await {
+        let saved = self
+            .store
+            .save(&self.inner.cfg, restart_start, self.inner.utxo_pool())
+            .await;
+        match saved {
             Ok(()) => tracing::debug!(
                 restart_start = %utc_timestamp(restart_start),
                 "saved the snapshot"
