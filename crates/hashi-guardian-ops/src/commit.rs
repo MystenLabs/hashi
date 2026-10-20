@@ -93,6 +93,16 @@ impl Tree {
     }
 }
 
+/// The paths that fix what a guardian sends and what it logs: its protos and the ones they import, and the types its
+/// records are made of.
+const FORMATS: [&str; 5] = [
+    "crates/hashi-types/proto/sui/hashi/v1alpha/guardian_service.proto",
+    "crates/hashi-types/proto/sui/hashi/v1alpha/guardian_relay_service.proto",
+    "crates/hashi-types/proto/sui/hashi/v1alpha/signature.proto",
+    "crates/hashi-types/proto/sui/hashi/v1alpha/utxo.proto",
+    "crates/hashi-types/src/guardian",
+];
+
 /// The full commit `rev` names in this checkout, if it names one.
 pub fn resolve(ctx: &Ctx, rev: &str) -> Result<Option<String>> {
     let output = ctx
@@ -105,6 +115,32 @@ pub fn resolve(ctx: &Ctx, rev: &str) -> Result<Option<String>> {
         ]))
         .with_context(|| format!("could not run git in {}", ctx.repo.display()))?;
     Ok(output.success.then(|| output.stdout.trim().to_owned()))
+}
+
+/// Stops unless `commit` has the guardian protos and log types of `other`, `whose` build: each guardian must read the
+/// records the other wrote.
+pub fn require_same_formats(ctx: &Ctx, commit: &str, other: &str, whose: &str) -> Result<()> {
+    for rev in [commit, other] {
+        if resolve(ctx, rev)?.is_none() {
+            bail!(
+                "this checkout does not have {rev}, so it cannot compare {commit} with {whose}; fetch it first"
+            );
+        }
+    }
+    let changed = read(
+        ctx.exec,
+        &git(&ctx.repo)
+            .args(["diff", "--name-only", other, commit, "--"])
+            .args(FORMATS),
+    )
+    .with_context(|| format!("could not compare {commit} with {other}"))?;
+    if !changed.trim().is_empty() {
+        bail!(
+            "{commit} changes the guardian's protos or log records from {whose}, {other}: {}; a rotation cannot move the key across that without a compatibility review",
+            changed.split_whitespace().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// `hashi-guardian-init`, built from the guardian's commit.

@@ -30,6 +30,8 @@ use crate::print_warning;
 use crate::render::Rendered;
 use crate::render::SlotRender;
 use crate::stack::Slot;
+use crate::steps::rotate::require_keeps_serving;
+use crate::steps::rotate::require_lists_log_builds;
 use crate::steps::slot;
 
 /// Writes the slot's configuration, then has the guardian's own tools load it as the ceremony will.
@@ -40,6 +42,11 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
         view.slot
     ));
     let render = SlotRender::new(ctx, &stack, &view)?;
+    if view.slot != stack.active()? {
+        require_keeps_serving(ctx, &stack, &view, &render.settings)?;
+    } else {
+        require_lists_log_builds(ctx, &stack, &view, &render.settings, Vec::new())?;
+    }
     let tree = Tree::at(
         ctx,
         &view.commit,
@@ -81,6 +88,9 @@ pub fn render(ctx: &Ctx, arg: Option<Slot>) -> Result<()> {
     let settings = &render.settings;
     println!("Guardian commit:  {}", settings.commit);
     println!("PCR0:             {}", settings.pcr0);
+    for build in &settings.prev_builds {
+        println!("Earlier build:    {}, PCR0 {}", build.commit, build.pcr0);
+    }
     println!("Log bucket:       s3://{}", settings.bucket);
     println!("Bitcoin network:  {}", settings.bitcoin_network);
     println!("Retention class:  {}", settings.retention_environment);
@@ -581,6 +591,10 @@ mod tests {
                 }
                 ["/x/hashi-guardian-init", "tools", "check-config", ..] => {
                     Some((checked, String::new()))
+                }
+                // A first deployment's log holds no session yet.
+                ["aws", "s3api", "list-objects-v2", .., "--prefix", "init/", "--query", _, "--output", "json"] => {
+                    Some((true, "[]\n".to_owned()))
                 }
                 _ => None,
             }
