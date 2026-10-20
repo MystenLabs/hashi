@@ -77,10 +77,6 @@ use sui_sdk_types::Address;
 /// pool's age without the findings.
 const OLDEST_UTXOS_LOGGED: usize = 20;
 
-pub trait AuditWindow {
-    fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
-}
-
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {
         let category = finding.category();
@@ -173,6 +169,10 @@ pub struct AuditorCore {
     /// request id, so a replayed event is ignored and each request has its
     /// own.
     pending_deposit_requests: HashMap<Address, DepositRequestStateMachine>,
+    /// A flow is audited only if one of its events is at or after this time.
+    /// The earlier ones come from the lookbacks and were judged before the
+    /// last restart.
+    window_start: UnixSeconds,
     /// The UTXOs the bridge holds, by Bitcoin's account. See `pool`. The
     /// snapshot keeps it between runs.
     utxo_pool: UtxoPool,
@@ -185,8 +185,16 @@ pub struct AuditorCore {
 }
 
 impl AuditorCore {
-    pub async fn new(cfg: &Config, cursors: Cursors, utxo_pool: UtxoPool) -> anyhow::Result<Self> {
-        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?;
+    /// Sui polling starts `Timing::sui_lookback` before `window_start`, and
+    /// guardian polling `Timing::guardian_lookback` before it.
+    pub async fn new(
+        cfg: &Config,
+        window_start: UnixSeconds,
+        utxo_pool: UtxoPool,
+    ) -> anyhow::Result<Self> {
+        let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
+        let guardian_start = window_start.saturating_sub(cfg.timing.guardian_lookback());
+        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
         let hashi_btc_keys = guardian_poller
             .read_hashi_btc_keys(cfg.deployment.bitcoin_network)
             .await?;
@@ -195,10 +203,11 @@ impl AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            window_start,
             utxo_pool,
             suspect_spends: HashMap::new(),
             guardian_poller,
-            sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, cursors.sui)?,
+            sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?,
             btc_client: BtcRpcClient::new(cfg)?,
         })
     }
@@ -349,10 +358,7 @@ impl AuditorCore {
 
     /// Pings Bitcoin RPC for all relevant withdrawals & deposits.
     /// Returns domain findings and bubbles up infra errors.
-    pub fn fetch_btc_info(
-        &mut self,
-        window: &impl AuditWindow,
-    ) -> anyhow::Result<Vec<MonitorFinding>> {
+    pub fn fetch_btc_info(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
         self.btc_client.ensure_synced()?;
         // The cache dedupes lookups inside one pass. It is cleared because a
         // "not confirmed yet" answer goes stale.
@@ -365,7 +371,7 @@ impl AuditorCore {
             .pending_withdrawals
             .values()
             .filter(|sm| {
-                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+                sm.is_since(self.window_start) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
             })
             .count();
         let deposit_count = self
@@ -382,7 +388,7 @@ impl AuditorCore {
             .pending_withdrawals
             .values()
             .filter(|sm| {
-                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+                sm.is_since(self.window_start) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
             })
             .map(WithdrawalStateMachine::btc_txid)
             .chain(
@@ -410,7 +416,7 @@ impl AuditorCore {
         self.btc_client.prefetch_confirmations(&unique_txids)?;
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
-            if !sm.is_in_audit_window(window) {
+            if !sm.is_since(self.window_start) {
                 continue;
             }
 
@@ -467,25 +473,22 @@ impl AuditorCore {
     }
 
     /// The complete withdrawals in the window: the ones the UTXO pool takes.
-    fn complete_withdrawals(&self, window: &impl AuditWindow) -> Vec<ConfirmedWithdrawal> {
+    fn complete_withdrawals(&self) -> Vec<ConfirmedWithdrawal> {
         self.pending_withdrawals
             .values()
-            .filter(|sm| sm.is_in_audit_window(window) && !sm.is_expecting_events())
+            .filter(|sm| sm.is_since(self.window_start) && !sm.is_expecting_events())
             .filter_map(|sm| sm.confirmed().cloned())
             .collect()
     }
 
     /// Fetches each overdue Hashi approval from Sui. One for the guardian's txid inside the
     /// scanned range is also a `SuiScanMissedEvent`; one whose lookup fails stays missing.
-    pub async fn fetch_missing_hashi_approvals(
-        &mut self,
-        window: &impl AuditWindow,
-    ) -> Vec<MonitorFinding> {
+    pub async fn fetch_missing_hashi_approvals(&mut self) -> Vec<MonitorFinding> {
         let cursors = self.cursors();
         let missing = self
             .pending_withdrawals
             .values()
-            .filter(|sm| sm.is_in_audit_window(window) && sm.is_missing_hashi_approval(&cursors))
+            .filter(|sm| sm.is_since(self.window_start) && sm.is_missing_hashi_approval(&cursors))
             .map(|sm| (sm.wid(), sm.btc_txid()))
             .collect::<Vec<_>>();
         let mut findings = Vec::new();
@@ -528,10 +531,10 @@ impl AuditorCore {
         findings
     }
 
-    pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
+    pub fn detect_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
-            if !sm.is_in_audit_window(window) {
+            if !sm.is_since(self.window_start) {
                 continue;
             }
 
@@ -557,17 +560,17 @@ impl AuditorCore {
     /// never completes never reaches the pool: its inputs stay held, and
     /// the daily check reports them once they are too old, on top of the
     /// finding for its missing event.
-    pub fn add_to_pool(&mut self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
+    pub fn add_to_pool(&mut self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_confirmed_deposits();
-        let confirmed_withdrawals = self.complete_withdrawals(window);
+        let confirmed_withdrawals = self.complete_withdrawals();
         for deposit in &confirmed_deposits {
             findings.extend(self.utxo_pool.add_deposit(deposit));
         }
         findings.extend(self.utxo_pool.add_withdrawals(&confirmed_withdrawals));
 
         self.pending_withdrawals.retain(|wid, sm| {
-            if !sm.is_in_audit_window(window) || sm.is_expecting_events() {
+            if !sm.is_since(self.window_start) || sm.is_expecting_events() {
                 return true;
             }
             let e1 = sm
@@ -621,11 +624,11 @@ impl AuditorCore {
     /// in the Bitcoin tick, so it pins the floor until then. Otherwise a
     /// snapshot saved in between would skip it, and its UTXOs would never
     /// move in the pool.
-    pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
+    pub fn progress_watermarks(&self) -> ProgressWatermarks {
         let mut verified_up_to_withdrawals = self.guardian_cursor();
         let mut withdrawal_blockers = Vec::new();
         for sm in self.pending_withdrawals.values() {
-            if !sm.is_in_audit_window(window) {
+            if !sm.is_since(self.window_start) {
                 continue;
             }
 
@@ -721,14 +724,6 @@ mod tests {
     use bitcoin::TxOut;
     use bitcoin::hashes::Hash as _;
 
-    struct AllTime;
-
-    impl AuditWindow for AllTime {
-        fn in_window(&self, _: UnixSeconds) -> bool {
-            true
-        }
-    }
-
     /// An auditor holding a guardian approval for `btc_txid` of `looked_up_approval`'s
     /// withdrawal, whose Sui scan covered `[start, cursor)` without its E1.
     async fn auditor_missing_approval(
@@ -741,6 +736,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
@@ -809,7 +805,7 @@ mod tests {
             auditor_missing_approval(approval.timestamp_secs - 3_600, cursor, approval.btc_txid)
                 .await;
 
-        let findings = auditor.fetch_missing_hashi_approvals(&AllTime).await;
+        let findings = auditor.fetch_missing_hashi_approvals().await;
 
         assert_eq!(
             findings,
@@ -820,7 +816,7 @@ mod tests {
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
         // The approval is ingested, so it is not also reported missing.
-        assert!(auditor.detect_violations(&AllTime).is_empty());
+        assert!(auditor.detect_violations().is_empty());
     }
 
     #[tokio::test]
@@ -830,13 +826,8 @@ mod tests {
         let mut auditor =
             auditor_missing_approval(approved_at + 1, approved_at + 3_600, approval.btc_txid).await;
 
-        assert!(
-            auditor
-                .fetch_missing_hashi_approvals(&AllTime)
-                .await
-                .is_empty()
-        );
-        assert!(auditor.detect_violations(&AllTime).is_empty());
+        assert!(auditor.fetch_missing_hashi_approvals().await.is_empty());
+        assert!(auditor.detect_violations().is_empty());
     }
 
     #[tokio::test]
@@ -850,7 +841,7 @@ mod tests {
         auditor.sui_poller =
             poller_scanned_with(txn.clone(), approval.timestamp_secs - 3_600, cursor).await;
 
-        let findings = auditor.fetch_missing_hashi_approvals(&AllTime).await;
+        let findings = auditor.fetch_missing_hashi_approvals().await;
 
         assert_eq!(
             findings,
@@ -862,7 +853,7 @@ mod tests {
         );
         // The rejected approval is not ingested, so the E1 stays missing.
         assert!(matches!(
-            auditor.detect_violations(&AllTime)[..],
+            auditor.detect_violations()[..],
             [MonitorFinding::ExpectedEventMissing { .. }]
         ));
     }
@@ -874,7 +865,7 @@ mod tests {
         let mut auditor =
             auditor_missing_approval(approved_at - 3_600, approved_at + 3_600, guardian_txid).await;
 
-        let findings = auditor.fetch_missing_hashi_approvals(&AllTime).await;
+        let findings = auditor.fetch_missing_hashi_approvals().await;
 
         assert_eq!(
             findings,
@@ -883,7 +874,7 @@ mod tests {
             )]
         );
         assert!(matches!(
-            auditor.detect_violations(&AllTime)[..],
+            auditor.detect_violations()[..],
             [MonitorFinding::ExpectedEventMissing { .. }]
         ));
     }
@@ -902,6 +893,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
@@ -918,7 +910,7 @@ mod tests {
                 .is_empty()
         );
 
-        let progress = auditor.progress_watermarks(&AllTime);
+        let progress = auditor.progress_watermarks();
 
         assert_eq!(progress.restart_start, approved_at);
         assert!(matches!(
@@ -935,6 +927,7 @@ mod tests {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             pending_deposit_requests: HashMap::new(),
+            window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
@@ -990,7 +983,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![unknown], &timing),
         );
 
-        let findings = auditor.add_to_pool(&AllTime);
+        let findings = auditor.add_to_pool();
 
         assert_eq!(
             findings,
@@ -1015,16 +1008,16 @@ mod tests {
             complete_withdrawal(7, 7, vec![input], &timing),
         );
 
-        let held = auditor.progress_watermarks(&AllTime);
+        let held = auditor.progress_watermarks();
         assert_eq!(held.restart_start, 1_000);
         assert!(matches!(
             &held.withdrawal_blockers.0[..],
             [blocker] if blocker.waiting_for.is_empty()
         ));
 
-        auditor.add_to_pool(&AllTime);
+        auditor.add_to_pool();
 
-        let taken = auditor.progress_watermarks(&AllTime);
+        let taken = auditor.progress_watermarks();
         let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());
         assert_eq!(taken.restart_start, cursors);
         assert!(taken.withdrawal_blockers.0.is_empty());
