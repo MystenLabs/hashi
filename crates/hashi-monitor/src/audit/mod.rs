@@ -16,9 +16,10 @@
 //!    Bitcoin event, and ingests the confirmations it finds.
 //! 3. A Sui approval still missing after its deadline is fetched by its
 //!    withdrawal id, since the Sui scan may have started after it.
-//! 4. Each tick, the core reports the timing violations of every machine
-//!    in the audit window: the expected events whose deadline a cursor has
-//!    passed.
+//! 4. Each tick, the core reports the timing violations of every
+//!    withdrawal machine in the audit window: the expected events whose
+//!    deadline a cursor has passed. A deposit machine reports its own
+//!    findings at its Bitcoin lookups.
 //! 5. Complete flows are added to the UTXO pool: it takes the UTXOs they
 //!    moved, and the flows are dropped. Closed deposit machines are
 //!    dropped too.
@@ -351,8 +352,12 @@ impl AuditorCore {
     }
 
     /// Pings Bitcoin RPC for all relevant withdrawals & deposits.
-    /// Returns domain findings and bubbles up infra errors.
-    pub fn fetch_btc_info(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
+    /// Returns domain findings and bubbles up infra errors. `started_at` is
+    /// taken before the lookups, so the machines record it as their check time.
+    pub fn fetch_btc_info(
+        &mut self,
+        started_at: UnixSeconds,
+    ) -> anyhow::Result<Vec<MonitorFinding>> {
         self.btc_client.ensure_synced()?;
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
@@ -401,7 +406,7 @@ impl AuditorCore {
             // Fetch BTC info for expecting withdrawals
             if sm.expects(WithdrawalEventType::E3BtcConfirmed)
                 && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client)?
+                    sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?
             {
                 findings.extend(new_findings);
             }
@@ -409,7 +414,7 @@ impl AuditorCore {
 
         for sm in self.pending_deposits.values_mut() {
             if sm.expects_btc() {
-                findings.extend(sm.try_fetch_btc_tx(&self.btc_client)?);
+                findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
             }
         }
 
@@ -519,9 +524,6 @@ impl AuditorCore {
             }
 
             findings.extend(sm.timing_violations(&self.cursors()));
-        }
-        for sm in self.pending_deposits.values() {
-            findings.extend(sm.timing_violations());
         }
         findings
     }

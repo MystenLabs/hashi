@@ -39,7 +39,6 @@ use crate::timing::Timing;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
-use hashi_types::guardian::time::now_timestamp_secs;
 
 /// The events seen and still expected for one withdrawal. See the module
 /// doc for how an event is added and judged.
@@ -254,17 +253,20 @@ impl WithdrawalStateMachine {
     ///     - Returns `Ok(BtcFetchOutcome::Unconfirmed)` if checked but block not yet mined.
     ///     - Returns `Ok(BtcFetchOutcome::Confirmed(findings))` if confirmed; `findings` may be empty.
     ///     - Returns `Err` for BTC RPC/infrastructure failures.
+    ///
+    /// `checked_at` must be no later than the lookup.
     pub fn try_fetch_btc_tx(
         &mut self,
         timing: &Timing,
         btc_rpc_client: &BtcRpcClient,
+        checked_at: UnixSeconds,
     ) -> anyhow::Result<BtcFetchOutcome> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
             return Ok(BtcFetchOutcome::NotExpected);
         }
 
         let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid)?;
-        self.btc_checked_at = Some(now_timestamp_secs());
+        self.btc_checked_at = Some(checked_at);
         Ok(match confirmation {
             Some(confirmation) => {
                 let e_btc = MonitorWithdrawalEvent::from_btc(

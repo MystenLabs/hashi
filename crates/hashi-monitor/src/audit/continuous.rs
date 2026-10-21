@@ -17,7 +17,8 @@
 //!    `Timing::guardian_lookback` before it.
 //! 2. At startup, each source catches up once. A source that fails is
 //!    logged and retried on its next tick.
-//! 3. Then the Sui, guardian and Bitcoin ticks run every `POLL_INTERVAL`,
+//! 3. Then the Sui, Bitcoin and guardian ticks run every
+//!    `SUI_POLL_INTERVAL`, `BTC_POLL_INTERVAL` and `GUARDIAN_POLL_INTERVAL`,
 //!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
 //!    Sui approvals, report the violations, log the progress watermarks,
 //!    and save the snapshot one state check behind. The complete flows are
@@ -56,8 +57,17 @@ use crate::time::utc_timestamp;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
-/// How often the Sui, guardian and Bitcoin sources are polled.
-const POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// How often Sui is polled. A deposit approval must reach the monitor
+/// early in Move's delay before the mint, ten minutes by default.
+const SUI_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often Bitcoin is asked about the pending transactions. An approval
+/// is reported unbacked at the second empty lookup after it, so with
+/// `SUI_POLL_INTERVAL` the alert comes within five minutes of it.
+const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
+
+/// How often the guardian's log is polled. The withdrawal bounds are hours.
+const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// How often every UTXO in the pool is checked against Bitcoin. Every
 /// tick runs on the one audit task, so this pass delays the polls by the
@@ -202,7 +212,7 @@ impl ContinuousAuditor {
     /// answers them all.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
-        let findings = self.inner.fetch_btc_info()?;
+        let findings = self.inner.fetch_btc_info(started_at)?;
         self.report_findings("btc", &findings);
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
         let pool_findings = self.inner.add_to_pool_and_gc();
@@ -253,9 +263,9 @@ impl ContinuousAuditor {
         Self::log_initial_catch_up(SOURCE_UTXO, utxo);
         self.tick_state_checks().await;
 
-        let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
-        let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
-        let mut btc_ticker = tokio::time::interval(POLL_INTERVAL);
+        let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
+        let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
+        let mut btc_ticker = tokio::time::interval(BTC_POLL_INTERVAL);
         let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
         let mut utxo_ticker = tokio::time::interval(UTXO_CHECK_INTERVAL);
 

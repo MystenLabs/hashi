@@ -28,6 +28,9 @@
 //!    answers a JSON-RPC error with HTTP 500, so 500 is not retried.
 //!
 //! Assumptions:
+//! - An unconfirmed answer is never reused across passes. So the auditor
+//!   can stamp every answer with the pass's start time: the real lookup
+//!   is no earlier. A cached confirmed answer does not need a time.
 //! - The endpoint serves `getrawtransaction` with verbose output, which
 //!   needs `txindex` or a hosted provider.
 //! - A request that still fails after the retries fails the pass, which

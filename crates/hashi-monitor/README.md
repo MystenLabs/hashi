@@ -56,9 +56,11 @@ block means Hashi approved before Bitcoin confirmed, or the skew is too tight.
 Without this,
 a compromised committee can mint hBTC against any confirmed transaction. An
 approval that arrives while its request's lookup is still open is judged
-when Bitcoin answers or the request lapses. If Bitcoin has not confirmed the transaction by the
-approval plus the skew, it is reported as `DepositUnbacked` until Bitcoin
-answers or the request lapses. A request is approved again after a
+when Bitcoin answers or the request lapses. Before that, if two Bitcoin lookups
+after the approval find the transaction not yet confirmed, the approval is
+reported as `DepositUnbacked`, and again at every later empty lookup. The honest committee approves only at
+the confirmation depth, so one lookup may race it by seconds; the second
+lookup is one tick later. A request is approved again after a
 committee change; the monitor judges only the first approval, since every
 approval names the same UTXO and the first has the earliest deadline.
 
