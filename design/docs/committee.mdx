@@ -113,8 +113,9 @@ core team, and any of them would take significant time to implement correctly.
 The one downside of not having tight coupling is the need to handle the
 hand-off from an old committee to a new committee. At each epoch boundary after
 genesis, the key rotation protocol transfers key shares from the old committee
-to the new one (at genesis the first committee runs DKG instead, with no old
-committee to hand off from). The hand-off requires that
+to the new one. At genesis, no old committee exists to hand off from, so the
+first committee runs distributed key generation (DKG) instead. The hand-off
+requires that
 `2f+1` stake-weighted members of the old committee are alive and willing to
 participate in the hand-off protocol. This design makes that assumption,
 because of the challenges of enforcing tight coupling, and an economic

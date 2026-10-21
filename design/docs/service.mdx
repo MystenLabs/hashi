@@ -50,7 +50,7 @@ refuses any caller whose key belongs to no registered validator, except on
 
 ## How should liveness probes check the node?
 
-The node runs two HTTP listeners: the TLS-secured service described above, and
+The node runs 2 HTTP listeners: the TLS-secured service described above, and
 a separate plain-HTTP metrics listener. The `/health` on the TLS service always
 answers; liveness probes should use the `/health` on the plain-HTTP metrics
 listener instead, which fails once the node's main runtime stops running tasks

@@ -72,21 +72,23 @@ where:
   derivation path `d` (the depositor's Sui address).
 - `g` is the guardian's fixed public key.
 - `delay` is the 60-day relative timelock, encoded as the BIP-68 sequence
-  `0x0040278D` (`4_204_429`). The encoding is broken down step by step below.
+  `0x0040278D` (`4_204_429`).
+  [How is the 60-day delay encoded?](#how-is-the-60-day-delay-encoded) breaks
+  down the encoding step by step.
 - `i` is the NUMS (nothing-up-my-sleeve) internal key defined in BIP-341
   (`50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0`)
   with no known private key, ensuring all spends occur through the script path.
 
 Read left to right, the descriptor says: the Taproot internal key is `i`, and
-the tree has two script leaves. `multi_a(2, {g}, {h})` is the 2-of-2 multisig
+the tree has 2 script leaves. `multi_a(2, {g}, {h})` is the 2-of-2 multisig
 leaf, which needs signatures from both the guardian key `g` and the child MPC
 key `h`. `and_v(v:older({delay}), pk({h}))` is the recovery leaf, which needs
 the `delay` to have elapsed and a signature from `h` alone.
 
 ## How is the 60-day delay encoded?
 
-Use the BIP-68 sequence value `0x0040278D` (`4_204_429`) for `delay`. It is
-built in 3 steps:
+Use the BIP-68 sequence value `0x0040278D` (`4_204_429`) for `delay`. To build
+the value:
 
 1. Express 60 days in seconds: `60 * 24 * 60 * 60` = `5_184_000`.
 2. Convert to 512-second units, rounding up:
@@ -97,13 +99,16 @@ built in 3 steps:
 
 ## How is a deposit address derived from a Sui address?
 
+To derive the deposit address for a Sui address:
+
 1. Take the depositor's Sui address as the derivation path `d`.
 2. Derive the child public key `h = derive(H, d)` from the base Hashi MPC
    public key `H`, which is available onchain.
 3. Substitute `h`, the guardian's public key `g`, the encoded `delay`, and the
    NUMS internal key `i` into the descriptor above.
-4. The resulting P2TR address is that Sui address's deposit address; deposits
-   to it are credited to that Sui address.
+
+The resulting P2TR address is the deposit address for that Sui address. Hashi
+credits any deposit to it to that Sui address.
 
 The key derivation is not BIP-32. It is a purpose-built unhardened derivation
 over secp256k1, keyed by the Sui address, giving each depositor a unique
