@@ -57,7 +57,7 @@ This document assumes familiarity with Sui validator operations, Linux system ad
 
 Onboarding takes 6 steps. The remaining sections cover the detail, the defaults, and the failure modes:
 
-1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. For a Mainnet Bitcoin node, provision 2 TB of SSD storage. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
+1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. For a Mainnet Bitcoin node, provision 2TB of SSD storage. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
 2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [2.2](#22-tls-key-dedicated), [2.4](#24-operator-key-day-to-day-signing), and [2.5](#25-backup-key-openpgp).
 3. **Write the validator config:** use your target network's column in [Networks](#networks). See [3.1](#31-validator-config).
 4. **Register your validator:** run `hashi register --serialize-unsigned-transaction` and sign the result offline with your Sui validator account key. See [2.3](#23-registration-must-be-signed-by-the-account-key) and [5.3](#53-step-2-register-your-validator).
@@ -73,6 +73,8 @@ These details trip up most operators:
 
 ## Common questions
 
+These answers summarize details from the sections that follow.
+
 ### Does the Hashi node connect to your Sui validator?
 
 The node's Sui connection is to a Sui fullnode ([1.4](#14-sui-rpc)), not to your validator, and the Hashi node should run on a separate host from your Sui validator ([1.1](#11-resources)). The link to your validator is onchain: `validator-address` in the validator config is your Sui validator address, and your validator account key signs the initial registration ([2.3](#23-registration-must-be-signed-by-the-account-key)).
@@ -87,11 +89,19 @@ Yes. The backup key is required: `backup-pgp-cert` and `backup-dir` are both req
 
 ### How much storage does the Bitcoin node need on Mainnet?
 
-Provision 2 TB of SSD storage for a self-hosted archival Mainnet Bitcoin node with `txindex` and `blockfilterindex`; see the Mainnet tab of [1.5](#15-bitcoin-node). This is separate from the Hashi process itself, which needs 10 GB of persistent storage ([1.1](#11-resources)).
+Provision 2TB of SSD storage for a self-hosted archival Mainnet Bitcoin node with `txindex` and `blockfilterindex`; see the Mainnet tab of [1.5](#15-bitcoin-node). This is separate from the Hashi process itself, which needs 10GB of persistent storage ([1.1](#11-resources)).
 
 ### What does a Mainnet node depend on?
 
-A self-hosted Sui fullnode serving the gRPC v2 API with `rpc.enable-indexing: true`, an archival Bitcoin Core v29 or newer node reachable over both JSON-RPC and P2P (self-hosting is strongly encouraged), a dedicated TLS key, an operator key funded with at least 2 SUI, and an OpenPGP backup key. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), [1.5](#15-bitcoin-node), and [2](#2-key-management-and-security).
+A Mainnet node depends on:
+
+- A self-hosted Sui fullnode serving the gRPC v2 API with `rpc.enable-indexing: true`
+- An archival Bitcoin Core v29 or newer node reachable over both JSON-RPC and P2P (self-hosting is strongly encouraged)
+- A dedicated TLS key
+- An operator key funded with at least 2 SUI
+- An OpenPGP backup key
+
+See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), [1.5](#15-bitcoin-node), and [2](#2-key-management-and-security).
 
 ## On this page
 
@@ -613,7 +623,7 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
 # grpc-max-decoding-message-size = 33554432
 
 # Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
@@ -745,7 +755,7 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Advanced Tuning (defaults are fine for most operators) ────────────
 
-# Max gRPC message size in bytes (default: 33554432 = 32 MiB)
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
 # grpc-max-decoding-message-size = 33554432
 
 # Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
@@ -1189,7 +1199,7 @@ hashi proposal create ignore-member --validator <address> [--unignore] [-m key=v
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-Nodes use the guardian for guardian info, limiter bootstrap, and withdrawal signing ([4.2](#42-outbound)). Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
+Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([4.2](#42-outbound)). Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
 
 ```bash
 hashi proposal create update-config guardian_node_url string:<url> [-m key=value]

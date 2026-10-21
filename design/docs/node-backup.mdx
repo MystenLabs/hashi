@@ -466,7 +466,7 @@ hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc
 
 Here `<namespace>` is the `<sui-chain-id>/<hashi-object-id>/<validator-address>`
 path from the destination template above, and `<timestamp>` is the timestamp in
-the archive's filename. Take the full URI from your backup URI/version receipts.
+the archive's filename. Take the full URI from the URI and version receipts you keep for each backup.
 
 Use `--version-id '<version-id>'` to select an exact object version. Keys are
 literal object keys, not URL-decoded paths. Recovery credentials need
@@ -482,7 +482,7 @@ Downloads use private temporary storage under `--output-dir` and are removed
 afterward. Restore publishes a complete extraction, refuses an existing
 destination, and does not install files at their original paths.
 
-Keep backup URI/version receipts, the region, and decryption-key access outside
+Keep backup URI and version receipts, the region, and decryption-key access outside
 the node. Use independently retained receipts and audit history to select an
 exact version, then pin it with `--version-id`. Neither the newest object nor
 successful decryption proves its origin: encryption does not authenticate the
