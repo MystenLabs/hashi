@@ -11,11 +11,13 @@ Audits the cross-system bridge flow on two parallel tracks.
   six confirmations.
 
 ### Deposits (BTC → Sui)
-- **E1**: Deposit confirmed on Bitcoin, timed by the block that gave it six
-  confirmations.
-- **E2**: `DepositConfirmed` on Sui. Because its Move payload has no timestamp,
-  the monitor uses the timestamp of its containing checkpoint returned by Sui
-  gRPC.
+- **Request**: `DepositRequested` on Sui, the user's claim. The monitor asks
+  Bitcoin about its transaction, and the UTXO pool takes a valid output.
+- **Approval**: `DepositApproved` on Sui, the committee's claim that the
+  deposit is paid. Move mints hBTC at `DepositConfirmed`, which needs an
+  approval at least `bitcoin_deposit_time_delay_ms` earlier. The delay lets
+  operators pause Hashi before a bad mint, so the monitor judges the
+  approval, not the mint. The approval carries its own timestamp.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
@@ -27,8 +29,8 @@ Findings are tagged as:
   still missing after its source cursor passes the deadline, an event the
   Sui scan covered but never returned, a Hashi approval or a guardian log
   whose txid does not match its inputs and outputs, a Hashi approval whose
-  inputs and outputs differ from the guardian's, a confirmed deposit
-  whose Bitcoin output does not match the Sui request, or a guardian
+  inputs and outputs differ from the guardian's, an approved deposit
+  Bitcoin does not back, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
 
@@ -44,10 +46,21 @@ itself as change. The monitor assumes no fixed change path. The bridge keys
 that derive the change addresses are read once at startup from the
 guardian's genesis and ceremony records.
 
-Move does not see Bitcoin, so the monitor compares a confirmed deposit's
-output with the Sui request: the same amount, and the same script as the bridge
-address of the claimed derivation path. Without this, a compromised committee
-can mint hBTC against any confirmed transaction.
+Move does not see Bitcoin, so the monitor checks every `DepositApproved`
+against what Bitcoin paid: the request's own answer if its lookup is still
+open, otherwise the UTXO pool. The UTXO must exist, or the pool must have spent
+it, as a deposit (`DepositUnbacked`), with the same amount and the same script
+as the bridge address of the claimed derivation path (`DepositMismatch`). Its
+block must be no later than the approval plus the skew (`DepositLate`): a late
+block means Hashi approved before Bitcoin confirmed, or the skew is too tight.
+Without this,
+a compromised committee can mint hBTC against any confirmed transaction. An
+approval that arrives while its request's lookup is still open is judged
+when Bitcoin answers or the request lapses. If Bitcoin has not confirmed the transaction by the
+approval plus the skew, it is reported as `DepositUnbacked` until Bitcoin
+answers or the request lapses. A request is approved again after a
+committee change; the monitor judges only the first approval, since every
+approval names the same UTXO and the first has the earliest deadline.
 
 The monitor also follows every `DepositRequested`, the user's own claim that a
 Bitcoin output pays the bridge. The committee cannot suppress it. Bitcoin is
@@ -233,7 +246,7 @@ are constants in `src/timing.rs`, each with its reason:
 | E2 -> E3 delay | 1 d | the signed transaction must get six confirmations on Bitcoin within this |
 | E1 after E2 skew | 5 min | the guardian's request clock tolerance |
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
-| deposit confirmation skew | 2 h | a deposit's confirmation time may be after its Hashi confirmation by this; a miner may date a block two hours ahead |
+| deposit approval skew | 2 h | a deposit's block time may be after its Sui approval by this; a miner may date a block two hours ahead |
 | deposit request watch | 2 d | Bitcoin is asked about a deposit request's transaction for this; an honest deposit is assumed to confirm within it |
 | UTXO warn age | 31 d | an unspent bridge UTXO older than this is a liveness finding; honest coin selection refreshes UTXOs older than 30 days |
 | UTXO critical age | 45 d | an unspent bridge UTXO older than this is a safety finding; the recovery leaf opens at 60 days |

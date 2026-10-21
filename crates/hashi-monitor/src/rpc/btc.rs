@@ -844,10 +844,6 @@ mod tests {
     use super::OutpointState;
     use crate::config::BtcConfig;
     use crate::config::Config;
-    use crate::domain::DepositEventType;
-    use crate::domain::DepositId;
-    use crate::domain::MonitorDepositEvent;
-    use crate::test_utils::confirmation;
     use crate::test_utils::txid;
 
     static TRACING_INIT: Once = Once::new();
@@ -1029,28 +1025,6 @@ mod tests {
         assert_eq!(states[&outpoint], OutpointState::Spent);
 
         Ok(())
-    }
-
-    #[test]
-    fn a_confirmation_builds_the_deposit_event_of_its_output() {
-        let script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-        let confirmation = confirmation(40_000, script_pubkey.clone());
-        let txid = txid(9);
-
-        assert_eq!(
-            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 1)),
-            Some(MonitorDepositEvent {
-                event_type: DepositEventType::E1BtcConfirmed,
-                timestamp_secs: 90,
-                deposit_id: DepositId::new(txid, 1),
-                amount: 40_000,
-                script_pubkey,
-            })
-        );
-        assert_eq!(
-            MonitorDepositEvent::from_btc(&confirmation, DepositId::new(txid, 2)),
-            None
-        );
     }
 
     /// Accept one connection, read its request, and answer `response`.

@@ -45,7 +45,6 @@
 
 use anyhow::Context;
 use hashi_types::guardian::WithdrawalID;
-use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::MoveType;
 use hashi_types::move_types::PackageVersions;
@@ -54,9 +53,9 @@ use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::StructTag;
 
-use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
@@ -114,7 +113,6 @@ pub fn parse_event(
     package_versions: &PackageVersions,
     hashi_btc_keys: &HashiBTCKeys,
     event: Event,
-    transaction_timestamp_secs: UnixSeconds,
     events: &mut Vec<MonitorEvent>,
     findings: &mut Vec<MonitorFinding>,
 ) -> anyhow::Result<()> {
@@ -131,12 +129,9 @@ pub fn parse_event(
                 Err(rejection) => findings.extend(rejection),
             }
         }
-        Some(HashiEvent::DepositConfirmed(event)) => {
-            // ListTransactions supplies the containing checkpoint's timestamp
-            // alongside the nested events.
-            events.push(MonitorEvent::Deposit(MonitorDepositEvent::from_sui(
+        Some(HashiEvent::DepositApproved(event)) => {
+            events.push(MonitorEvent::DepositApproved(SuiDepositApprovedEvent::new(
                 event,
-                transaction_timestamp_secs,
                 hashi_btc_keys,
             )));
         }
@@ -449,7 +444,6 @@ pub mod tests {
                 &package_versions(),
                 &hashi_btc_keys,
                 picked_for_processing_event(&txn),
-                0,
                 &mut events,
                 &mut findings,
             )
@@ -468,7 +462,6 @@ pub mod tests {
             &package_versions(),
             &test_hashi_btc_keys(),
             deposit_requested_event(&txn, 1_700_000_000_500),
-            9,
             &mut events,
             &mut findings,
         )

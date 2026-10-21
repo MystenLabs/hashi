@@ -49,7 +49,15 @@
 //! 5. In one pass, every add comes before every spend. A pass can answer a
 //!    deposit and the withdrawal that spends it, or a withdrawal and the one
 //!    that spends its change, in any order.
-//! 6. Once a day the monitor asks Bitcoin about every UTXO held. `check`
+//! 6. A `DepositApproved`, which Hashi needs before it mints, whose
+//!    request's machine has closed is checked against the pool: the pool
+//!    must hold the UTXO, or have spent it, as a deposit with the same
+//!    amount and script. One that arrives earlier is judged by its machine,
+//!    by the same rule. So every hBTC minted matches BTC that Bitcoin shows
+//!    paid to the bridge. A restart replays approvals against a pool that
+//!    may have spent the UTXO since, and the spent record keeps the amount
+//!    and script, so a spent UTXO is still found.
+//! 7. Once a day the monitor asks Bitcoin about every UTXO held. `check`
 //!    turns the answers into findings. An unspent UTXO is reported by age.
 //!    A spent UTXO is a spend outside Hashi. A missing UTXO is a phantom:
 //!    every UTXO held was confirmed when it entered, so a missing answer is
@@ -60,10 +68,10 @@
 //! Differences from Move's pool: this pool can hold a UTXO that Move never
 //! holds, with no fault of the committee. Two causes:
 //! - Sanctions (IOP-820): a member's AML screening rejects the deposit. The
-//!   UTXO is real bridge money, but no `DepositConfirmed` follows, so it
+//!   UTXO is real bridge money, but no `DepositApproved` follows, so it
 //!   stays outside Move until the recovery leaf opens.
 //! - User mistakes: the pool takes a UTXO that pays the bridge script of the
-//!   claimed path, but an honest committee confirms only a correct, live
+//!   claimed path, but an honest committee approves only a correct, live
 //!   request. A request with a wrong amount is rejected; the pool keeps the
 //!   UTXO at the amount Bitcoin paid. A request whose transaction confirms
 //!   after Move marks it expired (one day) but within the watch
@@ -96,6 +104,7 @@ use serde::Serialize;
 
 use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
+use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::UtxoOrigin;
 use crate::findings::MonitorFinding;
 use crate::findings::RpcInconsistency;
@@ -250,6 +259,28 @@ impl UtxoPool {
                 first_seen: deposit.block_time,
             },
         )
+    }
+
+    /// Check the Sui `DepositApproved` against the pool: the UTXO must be a
+    /// deposit the pool holds or spent. See `SuiDepositApprovedEvent::judge`.
+    pub fn check_sui_approval(
+        &self,
+        sui: &SuiDepositApprovedEvent,
+        skew: u64,
+    ) -> Vec<MonitorFinding> {
+        let outpoint = OutPoint::from(sui.deposit_id);
+        let paid = self
+            .utxos
+            .get(&outpoint)
+            .or_else(|| self.spent.get(&outpoint).map(|spent| &spent.utxo))
+            .filter(|utxo| utxo.origin == UtxoOrigin::Deposit)
+            .map(|utxo| ConfirmedDeposit {
+                deposit_id: sui.deposit_id,
+                amount: utxo.amount,
+                script_pubkey: utxo.script_pubkey.clone(),
+                block_time: utxo.first_seen,
+            });
+        sui.judge(paid.as_ref(), skew)
     }
 
     /// Apply withdrawals Bitcoin confirmed: every change output enters,

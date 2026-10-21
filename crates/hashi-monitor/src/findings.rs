@@ -18,12 +18,10 @@
 //!   one the monitor already holds. The bridge cannot cause it. The inner
 //!   enum names the contradiction.
 
-use crate::domain::DepositId;
-use crate::domain::MonitorDepositEvent;
+use crate::domain::ConfirmedDeposit;
 use crate::domain::MonitorEvent;
-use crate::domain::MonitorEventId;
-use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
 use crate::time::human_duration;
@@ -64,19 +62,6 @@ impl fmt::Display for FindingCategory {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorFinding {
     InvalidEventAdded(String),
-    EventOccurredAfterDeadline {
-        event: MonitorEvent,
-        relation: EventRelation,
-        deadline: UnixSeconds,
-        occurred_at: UnixSeconds, // same as event.timestamp
-    },
-    ExpectedEventMissing {
-        event_id: MonitorEventId,
-        event_type: MonitorEventType,
-        relation: EventRelation,
-        deadline: UnixSeconds,
-        cursor: UnixSeconds,
-    },
     /// A withdrawal event came after its deadline in the timing table.
     WithdrawalEventLate {
         event: MonitorWithdrawalEvent,
@@ -119,16 +104,24 @@ pub enum MonitorFinding {
         sui: WithdrawalTx,
         guardian: WithdrawalTx,
     },
-    /// The confirmed Bitcoin transaction has no output at the deposit's vout.
-    DepositOutputMissing {
-        deposit_id: DepositId,
-        output_count: usize,
+    /// Hashi approved a deposit for minting that Bitcoin shows no matching
+    /// deposit for.
+    DepositUnbacked {
+        sui: SuiDepositApprovedEvent,
     },
-    /// The deposit Bitcoin confirms differs in amount or script from the one
-    /// the Sui request claims.
+    /// Hashi approved a deposit whose block is later than `deadline`, the
+    /// approval plus the skew. Either Hashi approved before Bitcoin
+    /// confirmed, or a miner dated the block past the skew.
+    DepositLate {
+        sui: SuiDepositApprovedEvent,
+        deadline: UnixSeconds,
+        block_time: UnixSeconds,
+    },
+    /// The deposit Bitcoin confirmed differs in amount or script from the
+    /// one Hashi approved.
     DepositMismatch {
-        sui: MonitorDepositEvent,
-        btc: MonitorDepositEvent,
+        sui: SuiDepositApprovedEvent,
+        btc: ConfirmedDeposit,
     },
     /// An RPC answer contradicts one the monitor already holds. See
     /// `RpcInconsistency`.
@@ -233,14 +226,6 @@ impl MonitorFinding {
     pub fn category(&self) -> FindingCategory {
         match self {
             Self::InvalidEventAdded(_) => FindingCategory::Safety,
-            Self::EventOccurredAfterDeadline { relation, .. } => match relation {
-                EventRelation::Predecessor => FindingCategory::Safety,
-                EventRelation::Successor => FindingCategory::Liveness,
-            },
-            Self::ExpectedEventMissing { relation, .. } => match relation {
-                EventRelation::Predecessor => FindingCategory::Safety,
-                EventRelation::Successor => FindingCategory::Liveness,
-            },
             Self::WithdrawalEventLate { relation, .. } => match relation {
                 EventRelation::Predecessor => FindingCategory::Safety,
                 EventRelation::Successor => FindingCategory::Liveness,
@@ -253,7 +238,8 @@ impl MonitorFinding {
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
             Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
-            Self::DepositOutputMissing { .. } => FindingCategory::Safety,
+            Self::DepositUnbacked { .. } => FindingCategory::Safety,
+            Self::DepositLate { .. } => FindingCategory::Safety,
             Self::DepositMismatch { .. } => FindingCategory::Safety,
             Self::RpcInconsistency(_) => FindingCategory::Safety,
             Self::UtxoTooOld { critical, .. } => {
@@ -276,30 +262,6 @@ impl fmt::Display for MonitorFinding {
             Self::InvalidEventAdded(message) => {
                 write!(f, "InvalidEventAdded(message={message})")
             }
-            Self::EventOccurredAfterDeadline {
-                event,
-                relation,
-                deadline,
-                occurred_at,
-            } => write!(
-                f,
-                "EventOccurredAfterDeadline(event={event}, relation={relation:?}, deadline={}, occurred_at={}, late_by={})",
-                utc_timestamp(*deadline),
-                utc_timestamp(*occurred_at),
-                human_duration(occurred_at.saturating_sub(*deadline)),
-            ),
-            Self::ExpectedEventMissing {
-                event_id,
-                event_type,
-                relation,
-                deadline,
-                cursor,
-            } => write!(
-                f,
-                "ExpectedEventMissing({event_id}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
-                utc_timestamp(*deadline),
-                utc_timestamp(*cursor),
-            ),
             Self::WithdrawalEventLate {
                 event,
                 relation,
@@ -350,17 +312,31 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "WithdrawalMismatch(wid={wid}, sui={{{sui}}}, guardian={{{guardian}}})",
             ),
-            Self::DepositOutputMissing {
-                deposit_id,
-                output_count,
+            Self::DepositUnbacked { sui } => write!(
+                f,
+                "DepositUnbacked({})",
+                MonitorEvent::DepositApproved(sui.clone()),
+            ),
+            Self::DepositLate {
+                sui,
+                deadline,
+                block_time,
             } => write!(
                 f,
-                "DepositOutputMissing(deposit_id={deposit_id}, output_count={output_count})"
+                "DepositLate({}, deadline={}, block_time={})",
+                MonitorEvent::DepositApproved(sui.clone()),
+                utc_timestamp(*deadline),
+                utc_timestamp(*block_time),
             ),
             Self::DepositMismatch { sui, btc } => write!(
                 f,
-                "DepositMismatch(deposit_id={}, sui_amount={}, btc_amount={}, sui_script={:x}, btc_script={:x})",
-                sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
+                "DepositMismatch(request_id={}, deposit_id={}, hashi_amount={}, btc_amount={}, hashi_script={:x}, btc_script={:x})",
+                sui.request_id,
+                sui.deposit_id,
+                sui.amount,
+                btc.amount,
+                sui.script_pubkey,
+                btc.script_pubkey,
             ),
             Self::RpcInconsistency(inconsistency) => {
                 write!(f, "RpcInconsistency({inconsistency})")

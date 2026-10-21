@@ -244,9 +244,8 @@ impl SuiEventsPoller {
     ///
     /// The timestamp cursor advances only through `watermark.checkpoint`, which
     /// is the inclusive boundary that `ListTransactions` reports as fully
-    /// covered. Each transaction provides the checkpoint timestamp that
-    /// `DepositConfirmed` needs, and its nested events provide the Hashi
-    /// payloads. The Sui SDK handles item and scan limits, resumable cursors,
+    /// covered. Each transaction's nested events provide the Hashi payloads.
+    /// The Sui SDK handles item and scan limits, resumable cursors,
     /// and retryable partial streams. A terminal failure discards the partial
     /// range; that range is retried and may be split.
     pub async fn poll(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
@@ -603,7 +602,6 @@ impl SuiEventsPoller {
 
         let request = ListTransactionsRequest::default()
             .with_read_mask(FieldMask::from_paths([
-                "timestamp",
                 "checkpoint",
                 "events.events.event_type",
                 "events.events.contents",
@@ -662,7 +660,7 @@ impl SuiEventsPoller {
                 "{}::withdrawal_queue::WithdrawalPickedForProcessing",
                 self.package_id
             ),
-            format!("{}::deposit::DepositConfirmed", self.package_id),
+            format!("{}::deposit::DepositApproved", self.package_id),
             format!("{}::deposit::DepositRequested", self.package_id),
         ];
         TransactionFilter::any(event_types.into_iter().map(tx_filter::event_type))
@@ -676,12 +674,6 @@ impl SuiEventsPoller {
         events: &mut Vec<MonitorEvent>,
         findings: &mut Vec<MonitorFinding>,
     ) -> anyhow::Result<()> {
-        let timestamp = transaction
-            .timestamp
-            .context("Sui transaction is missing checkpoint timestamp")?;
-        let timestamp_ms =
-            proto_to_timestamp_ms(timestamp).context("invalid Sui transaction timestamp")?;
-        let timestamp_secs = unix_millis_to_seconds(timestamp_ms);
         let sui_events = transaction
             .events
             .context("filtered Sui transaction is missing events")?
@@ -692,7 +684,6 @@ impl SuiEventsPoller {
                 &self.package_versions,
                 &self.hashi_btc_keys,
                 sui_event,
-                timestamp_secs,
                 events,
                 findings,
             )?;

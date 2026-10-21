@@ -17,8 +17,8 @@
 //! - Withdrawals: each successor must follow its predecessor within its
 //!   delay. Each predecessor may be recorded after its successor by at most
 //!   its skew.
-//! - Deposits: the Bitcoin confirmation time may be after the Hashi
-//!   confirmation by at most the skew. The Bitcoin event is the user's
+//! - Deposits: the deposit's block time may be after the Hashi
+//!   approval by at most the skew. The Bitcoin event is the user's
 //!   payment, so no delay bounds it.
 //! - Deposit requests: Bitcoin is asked about a request's transaction for
 //!   the watch period. The monitor assumes an honest deposit confirms on
@@ -53,10 +53,9 @@ pub const WITHDRAWAL_E1_AFTER_E2_SKEW: u64 = 5 * 60;
 /// median of the last 11 blocks, which lags real time by about an hour.
 pub const WITHDRAWAL_E2_AFTER_E3_SKEW: u64 = 2 * 60 * 60;
 
-/// Deposit E1 after E2. E1 is timed by the block that gave the deposit its
-/// confirmations, and a miner may date a block up to two hours ahead of
-/// real time.
-pub const DEPOSIT_CONFIRMATION_SKEW: u64 = 2 * 60 * 60;
+/// A deposit's Bitcoin block after its Sui `DepositApproved`. A miner may
+/// date a block up to two hours ahead of real time.
+pub const DEPOSIT_APPROVAL_SKEW: u64 = 2 * 60 * 60;
 
 /// How long Bitcoin is asked about a deposit request's transaction.
 /// Assumption: an honest deposit confirms on Bitcoin within two days of
@@ -91,7 +90,7 @@ pub struct Timing {
     pub predecessor_skews: EventBounds,
     /// How far a deposit's confirmation time may be after its Hashi
     /// confirmation.
-    pub deposit_confirmation_skew: u64,
+    pub deposit_approval_skew: u64,
     /// How long Bitcoin is asked about a deposit request's transaction.
     pub deposit_request_watch: u64,
     /// Age of an unspent bridge UTXO that is a liveness finding.
@@ -125,7 +124,7 @@ impl Default for Timing {
                 ),
             ])
             .expect("one bound per non-terminal event"),
-            deposit_confirmation_skew: DEPOSIT_CONFIRMATION_SKEW,
+            deposit_approval_skew: DEPOSIT_APPROVAL_SKEW,
             deposit_request_watch: DEPOSIT_REQUEST_WATCH,
             utxo_age_warn: UTXO_AGE_WARN,
             utxo_age_critical: UTXO_AGE_CRITICAL,
@@ -187,7 +186,7 @@ impl Timing {
                 (WithdrawalEventType::E2GuardianApproved, 30),
             ])
             .expect("valid predecessor skews"),
-            deposit_confirmation_skew: 10,
+            deposit_approval_skew: 10,
             deposit_request_watch: 1_000,
             utxo_age_warn: 100,
             utxo_age_critical: 200,
