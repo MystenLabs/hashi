@@ -15,6 +15,7 @@ use fastcrypto::merkle::DIGEST_LEN;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::types::ShareIndex;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use sui_sdk_types::Address;
 
@@ -38,6 +39,8 @@ const AVID_NONCE_MESSAGE_KIND_ECHO: usize = AvidNonceMessageKind::ECHO_VARIANT a
 const PROTOCOL_COMPLAINT_AVSS: usize = ProtocolComplaint::AVSS_VARIANT as usize;
 const PROTOCOL_COMPLAINT_AVID_REVEAL: usize = ProtocolComplaint::AVID_REVEAL_VARIANT as usize;
 const PROTOCOL_COMPLAINT_AVID_BLAME: usize = ProtocolComplaint::AVID_BLAME_VARIANT as usize;
+const RS_LENGTH_PREFIX: usize = size_of::<u32>();
+const RS_ELEMENT: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CountCheckError {
@@ -49,6 +52,18 @@ pub enum CountCheckError {
     },
     #[error("{field}: {found} entries, at most {max} allowed")]
     TooMany {
+        field: &'static str,
+        found: usize,
+        max: usize,
+    },
+    #[error("{field}: {found} bytes, expected {expected}")]
+    WrongBytes {
+        field: &'static str,
+        found: usize,
+        expected: usize,
+    },
+    #[error("{field}: {found} bytes, at most {max} allowed")]
+    TooManyBytes {
         field: &'static str,
         found: usize,
         max: usize,
@@ -100,6 +115,50 @@ pub struct AvidShape<'a> {
     pub batch_size_per_weight: u16,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct DispersalShape<'a> {
+    pub weights: PartyWeights<'a>,
+    pub batch_size: usize,
+    pub data_shards: NonZeroUsize,
+}
+
+impl<'a> DispersalShape<'a> {
+    pub fn new(
+        weights: PartyWeights<'a>,
+        dealer: u16,
+        batch_size_per_weight: u16,
+        max_faulty: u16,
+    ) -> Option<Self> {
+        let total_weight: usize = weights.0.iter().map(|&weight| usize::from(weight)).sum();
+        let data_shards = total_weight
+            .checked_sub(2 * usize::from(max_faulty))
+            .and_then(NonZeroUsize::new)?;
+        let dealer_weight = weights.0.get(usize::from(dealer)).copied().unwrap_or(0);
+        Some(Self {
+            weights,
+            batch_size: usize::from(dealer_weight) * usize::from(batch_size_per_weight),
+            data_shards,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExactShards {
+    shard_bytes: usize,
+    row_depth: usize,
+    top_depth: usize,
+}
+
+fn avid_shard_bytes(row_weight: usize, batch_size: usize, data_shards: NonZeroUsize) -> usize {
+    let share_batch = uleb128_len(batch_size) + (batch_size + 1) * SCALAR;
+    let payload = uleb128_len(row_weight) + row_weight * share_batch;
+    (RS_LENGTH_PREFIX + payload).div_ceil(RS_ELEMENT * data_shards.get()) * RS_ELEMENT
+}
+
+fn uleb128_len(value: usize) -> usize {
+    (usize::BITS - value.leading_zeros()).div_ceil(7).max(1) as usize
+}
+
 pub fn check_avss_message(bytes: &[u8], shape: AvssShape) -> CountCheckResult<()> {
     let mut cursor = Cursor::new(bytes);
     walk_avss_message(&mut cursor, shape)?;
@@ -132,8 +191,7 @@ pub fn check_rotation_messages(
 
 pub fn avss_complaint_response_size(responder_weight: u16) -> usize {
     let weight = usize::from(responder_weight);
-    let length_prefix = (usize::BITS - weight.leading_zeros()).div_ceil(7).max(1) as usize;
-    length_prefix + weight * SHARE
+    uleb128_len(weight) + weight * SHARE
 }
 
 pub fn check_avss_complaint_response(bytes: &[u8], responder_weight: u16) -> CountCheckResult<()> {
@@ -168,22 +226,41 @@ pub fn check_avid_avss_message(
 
 pub fn check_dispersal(
     bytes: &[u8],
-    weights: PartyWeights<'_>,
+    shape: DispersalShape<'_>,
     holder: u16,
 ) -> CountCheckResult<()> {
     const FIELD: &str = "dispersal";
-    let shards = weights.weight_of(FIELD, holder)?;
+    let shards = shape.weights.weight_of(FIELD, holder)?;
+    let row_depth = merkle_depth(shape.weights.num_nodes());
+    let top_depth = merkle_depth(Cursor::new(bytes).length(FIELD)?);
     let mut cursor = Cursor::new(bytes);
-    walk_u16_map(&mut cursor, FIELD, weights.num_nodes(), |cursor, _| {
-        walk_authenticated_shards(cursor, shards)
-    })?;
+    walk_u16_map(
+        &mut cursor,
+        FIELD,
+        shape.weights.num_nodes(),
+        |cursor, row| {
+            let row_weight = shape.weights.weight_of(FIELD, row)?;
+            let exact = ExactShards {
+                shard_bytes: avid_shard_bytes(row_weight, shape.batch_size, shape.data_shards),
+                row_depth,
+                top_depth,
+            };
+            walk_authenticated_shards(cursor, shards, Some(exact))
+        },
+    )?;
+    cursor.finish()
+}
+
+pub fn check_confirm_certificate(bytes: &[u8], weights: PartyWeights<'_>) -> CountCheckResult<()> {
+    let mut cursor = Cursor::new(bytes);
+    walk_vote_certificate(&mut cursor, Some(weights.num_nodes().div_ceil(8)))?;
     cursor.finish()
 }
 
 pub fn check_echo(bytes: &[u8], weights: PartyWeights<'_>, sender: u16) -> CountCheckResult<()> {
     let shards = weights.weight_of("echo", sender)?;
     let mut cursor = Cursor::new(bytes);
-    walk_authenticated_shards(&mut cursor, shards)?;
+    walk_authenticated_shards(&mut cursor, shards, None)?;
     cursor.finish()
 }
 
@@ -211,10 +288,10 @@ pub fn check_protocol_complaint(bytes: &[u8], weights: PartyWeights<'_>) -> Coun
                 weights.num_nodes(),
                 |cursor, disperser| {
                     let shards = weights.weight_of("complaint.shards", disperser)?;
-                    walk_authenticated_shards(cursor, shards)
+                    walk_authenticated_shards(cursor, shards, None)
                 },
             )?;
-            walk_vote_certificate(&mut cursor)?;
+            walk_vote_certificate(&mut cursor, None)?;
         }
         variant => {
             return Err(CountCheckError::BadVariant {
@@ -250,9 +327,9 @@ pub fn check_held_avid_echoes(
         cursor.take(FIELD, BATCH_INDEX)?;
         cursor.expect_variant(FIELD, AVID_NONCE_MESSAGE_KIND_ECHO)?;
         cursor.take(FIELD, ADDRESS)?;
-        walk_authenticated_shards(&mut cursor, shards)?;
+        walk_authenticated_shards(&mut cursor, shards, None)?;
     }
-    walk_vote_certificate(&mut cursor)?;
+    walk_vote_certificate(&mut cursor, None)?;
     cursor.finish()
 }
 
@@ -298,21 +375,35 @@ fn walk_avss_common_message(
 fn walk_authenticated_shards(
     cursor: &mut Cursor<'_>,
     expected_shards: usize,
+    exact: Option<ExactShards>,
 ) -> CountCheckResult<()> {
     const SHARDS: &str = "shards";
     let shards = cursor.length(SHARDS)?;
     expect_count(SHARDS, shards, expected_shards)?;
     for _ in 0..shards {
-        walk_bytes(cursor, SHARDS)?;
+        let len = cursor.length(SHARDS)?;
+        exact.map_or(Ok(()), |exact| expect_bytes(SHARDS, len, exact.shard_bytes))?;
+        cursor.take(SHARDS, len)?;
     }
-    walk_merkle_path(cursor, "row_proof")?;
-    walk_merkle_path(cursor, "top_proof")
+    walk_merkle_path(cursor, "row_proof", exact.map(|exact| exact.row_depth))?;
+    walk_merkle_path(cursor, "top_proof", exact.map(|exact| exact.top_depth))
 }
 
-fn walk_merkle_path(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckResult<()> {
+fn walk_merkle_path(
+    cursor: &mut Cursor<'_>,
+    field: &'static str,
+    depth: Option<usize>,
+) -> CountCheckResult<()> {
     let nodes = cursor.length(field)?;
-    at_most(field, nodes, MAX_MERKLE_PATH)?;
+    depth.map_or_else(
+        || at_most(field, nodes, MAX_MERKLE_PATH),
+        |depth| expect_count(field, nodes, depth),
+    )?;
     (0..nodes).try_for_each(|_| walk_merkle_node(cursor, field))
+}
+
+fn merkle_depth(leaves: usize) -> usize {
+    leaves.next_power_of_two().trailing_zeros() as usize
 }
 
 fn walk_merkle_node(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckResult<()> {
@@ -332,10 +423,16 @@ fn walk_avid_vote(cursor: &mut Cursor<'_>, weights: PartyWeights<'_>) -> CountCh
     cursor.take("common_message_hash", HASH).map(drop)
 }
 
-fn walk_vote_certificate(cursor: &mut Cursor<'_>) -> CountCheckResult<()> {
+fn walk_vote_certificate(
+    cursor: &mut Cursor<'_>,
+    max_signers_bytes: Option<usize>,
+) -> CountCheckResult<()> {
     const FIELD: &str = "certificate";
+    const SIGNERS: &str = "certificate.signers";
     cursor.take(FIELD, EPOCH + AGGREGATE_SIGNATURE)?;
-    walk_bytes(cursor, "certificate.signers")?;
+    let signers = cursor.length(SIGNERS)?;
+    max_signers_bytes.map_or(Ok(()), |max| at_most_bytes(SIGNERS, signers, max))?;
+    cursor.take(SIGNERS, signers)?;
     cursor.take(FIELD, ADDRESS)?;
     walk_bytes(cursor, "certificate.messages_hash")?;
     cursor.take(FIELD, BATCH_INDEX).map(drop)
@@ -380,6 +477,22 @@ fn at_most(field: &'static str, found: usize, max: usize) -> CountCheckResult<()
     (found <= max)
         .then_some(())
         .ok_or(CountCheckError::TooMany { field, found, max })
+}
+
+fn expect_bytes(field: &'static str, found: usize, expected: usize) -> CountCheckResult<()> {
+    (found == expected)
+        .then_some(())
+        .ok_or(CountCheckError::WrongBytes {
+            field,
+            found,
+            expected,
+        })
+}
+
+fn at_most_bytes(field: &'static str, found: usize, max: usize) -> CountCheckResult<()> {
+    (found <= max)
+        .then_some(())
+        .ok_or(CountCheckError::TooManyBytes { field, found, max })
 }
 
 struct Cursor<'a> {

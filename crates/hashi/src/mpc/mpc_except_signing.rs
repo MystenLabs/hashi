@@ -348,6 +348,7 @@ impl MpcManager {
             self.protocol_type.clone(),
             self.batch_size_per_weight,
             min_batch_presigs,
+            self.mpc_config.max_faulty,
             CommitteeShape::new(
                 &self.committee,
                 &self.mpc_config.nodes,
