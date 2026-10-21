@@ -3,6 +3,7 @@
 
 use crate::mpc::count_check::AvidShape;
 use crate::mpc::count_check::AvssShape;
+use crate::mpc::count_check::DispersalShape;
 use crate::mpc::count_check::PartyWeights;
 use crate::mpc::types::EncryptionGroupElement;
 use crate::mpc::types::ProtocolType;
@@ -84,6 +85,7 @@ pub struct ShapeParams {
     protocol_type: ProtocolType,
     batch_size_per_weight: u16,
     min_batch_presigs: u64,
+    max_faulty: u16,
     current: CommitteeShape,
     previous: Option<CommitteeShape>,
     previous_input: Option<CommitteeShape>,
@@ -97,6 +99,7 @@ impl ShapeParams {
         protocol_type: ProtocolType,
         batch_size_per_weight: u16,
         min_batch_presigs: u64,
+        max_faulty: u16,
         current: CommitteeShape,
         previous: Option<CommitteeShape>,
         previous_input: Option<CommitteeShape>,
@@ -107,6 +110,7 @@ impl ShapeParams {
             protocol_type,
             batch_size_per_weight,
             min_batch_presigs,
+            max_faulty,
             current,
             previous,
             previous_input,
@@ -139,6 +143,15 @@ impl ShapeParams {
             weights: self.current.weights(),
             batch_size_per_weight: self.batch_size_per_weight,
         }
+    }
+
+    pub(crate) fn avid_dispersal_shape(&self, dealer: PartyId) -> Option<DispersalShape<'_>> {
+        DispersalShape::new(
+            self.current.weights(),
+            dealer,
+            self.batch_size_per_weight,
+            self.max_faulty,
+        )
     }
 
     pub(crate) fn committee_for_epoch(&self, epoch: u64) -> Option<&CommitteeShape> {

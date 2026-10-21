@@ -33,7 +33,11 @@ use hashi_types::committee::BLS12381AggregateSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::intent::IntentMessage;
 use proptest::prelude::*;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::sync::LazyLock;
 use sui_sdk_types::Address;
 use test_strategy::proptest;
@@ -206,8 +210,13 @@ fn a_count_is_refused_before_its_elements_are_read() {
         })
     );
     let weights = PartyWeights(&[2, 2, 1, 0]);
+    let dispersal_shape = DispersalShape {
+        weights,
+        batch_size: 0,
+        data_shards: NonZeroUsize::MIN,
+    };
     assert_eq!(
-        check_dispersal(&uleb128(5), weights, 0),
+        check_dispersal(&uleb128(5), dispersal_shape, 0),
         Err(CountCheckError::TooMany {
             field: "dispersal",
             found: 5,
@@ -427,11 +436,17 @@ impl AvidPayloads {
             batch_size_per_weight: 64,
         }
     }
+
+    fn dispersal_shape(&self) -> DispersalShape<'_> {
+        DispersalShape::new(PartyWeights(&self.weights), 0, 64, 1).unwrap()
+    }
 }
 
-static AVID: LazyLock<AvidPayloads> = LazyLock::new(|| {
+static AVID: LazyLock<AvidPayloads> =
+    LazyLock::new(|| avid_payloads(vec![2, 2, 2, 1, 0], BTreeSet::from([0, 1, 2])));
+
+fn avid_payloads(weights: Vec<u16>, signers: BTreeSet<PartyId>) -> AvidPayloads {
     let mut rng = rand::thread_rng();
-    let weights = vec![2u16, 2, 2, 1, 0];
     let params = Parameters { t: 4, f: 1 };
     let keys: Vec<PrivateKey<EncryptionGroupElement>> =
         weights.iter().map(|_| PrivateKey::new(&mut rng)).collect();
@@ -456,13 +471,7 @@ static AVID: LazyLock<AvidPayloads> = LazyLock::new(|| {
     let avss_message = avss_builder.message_for(0).unwrap();
     let (_, vote, verified_common) = receiver.process_avss_message(&avss_message).unwrap();
     let avid_builder = dealer
-        .create_avid_messages(
-            &avss_builder,
-            TestAvssCert {
-                signers: BTreeSet::from([0, 1, 2]),
-                vote,
-            },
-        )
+        .create_avid_messages(&avss_builder, TestAvssCert { signers, vote })
         .unwrap();
     let dispersals = (0..weights.len() as u16)
         .map(|holder| avid_builder.message_for(holder).unwrap().dispersal)
@@ -478,7 +487,7 @@ static AVID: LazyLock<AvidPayloads> = LazyLock::new(|| {
         avid_vote,
         weights,
     }
-});
+}
 
 fn avss_complaint() -> avss::Complaint {
     let mut rng = rand::thread_rng();
@@ -553,7 +562,7 @@ fn avid_payloads_pass_and_are_consumed_exactly() {
         assert_eq!(
             check_dispersal(
                 &bcs::to_bytes(dispersal).unwrap(),
-                shape.weights,
+                avid.dispersal_shape(),
                 holder as u16
             ),
             Ok(())
@@ -619,7 +628,7 @@ fn avid_counts_follow_the_dealer_holder_and_sender() {
     assert_eq!(
         check_dispersal(
             &bcs::to_bytes(&avid.dispersals[0]).unwrap(),
-            shape.weights,
+            avid.dispersal_shape(),
             3
         ),
         Err(CountCheckError::WrongCount {
@@ -634,6 +643,73 @@ fn avid_counts_follow_the_dealer_holder_and_sender() {
             field: "shards",
             found: 2,
             expected: 0,
+        })
+    );
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+enum MirroredNode {
+    Empty,
+    Digest([u8; 32]),
+}
+
+type MirroredRow = (Vec<Vec<u8>>, Vec<MirroredNode>, Vec<MirroredNode>);
+
+#[test]
+fn dispersals_and_confirm_certificates_are_held_to_their_honest_lengths() {
+    let avid = avid_payloads(vec![2, 2, 2, 1, 0, 0], BTreeSet::from([0, 1, 2]));
+    let shape = avid.dispersal_shape();
+    for (holder, dispersal) in avid.dispersals.iter().enumerate() {
+        assert_eq!(
+            check_dispersal(&bcs::to_bytes(dispersal).unwrap(), shape, holder as u16),
+            Ok(())
+        );
+    }
+    let rows: BTreeMap<u16, MirroredRow> =
+        bcs::from_bytes(&bcs::to_bytes(&avid.dispersals[0]).unwrap()).unwrap();
+    assert_eq!(rows.keys().copied().collect::<Vec<_>>(), [3, 4, 5]);
+    let mut longer_shard = rows.clone();
+    let (shards, _, _) = longer_shard.get_mut(&3).unwrap();
+    shards[0].push(0);
+    assert_eq!(
+        check_dispersal(&bcs::to_bytes(&longer_shard).unwrap(), shape, 0),
+        Err(CountCheckError::WrongBytes {
+            field: "shards",
+            found: 829,
+            expected: 828,
+        })
+    );
+    let mut deeper_proof = rows;
+    let (_, _, top_proof) = deeper_proof.get_mut(&5).unwrap();
+    top_proof.push(MirroredNode::Empty);
+    assert_eq!(
+        check_dispersal(&bcs::to_bytes(&deeper_proof).unwrap(), shape, 0),
+        Err(CountCheckError::WrongCount {
+            field: "top_proof",
+            found: 3,
+            expected: 2,
+        })
+    );
+    let certificate = |signers: &[u8]| {
+        let message = AvssVoteMessagesHash {
+            dealer_address: Address::ZERO,
+            messages_hash: MessagesHash::from([7; 32]),
+            batch_index: 7,
+        };
+        let signature = BLS12381AggregateSignature::default();
+        bcs::to_bytes(&SignedMessage::new(1, message, signature.as_bytes(), signers).unwrap())
+            .unwrap()
+    };
+    assert_eq!(
+        check_confirm_certificate(&certificate(&[0b1110_0000]), shape.weights),
+        Ok(())
+    );
+    assert_eq!(
+        check_confirm_certificate(&certificate(&[0b1110_0000, 0]), shape.weights),
+        Err(CountCheckError::TooManyBytes {
+            field: "certificate.signers",
+            found: 2,
+            max: 1,
         })
     );
 }
@@ -813,7 +889,8 @@ fn mutated_avid_payloads_never_panic(position: prop::sample::Index, byte: u8, cu
         mutated.truncate(bytes.len().saturating_sub(cut as usize % 64));
         let _ = check_avss_common_message(&mutated, shape, 0);
         let _ = check_avid_avss_message(&mutated, shape, 0);
-        let _ = check_dispersal(&mutated, shape.weights, 0);
+        let _ = check_dispersal(&mutated, avid.dispersal_shape(), 0);
+        let _ = check_confirm_certificate(&mutated, shape.weights);
         let _ = check_echo(&mutated, shape.weights, 0);
         let _ = check_avid_vote(&mutated, shape.weights);
         let _ = check_protocol_complaint(&mutated, shape.weights);
@@ -826,6 +903,8 @@ fn mutated_avid_payloads_never_panic(position: prop::sample::Index, byte: u8, cu
 fn arbitrary_bytes_never_panic_in_avid_layouts(
     #[strategy(prop::collection::vec(any::<u8>(), 0..1024))] bytes: Vec<u8>,
     #[strategy(prop::collection::vec(any::<u16>(), 0..8))] weights: Vec<u16>,
+    #[strategy(0usize..1 << 32)] batch_size: usize,
+    #[strategy(1usize..1 << 16)] data_shards: usize,
     threshold: u16,
     batch_size_per_weight: u16,
     #[strategy(0u16..8)] party: u16,
@@ -835,9 +914,15 @@ fn arbitrary_bytes_never_panic_in_avid_layouts(
         weights: PartyWeights(&weights),
         batch_size_per_weight,
     };
+    let dispersal_shape = DispersalShape {
+        weights: shape.weights,
+        batch_size,
+        data_shards: NonZeroUsize::new(data_shards).unwrap(),
+    };
     let _ = check_avss_common_message(&bytes, shape, party);
     let _ = check_avid_avss_message(&bytes, shape, party);
-    let _ = check_dispersal(&bytes, shape.weights, party);
+    let _ = check_dispersal(&bytes, dispersal_shape, party);
+    let _ = check_confirm_certificate(&bytes, shape.weights);
     let _ = check_echo(&bytes, shape.weights, party);
     let _ = check_avid_vote(&bytes, shape.weights);
     let _ = check_protocol_complaint(&bytes, shape.weights);

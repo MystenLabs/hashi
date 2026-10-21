@@ -130,10 +130,22 @@ fn check_avid_nonce_message(
     match &avid.kind {
         Some(Kind::Optimistic(optimistic)) => avss_message(optimistic.message.as_ref()),
         Some(Kind::Dispersal(dispersal)) => {
+            let dispersal_shape = shape.avid_dispersal_shape(dealer).ok_or_else(|| {
+                MpcError::InvalidConfig(format!(
+                    "epoch {} has no AVID data shards: reduced weight is at most twice max_faulty",
+                    shape.epoch()
+                ))
+            })?;
             dispersal.dispersal.as_ref().map_or(Ok(()), |rows| {
                 count_checked(
                     sender,
-                    count_check::check_dispersal(bytes(rows), current.weights(), holder),
+                    count_check::check_dispersal(bytes(rows), dispersal_shape, holder),
+                )
+            })?;
+            dispersal.confirm_cert.as_ref().map_or(Ok(()), |cert| {
+                count_checked(
+                    sender,
+                    count_check::check_confirm_certificate(bytes(cert), current.weights()),
                 )
             })?;
             avss_message(dispersal.optimistic_message.as_ref())
