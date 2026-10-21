@@ -852,7 +852,7 @@ mod tests {
         // The rejected approval is not ingested, so the E1 stays missing.
         assert!(matches!(
             auditor.detect_timing_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 
@@ -873,7 +873,7 @@ mod tests {
         );
         assert!(matches!(
             auditor.detect_timing_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 

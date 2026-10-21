@@ -130,8 +130,6 @@ mod tests {
     use hashi_types::guardian::WithdrawalID;
 
     use super::*;
-    use crate::domain::MonitorEventId;
-    use crate::domain::MonitorEventType;
     use crate::domain::WithdrawalEventType;
     use crate::findings::EventRelation;
 
@@ -180,9 +178,9 @@ mod tests {
     #[test]
     fn findings_set_the_latest_timestamp_of_their_category() {
         let metrics = MonitorMetrics::new();
-        let liveness = MonitorFinding::ExpectedEventMissing {
-            event_id: MonitorEventId::Withdrawal(WithdrawalID::new([1; 32])),
-            event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E3BtcConfirmed),
+        let liveness = MonitorFinding::WithdrawalEventMissing {
+            wid: WithdrawalID::new([1; 32]),
+            event_type: WithdrawalEventType::E3BtcConfirmed,
             relation: EventRelation::Successor,
             deadline: 50,
             cursor: 60,

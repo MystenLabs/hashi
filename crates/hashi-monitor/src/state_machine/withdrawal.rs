@@ -28,9 +28,6 @@
 
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
-use crate::domain::MonitorEvent;
-use crate::domain::MonitorEventId;
-use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
@@ -306,9 +303,9 @@ impl WithdrawalStateMachine {
                 _ => cursors.for_event_type(*event_type),
             };
             if *deadline <= cursor {
-                out.push(MonitorFinding::ExpectedEventMissing {
-                    event_id: MonitorEventId::Withdrawal(self.wid),
-                    event_type: MonitorEventType::Withdrawal(*event_type),
+                out.push(MonitorFinding::WithdrawalEventMissing {
+                    wid: self.wid,
+                    event_type: *event_type,
                     relation: *relation,
                     deadline: *deadline,
                     cursor,
@@ -328,8 +325,8 @@ fn neighbor_timing_findings(
     let mut findings = Vec::new();
     let deadline = timing.successor_deadline(predecessor);
     if deadline < successor.timestamp_secs {
-        findings.push(MonitorFinding::EventOccurredAfterDeadline {
-            event: MonitorEvent::Withdrawal(successor.clone()),
+        findings.push(MonitorFinding::WithdrawalEventLate {
+            event: successor.clone(),
             relation: EventRelation::Successor,
             deadline,
             occurred_at: successor.timestamp_secs,
@@ -337,8 +334,8 @@ fn neighbor_timing_findings(
     }
     let deadline = timing.predecessor_deadline(successor);
     if deadline < predecessor.timestamp_secs {
-        findings.push(MonitorFinding::EventOccurredAfterDeadline {
-            event: MonitorEvent::Withdrawal(predecessor.clone()),
+        findings.push(MonitorFinding::WithdrawalEventLate {
+            event: predecessor.clone(),
             relation: EventRelation::Predecessor,
             deadline,
             occurred_at: predecessor.timestamp_secs,
@@ -493,8 +490,8 @@ mod tests {
         let findings = sm.add_event(event.clone(), &timing);
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(event),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event,
                 relation: EventRelation::Successor,
                 deadline: 200,
                 occurred_at: 201,
@@ -521,14 +518,14 @@ mod tests {
         assert_eq!(
             findings,
             vec![
-                MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(guardian_approval),
+                MonitorFinding::WithdrawalEventLate {
+                    event: guardian_approval,
                     relation: EventRelation::Successor,
                     deadline: 200,
                     occurred_at: 311,
                 },
-                MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(btc_confirmed),
+                MonitorFinding::WithdrawalEventLate {
+                    event: btc_confirmed,
                     relation: EventRelation::Successor,
                     deadline: 511,
                     occurred_at: 600,
@@ -542,8 +539,8 @@ mod tests {
     fn timing_findings_do_not_depend_on_ingestion_order() {
         let timing = Timing::for_tests();
         let late = |event: &MonitorWithdrawalEvent, relation, deadline| {
-            MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(event.clone()),
+            MonitorFinding::WithdrawalEventLate {
+                event: event.clone(),
                 relation,
                 deadline,
                 occurred_at: event.timestamp_secs,
@@ -634,9 +631,9 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(
             violations[0],
-            MonitorFinding::ExpectedEventMissing {
-                event_id: MonitorEventId::Withdrawal(WithdrawalID::new([1; 32])),
-                event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E2GuardianApproved),
+            MonitorFinding::WithdrawalEventMissing {
+                wid: WithdrawalID::new([1; 32]),
+                event_type: WithdrawalEventType::E2GuardianApproved,
                 relation: EventRelation::Successor,
                 deadline: 200,
                 cursor: 200,
@@ -680,8 +677,8 @@ mod tests {
         let findings = late.add_event(approval.clone(), &timing);
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(approval),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event: approval,
                 relation: EventRelation::Predecessor,
                 deadline: 110,
                 occurred_at: 111,
@@ -724,8 +721,8 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::EventOccurredAfterDeadline {
-                event: MonitorEvent::Withdrawal(guardian_approval),
+            vec![MonitorFinding::WithdrawalEventLate {
+                event: guardian_approval,
                 relation: EventRelation::Predecessor,
                 deadline: 149,
                 occurred_at: 150,

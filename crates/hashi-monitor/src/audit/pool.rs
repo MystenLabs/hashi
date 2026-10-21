@@ -57,6 +57,19 @@
 //!    spends is not checked: Bitcoin spends it about an hour before the
 //!    flow completes, and an incomplete flow has its own finding.
 //!
+//! Differences from Move's pool: this pool can hold a UTXO that Move never
+//! holds, with no fault of the committee. Two causes:
+//! - Sanctions (IOP-820): a member's AML screening rejects the deposit. The
+//!   UTXO is real bridge money, but no `DepositConfirmed` follows, so it
+//!   stays outside Move until the recovery leaf opens.
+//! - User mistakes: the pool takes a UTXO that pays the bridge script of the
+//!   claimed path, but an honest committee confirms only a correct, live
+//!   request. A request with a wrong amount is rejected; the pool keeps the
+//!   UTXO at the amount Bitcoin paid. A request whose transaction confirms
+//!   after Move marks it expired (one day) but within the watch
+//!   (`DEPOSIT_REQUEST_WATCH`) is deleted. In both cases Move holds the UTXO
+//!   only once the user sends a correct request again.
+//!
 //! Invariants:
 //! - An outpoint is held or spent, never both.
 //! - The spent record is never pruned, and it only grows: an entry is added
