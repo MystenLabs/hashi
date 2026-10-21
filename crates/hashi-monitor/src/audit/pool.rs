@@ -26,7 +26,7 @@
 //! 1. The pool starts empty, at the bridge's genesis. Move's records are
 //!    never read for it. The continuous auditor keeps it in its snapshot,
 //!    so a restart resumes with the pool the last run built.
-//! 2. A coin is added when Bitcoin confirms a deposit request's output at
+//! 2. A UTXO is added when Bitcoin confirms a deposit request's output at
 //!    the bridge script of the claimed path. The committee is not needed.
 //! 3. When a withdrawal flow is complete, E1, E2 and E3 seen, its change
 //!    outputs are added and its inputs move to the spent record, with the
@@ -56,6 +56,19 @@
 //!    an RPC inconsistency. A UTXO that a withdrawal the monitor follows
 //!    spends is not checked: Bitcoin spends it about an hour before the
 //!    flow completes, and an incomplete flow has its own finding.
+//!
+//! Differences from Move's pool: this pool can hold a UTXO that Move never
+//! holds, with no fault of the committee. Two causes:
+//! - Sanctions (IOP-820): a member's AML screening rejects the deposit. The
+//!   UTXO is real bridge money, but no `DepositConfirmed` follows, so it
+//!   stays outside Move until the recovery leaf opens.
+//! - User mistakes: the pool takes a UTXO that pays the bridge script of the
+//!   claimed path, but an honest committee confirms only a correct, live
+//!   request. A request with a wrong amount is rejected; the pool keeps the
+//!   UTXO at the amount Bitcoin paid. A request whose transaction confirms
+//!   after Move marks it expired (one day) but within the watch
+//!   (`DEPOSIT_REQUEST_WATCH`) is deleted. In both cases Move holds the UTXO
+//!   only once the user sends a correct request again.
 //!
 //! Invariants:
 //! - An outpoint is held or spent, never both.

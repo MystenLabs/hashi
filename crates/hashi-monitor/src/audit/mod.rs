@@ -15,8 +15,9 @@
 //!    Bitcoin event, and ingests the confirmations it finds.
 //! 3. A Sui approval still missing after its deadline is fetched by its
 //!    withdrawal id, since the Sui scan may have started after it.
-//! 4. Each tick, the core reports the violations of every machine in the
-//!    audit window: the expected events whose deadline a cursor has passed.
+//! 4. Each tick, the core reports the timing violations of every machine
+//!    in the audit window: the expected events whose deadline a cursor has
+//!    passed.
 //! 5. Complete flows are added to the UTXO pool: it takes the UTXOs they
 //!    moved, and the flows are dropped.
 //! 6. The progress watermarks give the time through which every flow is
@@ -225,7 +226,7 @@ impl AuditorCore {
             .collect()
     }
 
-    /// Ask Bitcoin about every coin held in the UTXO pool and return the
+    /// Ask Bitcoin about every UTXO held in the UTXO pool and return the
     /// findings. The spends the pool cannot explain are kept as suspects
     /// for `judge_suspect_spends`.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
@@ -472,7 +473,7 @@ impl AuditorCore {
     fn complete_withdrawals(&self) -> Vec<ConfirmedWithdrawal> {
         self.pending_withdrawals
             .values()
-            .filter(|sm| sm.is_since(self.window_start) && !sm.is_expecting_events())
+            .filter(|sm| sm.is_since(self.window_start) && sm.is_ready_for_gc())
             .filter_map(|sm| sm.confirmed().cloned())
             .collect()
     }
@@ -527,23 +528,24 @@ impl AuditorCore {
         findings
     }
 
-    pub fn detect_violations(&self) -> Vec<MonitorFinding> {
+    pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_since(self.window_start) {
                 continue;
             }
 
-            findings.extend(sm.violations(&self.cursors()));
+            findings.extend(sm.timing_violations(&self.cursors()));
         }
         for sm in self.pending_deposits.values() {
-            findings.extend(sm.violations());
+            findings.extend(sm.timing_violations());
         }
         findings
     }
 
-    /// Add every complete flow in the window to the UTXO pool: it takes the
-    /// UTXOs the flow moved, then the flow is dropped and logged. The pool takes
+    /// Add every complete flow in the window to the UTXO pool, then drop it:
+    /// the pool takes the UTXOs the flow moved. Closed deposit requests are
+    /// dropped too. The pool takes
     /// every deposit before any withdrawal, and a withdrawal's change before
     /// its inputs, so the order the flows completed in does not matter.
     /// Call it right after the Bitcoin lookups and before any other poll:
@@ -556,7 +558,7 @@ impl AuditorCore {
     /// never completes never reaches the pool: its inputs stay held, and
     /// the daily check reports them once they are too old, on top of the
     /// finding for its missing event.
-    pub fn add_to_pool(&mut self) -> Vec<MonitorFinding> {
+    pub fn add_to_pool_and_gc(&mut self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_confirmed_deposits();
         let confirmed_withdrawals = self.complete_withdrawals();
@@ -566,7 +568,7 @@ impl AuditorCore {
         findings.extend(self.utxo_pool.add_withdrawals(&confirmed_withdrawals));
 
         self.pending_withdrawals.retain(|wid, sm| {
-            if !sm.is_since(self.window_start) || sm.is_expecting_events() {
+            if !sm.is_since(self.window_start) || !sm.is_ready_for_gc() {
                 return true;
             }
             let e1 = sm
@@ -616,7 +618,7 @@ impl AuditorCore {
 
     /// Where a restart can start and still replay every flow the auditor
     /// holds: an open flow, and a complete one the pool has not taken yet.
-    /// A complete flow leaves the auditor only when `add_to_pool` takes it,
+    /// A complete flow leaves the auditor only when `add_to_pool_and_gc` takes it,
     /// in the Bitcoin tick, so it pins the floor until then. Otherwise a
     /// snapshot saved in between would skip it, and its UTXOs would never
     /// move in the pool.
@@ -812,7 +814,7 @@ mod tests {
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
         // The approval is ingested, so it is not also reported missing.
-        assert!(auditor.detect_violations().is_empty());
+        assert!(auditor.detect_timing_violations().is_empty());
     }
 
     #[tokio::test]
@@ -823,7 +825,7 @@ mod tests {
             auditor_missing_approval(approved_at + 1, approved_at + 3_600, approval.btc_txid).await;
 
         assert!(auditor.fetch_missing_hashi_approvals().await.is_empty());
-        assert!(auditor.detect_violations().is_empty());
+        assert!(auditor.detect_timing_violations().is_empty());
     }
 
     #[tokio::test]
@@ -849,8 +851,8 @@ mod tests {
         );
         // The rejected approval is not ingested, so the E1 stays missing.
         assert!(matches!(
-            auditor.detect_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            auditor.detect_timing_violations()[..],
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 
@@ -870,8 +872,8 @@ mod tests {
             )]
         );
         assert!(matches!(
-            auditor.detect_violations()[..],
-            [MonitorFinding::ExpectedEventMissing { .. }]
+            auditor.detect_timing_violations()[..],
+            [MonitorFinding::WithdrawalEventMissing { .. }]
         ));
     }
 
@@ -979,7 +981,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![unknown], &timing),
         );
 
-        let findings = auditor.add_to_pool();
+        let findings = auditor.add_to_pool_and_gc();
 
         assert_eq!(
             findings,
@@ -1011,7 +1013,7 @@ mod tests {
             [blocker] if blocker.waiting_for.is_empty()
         ));
 
-        auditor.add_to_pool();
+        auditor.add_to_pool_and_gc();
 
         let taken = auditor.progress_watermarks();
         let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());

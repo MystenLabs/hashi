@@ -99,7 +99,7 @@ when Bitcoin confirms a known outpoint with a second amount or script, and
 `UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
 transaction already spent, since Bitcoin cannot produce either; **safety**
 `UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
-never held, since the bridge spent a coin that no verified deposit or change
+never held, since the bridge spent a UTXO that no verified deposit or change
 brought in; the pool records nothing for that spend. In one Bitcoin pass
 every add comes before every spend, so a pass
 that answers a deposit and the withdrawal that spends it is right in any

@@ -199,7 +199,7 @@ pub struct WithdrawalTx {
 }
 
 impl WithdrawalTx {
-    /// Move leaves an input's derivation path unset for change coins. The
+    /// Move leaves an input's derivation path unset for change UTXOs. The
     /// guardian and the transaction builder read that as the zero path, so it
     /// is made explicit here and the two sources compare equal.
     pub fn new(
