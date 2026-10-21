@@ -675,6 +675,7 @@ mod tests {
     use crate::rpc::sui::tests::looked_up_approval;
     use crate::rpc::sui::tests::poller_scanned;
     use crate::rpc::sui::tests::poller_scanned_with;
+    use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
@@ -901,6 +902,109 @@ mod tests {
             btc_client: BtcRpcClient::new(&cfg).unwrap(),
             cfg,
         }
+    }
+
+    /// A deposit request for `txid(9):1` of `amount` to `p2wpkh(0x54)`, and
+    /// its Sui approval at time 200.
+    fn deposit_request_and_approval(
+        amount: u64,
+    ) -> (SuiDepositRequestedEvent, SuiDepositApprovedEvent) {
+        let request = SuiDepositRequestedEvent {
+            amount,
+            ..deposit_request()
+        };
+        let approval = approval_of(&request, 200);
+        (request, approval)
+    }
+
+    #[tokio::test]
+    async fn a_sui_approval_after_its_request_closed_is_checked_against_the_pool() {
+        let mut auditor = auditor_with_pool().await;
+        let (_, sui) = deposit_request_and_approval(50_000);
+        let unbacked = auditor.ingest(MonitorEvent::DepositApproved(sui.clone()));
+        assert!(matches!(
+            &unbacked[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+        ));
+
+        assert!(
+            auditor
+                .utxo_pool
+                .add_deposit(&ConfirmedDeposit {
+                    deposit_id: sui.deposit_id,
+                    amount: 50_000,
+                    script_pubkey: sui.script_pubkey.clone(),
+                    block_time: 150,
+                })
+                .is_none()
+        );
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositApproved(sui))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_request_keeps_its_sui_approval_until_bitcoin_answers() {
+        let mut auditor = auditor_with_pool().await;
+        // The request claims more than Bitcoin pays, and Hashi approves it.
+        let (request, sui) = deposit_request_and_approval(60_000);
+        let request_id = request.request_id;
+        assert!(
+            auditor
+                .ingest_batch(vec![
+                    MonitorEvent::DepositRequested(request),
+                    MonitorEvent::DepositApproved(sui.clone()),
+                ])
+                .is_empty()
+        );
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+
+        // Bitcoin answers: the machine judges the held approval.
+        let findings = auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                0,
+                Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x54))),
+            );
+        assert!(
+            matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, btc }] if *claimed == sui && btc.amount == 50_000)
+        );
+
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.pending_deposits.is_empty());
+        assert_eq!(auditor.utxo_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sui_approval_of_a_request_bitcoin_did_not_back_is_unbacked() {
+        let mut auditor = auditor_with_pool().await;
+        let (request, sui) = deposit_request_and_approval(50_000);
+        let request_id = request.request_id;
+        auditor.ingest_batch(vec![
+            MonitorEvent::DepositRequested(request),
+            MonitorEvent::DepositApproved(sui.clone()),
+        ]);
+
+        // The output pays another script.
+        let findings = auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                0,
+                Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x55))),
+            );
+
+        assert!(matches!(
+            &findings[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+        ));
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.utxo_pool.is_empty());
     }
 
     /// A complete withdrawal `txid(fill)` for `wid_seed`, spending `inputs`,

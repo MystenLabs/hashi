@@ -222,6 +222,24 @@ pub mod tests {
         event
     }
 
+    /// A `DepositApproved` event for `txn`'s first input, approved at `timestamp_ms`.
+    pub fn deposit_approved_event(txn: &WithdrawalTransaction, timestamp_ms: u64) -> Event {
+        let input = &txn.inputs[0];
+        // `DepositApproved` fields, in declaration order: the request, the
+        // UTXO, the committee certificate and the approval time.
+        let mut contents = Bcs::serialize(&(
+            Address::new([0x61; 32]),
+            (input.id, input.amount, input.derivation_path),
+            (7_u64, vec![0x64_u8; 48], vec![0xff_u8]),
+            timestamp_ms,
+        ))
+        .unwrap();
+        contents.name = Some(format!("{PACKAGE_ID}::deposit::DepositApproved"));
+        let mut event = Event::default();
+        event.contents = Some(contents);
+        event
+    }
+
     pub fn withdrawal_transaction(id: Address) -> WithdrawalTransaction {
         let tx = withdrawal_tx(witness_program_from_address(&test_change_address()).unwrap());
         let txn = WithdrawalTransaction {
@@ -472,6 +490,34 @@ pub mod tests {
             vec![MonitorEvent::DepositRequested(SuiDepositRequestedEvent {
                 request_id: Address::new([0x61; 32]),
                 timestamp_secs: 1_700_000_000,
+                deposit_id: DepositId::new(input.id.txid.into(), input.id.vout),
+                amount: input.amount,
+                script_pubkey: test_hashi_btc_keys().script_pubkey(input.derivation_path.as_ref()),
+            })]
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn a_deposit_approval_carries_the_claimed_script_and_its_own_time() {
+        let txn = withdrawal_transaction(WID);
+        let input = &txn.inputs[0];
+        let (mut events, mut findings) = (Vec::new(), Vec::new());
+
+        parse_event(
+            &package_versions(),
+            &test_hashi_btc_keys(),
+            deposit_approved_event(&txn, 1_700_000_600_900),
+            &mut events,
+            &mut findings,
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![MonitorEvent::DepositApproved(SuiDepositApprovedEvent {
+                timestamp_secs: 1_700_000_600,
+                request_id: Address::new([0x61; 32]),
                 deposit_id: DepositId::new(input.id.txid.into(), input.id.vout),
                 amount: input.amount,
                 script_pubkey: test_hashi_btc_keys().script_pubkey(input.derivation_path.as_ref()),

@@ -449,7 +449,10 @@ mod tests {
 
     use crate::domain::BtcConfirmation;
     use crate::domain::DepositId;
+    use crate::domain::SuiDepositRequestedEvent;
     use crate::findings::FindingCategory;
+    use crate::test_utils::approval_of;
+    use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
 
     // `Timing::for_tests` values.
@@ -699,6 +702,98 @@ mod tests {
         assert!(findings.is_empty());
         assert_eq!(pool.outpoints(), vec![change_of(8)]);
         assert_eq!(pool.get_spent(&change_of(7)).unwrap().spent_by, txid(8));
+    }
+
+    const SKEW: u64 = 10;
+
+    /// The Sui `DepositApproved` for `outpoint(fill)`, at time 600.
+    fn sui_approval(fill: u8, amount: u64, script_pubkey: ScriptBuf) -> SuiDepositApprovedEvent {
+        let request = SuiDepositRequestedEvent {
+            deposit_id: DepositId::new(txid(fill), 0),
+            amount,
+            script_pubkey,
+            ..deposit_request()
+        };
+        approval_of(&request, 600)
+    }
+
+    #[test]
+    fn an_approval_of_a_held_deposit_is_backed() {
+        let pool = pool_with_one();
+
+        let sui = sui_approval(1, 1_000, script());
+        assert!(pool.check_sui_approval(&sui, SKEW).is_empty());
+    }
+
+    #[test]
+    fn an_approval_of_a_spent_deposit_is_backed() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(5, vec![outpoint(1)])]);
+        assert!(pool.is_spent(&outpoint(1)));
+
+        let sui = sui_approval(1, 1_000, script());
+        assert!(pool.check_sui_approval(&sui, SKEW).is_empty());
+    }
+
+    #[test]
+    fn an_approval_the_pool_never_held_is_unbacked() {
+        let pool = pool_with_one();
+
+        let sui = sui_approval(2, 1_000, script());
+        let findings = pool.check_sui_approval(&sui, SKEW);
+        assert_eq!(findings, vec![MonitorFinding::DepositUnbacked { sui }]);
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn an_approval_of_a_change_output_is_unbacked() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(5, vec![outpoint(1)])]);
+        let change = change_of(5);
+
+        let sui = SuiDepositApprovedEvent {
+            deposit_id: DepositId::new(change.txid, change.vout),
+            ..sui_approval(5, 550, script())
+        };
+        assert_eq!(
+            pool.check_sui_approval(&sui, SKEW),
+            vec![MonitorFinding::DepositUnbacked { sui }]
+        );
+    }
+
+    #[test]
+    fn an_approval_with_another_amount_or_script_is_a_mismatch() {
+        let pool = pool_with_one();
+
+        for sui in [
+            sui_approval(1, 2_000, script()),
+            sui_approval(1, 1_000, ScriptBuf::from_bytes(vec![0x52])),
+        ] {
+            let findings = pool.check_sui_approval(&sui, SKEW);
+            assert!(
+                matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, .. }] if *claimed == sui)
+            );
+            assert_eq!(findings[0].category(), FindingCategory::Safety);
+        }
+    }
+
+    #[test]
+    fn a_deposit_mined_after_its_approval_and_the_skew_is_late() {
+        let sui = sui_approval(1, 1_000, script());
+
+        assert!(
+            pool_seen_at(600 + SKEW)
+                .check_sui_approval(&sui, SKEW)
+                .is_empty()
+        );
+        assert!(matches!(
+            &pool_seen_at(600 + SKEW + 1).check_sui_approval(&sui, SKEW)[..],
+            [MonitorFinding::DepositLate {
+                deadline: 610,
+                block_time: 611,
+                ..
+            }]
+        ));
     }
 
     #[test]

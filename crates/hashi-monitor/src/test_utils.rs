@@ -3,7 +3,7 @@
 
 //! Fixtures shared by the test modules: the test bridge keys, Bitcoin ids
 //! and scripts, a confirmed transaction, a withdrawal transaction, and a
-//! deposit request.
+//! deposit request with its approval.
 
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
@@ -19,10 +19,12 @@ use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
 
+use hashi_types::guardian::time::UnixSeconds;
 use sui_sdk_types::Address;
 
 use crate::domain::BtcConfirmation;
 use crate::domain::DepositId;
+use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalTx;
 use crate::keys::HashiBTCKeys;
@@ -63,6 +65,21 @@ pub fn deposit_request() -> SuiDepositRequestedEvent {
         deposit_id: DepositId::new(txid(9), 1),
         amount: 50_000,
         script_pubkey: p2wpkh(0x54),
+    }
+}
+
+/// The approval of `request` at `timestamp_secs`. Like Move, it copies the
+/// UTXO from the request.
+pub fn approval_of(
+    request: &SuiDepositRequestedEvent,
+    timestamp_secs: UnixSeconds,
+) -> SuiDepositApprovedEvent {
+    SuiDepositApprovedEvent {
+        timestamp_secs,
+        request_id: request.request_id,
+        deposit_id: request.deposit_id,
+        amount: request.amount,
+        script_pubkey: request.script_pubkey.clone(),
     }
 }
 
