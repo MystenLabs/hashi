@@ -48,7 +48,7 @@ graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
 ```
 
-## Roles in a withdrawal
+## Who does what in a withdrawal?
 
 1. **User**: calls `hashi::withdraw::request_withdrawal` with the `hBTC` and a
    Bitcoin destination address. Until the request is committed to a
@@ -65,11 +65,11 @@ graph LR
    after the required confirmations, a committee member calls
    `hashi::withdraw::confirm_withdrawal`.
 
-Beyond the request, the user's only optional actions are cancelling and, if
-the transaction gets stuck, fee bumping through CPFP (see
-[Broadcast](#broadcast)).
+Beyond the request, the user's only optional actions are canceling and, if
+the transaction gets stuck, fee bumping through child pays for parent (CPFP),
+described in [Broadcast](#broadcast).
 
-## Withdrawal timing
+## How long does a withdrawal take?
 
 The time from request to settlement depends mainly on these stages:
 
@@ -77,11 +77,12 @@ The time from request to settlement depends mainly on these stages:
   5 minutes since it was submitted, a threshold number of approved requests
   have accumulated, or the rate limiter can't fit the next request, whichever
   comes first. A request can wait longer if the Guardian's rate limiter is out
-  of capacity, and a request larger than the bucket's maximum capacity is
-  never processed unless the limit is raised (see [Build TX](#build-tx)).
+  of capacity, and Hashi never processes a request larger than the bucket's
+  maximum capacity unless the limit increases (see [Build TX](#build-tx)).
 - **One batch at a time**: the leader commits the next batch only after the
   previous one is fully signed.
-- **Confirmations**: the withdrawal is confirmed after the transaction reaches
+- **Confirmations**: a committee member confirms the withdrawal after the
+  transaction reaches
   the configured number of Bitcoin block confirmations
   ([`bitcoin_confirmation_threshold`](config.mdx#bitcoin_confirmation_threshold)).
 

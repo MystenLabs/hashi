@@ -244,9 +244,9 @@ resulting store, so move both keys in one proposal when one would cross the
 other. The epoch config also refuses the retired keys
 `mpc_threshold_in_basis_points` and `mpc_nonce_generation_protocol`.
 
-Invariant checked at execution on the resulting epoch config:
+At execution, the proposal checks this invariant on the resulting epoch config:
 
-```
+```text
 mpc_weight_reduction_allowed_delta < mpc_max_faulty_in_basis_points
 ```
 
