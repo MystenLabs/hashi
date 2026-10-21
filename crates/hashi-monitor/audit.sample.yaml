@@ -23,8 +23,9 @@ deployment:
       pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until the snapshot's restart start, logged at every state
-    # check, passes its last record: a restart re-audits everything from there.
+    # replaced build until the guardian cursor, logged at every state check,
+    # passes its last record. A first run from genesis reads every record, so
+    # it needs every build.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

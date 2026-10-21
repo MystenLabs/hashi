@@ -8,6 +8,7 @@ use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 use serde::Serialize;
+use sui_sdk_types::Address;
 
 use crate::domain::BtcConfirmation;
 use crate::domain::ConfirmedDeposit;
@@ -69,7 +70,7 @@ enum BtcAnswer {
 ///   deposits unapproved, so a missing E3 is not a finding yet.
 /// - E3 expects E2 already. `EMPTY_LOOKUPS_BEFORE_ALERT` lookups after E3
 ///   that find no E2 report E3 unbacked, before the machine closes.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DepositStateMachine {
     sui_request: SuiDepositRequestedEvent,
     /// The first Sui `DepositApproved` for this request, if it arrived while
@@ -92,17 +93,17 @@ impl DepositStateMachine {
         }
     }
 
+    /// The Sui `DepositRequest` this machine follows.
+    pub fn request_id(&self) -> Address {
+        self.sui_request.request_id
+    }
+
     pub fn deposit_id(&self) -> DepositId {
         self.sui_request.deposit_id
     }
 
     pub fn btc_txid(&self) -> Txid {
         self.sui_request.deposit_id.txid()
-    }
-
-    /// When the request was made on Sui.
-    pub fn requested_at(&self) -> UnixSeconds {
-        self.sui_request.timestamp_secs
     }
 
     /// The deposit, once Bitcoin confirmed it at the claimed script.
@@ -118,8 +119,8 @@ impl DepositStateMachine {
         self.confirmed().cloned()
     }
 
-    /// The request seen again, as a replay does. One with other contents
-    /// is a finding and is dropped.
+    /// The request seen again. One with other contents is a finding and is
+    /// dropped.
     pub fn add_sui_request(&self, event: &SuiDepositRequestedEvent) -> Option<MonitorFinding> {
         (*event != self.sui_request).then(|| {
             MonitorFinding::InvalidEventAdded(

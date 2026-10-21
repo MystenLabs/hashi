@@ -11,7 +11,7 @@
 //!
 //! Scope: this module does two things. It keeps an accurate record of the
 //! UTXOs Hashi holds, built from Bitcoin facts alone. It makes every
-//! operation safe to replay, so a restart can feed it the same facts again.
+//! operation safe to repeat, so the same fact given twice changes nothing.
 //! The pool is Bitcoin's answers for the outputs the bridge's events name:
 //! a deposit request names an outpoint, a withdrawal names a txid, and the
 //! pool keeps what Bitcoin confirms for them. The one label Bitcoin cannot
@@ -40,7 +40,8 @@
 //!    the pool right after its Bitcoin lookups, so a withdrawal's inputs
 //!    have entered before the withdrawal spends them.
 //! 4. Every operation is strict. An operation the pool already applied is a
-//!    repeat and is skipped, so a restart can replay any range of events.
+//!    repeat and is skipped. For example, two requests for one UTXO give
+//!    the pool the same deposit twice.
 //!    An operation that contradicts the pool is a finding. An outpoint
 //!    confirmed with a second amount or script, or a UTXO spent by a second
 //!    transaction, is an `RpcInconsistency`: Bitcoin cannot produce it. A
@@ -54,9 +55,9 @@
 //!    must hold the UTXO, or have spent it, as a deposit with the same
 //!    amount and script. One that arrives earlier is judged by its machine,
 //!    by the same rule. So every hBTC minted matches BTC that Bitcoin shows
-//!    paid to the bridge. A restart replays approvals against a pool that
-//!    may have spent the UTXO since, and the spent record keeps the amount
-//!    and script, so a spent UTXO is still found.
+//!    paid to the bridge. A late approval can come after the pool spent
+//!    the UTXO. The spent record keeps the amount and script, so a spent
+//!    UTXO is still found.
 //! 7. Once a day the monitor asks Bitcoin about every UTXO held. `check`
 //!    turns the answers into findings. An unspent UTXO is reported by age.
 //!    A spent UTXO is a spend outside Hashi. A missing UTXO is a phantom:
@@ -132,7 +133,7 @@ pub struct SpentUtxo {
 
 /// A held UTXO that Bitcoin reports spent, which no followed withdrawal
 /// explains. The auditor judges it once the Sui cursor is past `asked_at`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SuspectSpend {
     /// When Bitcoin was asked.
     pub asked_at: UnixSeconds,
@@ -327,7 +328,7 @@ impl UtxoPool {
         let held = match (self.utxos.get(&outpoint), self.spent.get(&outpoint)) {
             (Some(held), _) => held,
             // Not a finding: the utxo pool is sourced from Bitcoin RPC node, so a
-            // second add of a spent UTXO is a replay.
+            // second add of a spent UTXO is a repeat.
             (None, Some(spent)) => &spent.utxo,
             (None, None) => {
                 self.utxos.insert(outpoint, utxo);
@@ -632,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_add_of_a_spent_utxo_is_a_repeat() {
+    fn a_second_add_of_a_spent_utxo_is_a_repeat() {
         let mut pool = pool_with_one();
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
@@ -649,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_spend_is_a_repeat_and_a_second_spender_is_a_finding() {
+    fn a_repeated_spend_is_a_repeat_and_a_second_spender_is_a_finding() {
         let mut pool = pool_with_one();
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 

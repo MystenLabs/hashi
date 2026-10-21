@@ -43,7 +43,7 @@ use serde::Serialize;
 
 /// The events seen and still expected for one withdrawal. See the module
 /// doc for how an event is added and judged.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct WithdrawalStateMachine {
     /// The events seen so far, at most one per type.
     seen_events: Vec<MonitorWithdrawalEvent>,
@@ -117,10 +117,6 @@ impl WithdrawalStateMachine {
     /// and the auditor can drop it.
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
-    /// Callers must ensure `is_since()` is true before using this for
-    /// garbage collection. Out-of-window withdrawals with pending expectations
-    /// may remain in memory, but they arise only from the bounded lookback or
-    /// lookahead ranges.
     pub fn is_ready_for_gc(&self) -> bool {
         self.expected_events.is_empty()
     }
@@ -130,13 +126,6 @@ impl WithdrawalStateMachine {
             .iter()
             .map(|(event_type, _, _)| *event_type)
             .collect()
-    }
-
-    /// Whether any seen event is at or after `window_start`.
-    pub fn is_since(&self, window_start: UnixSeconds) -> bool {
-        self.seen_events
-            .iter()
-            .any(|e| e.timestamp_secs >= window_start)
     }
 
     /// The time of the earliest event seen.
@@ -279,7 +268,6 @@ impl WithdrawalStateMachine {
 
     /// Check for timing violations given per-source cursors.
     /// Only reports a missing event if its deadline has passed relative to the relevant cursor.
-    /// Callers must ensure is_since() is true before calling this function.
     pub fn timing_violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
         let mut out = Vec::new();
         for (event_type, deadline, relation) in &self.expected_events {
@@ -715,42 +703,6 @@ mod tests {
             }]
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
-    }
-
-    #[test]
-    fn an_e1_before_the_window_start_with_an_e2_inside_it_is_still_valid() {
-        let timing = Timing::for_tests();
-        let mut sm = WithdrawalStateMachine::new(
-            event(WithdrawalEventType::E1HashiApproved, 31, 90, 1),
-            &timing,
-        );
-
-        assert!(
-            sm.add_event(
-                event(WithdrawalEventType::E2GuardianApproved, 31, 100, 1),
-                &timing,
-            )
-            .is_empty()
-        );
-        assert!(sm.is_since(100));
-
-        let findings = sm.timing_violations(&Cursors {
-            sui: 1_000,
-            guardian: 1_000,
-        });
-
-        assert!(findings.is_empty());
-    }
-
-    #[test]
-    fn e1_inside_window_without_e2_is_in_scope() {
-        let timing = Timing::for_tests();
-        let sm = WithdrawalStateMachine::new(
-            event(WithdrawalEventType::E1HashiApproved, 88, 120, 2),
-            &timing,
-        );
-
-        assert!(sm.is_since(100));
     }
 
     #[test]

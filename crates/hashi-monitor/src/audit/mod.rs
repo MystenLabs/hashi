@@ -14,27 +14,22 @@
 //!    no open machine is checked against the UTXO pool at once.
 //! 2. Each tick, the core looks up on Bitcoin every machine that expects a
 //!    Bitcoin event, and ingests the confirmations it finds.
-//! 3. A Sui approval still missing after its deadline is fetched by its
-//!    withdrawal id, since the Sui scan may have started after it.
-//! 4. Each tick, the core reports the timing violations of every
-//!    withdrawal machine in the audit window: the expected events whose
-//!    deadline a cursor has passed. A deposit machine reports its own
-//!    findings at its Bitcoin lookups.
-//! 5. Complete flows are added to the UTXO pool: it takes the UTXOs they
+//! 3. Each tick, the core reports the timing violations of every
+//!    withdrawal machine: the expected events whose deadline a cursor has
+//!    passed. A deposit machine reports its own findings at its Bitcoin
+//!    lookups.
+//! 4. Complete flows are added to the UTXO pool: it takes the UTXOs they
 //!    moved, and the flows are dropped. Closed deposit machines are
 //!    dropped too.
-//! 6. The progress watermarks give the time through which every flow is
-//!    verified, which is where a restart starts.
-//! 7. The UTXO pool check asks Bitcoin about every held UTXO. A spend no
+//! 5. The UTXO pool check asks Bitcoin about every held UTXO. A spend no
 //!    followed withdrawal explains is a suspect, judged at a later state
 //!    check once the Sui cursor is past the time Bitcoin was asked.
+//! 6. `state` gives the pollers' positions and the open machines for the
+//!    snapshot. A restart builds the core again from that state.
 //!
 //! Assumptions:
-//! - The window starts at the restart start, on the guardian timeline. A
-//!   withdrawal is in the window if any of its events is, so an orphan E1
-//!   in the window is reported too.
-//! - Deposits are checked over the Sui range the window derives, not gated
-//!   by the window.
+//! - The first run starts at the bridge's genesis, so no flow began before
+//!   the pollers' start.
 
 use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
@@ -47,6 +42,7 @@ use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalEventType;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -61,9 +57,11 @@ use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
+use crate::rpc::sui::package_publish_time;
 use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
+use crate::store::AuditState;
 use bitcoin::OutPoint;
 use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
@@ -72,7 +70,6 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use pool::SuspectSpend;
 use pool::UtxoPool;
-use std::fmt;
 use sui_sdk_types::Address;
 
 /// The UTXOs held longest that the daily check logs, for a look at the
@@ -103,82 +100,19 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ProgressWatermarks {
-    pub verified_up_to_withdrawals: UnixSeconds,
-    pub verified_up_to_deposits: UnixSeconds,
-    /// Where a restart starts. It is at or before both cursors and every
-    /// pending flow in the window, so a restart reads each one again.
-    pub restart_start: UnixSeconds,
-    withdrawal_blockers: WithdrawalProgressBlockers,
-}
-
-impl ProgressWatermarks {
-    pub fn withdrawal_blockers(&self) -> &WithdrawalProgressBlockers {
-        &self.withdrawal_blockers
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct WithdrawalProgressBlockers(Vec<WithdrawalProgressBlocker>);
-
-impl fmt::Display for WithdrawalProgressBlockers {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Some((first, rest)) = self.0.split_first() else {
-            return f.write_str("none");
-        };
-
-        write!(f, "{first}")?;
-        for blocker in rest {
-            write!(f, "; {blocker}")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct WithdrawalProgressBlocker {
-    wid: WithdrawalID,
-    btc_txid: Txid,
-    earliest_event_at: UnixSeconds,
-    waiting_for: Vec<WithdrawalEventType>,
-}
-
-impl fmt::Display for WithdrawalProgressBlocker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "wid={}, btc_txid={}, earliest_event_at={}, ",
-            self.wid,
-            self.btc_txid,
-            utc_timestamp(self.earliest_event_at),
-        )?;
-        if self.waiting_for.is_empty() {
-            write!(f, "complete, enters the pool at the next Bitcoin tick")
-        } else {
-            write!(f, "waiting_for={:?}", self.waiting_for)
-        }
-    }
-}
-
 pub struct AuditorCore {
     // immutable
     cfg: Config,
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
     /// Deposit requests Bitcoin is still asked about. Keyed by the Sui
-    /// request id, so a replayed event is ignored and each request has its
+    /// request id, so a repeated event is ignored and each request has its
     /// own.
     pending_deposits: HashMap<Address, DepositStateMachine>,
-    /// A flow is audited only if one of its events is at or after this time.
-    /// The earlier ones come from the lookbacks and were judged before the
-    /// last restart.
-    window_start: UnixSeconds,
     /// The UTXOs the bridge holds, by Bitcoin's account. See `pool`. The
     /// snapshot keeps it between runs.
     utxo_pool: UtxoPool,
-    /// Spends waiting for the Sui cursor, by outpoint. Not in the snapshot:
-    /// the next pool check finds them again.
+    /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
@@ -186,16 +120,25 @@ pub struct AuditorCore {
 }
 
 impl AuditorCore {
-    /// Sui polling starts `Timing::sui_lookback` before `window_start`, and
-    /// guardian polling `Timing::guardian_lookback` before it.
+    /// Resume from a snapshot's `state`, or start a first run at the
+    /// bridge's genesis: the time the Hashi package was published on Sui.
     pub async fn new(
         cfg: &Config,
-        window_start: UnixSeconds,
+        state: Option<AuditState>,
         utxo_pool: UtxoPool,
     ) -> anyhow::Result<Self> {
-        let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
-        let guardian_start = window_start.saturating_sub(cfg.timing.guardian_lookback());
-        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
+        let start = match &state {
+            Some(state) => state.guardian_cursor,
+            None => {
+                let genesis = package_publish_time(&cfg.sui).await?;
+                tracing::info!(
+                    genesis = %utc_timestamp(genesis),
+                    "first run: starting at the bridge's genesis with an empty UTXO pool"
+                );
+                genesis
+            }
+        };
+        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, start).await?;
         let (hashi_btc_keys, hashi_object_id) = guardian_poller
             .read_hashi_identity(cfg.deployment.bitcoin_network)
             .await?;
@@ -204,17 +147,50 @@ impl AuditorCore {
             cfg.deployment.bitcoin_network,
         )?;
         tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
-        Ok(Self {
+        // On a resume, the Sui poller starts at the saved checkpoint instead.
+        let sui_poller = SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, start)?;
+        let mut core = Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            window_start,
             utxo_pool,
             suspect_spends: HashMap::new(),
             guardian_poller,
-            sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?,
+            sui_poller,
             btc_client: BtcRpcClient::new(cfg, confirmations)?,
-        })
+        };
+        if let Some(state) = state {
+            core.sui_poller.resume_at(state.sui_next_checkpoint);
+            core.restore(state);
+        }
+        Ok(core)
+    }
+
+    /// The pollers' positions, the open machines and the suspect spends, for
+    /// the snapshot.
+    pub fn state(&self, last_findings: BTreeMap<String, UnixSeconds>) -> AuditState {
+        AuditState {
+            sui_next_checkpoint: self
+                .sui_poller
+                .next_checkpoint()
+                .expect("the start check sets the first Sui checkpoint"),
+            guardian_cursor: self.guardian_cursor(),
+            withdrawals: self.pending_withdrawals.values().cloned().collect(),
+            deposits: self.pending_deposits.values().cloned().collect(),
+            suspect_spends: self.suspect_spends.clone().into_iter().collect(),
+            last_findings,
+        }
+    }
+
+    /// Hold the machines and the suspect spends a snapshot saved.
+    fn restore(&mut self, state: AuditState) {
+        for sm in state.withdrawals {
+            self.pending_withdrawals.insert(sm.wid(), sm);
+        }
+        for sm in state.deposits {
+            self.pending_deposits.insert(sm.request_id(), sm);
+        }
+        self.suspect_spends.extend(state.suspect_spends);
     }
 
     /// The inputs of every withdrawal the monitor follows. It spends them
@@ -370,9 +346,7 @@ impl AuditorCore {
         let withdrawal_count = self
             .pending_withdrawals
             .values()
-            .filter(|sm| {
-                sm.is_since(self.window_start) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
-            })
+            .filter(|sm| sm.expects(WithdrawalEventType::E3BtcConfirmed))
             .count();
         let deposit_count = self
             .pending_deposits
@@ -382,9 +356,7 @@ impl AuditorCore {
         let unique_txids = self
             .pending_withdrawals
             .values()
-            .filter(|sm| {
-                sm.is_since(self.window_start) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
-            })
+            .filter(|sm| sm.expects(WithdrawalEventType::E3BtcConfirmed))
             .map(WithdrawalStateMachine::btc_txid)
             .chain(
                 self.pending_deposits
@@ -404,10 +376,6 @@ impl AuditorCore {
         self.btc_client.prefetch_confirmations(&unique_txids)?;
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
-            if !sm.is_since(self.window_start) {
-                continue;
-            }
-
             findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
         }
 
@@ -454,11 +422,11 @@ impl AuditorCore {
         deposits
     }
 
-    /// The complete withdrawals in the window: the ones the UTXO pool takes.
+    /// The complete withdrawals: the ones the UTXO pool takes.
     fn complete_withdrawals(&self) -> Vec<ConfirmedWithdrawal> {
         self.pending_withdrawals
             .values()
-            .filter(|sm| sm.is_since(self.window_start) && sm.is_ready_for_gc())
+            .filter(|sm| sm.is_ready_for_gc())
             .filter_map(|sm| sm.confirmed().cloned())
             .collect()
     }
@@ -466,16 +434,12 @@ impl AuditorCore {
     pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
-            if !sm.is_since(self.window_start) {
-                continue;
-            }
-
             findings.extend(sm.timing_violations(&self.cursors()));
         }
         findings
     }
 
-    /// Add every complete flow in the window to the UTXO pool, then drop it:
+    /// Add every complete flow to the UTXO pool, then drop it:
     /// the pool takes the UTXOs the flow moved. A closed deposit machine is
     /// dropped too; it judged its `DepositApproved` when it closed. The pool
     /// takes
@@ -501,7 +465,7 @@ impl AuditorCore {
         findings.extend(self.utxo_pool.add_withdrawals(&confirmed_withdrawals));
 
         self.pending_withdrawals.retain(|wid, sm| {
-            if !sm.is_since(self.window_start) || !sm.is_ready_for_gc() {
+            if !sm.is_ready_for_gc() {
                 return true;
             }
             let e1 = sm
@@ -528,52 +492,38 @@ impl AuditorCore {
         findings
     }
 
-    /// Where a restart can start and still replay every flow the auditor
-    /// holds: an open flow, and a complete one the pool has not taken yet.
-    /// A complete flow leaves the auditor only when `add_to_pool_and_gc` takes it,
-    /// in the Bitcoin tick, so it pins the floor until then. Otherwise a
-    /// snapshot saved in between would skip it, and its UTXOs would never
-    /// move in the pool.
-    pub fn progress_watermarks(&self) -> ProgressWatermarks {
-        let mut verified_up_to_withdrawals = self.guardian_cursor();
-        let mut withdrawal_blockers = Vec::new();
-        for sm in self.pending_withdrawals.values() {
-            if !sm.is_since(self.window_start) {
-                continue;
-            }
-
-            let earliest_event_at = sm.earliest_event_at();
-            if earliest_event_at < verified_up_to_withdrawals {
-                verified_up_to_withdrawals = earliest_event_at;
-                withdrawal_blockers.clear();
-            }
-            if earliest_event_at == verified_up_to_withdrawals {
-                withdrawal_blockers.push(WithdrawalProgressBlocker {
-                    wid: sm.wid(),
-                    btc_txid: sm.btc_txid(),
-                    earliest_event_at,
-                    waiting_for: sm.expected_event_types(),
-                });
-            }
-        }
-
-        // A deposit or deposit request still held pins the floor too, so a
-        // restart replays it and its UTXO is not lost.
-        let unresolved_deposit_floor = self
-            .pending_deposits
+    /// The open withdrawals whose first event is the earliest, for the
+    /// progress log. An operator sees what the audit still waits for.
+    pub fn oldest_open_withdrawals(&self) -> String {
+        let earliest = self
+            .pending_withdrawals
             .values()
-            .map(DepositStateMachine::requested_at)
-            .min()
-            .unwrap_or(u64::MAX);
-
-        let verified_up_to_deposits = self.sui_cursor().min(unresolved_deposit_floor);
-
-        ProgressWatermarks {
-            verified_up_to_withdrawals,
-            verified_up_to_deposits,
-            restart_start: verified_up_to_withdrawals.min(verified_up_to_deposits),
-            withdrawal_blockers: WithdrawalProgressBlockers(withdrawal_blockers),
+            .map(WithdrawalStateMachine::earliest_event_at)
+            .min();
+        let oldest = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| Some(sm.earliest_event_at()) == earliest)
+            .map(|sm| {
+                format!(
+                    "wid={}, btc_txid={}, earliest_event_at={}, waiting_for={:?}",
+                    sm.wid(),
+                    sm.btc_txid(),
+                    utc_timestamp(sm.earliest_event_at()),
+                    sm.expected_event_types(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if oldest.is_empty() {
+            "none".to_string()
+        } else {
+            oldest.join("; ")
         }
+    }
+
+    /// The number of open withdrawal and deposit machines.
+    pub fn open_flows(&self) -> (usize, usize) {
+        (self.pending_withdrawals.len(), self.pending_deposits.len())
     }
 
     /// Advance the Guardian cursor by one hourly S3 directory. Callers may loop
@@ -630,7 +580,7 @@ mod tests {
     use bitcoin::TxOut;
 
     #[tokio::test]
-    async fn a_replayed_deposit_request_is_ingested_once() {
+    async fn a_repeated_deposit_request_is_ingested_once() {
         let approval = hashi_approval();
         let mut auditor = auditor_with_pool().await;
         let request = SuiDepositRequestedEvent {
@@ -675,45 +625,6 @@ mod tests {
         assert_eq!(auditor.pending_deposits.len(), 2);
     }
 
-    #[tokio::test]
-    async fn an_open_withdrawal_holds_the_restart_start_at_its_earliest_event() {
-        let cfg = Config::for_tests();
-        let approval = hashi_approval();
-        let approved_at = approval.timestamp_secs;
-        let signature = MonitorWithdrawalEvent {
-            event_type: WithdrawalEventType::E2GuardianApproved,
-            timestamp_secs: approved_at + 60,
-            ..approval.clone()
-        };
-        let mut auditor = AuditorCore {
-            pending_withdrawals: HashMap::new(),
-            pending_deposits: HashMap::new(),
-            window_start: 0,
-            utxo_pool: UtxoPool::default(),
-            suspect_spends: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
-            sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200),
-            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
-            cfg,
-        };
-        assert!(
-            auditor
-                .ingest_batch(vec![
-                    MonitorEvent::Withdrawal(signature),
-                    MonitorEvent::Withdrawal(approval),
-                ])
-                .is_empty()
-        );
-
-        let progress = auditor.progress_watermarks();
-
-        assert_eq!(progress.restart_start, approved_at);
-        assert!(matches!(
-            &progress.withdrawal_blockers.0[..],
-            [blocker] if blocker.earliest_event_at == approved_at
-        ));
-    }
-
     /// An auditor with an empty UTXO pool and no flows.
     async fn auditor_with_pool() -> AuditorCore {
         let cfg = Config::for_tests();
@@ -721,7 +632,6 @@ mod tests {
         AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
-            window_start: 0,
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
@@ -892,34 +802,6 @@ mod tests {
             }]
         );
         assert!(auditor.pending_withdrawals.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_complete_withdrawal_holds_the_restart_start_until_the_pool_takes_it() {
-        let mut auditor = auditor_with_pool().await;
-        let timing = auditor.cfg.timing.clone();
-        let input = OutPoint {
-            txid: txid(9),
-            vout: 1,
-        };
-        auditor.pending_withdrawals.insert(
-            WithdrawalID::new([7; 32]),
-            complete_withdrawal(7, 7, vec![input], &timing),
-        );
-
-        let held = auditor.progress_watermarks();
-        assert_eq!(held.restart_start, 1_000);
-        assert!(matches!(
-            &held.withdrawal_blockers.0[..],
-            [blocker] if blocker.waiting_for.is_empty()
-        ));
-
-        auditor.add_to_pool_and_gc();
-
-        let taken = auditor.progress_watermarks();
-        let cursors = auditor.guardian_cursor().min(auditor.sui_cursor());
-        assert_eq!(taken.restart_start, cursors);
-        assert!(taken.withdrawal_blockers.0.is_empty());
     }
 
     #[tokio::test]

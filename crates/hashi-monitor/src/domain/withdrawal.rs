@@ -151,7 +151,7 @@ impl MonitorWithdrawalEvent {
 
 /// A withdrawal Bitcoin confirmed, with the guardian's word on which of its
 /// outputs are change. The UTXO pool applies it.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConfirmedWithdrawal {
     pub txid: Txid,
     pub confirmation: BtcConfirmation,

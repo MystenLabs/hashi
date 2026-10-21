@@ -7,21 +7,18 @@
 //! event soon after it happens, and alerting reads its metrics.
 //!
 //! How it works:
-//! 1. The start is on the guardian timeline. A snapshot this deployment
-//!    saved, with a UTXO pool, sets it to the snapshot's restart start, and
-//!    the pool resumes from the snapshot. Without one, this is a first run:
-//!    the start is the bridge's genesis, the time the Hashi package was
+//! 1. A snapshot this deployment saved gives the start: the open machines,
+//!    the suspect spends, the UTXO pool, the time of the last finding of
+//!    each category, and the position of each poller. Without one, this is a first run: both
+//!    pollers start at the bridge's genesis, the time the Hashi package was
 //!    published on Sui, and the pool is empty. Either way, the monitor fails
-//!    to start unless the Sui node still serves the start. Sui polling starts
-//!    `Timing::sui_lookback` before the start, and guardian polling
-//!    `Timing::guardian_lookback` before it.
+//!    to start unless the Sui node still serves the start.
 //! 2. At startup, each source catches up once. A source that fails is
 //!    logged and retried on its next tick.
 //! 3. Then the Sui, Bitcoin and guardian ticks run every
 //!    `SUI_POLL_INTERVAL`, `BTC_POLL_INTERVAL` and `GUARDIAN_POLL_INTERVAL`,
-//!    and the state checks every `STATE_TICK_INTERVAL`: fetch the missing
-//!    Sui approvals, report the violations, log the progress watermarks,
-//!    and save the snapshot one state check behind. The complete flows are
+//!    and the state checks every `STATE_TICK_INTERVAL`: report the
+//!    violations, log the progress, and save the snapshot. The complete flows are
 //!    added to the UTXO pool in the Bitcoin tick, right after its lookups,
 //!    so the pool takes a withdrawal only once Bitcoin has answered for its
 //!    inputs. The pool is checked against Bitcoin once at startup and then
@@ -48,13 +45,13 @@ use crate::findings::MonitorFinding;
 use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
+use crate::metrics::SOURCE_SNAPSHOT;
 use crate::metrics::SOURCE_SUI;
 use crate::metrics::SOURCE_UTXO;
-use crate::rpc::sui::package_publish_time;
+use crate::store::AuditState;
 use crate::store::Snapshot;
 use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
-use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
 /// How often Sui is polled. A deposit approval must reach the monitor
@@ -78,16 +75,12 @@ const UTXO_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// A continuous auditor that runs indefinitely and processes events as they
-/// arrive. Its start time is on the guardian timeline; Sui and guardian
-/// polling begin their lookbacks before it.
+/// arrive.
 pub struct ContinuousAuditor {
     pub inner: AuditorCore,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
     store: SnapshotStore,
-    /// The last state check's restart start, saved by the next one, so a
-    /// restart re-reports findings alerting may not have read yet.
-    previous_restart_start: UnixSeconds,
 }
 
 impl ContinuousAuditor {
@@ -99,55 +92,67 @@ impl ContinuousAuditor {
         metrics: Arc<MonitorMetrics>,
         store: SnapshotStore,
     ) -> anyhow::Result<Self> {
-        let cur_time = now_timestamp_secs();
-        let (start, pool) = match resume_point(cfg, store.load().await?) {
-            Some(resumed) => resumed,
-            None => {
-                let genesis = package_publish_time(&cfg.sui).await?;
+        let (state, pool) = match this_deployments(cfg, store.load().await?) {
+            Some(snapshot) => {
                 tracing::info!(
-                    genesis = %utc_timestamp(genesis),
-                    "first run: starting at the bridge's genesis with an empty UTXO pool"
+                    sui_next_checkpoint = snapshot.state.sui_next_checkpoint,
+                    guardian_cursor = %utc_timestamp(snapshot.state.guardian_cursor),
+                    withdrawals = snapshot.state.withdrawals.len(),
+                    deposits = snapshot.state.deposits.len(),
+                    suspect_spends = snapshot.state.suspect_spends.len(),
+                    utxos_held = snapshot.pool.len(),
+                    utxos_spent = snapshot.pool.spent_len(),
+                    "loaded the snapshot; resuming where it stopped"
                 );
-                (genesis, UtxoPool::default())
+                metrics.restore_last_findings(&snapshot.state.last_findings);
+                (Some(snapshot.state), snapshot.pool)
             }
+            None => (None, UtxoPool::default()),
         };
-        anyhow::ensure!(
-            start <= cur_time,
-            "start is in the future: start={} > current_time={}",
-            utc_timestamp(start),
-            utc_timestamp(cur_time),
-        );
-        // Fail now on a bucket that is missing or read-only: a missing one
-        // loads as empty.
-        store.save(cfg, start, &pool).await?;
-
-        let mut inner = AuditorCore::new(cfg, start, pool).await?;
+        let mut inner = AuditorCore::new(cfg, state, pool).await?;
         // A pruned start would leave the pool incomplete for good.
         inner.ensure_sui_serves_start().await?;
         metrics.set_checked_through(SOURCE_SUI, inner.sui_cursor());
         metrics.set_checked_through(SOURCE_GUARDIAN, inner.guardian_cursor());
-        Ok(Self {
+        let auditor = Self {
             inner,
             metrics,
             store,
-            previous_restart_start: start,
-        })
+        };
+        // Fail now on a bucket that is missing or read-only: a missing one
+        // loads as empty.
+        auditor
+            .store
+            .save(
+                &auditor.inner.cfg,
+                auditor.state(),
+                auditor.inner.utxo_pool(),
+            )
+            .await?;
+        auditor
+            .metrics
+            .set_checked_through(SOURCE_SNAPSHOT, now_timestamp_secs());
+        Ok(auditor)
     }
 
-    /// Save the snapshot: `restart_start` and the pool as it is now. A failed
-    /// save is logged and does not stop the audit; the next state check
-    /// saves again.
-    async fn save_snapshot(&self, restart_start: UnixSeconds) {
+    /// The audit state the snapshot keeps.
+    fn state(&self) -> AuditState {
+        self.inner.state(self.metrics.last_findings())
+    }
+
+    /// Save the snapshot. A failed save is logged and does not stop the
+    /// audit; the next state check saves again. Alerting watches the time
+    /// of the last good save.
+    async fn save_snapshot(&self) {
         let saved = self
             .store
-            .save(&self.inner.cfg, restart_start, self.inner.utxo_pool())
+            .save(&self.inner.cfg, self.state(), self.inner.utxo_pool())
             .await;
         match saved {
-            Ok(()) => tracing::debug!(
-                restart_start = %utc_timestamp(restart_start),
-                "saved the snapshot"
-            ),
-            Err(error) => tracing::warn!(?error, "failed to save the snapshot; continuing"),
+            Ok(()) => self
+                .metrics
+                .set_checked_through(SOURCE_SNAPSHOT, now_timestamp_secs()),
+            Err(error) => tracing::error!(?error, "failed to save the snapshot; continuing"),
         }
     }
 
@@ -222,30 +227,25 @@ impl ContinuousAuditor {
 
     async fn tick_state_checks(&mut self) {
         let violations = self.inner.detect_timing_violations();
-        // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("timing", &violations);
         let spends = self.inner.judge_suspect_spends();
         self.report_findings(SOURCE_UTXO, &spends);
 
-        let progress = self.inner.progress_watermarks();
+        let (withdrawals, deposits) = self.inner.open_flows();
         tracing::info!(
-            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  verified_up_to_withdrawals={}\n  withdrawal_blockers={}\n  verified_up_to_deposits={}\n  restart_start={}",
+            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}",
             utc_timestamp(self.inner.guardian_cursor()),
             utc_timestamp(self.inner.sui_cursor()),
-            utc_timestamp(progress.verified_up_to_withdrawals),
-            progress.withdrawal_blockers(),
-            utc_timestamp(progress.verified_up_to_deposits),
-            utc_timestamp(progress.restart_start),
+            withdrawals,
+            deposits,
+            self.inner.oldest_open_withdrawals(),
         );
-        let restart_start =
-            std::mem::replace(&mut self.previous_restart_start, progress.restart_start);
-        self.save_snapshot(restart_start).await;
+        self.save_snapshot().await;
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         tracing::info!(
-            "starting continuous audit:\n  start={}\n  sui_start={}\n  guardian_start={}",
-            utc_timestamp(self.inner.window_start),
+            "starting continuous audit:\n  sui_start={}\n  guardian_start={}",
             utc_timestamp(self.inner.sui_cursor()),
             utc_timestamp(self.inner.guardian_cursor()),
         );
@@ -311,36 +311,24 @@ impl ContinuousAuditor {
     }
 }
 
-/// The start and pool the snapshot resumes, if it is this deployment's.
-/// Otherwise `None`: the audit is a first run.
-fn resume_point(cfg: &Config, snapshot: Option<Snapshot>) -> Option<(UnixSeconds, UtxoPool)> {
-    let snapshot = match snapshot {
-        Some(snapshot) if snapshot.is_for(cfg) => snapshot,
+/// The snapshot, if this deployment saved it. Otherwise `None`: the audit
+/// is a first run.
+fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> Option<Snapshot> {
+    match snapshot {
+        Some(snapshot) if snapshot.is_for(cfg) => Some(snapshot),
         Some(snapshot) => {
             tracing::warn!(
                 guardian_bucket = snapshot.guardian_bucket,
                 package_id = snapshot.package_id,
                 "ignoring the snapshot of another deployment"
             );
-            return None;
+            None
         }
         None => {
             tracing::info!("no snapshot");
-            return None;
+            None
         }
-    };
-    let Snapshot {
-        restart_start,
-        pool,
-        ..
-    } = snapshot;
-    tracing::info!(
-        restart_start = %utc_timestamp(restart_start),
-        utxos_held = pool.len(),
-        utxos_spent = pool.spent_len(),
-        "loaded the snapshot; resuming with its UTXO pool"
-    );
-    Some((restart_start, pool))
+    }
 }
 
 #[cfg(test)]
@@ -355,163 +343,78 @@ mod tests {
     use crate::rpc::sui::tests::hashi_approval;
     use crate::rpc::sui::tests::poller_scanned;
     use crate::test_utils::txid;
-    use crate::timing::EventBounds;
-    use crate::timing::Timing;
-    use crate::timing::UTXO_AGE_CRITICAL;
-    use crate::timing::UTXO_AGE_WARN;
     use bitcoin::ScriptBuf;
     use std::collections::HashMap;
 
-    /// Timing with a day's E2 -> E3 delay and the protocol skews.
-    fn timing() -> Timing {
-        Timing {
-            successor_delays: EventBounds::new([
-                (WithdrawalEventType::E1HashiApproved, 1_200),
-                (WithdrawalEventType::E2GuardianApproved, 86_400),
-            ])
-            .unwrap(),
-            predecessor_skews: EventBounds::new([
-                (WithdrawalEventType::E1HashiApproved, 300),
-                (WithdrawalEventType::E2GuardianApproved, 7_200),
-            ])
-            .unwrap(),
-            deposit_approval_skew: 300,
-            deposit_request_watch: 172_800,
-            utxo_age_warn: UTXO_AGE_WARN,
-            utxo_age_critical: UTXO_AGE_CRITICAL,
-        }
-    }
-
-    #[test]
-    fn the_guardian_is_read_early_enough_to_match_every_approval_in_the_window() {
-        let timing = timing();
-        let start: UnixSeconds = 1_700_002_800;
-
-        let guardian_start = start.saturating_sub(timing.guardian_lookback());
-
-        let earliest_signature = start
-            - timing
-                .predecessor_skews
-                .get(WithdrawalEventType::E1HashiApproved)
-                .unwrap();
-        assert!(guardian_start <= earliest_signature);
-    }
-
-    #[tokio::test]
-    async fn a_restart_still_audits_an_approval_the_guardian_never_signed() {
-        let cfg = Config::for_tests();
-        let approval = hashi_approval();
-        let approved_at = approval.timestamp_secs;
-        let guardian_cursor = approved_at + 7_200;
-        let window_start = approved_at - 86_400;
-        let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
-        let mut inner = AuditorCore {
-            cfg: cfg.clone(),
-            pending_withdrawals: HashMap::new(),
-            pending_deposits: HashMap::new(),
-            window_start,
-            utxo_pool: UtxoPool::default(),
-            suspect_spends: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
-            sui_poller: poller_scanned(sui_start, guardian_cursor + 600),
-            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
-        };
-        assert!(
-            inner
-                .ingest_batch(vec![MonitorEvent::Withdrawal(approval)])
-                .is_empty()
-        );
-        assert_eq!(inner.detect_timing_violations().len(), 1);
-
-        let restart_start = inner.progress_watermarks().restart_start;
-
-        assert!(restart_start.saturating_sub(cfg.timing.sui_lookback()) <= approved_at);
-        assert!(approved_at >= restart_start);
-    }
-
-    /// An auditor over an in-memory store that holds `utxo_pool`, started a
-    /// day before `hashi_approval` with the guardian two hours past it.
-    async fn auditor_with(cfg: &Config, utxo_pool: UtxoPool) -> ContinuousAuditor {
-        let approved_at = hashi_approval().timestamp_secs;
-        let guardian_cursor = approved_at + 7_200;
-        let window_start = approved_at - 86_400;
-        let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
+    /// An auditor over an in-memory store, with both cursors two hours past
+    /// `hashi_approval`.
+    fn auditor_with(cfg: &Config, metrics: Arc<MonitorMetrics>) -> ContinuousAuditor {
+        let cursor = hashi_approval().timestamp_secs + 7_200;
         ContinuousAuditor {
             inner: AuditorCore {
                 cfg: cfg.clone(),
                 pending_withdrawals: HashMap::new(),
                 pending_deposits: HashMap::new(),
-                window_start,
-                utxo_pool,
+                utxo_pool: UtxoPool::default(),
                 suspect_spends: HashMap::new(),
-                guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, guardian_cursor),
-                sui_poller: poller_scanned(sui_start, guardian_cursor + 600),
+                guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, cursor),
+                sui_poller: poller_scanned(cursor, cursor),
                 btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             },
-            previous_restart_start: window_start,
-            metrics: Arc::new(MonitorMetrics::new()),
+            metrics,
             store: SnapshotStore::in_memory(),
         }
     }
 
     #[tokio::test]
-    async fn a_state_check_saves_the_restart_start_of_the_check_before() {
+    async fn a_restart_resumes_the_open_flows_the_pool_and_the_finding_times() {
         let cfg = Config::for_tests();
-        let approval = hashi_approval();
-        let approved_at = approval.timestamp_secs;
-        let mut auditor = auditor_with(&cfg, UtxoPool::default()).await;
-        let resumed_from = auditor.inner.window_start;
-        auditor.ingest_batch(vec![MonitorEvent::Withdrawal(approval)]);
-
-        auditor.tick_state_checks().await;
-        let saved = auditor.store.load().await.unwrap();
-        assert_eq!(
-            saved,
-            Some(Snapshot::new(&cfg, resumed_from, UtxoPool::default()))
-        );
-
-        // The approval's flow ends before the next check, which still saves a
-        // start that reads it again.
-        auditor.inner.pending_withdrawals.clear();
-        auditor.tick_state_checks().await;
-        let saved = auditor.store.load().await.unwrap();
-        assert_eq!(
-            saved,
-            Some(Snapshot::new(&cfg, approved_at, UtxoPool::default()))
-        );
-    }
-
-    #[tokio::test]
-    async fn a_state_check_saves_the_utxo_pool() {
-        let cfg = Config::for_tests();
-        let mut pool = UtxoPool::default();
+        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         let deposit = ConfirmedDeposit {
             deposit_id: DepositId::new(txid(1), 0),
             amount: 1_000,
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_700_000_000,
         };
-        assert!(pool.add_deposit(&deposit).is_none());
-        let mut auditor = auditor_with(&cfg, pool.clone()).await;
-
+        assert!(auditor.inner.utxo_pool.add_deposit(&deposit).is_none());
+        // An approval the guardian never signed: its E2 is overdue.
+        auditor.ingest_batch(vec![MonitorEvent::Withdrawal(hashi_approval())]);
         auditor.tick_state_checks().await;
+        let missing = auditor.inner.detect_timing_violations();
+        assert!(matches!(
+            missing[..],
+            [MonitorFinding::WithdrawalEventMissing {
+                event_type: WithdrawalEventType::E2GuardianApproved,
+                ..
+            }]
+        ));
 
-        let saved = auditor.store.load().await.unwrap().unwrap();
-        assert_eq!(saved.pool, pool);
+        let snapshot = auditor.store.load().await.unwrap().unwrap();
+        assert_eq!(snapshot.pool, *auditor.inner.utxo_pool());
+        let metrics = Arc::new(MonitorMetrics::new());
+        metrics.restore_last_findings(&snapshot.state.last_findings);
+        let mut resumed = auditor_with(&cfg, metrics);
+        resumed.inner.restore(snapshot.state);
+
+        assert_eq!(resumed.inner.detect_timing_violations(), missing);
+        assert_eq!(
+            resumed.metrics.last_findings(),
+            auditor.metrics.last_findings()
+        );
     }
 
-    #[test]
-    fn only_this_deployments_snapshot_is_resumed() {
+    #[tokio::test]
+    async fn only_this_deployments_snapshot_is_resumed() {
         let cfg = Config::for_tests();
-        let pool = UtxoPool::default();
+        let auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
+        let ours = Snapshot::new(&cfg, auditor.state(), UtxoPool::default());
 
-        assert_eq!(resume_point(&cfg, None), None);
+        assert_eq!(this_deployments(&cfg, None), None);
 
-        let mut other = Snapshot::new(&cfg, 500, pool.clone());
+        let mut other = ours.clone();
         other.package_id = format!("0x{}", "22".repeat(32));
-        assert_eq!(resume_point(&cfg, Some(other)), None);
+        assert_eq!(this_deployments(&cfg, Some(other)), None);
 
-        let ours = Snapshot::new(&cfg, 500, pool.clone());
-        assert_eq!(resume_point(&cfg, Some(ours)), Some((500, pool)));
+        assert_eq!(this_deployments(&cfg, Some(ours.clone())), Some(ours));
     }
 }

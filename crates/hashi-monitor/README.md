@@ -104,7 +104,7 @@ Bitcoin fact changes it:
   one poll; the pool waits for the lookups that follow.
 
 Every operation is strict. One the pool already applied is a repeat and is
-skipped, so a restart can replay any range of events. One that contradicts
+skipped. One that contradicts
 the pool is a finding: **safety** `RpcInconsistency`, for `UtxoMismatch`
 when Bitcoin confirms a known outpoint with a second amount or script, and
 `UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
@@ -154,14 +154,10 @@ first day instead of at the warn age.
 The monitor polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports
 findings as they appear.
 
-- The start is on the **guardian (E2)** timeline.
-- Sui withdrawal events are polled from one E1 delay before the start,
-  since an E1 older than that is a late E2 in its own right.
-- The guardian is read from one E1 skew before the start, since
-  an E1 at the start may follow its E2 by that much.
-- Orphan E1 findings are reported when E1 falls in the window.
-- Deposits are audited over the derived Sui range rather than gated by the
-  withdrawal audit-window logic.
+- The first run reads Sui and the guardian log from the bridge's genesis,
+  so the monitor sees every flow from its first event.
+- A restart resumes each source exactly where the last run stopped, with
+  the open flows the last run held.
 
 ## Usage
 
@@ -180,9 +176,11 @@ cargo run -p hashi-monitor -- \
   --snapshot-bucket my-hashi-monitor-snapshot
 ```
 The monitor keeps a snapshot in the bucket and saves it after every state
-check: the `restart_start` its previous state check logged, the UTXO pool as
-it is now, and the deployment it audits. `snapshot.json` holds the
-`restart_start`, the held UTXOs and the number of spent entries. The spent
+check: the deployment it audits, the next Sui checkpoint and guardian hourly
+directory to read, every open flow, the spends the last pool check has not
+judged yet, the time of the last finding of each category, and the UTXO
+pool. `snapshot.json` holds all of it except the
+spent record, plus the number of spent entries. The spent
 record only grows, so it lives in `spent/NNNNN.json` files of 10,000 entries
 each. A save writes only the files with new entries, then `snapshot.json`. The monitor needs
 read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
@@ -200,19 +198,15 @@ restart, since a pruned start would leave the pool incomplete for good.
 The scan from genesis runs in ranges of 10,000 checkpoints, about an hour of
 Sui each, and the state checks wait for it. On a busy network it takes hours.
 
-A restart resumes from the snapshot: the audit from `restart_start`, and the
-pool as saved. The replay changes nothing in the pool, since the pool skips
-every operation it already applied. Findings since `restart_start` are
-reported again. A snapshot of another deployment is ignored and the run is a first
-run. A snapshot that does not parse, or that lacks a spent file, stops the
-monitor at startup. Delete the objects to start over from genesis.
+A restart resumes from the snapshot. It holds the saved flows again, sets
+the finding metrics to the saved times, and reads each source from its saved
+position, so it reads no event twice and skips none. A snapshot of another
+deployment is ignored and the run is a first run. A snapshot of another
+format version, one that does not parse, or one that lacks a spent file stops
+the monitor at startup. Delete the objects to start over from genesis.
 
-A flow holds `restart_start` back until the pool takes it, at the Bitcoin
-tick after it completes. A flow that never completes holds it back for good,
-so every restart replays everything since that flow began. To move the restart point past it,
-edit `restart_start` in the object by hand while the monitor is stopped; the
-flow is then no longer audited. The field is a UTC timestamp such as
-`2026-10-05T23:30:36Z`.
+A flow that never completes stays open in the snapshot, and the monitor
+reports its missing event at every state check.
 
 The snapshot is a durable asset, not a cache. Losing it means a new first run
 from genesis, on a node that still serves it.
@@ -264,8 +258,9 @@ deployment:
       pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until the snapshot's restart start, logged at every state
-    # check, passes its last record: a restart re-audits everything from there.
+    # replaced build until the guardian cursor, logged at every state check,
+    # passes its last record. A first run from genesis reads every record, so
+    # it needs every build.
     prev_builds: []
     # prev_builds:
     #   - git_revision: "1111111111111111111111111111111111111111"

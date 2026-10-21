@@ -241,6 +241,17 @@ impl SuiEventsPoller {
         self.cursor_seconds
     }
 
+    /// The first checkpoint not yet scanned, once the start is known.
+    pub fn next_checkpoint(&self) -> Option<u64> {
+        self.next_checkpoint_to_scan
+    }
+
+    /// Resume the scan at `checkpoint`, which a snapshot saved.
+    /// `ensure_start_is_served` then sets the cursor.
+    pub fn resume_at(&mut self, checkpoint: u64) {
+        self.next_checkpoint_to_scan = Some(checkpoint);
+    }
+
     /// Scan through the checkpoint covering `up_to`, or the observed chain head,
     /// but at most `MAX_CHECKPOINTS_PER_POLL` checkpoints.
     ///
@@ -373,6 +384,17 @@ impl SuiEventsPoller {
     /// leave the UTXO pool incomplete for good. On success the first poll
     /// does not probe again.
     pub async fn ensure_start_is_served(&mut self) -> anyhow::Result<()> {
+        if let Some(next) = self.next_checkpoint_to_scan {
+            self.refresh_chain_head().await?;
+            anyhow::ensure!(
+                self.lowest_available_checkpoint <= next,
+                "the Sui node has pruned checkpoint {next}, where the scan resumes. Use a Sui node that keeps the history from there",
+            );
+            // The cursor is the time of the last checkpoint scanned.
+            self.cursor_seconds = self.checkpoint_timestamp(next.saturating_sub(1)).await?;
+            self.start_seconds = self.cursor_seconds;
+            return Ok(());
+        }
         let first_checkpoint = self.first_checkpoint_to_scan().await?;
         anyhow::ensure!(
             self.start_seconds == self.cursor_seconds,
@@ -833,6 +855,7 @@ pub mod tests {
         };
         let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), start).unwrap();
         poller.cursor_seconds = cursor;
+        poller.next_checkpoint_to_scan = Some(0);
         poller
     }
 
