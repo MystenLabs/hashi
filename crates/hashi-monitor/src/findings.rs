@@ -131,7 +131,7 @@ pub enum MonitorFinding {
         amount: u64,
     },
     /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
-    /// never held. The bridge spent a coin that no verified deposit or
+    /// never held. The bridge spent a UTXO that no verified deposit or
     /// change brought in, or the pool missed the UTXO's entry.
     UtxoUnknownInputSpent {
         outpoint: OutPoint,

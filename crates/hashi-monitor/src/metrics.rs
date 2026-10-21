@@ -19,7 +19,7 @@ use crate::findings::MonitorFinding;
 pub const SOURCE_SUI: &str = "sui";
 pub const SOURCE_GUARDIAN: &str = "guardian";
 pub const SOURCE_BTC: &str = "btc";
-/// The daily check of every coin in the UTXO pool against Bitcoin.
+/// The daily check of every UTXO in the UTXO pool against Bitcoin.
 pub const SOURCE_UTXO: &str = "utxo";
 
 pub struct MonitorMetrics {

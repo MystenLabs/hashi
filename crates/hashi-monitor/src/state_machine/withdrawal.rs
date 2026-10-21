@@ -18,8 +18,8 @@
 //! 3. A consistent event is kept. It is judged against each neighbor the
 //!    machine has seen, and it removes itself from the expected events.
 //! 4. The auditor looks the transaction up on Bitcoin while E3 is expected,
-//!    and asks for violations each tick: an expected event whose deadline the
-//!    source's cursor has passed is reported missing.
+//!    and asks for timing violations each tick: an expected event whose
+//!    deadline the source's cursor has passed is reported missing.
 //!
 //! Invariants:
 //! - `expected_events` never holds an event type in `seen_events`.
@@ -124,15 +124,16 @@ impl WithdrawalStateMachine {
             })
     }
 
-    /// Are any expected neighboring events still outstanding?
+    /// Whether every expected event was seen, so the pool can take the flow
+    /// and the auditor can drop it.
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
     /// Callers must ensure `is_since()` is true before using this for
     /// garbage collection. Out-of-window withdrawals with pending expectations
     /// may remain in memory, but they arise only from the bounded lookback or
     /// lookahead ranges.
-    pub fn is_expecting_events(&self) -> bool {
-        !self.expected_events.is_empty()
+    pub fn is_ready_for_gc(&self) -> bool {
+        self.expected_events.is_empty()
     }
 
     pub fn expected_event_types(&self) -> Vec<WithdrawalEventType> {
@@ -287,10 +288,10 @@ impl WithdrawalStateMachine {
         })
     }
 
-    /// Check for violations given per-source cursors.
+    /// Check for timing violations given per-source cursors.
     /// Only reports a missing event if its deadline has passed relative to the relevant cursor.
     /// Callers must ensure is_since() is true before calling this function.
-    pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
+    pub fn timing_violations(&self, cursors: &Cursors) -> Vec<MonitorFinding> {
         let mut out = Vec::new();
         for (event_type, deadline, relation) in &self.expected_events {
             let cursor = match event_type {
@@ -370,7 +371,7 @@ impl WithdrawalStateMachine {
         assert!(sm.add_event(e2.clone(), timing).is_empty());
         assert!(sm.add_event(e3, timing).is_empty());
         sm.confirmed = Some(ConfirmedWithdrawal::from_confirmation(&e2, confirmation));
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
         sm
     }
 }
@@ -477,7 +478,7 @@ mod tests {
             .is_empty()
         );
 
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
     }
 
     #[test]
@@ -534,7 +535,7 @@ mod tests {
                 },
             ]
         );
-        assert!(!sm.is_expecting_events());
+        assert!(sm.is_ready_for_gc());
     }
 
     #[test]
@@ -607,7 +608,7 @@ mod tests {
                     expected.iter().all(|finding| findings.contains(finding)),
                     "{order:?}: {findings:?}"
                 );
-                assert!(!sm.is_expecting_events(), "{order:?}");
+                assert!(sm.is_ready_for_gc(), "{order:?}");
             }
         }
     }
@@ -620,13 +621,13 @@ mod tests {
             &timing,
         );
 
-        let no_violation = sm.violations(&Cursors {
+        let no_violation = sm.timing_violations(&Cursors {
             sui: 0,
             guardian: 199,
         });
         assert!(no_violation.is_empty());
 
-        let violations = sm.violations(&Cursors {
+        let violations = sm.timing_violations(&Cursors {
             sui: 0,
             guardian: 200,
         });
@@ -666,7 +667,7 @@ mod tests {
             .is_empty()
         );
         assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
-        assert!(sm.violations(&cursors(1_000)).is_empty());
+        assert!(sm.timing_violations(&cursors(1_000)).is_empty());
     }
 
     #[test]
@@ -750,7 +751,7 @@ mod tests {
         );
         assert!(sm.is_since(100));
 
-        let findings = sm.violations(&Cursors {
+        let findings = sm.timing_violations(&Cursors {
             sui: 1_000,
             guardian: 1_000,
         });

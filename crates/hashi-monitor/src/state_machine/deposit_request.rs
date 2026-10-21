@@ -84,7 +84,7 @@ impl DepositRequestStateMachine {
 
     /// Whether Bitcoin still has to be asked about this request.
     pub fn is_expecting_events(&self) -> bool {
-        // Bitcoin confirmed the transaction, with or without the coin.
+        // Bitcoin confirmed the transaction, whether or not it has the claimed UTXO.
         if self.btc_answered {
             return false;
         }
@@ -95,7 +95,7 @@ impl DepositRequestStateMachine {
         true
     }
 
-    /// Look up the transaction on Bitcoin and keep the coin if it pays the
+    /// Look up the transaction on Bitcoin and keep the UTXO if it pays the
     /// claimed script. Nothing here is a finding; an error is the RPC's.
     pub fn try_fetch_btc_tx(&mut self, btc_rpc_client: &BtcRpcClient) -> anyhow::Result<()> {
         if !self.is_expecting_events() {

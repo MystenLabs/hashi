@@ -17,7 +17,7 @@
 //! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
 //!   Hashi's `DepositConfirmed` on Sui.
 //! - A deposit request is the user's `DepositRequested` on Sui, followed on
-//!   its own until Bitcoin confirms the coin it names.
+//!   its own until Bitcoin confirms the UTXO it names.
 //!
 //! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
