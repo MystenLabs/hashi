@@ -10,17 +10,24 @@ const sidebars = {
       label: 'Design',
       collapsed: true,
       items: [
-        'committee',
-        'governance-actions',
-        'move-upgrades',
-        'sanctions',
-        'service',
-        'mpc-protocol',
-        'guardian',
-        'address-scheme',
-        'limiter',
-        'fees',
-        'config',
+        {
+          type: 'category',
+          label: 'Architecture',
+          collapsed: false,
+          items: ['service', 'committee', 'mpc-protocol', 'guardian'],
+        },
+        {
+          type: 'category',
+          label: 'Bitcoin handling',
+          collapsed: false,
+          items: ['address-scheme', 'fees', 'limiter', 'sanctions'],
+        },
+        {
+          type: 'category',
+          label: 'Governance',
+          collapsed: false,
+          items: ['config', 'governance-actions', 'move-upgrades'],
+        },
       ],
     },
     {
@@ -31,6 +38,7 @@ const sidebars = {
         'reconfiguration',
         'deposit',
         'withdraw',
+        'move-model-lifecycle',
       ],
     },
     {

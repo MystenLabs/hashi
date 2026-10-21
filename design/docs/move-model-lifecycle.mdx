@@ -45,20 +45,26 @@ This document illustrates the lifecycle of key Move models in the deposit and
 withdrawal flows, showing how data structures transform between onchain (Sui)
 and offchain (Bitcoin) states.
 
-## Entry-function gating principle
+## What is the entry-function gating principle?
 
 Every entry function that takes the `Hashi` object asserts the package
 version is enabled. Beyond that, **pause and reconfiguration gate only the
-deposit and withdrawal flows.** Deposit approval and confirmation, and
-withdrawal approval, commitment, signing, and finalization, all stop when
-governance pauses the system or while a committee handoff is pending; user
-requests and withdrawal confirmation stop only for a pause, and cancelling a
-withdrawal stops for neither. Reconfiguration, MPC certificate submission,
-governance, cleanup entries (`cleanup_spent_utxos`,
-`archive_confirmed_withdrawals`, `archive_withdrawal_requests`,
-`finish_archive_withdrawal_txns`, `destroy_key_gen_certs`,
-`destroy_nonce_certs`, `delete_expired_deposit`, `proposal::delete_expired`),
-and validator registration or key rotation never check pause, because an
+deposit and withdrawal flows.** The table shows which entry functions stop
+when governance pauses the system and which stop while a committee handoff is
+pending.
+
+| Entry functions | Stops during a pause | Stops while a committee handoff is pending |
+| --------------- | -------------------- | ------------------------------------------ |
+| Deposit approval (`approve_deposit()`) and confirmation (`confirm_deposit()`) | Yes | Yes |
+| Withdrawal approval (`approve_request()`), commitment, signing, and finalization (`finalize_withdrawal()`) | Yes | Yes |
+| User requests (`deposit()`, `request_withdrawal()`) | Yes | No |
+| Withdrawal confirmation (`confirm_withdrawal()`) | Yes | No |
+| Withdrawal cancellation | No | No |
+| Reconfiguration, MPC certificate submission, governance | No | No |
+| Cleanup entries: `cleanup_spent_utxos`, `archive_confirmed_withdrawals`, `archive_withdrawal_requests`, `finish_archive_withdrawal_txns`, `destroy_key_gen_certs`, `destroy_nonce_certs`, `delete_expired_deposit`, `proposal::delete_expired` | No | No |
+| Validator registration or key rotation | No | No |
+
+The last 4 rows never check pause, because an
 emergency pause must not block operators from maintaining nodes or the chain
 from shedding dead state. Nodes themselves stop all leader work while paused,
 garbage collection included, so during a pause that state is shed only by a
@@ -67,7 +73,11 @@ withdrawals during reconfiguration (a withdrawal request only escrows their
 hBTC); only committee approval, commitment, signing, and deposit confirmation
 wait for the new committee.
 
-## Deposit flow
+## How do Move models change during a deposit?
+
+During a reconfiguration, users can still call `deposit()`, but approval and
+confirmation wait for the new committee; see
+[What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
 
 ```mermaid
 ---
@@ -132,21 +142,26 @@ flowchart TD
 
 ### Deposit flow summary
 
-| Step | Action                                           | Model Transformation                                                                  |
-| ---- | ------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| 1    | User sends BTC to bridge address                 | Bitcoin UTXO created                                                                  |
-| 2    | User calls `deposit()`                           | `DepositRequest` → `DepositRequestQueue`                                              |
-| 3    | Committee members wait for Bitcoin confirmations | `bitcoin_confirmation_threshold` blocks on the deposit transaction                    |
-| 4    | Committee members screen and sign request        | Members with a TRM API key screen it (mainnet only); BLS signatures aggregated → `CommitteeSignature` |
-| 5    | Leader calls `approve_deposit()` with cert       | `verify_certificate()` → request stores `approval_cert` and `approved_timestamp_ms`   |
-| 6    | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before anything is minted) |
-| 7    | Anyone calls `confirm_deposit()`                 | Re-`verify_certificate()` → `CertifiedMessage<DepositConfirmationMessage>`            |
-| 8    | Treasury mints tokens                            | If the UTXO has a derivation path, `Utxo.amount` → `Balance<BTC>` sent to that address |
-| 9    | Certified request processed                      | `Utxo` → `UtxoPool`; `DepositRequest` → `DepositRequestQueue.processed` with `confirmed_timestamp_ms` set |
+| Step | Actor             | Action                                           | Model Transformation                                                                  |
+| ---- | ----------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| 1    | User              | User sends BTC to bridge address                 | Bitcoin UTXO created                                                                  |
+| 2    | User              | User calls `deposit()`                           | `DepositRequest` → `DepositRequestQueue`                                              |
+| 3    | Committee members | Committee members wait for Bitcoin confirmations | `bitcoin_confirmation_threshold` blocks on the deposit transaction                    |
+| 4    | Committee members | Committee members screen and sign request        | Members with a TRM API key screen it (Mainnet only); BLS signatures aggregated → `CommitteeSignature` |
+| 5    | Leader            | Leader calls `approve_deposit()` with cert       | `verify_certificate()` → request stores `approval_cert` and `approved_timestamp_ms`   |
+| 6    | None              | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before anything is minted) |
+| 7    | Anyone            | Anyone calls `confirm_deposit()`                 | Re-`verify_certificate()` → `CertifiedMessage<DepositConfirmationMessage>`            |
+| 8    | Treasury          | Treasury mints tokens                            | If the UTXO has a derivation path, `Utxo.amount` → `Balance<BTC>` sent to that address |
+| 9    | None              | Certified request processed                      | `Utxo` → `UtxoPool`; `DepositRequest` → `DepositRequestQueue.processed` with `confirmed_timestamp_ms` set |
 
 ---
 
-## Withdrawal flow
+## How do Move models change during a withdrawal?
+
+During a reconfiguration, users can still call `request_withdrawal()` and
+withdrawal confirmation still proceeds, but approval, commitment, signing, and
+finalization wait for the new committee; see
+[What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
 
 ```mermaid
 ---
@@ -209,7 +224,7 @@ flowchart TD
     SCREEN2 --> VOTE
     VOTE -.->|"Select UTXOs<br/>(off-chain)"| UTXO_POOL
     VOTE --> BURN
-    BURN -->|"Balance&lt;BTC&gt; burned"| PW
+    BURN -->|"Balance&lt;BTC&gt; burned,<br/>WithdrawalTransaction created"| PW
     PW --> PWQ
     PWQ -.->|"Observe withdrawal<br/>transactions"| MPC
     MPC -->|"Schnorr witness signatures<br/>per input"| SUBMIT_SIGS
@@ -272,24 +287,24 @@ drifted and adopting a new limiter policy after a guardian rotation.
 
 ### Withdrawal flow summary
 
-| Step | Action                                       | Model Transformation                                                         |
-| ---- | -------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1    | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`     |
-| 2    | Committee screens and approves request       | Members with a TRM API key screen it (mainnet only); `approve_request()` records `approval_cert` on the request |
-| 3    | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns` |
-| 4    | MPC protocol signs Bitcoin transaction       | Committee signs each input via MPC; `commit_input_signatures()` stores the signatures onchain in chunks |
-| 5    | Leader checks its `LocalLimiter`             | `LocalLimiter::validate_consume(seq, ts, amt)` (read-only) before calling the guardian |
-| 6    | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC     |
-| 7    | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(seq, ts, amt)` → enclave signatures |
-| 8    | Leader finalizes with guardian signatures    | Members re-run `validate_consume` and certify both signature sets; `finalize_withdrawal()` attaches the guardian signatures |
-| 9    | Each node advances its `LocalLimiter`        | Object mirror sees the tx become fully signed → `apply_consume(seq, ts, amt)` |
-| 10   | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from onchain data, broadcast to Bitcoin              |
-| 11   | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                          |
-| 12   | Leader confirms withdrawal                   | `confirmed_timestamp_ms` set, input UTXOs marked spent; the leader's GC later moves the tx to `.confirmed_txns`, its requests to `.processed`, and the spent inputs to `spent_utxos` |
+| Step | Actor           | Action                                       | Model Transformation                                                         |
+| ---- | --------------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1    | User            | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`     |
+| 2    | Committee       | Committee screens and approves request       | Members with a TRM API key screen it (Mainnet only); `approve_request()` records `approval_cert` on the request |
+| 3    | Leader          | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns` |
+| 4    | Committee (MPC) | MPC protocol signs Bitcoin transaction       | Committee signs each input through MPC; `commit_input_signatures()` stores the signatures onchain in chunks |
+| 5    | Leader          | Leader checks its `LocalLimiter`             | `LocalLimiter::validate_consume(seq, ts, amt)` (read-only) before calling the guardian |
+| 6    | Leader          | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)`, the input to the guardian RPC |
+| 7    | Guardian        | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(seq, ts, amt)` → enclave signatures |
+| 8    | Leader          | Leader finalizes with guardian signatures    | Members re-run `validate_consume` and certify both signature sets; `finalize_withdrawal()` attaches the guardian signatures |
+| 9    | Each node       | Each node advances its `LocalLimiter`        | Object mirror sees the tx become fully signed → `apply_consume(seq, ts, amt)` |
+| 10   | Leader          | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from onchain data, broadcast to Bitcoin              |
+| 11   | Committee       | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                          |
+| 12   | Leader          | Leader confirms withdrawal                   | `confirmed_timestamp_ms` set, input UTXOs marked spent; the leader's GC later moves the tx to `.confirmed_txns`, its requests to `.processed`, and the spent inputs to `spent_utxos` |
 
 ---
 
-## Key models reference
+## What are the key Move models?
 
 | Model                    | Location                                 | Description                                                            |
 | ------------------------ | ---------------------------------------- | ---------------------------------------------------------------------- |
@@ -302,5 +317,5 @@ drifted and adopting a new limiter policy after a guardian rotation.
 | `Bitcoin UTXO`           | Bitcoin Network                          | Actual unspent transaction output on Bitcoin                           |
 | `Committee`              | `CommitteeSet`                           | BLS signing committee of Sui validators for an epoch                   |
 | `CommitteeMember`        | `Committee.members`                      | Validator with public_key and voting weight                            |
-| `CommitteeSignature`     | Built in the PTB by `committee::new_committee_signature`; stored as `approval_cert` on requests | Aggregated BLS signature with signers bitmap |
+| `CommitteeSignature`     | Built in the programmable transaction block (PTB) by `committee::new_committee_signature`; stored as `approval_cert` on requests | Aggregated BLS signature with signers bitmap |
 | `CertifiedMessage<T>`    | Verified onchain                         | Message proven to have committee quorum support                        |

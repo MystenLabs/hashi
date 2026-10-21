@@ -42,6 +42,9 @@ Hashi automatically backs up the data a node needs to rejoin the committee after
 data loss. Every epoch, Hashi writes the node config, referenced key files,
 and database snapshot to a tar archive, then compresses and encrypts it as an
 ASCII-armored PGP message. The backup files use the suffix `.tar.asc`.
+The key files and database snapshot can contain the node's operator, TLS, and
+MPC private keys (see [Suspected node compromise](#suspected-node-compromise)),
+so treat a decrypted backup as sensitive key material.
 
 Encryption only needs the public PGP certificate, so the backup key does not
 need to be present on the server during normal operation. Restore needs access
@@ -50,7 +53,21 @@ to the matching private key, either as a local PGP secret-key file or through
 SSH, you can restore on a remote server using a YubiKey plugged into your laptop
 instead of plugging the YubiKey into the server itself.
 
-## Create a backup Key
+## Prerequisites
+
+Each item is described in detail in the section that uses it:
+
+- For a YubiKey backup key: a [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/)
+  key, a machine with a physical USB port, [oct](https://codeberg.org/openpgp-card/openpgp-card-tools),
+  and [gpg](https://gnupg.org/).
+- For a local backup key file: [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq).
+- For S3 backups: AWS credentials from the default credential chain, a node role
+  restricted to `s3:PutObject` within its prefix, and recovery credentials with
+  `s3:GetObject` (or `s3:GetObjectVersion` for a pinned version, plus
+  `s3:ListBucketVersions` to inspect version history). See [Back up to S3](#back-up-to-s3)
+  for the full Mainnet baseline.
+
+## Create a backup key
 
 ### Option 1: Create a private key on a YubiKey (recommended)
 
@@ -255,6 +272,14 @@ backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 backup-dir = "/var/lib/hashi/backups"
 ```
 
+The `backup-pgp-cert` file is the public key you created in
+[Create a backup key](#create-a-backup-key): the `$CARD_FILE`
+output from Option 1 (for example, `yubikey-public-0006-26883270.asc`), or
+`public-key.asc` from Option 2. It is the public half of the backup key pair.
+Restore uses the matching private half, passed as `--backup-pgp-secret-key`
+(for example, `private-key.asc` from Option 2) or reached through
+`--use-gpg-agent` for YubiKey-backed keys.
+
 Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
 
@@ -276,15 +301,7 @@ except the [monthly off-machine copies](#monthly-off-machine-copy).
 Archives are staged in `backup-dir`, finalized and synced to disk before publication;
 the directory is synced afterward on a best-effort basis. A directory sync failure
 is logged at error level without failing the already-published backup. Failed saves
-remove their temporary files and never overwrite existing archives. Within
-`backup-dir`, cleanup removes abandoned
-`.hashi-backup-*` files and `.hashi-restore-*` directories older than 14 days by
-modification time, without retaining the newest staging entry. Recent staging
-entries and symlinks are left alone. Restore staging and completed restore output
-contain decrypted keys and database data; use a private restore output directory.
-Completed restores, `.hashi-db-restore-*` staging directories beside the destination
-database, and restore output elsewhere are not swept by automatic backup cleanup.
-Operators must remove these plaintext copies when no longer needed.
+remove their temporary files and never overwrite existing archives.
 
 ### Backup expiry
 
@@ -338,8 +355,11 @@ of every deletion rule. Keep a way to decrypt them too, even after you replace
 choose. It installs nothing. The full procedure, from choosing a backup to
 restarting the node, is in the
 [operator runbook](node-operator-runbook.mdx#102-restoring-a-node).
+For S3 restore commands and an on-page recovery checklist, see
+[Restore and infrastructure limits](#restore-and-infrastructure-limits) and
+[Machine-loss recovery](#machine-loss-recovery) below.
 
-## Cloud backup
+## Back up to S3
 
 Enable S3 uploads with this optional node-config table; both values are required.
 Use a bucket name, not an S3 URI. Omit the table for local-only backups.
@@ -405,6 +425,10 @@ Stop the node before opening its database for a manual backup:
 hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
 ```
 
+Replace `/path/to/validator.toml` with the path to your node config, and
+`/var/lib/hashi/backups` with the directory to write the archive to (for
+example, your configured `backup-dir`).
+
 This saves locally, then uploads if configured. Add `--local-only` to skip S3.
 Upload failure returns a nonzero exit status while preserving the local archive.
 With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
@@ -418,6 +442,10 @@ hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc
   --region us-east-1 --backup-pgp-secret-key /secure/secret-key.asc \
   --output-dir /private/restore
 ```
+
+Here `<namespace>` is the `<sui-chain-id>/<hashi-object-id>/<validator-address>`
+path from the destination template above, and `<timestamp>` is the timestamp in
+the archive's filename. Take the full URI from your backup URI/version receipts.
 
 Use `--version-id '<version-id>'` to select an exact object version. Keys are
 literal object keys, not URL-decoded paths. Recovery credentials need

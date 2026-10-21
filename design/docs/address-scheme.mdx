@@ -56,6 +56,8 @@ two leaves:
    the UTXO confirms and is baked into the script, so changing it changes
    every deposit address.
 
+## What is the exact descriptor?
+
 The exact [descriptor](https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md)
 is:
 
@@ -70,12 +72,45 @@ where:
   derivation path `d` (the depositor's Sui address).
 - `g` is the guardian's fixed public key.
 - `delay` is the 60-day relative timelock, encoded as the BIP-68 sequence
-  `0x0040278D` (`4_204_429`): the time-based type bit (`1 << 22`) OR'd with
-  `10_125` (= `ceil(60 * 24 * 60 * 60 / 512)`, the count of 512-second units
-  in 60 days).
+  `0x0040278D` (`4_204_429`). The encoding is broken down step by step below.
 - `i` is the NUMS (nothing-up-my-sleeve) internal key defined in BIP-341
   (`50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0`)
   with no known private key, ensuring all spends occur through the script path.
+
+Read left to right, the descriptor says: the Taproot internal key is `i`, and
+the tree has two script leaves. `multi_a(2, {g}, {h})` is the 2-of-2 multisig
+leaf, which needs signatures from both the guardian key `g` and the child MPC
+key `h`. `and_v(v:older({delay}), pk({h}))` is the recovery leaf, which needs
+the `delay` to have elapsed and a signature from `h` alone.
+
+## How is the 60-day delay encoded?
+
+Use the BIP-68 sequence value `0x0040278D` (`4_204_429`) for `delay`. It is
+built in 3 steps:
+
+1. Express 60 days in seconds: `60 * 24 * 60 * 60` = `5_184_000`.
+2. Convert to 512-second units, rounding up:
+   `ceil(5_184_000 / 512)` = `10_125`. This is a count of 512-second units in
+   60 days, not a count of blocks.
+3. OR in the time-based type bit, `1 << 22` (`4_194_304`):
+   `4_194_304 | 10_125` = `4_204_429` = `0x0040278D`.
+
+## How is a deposit address derived from a Sui address?
+
+1. Take the depositor's Sui address as the derivation path `d`.
+2. Derive the child public key `h = derive(H, d)` from the base Hashi MPC
+   public key `H`, which is available onchain.
+3. Substitute `h`, the guardian's public key `g`, the encoded `delay`, and the
+   NUMS internal key `i` into the descriptor above.
+4. The resulting P2TR address is that Sui address's deposit address; deposits
+   to it are credited to that Sui address.
+
+The key derivation is not BIP-32. It is a purpose-built unhardened derivation
+over secp256k1, keyed by the Sui address, giving each depositor a unique
+Bitcoin address while the master signing key remains shared across the MPC
+committee.
+
+## How does withdrawal funding treat older deposit UTXOs?
 
 Normal withdrawal funding remains largest-first. Within the existing
 fee-eligible consolidation budget, confirmed UTXOs older than 4,320 blocks are
@@ -83,8 +118,3 @@ prioritized before ordinary smallest-first candidates. The 4,320-block
 threshold estimates 30 days using Bitcoin's ten-minute block target; actual
 MPC-only recovery eligibility remains governed by the time-based CSV script
 above.
-
-The key derivation is not BIP-32. It is a purpose-built unhardened derivation
-over secp256k1, keyed by the Sui address, giving each depositor a unique
-Bitcoin address while the master signing key remains shared across the MPC
-committee.

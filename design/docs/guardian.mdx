@@ -50,14 +50,17 @@ MPC committee alone spend a UTXO 60 days after it confirms (see
 The guardian integration has five distinct flows:
 
 - **Ceremony mode** is the key-generation control-plane flow. The operator
-  initializes a ceremony guardian, supplies the KP roster, and receives the
-  guardian BTC public key plus encrypted KP shares.
+  initializes a ceremony guardian, supplies the key provisioner (KP) roster,
+  and receives the guardian BTC public key plus encrypted KP shares.
 - **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
   current active guardian is still alive. The operator installs a stable
   `InitConfig`; each KP independently recomputes `config_hash` from its locally
   configured limiter config and deployment config (S3 bucket and region,
   retention environment, network, and PCR allowlist), requires it to match the
   enclave's, and submits threshold encrypted shares through the public relay.
+  Because the hash covers both the limiter config and the deployment config, a
+  KP releases its share only to an enclave running the configuration that KP
+  expects.
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
@@ -88,7 +91,10 @@ The main components are:
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
-  and signs Bitcoin inputs. Every session signs the records it writes to S3.
+  and signs Bitcoin inputs. A standby does not serve withdrawals: it is armed
+  while the current active guardian is still alive and takes over from it only
+  after operator-triggered activation. Every session signs the records it
+  writes to S3.
 - **Key provisioners (KPs)**: independent holders of guardian key shares. Each
   share has one configured YubiKey-backed OpenPGP certificate and one encrypted
   ciphertext.
