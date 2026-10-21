@@ -10,6 +10,7 @@ use crate::mpc::RetrieveOutcome;
 use crate::mpc::RetrieveReply;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
+use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
 use crate::mpc::types::MpcError;
@@ -37,6 +38,8 @@ use tonic::Status;
 
 /// Concurrent store reads per requester.
 const STORE_READ_PERMITS: usize = 4;
+
+const AVID_BATCH_CEILING_SLACK: u32 = 4;
 
 #[tonic::async_trait]
 impl MpcService for HttpService {
@@ -69,6 +72,8 @@ impl MpcService for HttpService {
                 }
                 send_messages_error(sender, e)
             })?;
+            check_avid_batch_ceiling(&service, &shape, &external_request)
+                .map_err(|e| send_messages_error(sender, e))?;
             let internal_request = types::SendMessagesRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             if let Some(wire_shape) = rotation_wire_shape(&external_request) {
@@ -456,6 +461,62 @@ fn send_messages_protocol(request: &SendMessagesRequest) -> &'static str {
     }
 }
 
+fn check_avid_batch_ceiling(
+    service: &HttpService,
+    shape: &ShapeParams,
+    request: &SendMessagesRequest,
+) -> Result<(), MpcError> {
+    use hashi_types::proto::send_messages_request::Messages;
+    let Some(Messages::AvidNonceMessage(avid)) = &request.messages else {
+        return Ok(());
+    };
+    let Some(batch_index) = avid.batch_index else {
+        return Ok(());
+    };
+    let epoch = shape.epoch();
+    let onchain = service.onchain_state_opt();
+    let chain = onchain.as_ref().map(|onchain| {
+        let state = onchain.state();
+        let hashi = state.hashi();
+        (hashi.committees.epoch(), hashi.num_consumed_presigs)
+    });
+    let ceiling = avid_batch_ceiling(chain, epoch, shape.min_batch_presigs());
+    if batch_index <= ceiling {
+        return Ok(());
+    }
+    let chain_view = onchain.zip(chain).map_or_else(
+        || "no chain view".to_string(),
+        |(onchain, (chain_epoch, chain_cursor))| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis() as u64);
+            let age_s = now_ms.saturating_sub(onchain.latest_checkpoint_timestamp_ms()) / 1000;
+            let mirror = onchain.state_watermark().map_or_else(
+                || "no mirror".to_string(),
+                |watermark| format!("mirror through checkpoint {watermark}"),
+            );
+            format!(
+                "onchain epoch {chain_epoch} at presig cursor {chain_cursor}, {mirror}, latest \
+                 checkpoint {} from {age_s} s ago",
+                onchain.latest_checkpoint_height()
+            )
+        },
+    );
+    Err(MpcError::NotReady(format!(
+        "AVID batch {batch_index} is above this node's ceiling {ceiling} for epoch {epoch} \
+         ({chain_view})"
+    )))
+}
+
+fn avid_batch_ceiling(chain: Option<(u64, u64)>, epoch: u64, min_batch_presigs: u64) -> u32 {
+    let cursor = chain
+        .filter(|&(chain_epoch, _)| chain_epoch == epoch)
+        .map_or(0, |(_, cursor)| cursor);
+    u32::try_from(cursor / min_batch_presigs.max(1))
+        .unwrap_or(u32::MAX)
+        .saturating_add(AVID_BATCH_CEILING_SLACK)
+}
+
 fn proto_protocol_label(protocol_type: Option<i32>) -> &'static str {
     use hashi_types::proto::MpcProtocolType;
     match protocol_type.and_then(|value| MpcProtocolType::try_from(value).ok()) {
@@ -541,5 +602,30 @@ fn mpc_error_to_status(err: MpcError) -> Status {
         NotFound(_) => Status::not_found(err.to_string()),
         ComplaintWithheld { .. } => Status::permission_denied(err.to_string()),
         _ => Status::internal(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avid_batch_ceiling_counts_only_the_request_epochs_cursor() {
+        let cases = [
+            (Some((5, 95)), 5, 10, 13),
+            (Some((6, 95)), 5, 10, 4),
+            (Some((4, 95)), 5, 10, 4),
+            (None, 5, 10, 4),
+            (Some((5, 7)), 5, 0, 11),
+            (Some((5, u64::MAX)), 5, 1, u32::MAX),
+            (Some((5, u64::from(u32::MAX) - 2)), 5, 1, u32::MAX),
+        ];
+        for (chain, epoch, min_batch_presigs, expected) in cases {
+            assert_eq!(
+                avid_batch_ceiling(chain, epoch, min_batch_presigs),
+                expected,
+                "chain {chain:?}, epoch {epoch}, min_batch_presigs {min_batch_presigs}"
+            );
+        }
     }
 }

@@ -83,17 +83,20 @@ pub struct ShapeParams {
     previous_epoch: u64,
     protocol_type: ProtocolType,
     batch_size_per_weight: u16,
+    min_batch_presigs: u64,
     current: CommitteeShape,
     previous: Option<CommitteeShape>,
     previous_input: Option<CommitteeShape>,
 }
 
 impl ShapeParams {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         epoch: u64,
         previous_epoch: u64,
         protocol_type: ProtocolType,
         batch_size_per_weight: u16,
+        min_batch_presigs: u64,
         current: CommitteeShape,
         previous: Option<CommitteeShape>,
         previous_input: Option<CommitteeShape>,
@@ -103,6 +106,7 @@ impl ShapeParams {
             previous_epoch,
             protocol_type,
             batch_size_per_weight,
+            min_batch_presigs,
             current,
             previous,
             previous_input,
@@ -123,6 +127,10 @@ impl ShapeParams {
 
     pub(crate) fn current(&self) -> &CommitteeShape {
         &self.current
+    }
+
+    pub(crate) fn min_batch_presigs(&self) -> u64 {
+        self.min_batch_presigs
     }
 
     pub(crate) fn avid_shape(&self) -> AvidShape<'_> {
