@@ -84,7 +84,7 @@ impl fmt::Display for MonitorEvent {
 }
 
 /// A transaction mined at least Hashi's confirmation threshold deep.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BtcConfirmation {
     /// The time of the block that holds the transaction. The recovery leaf's
     /// clock starts at this block, so a UTXO's age counts from here.

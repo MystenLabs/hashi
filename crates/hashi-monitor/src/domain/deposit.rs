@@ -14,13 +14,15 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::DepositApproved;
 use hashi_types::move_types::DepositRequested;
+use serde::Deserialize;
+use serde::Serialize;
 use sui_sdk_types::Address;
 
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
 /// Stable identifier for a monitored deposit: its Bitcoin outpoint.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub struct DepositId(OutPoint);
 
 impl DepositId {
@@ -52,7 +54,7 @@ impl fmt::Display for DepositId {
 /// The monitor's view of `DepositRequested` on Sui: the user's claim that a
 /// Bitcoin output pays the bridge. The public `deposit` entry emits it, so
 /// the committee cannot suppress it. Its timestamp is the request's own.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SuiDepositRequestedEvent {
     /// The Sui `DepositRequest` object. Each request for a UTXO has its own.
     pub request_id: Address,
@@ -86,7 +88,7 @@ impl SuiDepositRequestedEvent {
 /// delay, so judging the approval can alert before the mint. Move copies
 /// the UTXO from the request, so it names the request's outpoint, amount
 /// and path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SuiDepositApprovedEvent {
     /// The approval's time on Move's clock. The time delay counts from it.
     pub timestamp_secs: UnixSeconds,
@@ -152,7 +154,7 @@ impl SuiDepositApprovedEvent {
 }
 
 /// A deposit Bitcoin confirmed at a bridge address. The UTXO pool records it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ConfirmedDeposit {
     pub deposit_id: DepositId,
     /// Satoshis Bitcoin paid.

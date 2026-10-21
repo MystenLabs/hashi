@@ -319,7 +319,7 @@ impl AuditorCore {
         match self.pending_deposits.entry(event.request_id) {
             Entry::Occupied(entry) => entry.get().add_sui_request(&event).into_iter().collect(),
             Entry::Vacant(entry) => {
-                entry.insert(DepositStateMachine::new(event, &self.cfg.timing));
+                entry.insert(DepositStateMachine::new(event));
                 Vec::new()
             }
         }
@@ -341,7 +341,7 @@ impl AuditorCore {
     /// the approval. Once it closed, the pool has its answer.
     fn ingest_deposit_approved(&mut self, event: SuiDepositApprovedEvent) -> Vec<MonitorFinding> {
         match self.pending_deposits.get_mut(&event.request_id) {
-            Some(sm) => sm.add_sui_approval(event),
+            Some(sm) => sm.add_sui_approval(event, &self.cfg.timing),
             None => self
                 .utxo_pool
                 .check_sui_approval(&event, self.cfg.timing.deposit_approval_skew),
@@ -412,7 +412,7 @@ impl AuditorCore {
         }
 
         for sm in self.pending_deposits.values_mut() {
-            findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
+            findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
         }
 
         Ok(findings)
@@ -794,6 +794,7 @@ mod tests {
             .get_mut(&request_id)
             .unwrap()
             .record_lookup(
+                &Timing::for_tests(),
                 0,
                 Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x54))),
             );
@@ -822,6 +823,7 @@ mod tests {
             .get_mut(&request_id)
             .unwrap()
             .record_lookup(
+                &Timing::for_tests(),
                 0,
                 Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x55))),
             );

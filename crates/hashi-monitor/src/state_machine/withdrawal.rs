@@ -38,9 +38,12 @@ use crate::timing::Timing;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// The events seen and still expected for one withdrawal. See the module
 /// doc for how an event is added and judged.
+#[derive(Deserialize, Serialize)]
 pub struct WithdrawalStateMachine {
     /// The events seen so far, at most one per type.
     seen_events: Vec<MonitorWithdrawalEvent>,
