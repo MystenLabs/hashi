@@ -22,7 +22,6 @@ use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalPickedForProcessing;
-use hashi_types::move_types::WithdrawalTransaction;
 
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
@@ -50,20 +49,6 @@ pub struct MonitorWithdrawalEvent {
 }
 
 impl MonitorWithdrawalEvent {
-    /// E1 from the `WithdrawalTransaction` object at `wid`.
-    pub fn from_sui_object(
-        wid: WithdrawalID,
-        txn: WithdrawalTransaction,
-    ) -> Result<Self, Vec<MonitorFinding>> {
-        Self::checked(
-            WithdrawalEventType::E1HashiApproved,
-            wid,
-            txn.txid.into(),
-            WithdrawalTx::new(txn.inputs, txn.withdrawal_outputs, txn.change_outputs),
-            unix_millis_to_seconds(txn.created_timestamp_ms),
-        )
-    }
-
     /// E1 from the `WithdrawalPickedForProcessing` event.
     pub fn from_sui_event(
         event: WithdrawalPickedForProcessing,

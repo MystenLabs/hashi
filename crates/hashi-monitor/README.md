@@ -80,11 +80,6 @@ it, shows up in the pool's checks. A claim no output matches is the user's
 problem and is dropped. Each request has its own lookup, so a corrected
 request for the same UTXO is followed on its own.
 
-Before reporting a missing withdrawal E1, the monitor reads the withdrawal's
-`WithdrawalTransaction` object from Sui, so an E1 older than the predecessor
-lookback still matches. An E1 found this way inside the range the Sui scan
-already covered also raises `SuiScanMissedEvent`.
-
 ### UTXO pool
 Each bridge UTXO is a 2-of-2 between the MPC committee and the guardian, plus
 a recovery leaf that lets the committee spend alone 60 days after the UTXO
@@ -161,8 +156,7 @@ findings as they appear.
 
 - The start is on the **guardian (E2)** timeline.
 - Sui withdrawal events are polled from one E1 delay before the start,
-  since an E1 older than that is a late E2 in its own right. An E1
-  outside the scan is still read from Sui by its withdrawal id.
+  since an E1 older than that is a late E2 in its own right.
 - The guardian is read from one E1 skew before the start, since
   an E1 at the start may follow its E2 by that much.
 - Orphan E1 findings are reported when E1 falls in the window.

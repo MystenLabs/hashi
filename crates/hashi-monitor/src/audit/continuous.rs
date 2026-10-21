@@ -221,8 +221,6 @@ impl ContinuousAuditor {
     }
 
     async fn tick_state_checks(&mut self) {
-        let lookup_findings = self.inner.fetch_missing_hashi_approvals().await;
-        self.report_findings("lookup", &lookup_findings);
         let violations = self.inner.detect_timing_violations();
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("timing", &violations);
@@ -354,7 +352,7 @@ mod tests {
     use crate::rpc::btc::BtcRpcClient;
     use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
     use crate::rpc::guardian::GuardianWithdrawalsPoller;
-    use crate::rpc::sui::tests::looked_up_approval;
+    use crate::rpc::sui::tests::hashi_approval;
     use crate::rpc::sui::tests::poller_scanned;
     use crate::test_utils::txid;
     use crate::timing::EventBounds;
@@ -402,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn a_restart_still_audits_an_approval_the_guardian_never_signed() {
         let cfg = Config::for_tests();
-        let approval = looked_up_approval();
+        let approval = hashi_approval();
         let approved_at = approval.timestamp_secs;
         let guardian_cursor = approved_at + 7_200;
         let window_start = approved_at - 86_400;
@@ -415,7 +413,7 @@ mod tests {
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
-            sui_poller: poller_scanned(sui_start, guardian_cursor + 600).await,
+            sui_poller: poller_scanned(sui_start, guardian_cursor + 600),
             btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
         };
         assert!(
@@ -432,9 +430,9 @@ mod tests {
     }
 
     /// An auditor over an in-memory store that holds `utxo_pool`, started a
-    /// day before `looked_up_approval` with the guardian two hours past it.
+    /// day before `hashi_approval` with the guardian two hours past it.
     async fn auditor_with(cfg: &Config, utxo_pool: UtxoPool) -> ContinuousAuditor {
-        let approved_at = looked_up_approval().timestamp_secs;
+        let approved_at = hashi_approval().timestamp_secs;
         let guardian_cursor = approved_at + 7_200;
         let window_start = approved_at - 86_400;
         let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
@@ -447,7 +445,7 @@ mod tests {
                 utxo_pool,
                 suspect_spends: HashMap::new(),
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, guardian_cursor),
-                sui_poller: poller_scanned(sui_start, guardian_cursor + 600).await,
+                sui_poller: poller_scanned(sui_start, guardian_cursor + 600),
                 btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             },
             previous_restart_start: window_start,
@@ -459,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn a_state_check_saves_the_restart_start_of_the_check_before() {
         let cfg = Config::for_tests();
-        let approval = looked_up_approval();
+        let approval = hashi_approval();
         let approved_at = approval.timestamp_secs;
         let mut auditor = auditor_with(&cfg, UtxoPool::default()).await;
         let resumed_from = auditor.inner.window_start;

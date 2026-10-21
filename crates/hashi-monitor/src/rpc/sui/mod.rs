@@ -17,8 +17,6 @@
 //! 3. The cursor advances through the last checkpoint the node declared
 //!    complete. The transactions of later checkpoints wait for the next poll,
 //!    so a checkpoint is ingested whole.
-//! 4. A Hashi approval missing from the scan is read from its
-//!    `WithdrawalTransaction` object by withdrawal id.
 //!
 //! Assumptions:
 //! - Every monitored event type keeps the original package's address across
@@ -31,7 +29,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
-use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::Hashi;
@@ -63,8 +60,6 @@ use crate::time::utc_timestamp;
 
 pub mod approval;
 
-use approval::HashiApproval;
-
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
 /// Checkpoints one poll scans at most. A backlog, such as a first run from
@@ -73,7 +68,6 @@ const PAGE_SIZE: u32 = 1_000;
 const MAX_CHECKPOINTS_PER_POLL: u64 = 10_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 const MAX_RANGE_ATTEMPTS: u32 = 3;
-const MAX_LOOKUP_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Distance kept above a pruning node's reported oldest checkpoint: an hour at the probe's
 /// six checkpoints per second, since the backends behind one endpoint prune unevenly.
@@ -107,19 +101,6 @@ fn completed_checkpoint_for_scan(
         "Sui transaction scan watermark checkpoint {completed_checkpoint} is outside requested range ending at {end_checkpoint}"
     );
     Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
-}
-
-/// Connection-level failures that a fresh connection can clear, as the node's peer
-/// retries classify them: a `GOAWAY` surfaces as `Internal`, a broken pipe as `Unknown`.
-fn is_transient(status: &tonic::Status) -> bool {
-    matches!(
-        status.code(),
-        tonic::Code::Unavailable
-            | tonic::Code::Unknown
-            | tonic::Code::Internal
-            | tonic::Code::Cancelled
-            | tonic::Code::DeadlineExceeded
-    )
 }
 
 /// A Sui v2 gRPC client for `config`, with `REQUEST_TIMEOUT` on every request.
@@ -260,12 +241,6 @@ impl SuiEventsPoller {
         self.cursor_seconds
     }
 
-    /// Whether the scan covered `timestamp_secs`. The cursor's own second is
-    /// excluded, since later unscanned checkpoints can share it.
-    pub fn has_scanned(&self, timestamp_secs: UnixSeconds) -> bool {
-        (self.start_seconds..self.cursor_seconds).contains(&timestamp_secs)
-    }
-
     /// Scan through the checkpoint covering `up_to`, or the observed chain head,
     /// but at most `MAX_CHECKPOINTS_PER_POLL` checkpoints.
     ///
@@ -392,57 +367,6 @@ impl SuiEventsPoller {
             "completed Sui event range"
         );
         Ok(PollOutcome::CursorAdvanced { events, findings })
-    }
-
-    /// Read the Hashi approval of `wid` from its `WithdrawalTransaction` object, which is
-    /// created alongside `WithdrawalPickedForProcessing` with the same txid and timestamp.
-    pub async fn fetch_withdrawal_approval(
-        &mut self,
-        wid: WithdrawalID,
-    ) -> anyhow::Result<Option<HashiApproval>> {
-        let request = GetObjectRequest::new(&wid).with_read_mask(FieldMask::from_paths([
-            Object::path_builder().object_type(),
-            Object::path_builder().contents().finish(),
-        ]));
-        let lookup = async {
-            let mut attempt = 0u32;
-            loop {
-                match self
-                    .client
-                    .ledger_client()
-                    .get_object(request.clone())
-                    .await
-                {
-                    Ok(response) => {
-                        break response
-                            .into_inner()
-                            .object
-                            .context("Sui GetObject response is missing the object")
-                            .map(Some);
-                    }
-                    Err(status) if status.code() == tonic::Code::NotFound => break Ok(None),
-                    Err(status) if attempt + 1 < MAX_LOOKUP_ATTEMPTS && is_transient(&status) => {
-                        let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << attempt);
-                        attempt += 1;
-                        tracing::warn!(%wid, attempt, ?delay, ?status, "Sui object lookup failed; retrying");
-                        tokio::time::sleep(delay).await;
-                    }
-                    Err(status) => {
-                        break Err(status).with_context(|| {
-                            format!("failed to fetch withdrawal transaction {wid}")
-                        });
-                    }
-                }
-            }
-        };
-        // Retries share one request's timeout, so a lookup never stalls the audit longer than one request.
-        let object = tokio::time::timeout(REQUEST_TIMEOUT, lookup)
-            .await
-            .with_context(|| format!("Sui lookup of withdrawal transaction {wid} timed out"))??;
-        match object {
-            Some(object) => approval::parse_withdrawal_object(&self.package_versions, wid, &object),
-            None => Ok(None),
-        }
     }
 
     /// Fail unless the node still serves the start. A pruned start would
@@ -724,15 +648,12 @@ pub mod tests {
     use super::approval::tests::PACKAGE_ID;
     use super::approval::tests::WID;
     use super::approval::tests::approval_tx;
-    use super::approval::tests::object_at_wid;
     use super::approval::tests::withdrawal_transaction;
     use super::*;
     use crate::domain::MonitorWithdrawalEvent;
     use crate::domain::WithdrawalEventType;
     use crate::test_utils::test_hashi_btc_keys;
-    use hashi_types::move_types::WithdrawalTransaction;
 
-    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -749,73 +670,6 @@ pub mod tests {
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerService;
     use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerServiceServer;
     use sui_rpc::proto::timestamp_ms_to_proto;
-
-    /// A ledger holding at most one object, answering every other id with
-    /// `miss`. Like a fullnode, it serves only the fields in the read mask.
-    #[derive(Clone)]
-    struct OneObjectLedger {
-        object: Option<Object>,
-        miss: tonic::Code,
-    }
-
-    #[tonic::async_trait]
-    impl LedgerService for OneObjectLedger {
-        async fn get_object(
-            &self,
-            request: tonic::Request<GetObjectRequest>,
-        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
-            let request = request.into_inner();
-            let Some(stored) = self
-                .object
-                .as_ref()
-                .filter(|object| object.object_id == request.object_id)
-            else {
-                return Err(tonic::Status::new(self.miss, "no such object"));
-            };
-            let paths = request.read_mask.map(|mask| mask.paths).unwrap_or_default();
-            let mut object = Object::default();
-            if paths.iter().any(|path| path == "object_type") {
-                object.object_type = stored.object_type.clone();
-            }
-            if paths.iter().any(|path| path == "contents") {
-                object.contents = stored.contents.clone();
-            }
-            Ok(tonic::Response::new(GetObjectResponse::new(object)))
-        }
-    }
-
-    /// Answers the first requests with `failures`, in order, then defers to `ledger`.
-    #[derive(Clone)]
-    struct FlakyLedger {
-        failures: Arc<Mutex<VecDeque<tonic::Code>>>,
-        requests: Arc<Mutex<u32>>,
-        ledger: OneObjectLedger,
-    }
-
-    impl FlakyLedger {
-        fn new(failures: impl IntoIterator<Item = tonic::Code>, ledger: OneObjectLedger) -> Self {
-            Self {
-                failures: Arc::new(Mutex::new(failures.into_iter().collect())),
-                requests: Arc::default(),
-                ledger,
-            }
-        }
-    }
-
-    #[tonic::async_trait]
-    impl LedgerService for FlakyLedger {
-        async fn get_object(
-            &self,
-            request: tonic::Request<GetObjectRequest>,
-        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
-            *self.requests.lock().unwrap() += 1;
-            let failure = self.failures.lock().unwrap().pop_front();
-            match failure {
-                Some(code) => Err(tonic::Status::new(code, "injected failure")),
-                None => self.ledger.get_object(request).await,
-            }
-        }
-    }
 
     /// Checkpoints `lowest..=head`, one a second from `GENESIS_SECS`. Like a pruning
     /// fullnode, it reports `lowest` and answers older checkpoints with `NotFound`.
@@ -959,8 +813,8 @@ pub mod tests {
         );
     }
 
-    /// The approval a lookup of `WID` returns from `poller_scanned`'s ledger.
-    pub fn looked_up_approval() -> MonitorWithdrawalEvent {
+    /// The Hashi approval of `withdrawal_transaction(WID)`.
+    pub fn hashi_approval() -> MonitorWithdrawalEvent {
         let txn = withdrawal_transaction(WID);
         MonitorWithdrawalEvent {
             event_type: WithdrawalEventType::E1HashiApproved,
@@ -971,164 +825,15 @@ pub mod tests {
         }
     }
 
-    /// A poller over a ledger holding `WID`'s approval that has scanned `[start, cursor)`.
-    pub async fn poller_scanned(start: UnixSeconds, cursor: UnixSeconds) -> SuiEventsPoller {
-        poller_scanned_with(withdrawal_transaction(WID), start, cursor).await
-    }
-
-    /// A poller over a ledger holding `txn` at `WID` that has scanned `[start, cursor)`.
-    pub async fn poller_scanned_with(
-        txn: WithdrawalTransaction,
-        start: UnixSeconds,
-        cursor: UnixSeconds,
-    ) -> SuiEventsPoller {
-        let mut poller = poller_for(OneObjectLedger {
-            object: Some(object_at_wid(PACKAGE_ID, &txn)),
-            miss: tonic::Code::NotFound,
-        })
-        .await;
-        poller.start_seconds = start;
+    /// A poller that has scanned `[start, cursor)`. No Sui node serves it.
+    pub fn poller_scanned(start: UnixSeconds, cursor: UnixSeconds) -> SuiEventsPoller {
+        let config = SuiConfig {
+            rpc_url: "http://127.0.0.1:9".to_string(),
+            package_id: PACKAGE_ID.to_string(),
+        };
+        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), start).unwrap();
         poller.cursor_seconds = cursor;
         poller
-    }
-
-    async fn fetch_approval(txn: &WithdrawalTransaction) -> HashiApproval {
-        let mut poller = poller_for(OneObjectLedger {
-            object: Some(object_at_wid(PACKAGE_ID, txn)),
-            miss: tonic::Code::NotFound,
-        })
-        .await;
-        poller
-            .fetch_withdrawal_approval(WID)
-            .await
-            .unwrap()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn approval_is_read_from_the_withdrawal_transaction() {
-        let txn = withdrawal_transaction(WID);
-
-        assert_eq!(
-            fetch_approval(&txn).await,
-            HashiApproval::Valid(MonitorWithdrawalEvent {
-                event_type: WithdrawalEventType::E1HashiApproved,
-                wid: WID,
-                timestamp_secs: 1_789_805_327,
-                btc_txid: txn.txid.into(),
-                tx: approval_tx(&txn),
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn a_missing_object_is_no_approval() {
-        let mut poller = poller_for(OneObjectLedger {
-            object: None,
-            miss: tonic::Code::NotFound,
-        })
-        .await;
-        assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
-    }
-
-    fn ledger_with_approval() -> OneObjectLedger {
-        OneObjectLedger {
-            object: Some(object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID))),
-            miss: tonic::Code::NotFound,
-        }
-    }
-
-    fn status_code(error: &anyhow::Error) -> Option<tonic::Code> {
-        error
-            .downcast_ref::<tonic::Status>()
-            .map(|status| status.code())
-    }
-
-    #[tokio::test]
-    async fn transient_statuses_are_retried() {
-        let ledger = FlakyLedger::new(
-            [tonic::Code::Internal, tonic::Code::Unavailable],
-            ledger_with_approval(),
-        );
-        let mut poller = poller_for(ledger.clone()).await;
-
-        assert!(
-            poller
-                .fetch_withdrawal_approval(WID)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(*ledger.requests.lock().unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn a_transient_failure_before_not_found_is_no_approval() {
-        let ledger = FlakyLedger::new(
-            [tonic::Code::Unavailable],
-            OneObjectLedger {
-                object: None,
-                miss: tonic::Code::NotFound,
-            },
-        );
-        let mut poller = poller_for(ledger.clone()).await;
-
-        assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
-        assert_eq!(*ledger.requests.lock().unwrap(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_lookup_gives_up_after_its_last_attempt() {
-        let ledger = FlakyLedger::new(
-            [tonic::Code::Unavailable; MAX_LOOKUP_ATTEMPTS as usize],
-            ledger_with_approval(),
-        );
-        let mut poller = poller_for(ledger.clone()).await;
-
-        let error = poller.fetch_withdrawal_approval(WID).await.unwrap_err();
-        assert_eq!(
-            status_code(&error),
-            Some(tonic::Code::Unavailable),
-            "{error:#}"
-        );
-        assert_eq!(*ledger.requests.lock().unwrap(), MAX_LOOKUP_ATTEMPTS);
-    }
-
-    #[tokio::test]
-    async fn other_statuses_fail_without_a_retry() {
-        let ledger = FlakyLedger::new([tonic::Code::PermissionDenied], ledger_with_approval());
-        let mut poller = poller_for(ledger.clone()).await;
-
-        let error = poller.fetch_withdrawal_approval(WID).await.unwrap_err();
-        assert_eq!(
-            status_code(&error),
-            Some(tonic::Code::PermissionDenied),
-            "{error:#}"
-        );
-        assert_eq!(*ledger.requests.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn connection_failures_are_transient_and_rejections_are_not() {
-        for code in [
-            tonic::Code::Unavailable,
-            tonic::Code::Unknown,
-            tonic::Code::Internal,
-            tonic::Code::Cancelled,
-            tonic::Code::DeadlineExceeded,
-        ] {
-            assert!(is_transient(&tonic::Status::new(code, "boom")), "{code:?}");
-        }
-        for code in [
-            tonic::Code::NotFound,
-            tonic::Code::InvalidArgument,
-            tonic::Code::FailedPrecondition,
-            tonic::Code::PermissionDenied,
-            tonic::Code::Unauthenticated,
-            tonic::Code::ResourceExhausted,
-        ] {
-            assert!(!is_transient(&tonic::Status::new(code, "nope")), "{code:?}");
-        }
     }
 
     #[test]
@@ -1161,22 +866,6 @@ pub mod tests {
                 Some(110)
             );
         }
-    }
-
-    #[tokio::test]
-    async fn the_scan_covers_its_start_but_not_its_cursor_second() {
-        let config = SuiConfig {
-            rpc_url: "http://127.0.0.1:9".to_string(),
-            package_id: PACKAGE_ID.to_string(),
-        };
-        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), 100).unwrap();
-        assert!(!poller.has_scanned(100));
-
-        poller.cursor_seconds = 200;
-        assert!(!poller.has_scanned(99));
-        assert!(poller.has_scanned(100));
-        assert!(poller.has_scanned(199));
-        assert!(!poller.has_scanned(200));
     }
 
     async fn pruned_poller_starting_at(sequence: u64) -> SuiEventsPoller {
