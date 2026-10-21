@@ -14,10 +14,9 @@
 //!   guardian's signature in its log; E3, the transaction confirmed on
 //!   Bitcoin. Every event states the transaction in Move's shape,
 //!   `WithdrawalTx`, so the sources can be compared as a whole.
-//! - A deposit is two events: E1, the output confirmed on Bitcoin; E2,
-//!   Hashi's `DepositConfirmed` on Sui.
-//! - A deposit request is the user's `DepositRequested` on Sui, followed on
-//!   its own until Bitcoin confirms the UTXO it names.
+//! - A deposit is three events: E1, the user's `DepositRequested` on Sui;
+//!   E2, the output confirmed on Bitcoin; E3, the `DepositConfirmed` on
+//!   Sui, on which Move mints. Each request is followed on its own.
 //!
 //! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
@@ -27,9 +26,8 @@ pub mod withdrawal;
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
 pub use deposit::ConfirmedDeposit;
-pub use deposit::DepositEventType;
 pub use deposit::DepositId;
-pub use deposit::MonitorDepositEvent;
+pub use deposit::SuiDepositConfirmedEvent;
 pub use deposit::SuiDepositRequestedEvent;
 use serde::Deserialize;
 use serde::Serialize;
@@ -40,7 +38,6 @@ pub use withdrawal::WithdrawalTx;
 
 use std::fmt;
 
-use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 
 use crate::findings::MonitorFinding;
@@ -49,7 +46,7 @@ use crate::time::utc_timestamp;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorEvent {
     Withdrawal(MonitorWithdrawalEvent),
-    Deposit(MonitorDepositEvent),
+    DepositConfirmed(SuiDepositConfirmedEvent),
     DepositRequested(SuiDepositRequestedEvent),
 }
 
@@ -64,10 +61,10 @@ impl fmt::Display for MonitorEvent {
                 utc_timestamp(event.timestamp_secs),
                 event.btc_txid,
             ),
-            Self::Deposit(event) => write!(
+            Self::DepositConfirmed(event) => write!(
                 formatter,
-                "Deposit(type={:?}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
-                event.event_type,
+                "DepositConfirmed(request_id={}, deposit_id={}, timestamp={}, amount={}, script_pubkey={:x})",
+                event.request_id,
                 event.deposit_id,
                 utc_timestamp(event.timestamp_secs),
                 event.amount,
@@ -84,29 +81,6 @@ impl fmt::Display for MonitorEvent {
             ),
         }
     }
-}
-
-/// Correlation identifier for an event in the monitor's withdrawal or deposit model.
-/// This is not a chain-native event ID.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MonitorEventId {
-    Withdrawal(WithdrawalID),
-    Deposit(DepositId),
-}
-
-impl fmt::Display for MonitorEventId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Withdrawal(wid) => write!(formatter, "wid={wid}"),
-            Self::Deposit(deposit_id) => write!(formatter, "deposit_id={deposit_id}"),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum MonitorEventType {
-    Withdrawal(WithdrawalEventType),
-    Deposit(DepositEventType),
 }
 
 /// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.

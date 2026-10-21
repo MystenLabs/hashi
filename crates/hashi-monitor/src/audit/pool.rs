@@ -49,7 +49,14 @@
 //! 5. In one pass, every add comes before every spend. A pass can answer a
 //!    deposit and the withdrawal that spends it, or a withdrawal and the one
 //!    that spends its change, in any order.
-//! 6. Once a day the monitor asks Bitcoin about every UTXO held. `check`
+//! 6. A `DepositConfirmed`, Hashi's mint, whose request's machine has
+//!    closed is checked against the pool: the pool must hold the UTXO, or
+//!    have spent it, as a deposit with the same amount and script. One
+//!    that arrives earlier is judged by its machine, by the same rule. So
+//!    every hBTC minted matches BTC that Bitcoin shows paid to the bridge. Move lets a withdrawal spend a deposit only
+//!    after its `DepositConfirmed`, and the spent record keeps the amount
+//!    and script, so a spent UTXO is still found.
+//! 7. Once a day the monitor asks Bitcoin about every UTXO held. `check`
 //!    turns the answers into findings. An unspent UTXO is reported by age.
 //!    A spent UTXO is a spend outside Hashi. A missing UTXO is a phantom:
 //!    every UTXO held was confirmed when it entered, so a missing answer is
@@ -96,6 +103,7 @@ use serde::Serialize;
 
 use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
+use crate::domain::SuiDepositConfirmedEvent;
 use crate::domain::UtxoOrigin;
 use crate::findings::MonitorFinding;
 use crate::findings::RpcInconsistency;
@@ -250,6 +258,28 @@ impl UtxoPool {
                 first_seen: deposit.block_time,
             },
         )
+    }
+
+    /// Check the Sui `DepositConfirmed` against the pool: the UTXO must be a
+    /// deposit the pool holds or spent. See `SuiDepositConfirmedEvent::judge`.
+    pub fn check_sui_confirmation(
+        &self,
+        sui: &SuiDepositConfirmedEvent,
+        skew: u64,
+    ) -> Vec<MonitorFinding> {
+        let outpoint = OutPoint::from(sui.deposit_id);
+        let paid = self
+            .utxos
+            .get(&outpoint)
+            .or_else(|| self.spent.get(&outpoint).map(|spent| &spent.utxo))
+            .filter(|utxo| utxo.origin == UtxoOrigin::Deposit)
+            .map(|utxo| ConfirmedDeposit {
+                deposit_id: sui.deposit_id,
+                amount: utxo.amount,
+                script_pubkey: utxo.script_pubkey.clone(),
+                block_time: utxo.first_seen,
+            });
+        sui.judge(paid.as_ref(), skew)
     }
 
     /// Apply withdrawals Bitcoin confirmed: every change output enters,
@@ -420,6 +450,7 @@ mod tests {
     use crate::domain::DepositId;
     use crate::findings::FindingCategory;
     use crate::test_utils::txid;
+    use sui_sdk_types::Address;
 
     // `Timing::for_tests` values.
     const WARN: u64 = 100;
@@ -668,6 +699,113 @@ mod tests {
         assert!(findings.is_empty());
         assert_eq!(pool.outpoints(), vec![change_of(8)]);
         assert_eq!(pool.get_spent(&change_of(7)).unwrap().spent_by, txid(8));
+    }
+
+    const SKEW: u64 = 10;
+
+    /// The Sui `DepositConfirmed` for `outpoint(fill)`, at time 600.
+    fn sui_confirmation(
+        fill: u8,
+        amount: u64,
+        script_pubkey: ScriptBuf,
+    ) -> SuiDepositConfirmedEvent {
+        SuiDepositConfirmedEvent {
+            timestamp_secs: 600,
+            request_id: Address::new([0x61; 32]),
+            deposit_id: DepositId::new(txid(fill), 0),
+            amount,
+            script_pubkey,
+        }
+    }
+
+    #[test]
+    fn a_confirmation_of_a_held_deposit_is_backed() {
+        let pool = pool_with_one();
+
+        let sui = sui_confirmation(1, 1_000, script());
+        assert!(pool.check_sui_confirmation(&sui, SKEW).is_empty());
+    }
+
+    #[test]
+    fn a_confirmation_of_a_spent_deposit_is_backed() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(5, vec![outpoint(1)])]);
+        assert!(pool.is_spent(&outpoint(1)));
+
+        let sui = sui_confirmation(1, 1_000, script());
+        assert!(pool.check_sui_confirmation(&sui, SKEW).is_empty());
+    }
+
+    #[test]
+    fn a_confirmation_the_pool_never_held_is_unbacked() {
+        let pool = pool_with_one();
+
+        let sui = sui_confirmation(2, 1_000, script());
+        let findings = pool.check_sui_confirmation(&sui, SKEW);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                deadline: 610,
+                block_time: None,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+    }
+
+    #[test]
+    fn a_confirmation_of_a_change_output_is_unbacked() {
+        let mut pool = pool_with_one();
+        pool.add_withdrawals(&[withdrawal(5, vec![outpoint(1)])]);
+        let change = change_of(5);
+
+        let sui = SuiDepositConfirmedEvent {
+            deposit_id: DepositId::new(change.txid, change.vout),
+            ..sui_confirmation(5, 550, script())
+        };
+        assert_eq!(
+            pool.check_sui_confirmation(&sui, SKEW),
+            vec![MonitorFinding::DepositUnbacked {
+                sui,
+                deadline: 610,
+                block_time: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_confirmation_with_another_amount_or_script_is_a_mismatch() {
+        let pool = pool_with_one();
+
+        for sui in [
+            sui_confirmation(1, 2_000, script()),
+            sui_confirmation(1, 1_000, ScriptBuf::from_bytes(vec![0x52])),
+        ] {
+            let findings = pool.check_sui_confirmation(&sui, SKEW);
+            assert!(
+                matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, .. }] if *claimed == sui)
+            );
+            assert_eq!(findings[0].category(), FindingCategory::Safety);
+        }
+    }
+
+    #[test]
+    fn a_deposit_mined_after_its_confirmation_and_the_skew_is_unbacked() {
+        let sui = sui_confirmation(1, 1_000, script());
+
+        assert!(
+            pool_seen_at(600 + SKEW)
+                .check_sui_confirmation(&sui, SKEW)
+                .is_empty()
+        );
+        assert!(matches!(
+            &pool_seen_at(600 + SKEW + 1).check_sui_confirmation(&sui, SKEW)[..],
+            [MonitorFinding::DepositUnbacked {
+                deadline: 610,
+                block_time: Some(611),
+                ..
+            }]
+        ));
     }
 
     #[test]
