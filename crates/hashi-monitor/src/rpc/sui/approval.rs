@@ -142,7 +142,7 @@ pub fn parse_event(
         }
         Some(HashiEvent::DepositRequested(event)) => {
             events.push(MonitorEvent::DepositRequested(
-                SuiDepositRequestedEvent::from_sui(event, hashi_btc_keys),
+                SuiDepositRequestedEvent::new(event, hashi_btc_keys),
             ));
         }
         Some(_) | None => {}

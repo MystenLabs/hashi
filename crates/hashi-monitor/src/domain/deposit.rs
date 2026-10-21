@@ -48,6 +48,38 @@ impl fmt::Display for DepositId {
     }
 }
 
+/// The monitor's view of `DepositRequested` on Sui: the user's claim that a
+/// Bitcoin output pays the bridge. The public `deposit` entry emits it, so
+/// the committee cannot suppress it. Its timestamp is the request's own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuiDepositRequestedEvent {
+    /// The Sui `DepositRequest` object. Each request for a UTXO has its own.
+    pub request_id: Address,
+    pub timestamp_secs: UnixSeconds,
+    pub deposit_id: DepositId,
+    /// Satoshis the user claims. The pool takes Bitcoin's amount; this one
+    /// only explains a request Hashi never confirms.
+    pub amount: u64,
+    /// The bridge script of the claimed derivation path. The monitor cannot
+    /// recognize a bridge output without the path, so a wrong path hides
+    /// the UTXO.
+    pub script_pubkey: ScriptBuf,
+}
+
+impl SuiDepositRequestedEvent {
+    /// Keep the claim and derive its bridge script. The requester and the
+    /// digest are not used.
+    pub fn new(event: DepositRequested, keys: &HashiBTCKeys) -> Self {
+        Self {
+            request_id: event.request_id,
+            timestamp_secs: unix_millis_to_seconds(event.timestamp_ms),
+            deposit_id: DepositId::new(event.utxo_id.txid.into(), event.utxo_id.vout),
+            amount: event.amount,
+            script_pubkey: keys.script_pubkey(event.derivation_path.as_ref()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonitorDepositEvent {
     pub event_type: DepositEventType,
@@ -101,38 +133,6 @@ pub enum DepositEventType {
     /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
     /// timestamp, supplied with the transaction by Sui gRPC.
     E2HashiDeposited,
-}
-
-/// The monitor's view of `DepositRequested` on Sui: the user's claim that a
-/// Bitcoin output pays the bridge. The public `deposit` entry emits it, so
-/// the committee cannot suppress it. Its timestamp is the request's own.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SuiDepositRequestedEvent {
-    /// The Sui `DepositRequest` object. Each request for a UTXO has its own.
-    pub request_id: Address,
-    pub timestamp_secs: UnixSeconds,
-    pub deposit_id: DepositId,
-    /// Satoshis the user claims. The pool takes Bitcoin's amount; this one
-    /// only explains a request Hashi never confirms.
-    pub amount: u64,
-    /// The bridge script of the claimed derivation path. The monitor cannot
-    /// recognize a bridge output without the path, so a wrong path hides
-    /// the UTXO.
-    pub script_pubkey: ScriptBuf,
-}
-
-impl SuiDepositRequestedEvent {
-    /// Keep the claim and derive its bridge script. The requester and the
-    /// digest are not used.
-    pub fn from_sui(event: DepositRequested, keys: &HashiBTCKeys) -> Self {
-        Self {
-            request_id: event.request_id,
-            timestamp_secs: unix_millis_to_seconds(event.timestamp_ms),
-            deposit_id: DepositId::new(event.utxo_id.txid.into(), event.utxo_id.vout),
-            amount: event.amount,
-            script_pubkey: keys.script_pubkey(event.derivation_path.as_ref()),
-        }
-    }
 }
 
 /// A deposit Bitcoin confirmed at a bridge address. The UTXO pool records it.
