@@ -7,12 +7,15 @@
 //! poller scans the checkpoints for them and gives each one its time.
 //!
 //! How it works:
-//! 1. The poller keeps a cursor in seconds. On the first poll it finds the
-//!    checkpoint before the cursor by probing checkpoint timestamps, or
-//!    starts at the oldest checkpoint a pruning node serves.
+//! 1. The poller starts at a checkpoint: on a first run, the one that holds
+//!    the Hashi package's publish transaction; on a resume, the one the
+//!    snapshot saved. Before the first poll, it checks that the node still
+//!    serves the start. Its cursor in seconds is then the time of the
+//!    checkpoint before the start.
 //! 2. Each poll lists the transactions that emit a monitored event, from the
-//!    next checkpoint through the one that covers the poll end, but at most
-//!    `MAX_CHECKPOINTS_PER_POLL` checkpoints. A failed range is retried,
+//!    next checkpoint through the checkpoint the caller names, but at most
+//!    `MAX_CHECKPOINTS_PER_POLL` checkpoints. The caller names the chain head
+//!    it read at the tick's start. A failed range is retried,
 //!    then split.
 //! 3. The cursor advances through the last checkpoint the node declared
 //!    complete. The transactions of later checkpoints wait for the next poll,
@@ -21,7 +24,6 @@
 //! Assumptions:
 //! - Every monitored event type keeps the original package's address across
 //!   upgrades.
-//! - Checkpoint timestamps are cached. A checkpoint's time never changes.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -69,8 +71,8 @@ const MAX_CHECKPOINTS_PER_POLL: u64 = 10_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 const MAX_RANGE_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
-/// Distance kept above a pruning node's reported oldest checkpoint: an hour at the probe's
-/// six checkpoints per second, since the backends behind one endpoint prune unevenly.
+/// Distance kept above a pruning node's reported oldest checkpoint: about an hour
+/// of checkpoints, since the backends behind one endpoint prune unevenly.
 const PRUNING_MARGIN_CHECKPOINTS: u64 = 6 * 60 * 60;
 
 struct TransactionScan {
@@ -111,19 +113,28 @@ fn connect(config: &SuiConfig) -> anyhow::Result<sui_rpc::Client> {
     Ok(client)
 }
 
-/// The time the original Hashi package was published: the bridge's genesis
-/// on Sui, since no Hashi event precedes it.
-pub async fn package_publish_time(config: &SuiConfig) -> anyhow::Result<UnixSeconds> {
-    let mut client = connect(config)?;
-    publish_time(&mut client, &config.package_id).await
+/// The bridge's genesis on Sui: the transaction that published the original
+/// Hashi package. No Hashi event precedes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Genesis {
+    /// The checkpoint that holds the publish transaction.
+    pub checkpoint: u64,
+    /// The time of that checkpoint.
+    pub timestamp: UnixSeconds,
 }
 
-/// The checkpoint time of the transaction that published `package_id`. The
-/// package object is immutable, so its previous transaction is its publish.
-async fn publish_time(
+/// The genesis of the Hashi package in `config`.
+pub async fn package_genesis(config: &SuiConfig) -> anyhow::Result<Genesis> {
+    let mut client = connect(config)?;
+    publish_genesis(&mut client, &config.package_id).await
+}
+
+/// The checkpoint and time of the transaction that published `package_id`.
+/// The package object is immutable, so its previous transaction is its publish.
+async fn publish_genesis(
     client: &mut sui_rpc::Client,
     package_id: &str,
-) -> anyhow::Result<UnixSeconds> {
+) -> anyhow::Result<Genesis> {
     let address = Address::from_str(package_id)
         .with_context(|| format!("invalid Hashi package ID {package_id}"))?;
     let request = GetObjectRequest::new(&address)
@@ -141,22 +152,29 @@ async fn publish_time(
     let digest = Digest::from_str(&publish_digest).with_context(|| {
         format!("invalid publish transaction digest {publish_digest} of Hashi package {package_id}")
     })?;
-    let request =
-        GetTransactionRequest::new(&digest).with_read_mask(FieldMask::from_paths(["timestamp"]));
-    let timestamp = client
+    let request = GetTransactionRequest::new(&digest)
+        .with_read_mask(FieldMask::from_paths(["checkpoint", "timestamp"]));
+    let transaction = client
         .ledger_client()
         .get_transaction(request)
         .await
         .with_context(|| format!("failed to fetch the publish transaction of Hashi package {package_id}"))?
         .into_inner()
         .transaction
-        .with_context(|| format!("Sui GetTransaction response is missing the publish transaction of Hashi package {package_id}"))?
-        .timestamp
-        .with_context(|| format!("publish transaction of Hashi package {package_id} is missing timestamp"))?;
+        .with_context(|| format!("Sui GetTransaction response is missing the publish transaction of Hashi package {package_id}"))?;
+    let checkpoint = transaction.checkpoint.with_context(|| {
+        format!("publish transaction of Hashi package {package_id} is missing checkpoint")
+    })?;
+    let timestamp = transaction.timestamp.with_context(|| {
+        format!("publish transaction of Hashi package {package_id} is missing timestamp")
+    })?;
     let timestamp_ms = proto_to_timestamp_ms(timestamp).with_context(|| {
         format!("invalid publish transaction timestamp of Hashi package {package_id}")
     })?;
-    Ok(unix_millis_to_seconds(timestamp_ms))
+    Ok(Genesis {
+        checkpoint,
+        timestamp: unix_millis_to_seconds(timestamp_ms),
+    })
 }
 
 /// Hashi's on-chain `bitcoin_confirmation_threshold`: the confirmations the
@@ -194,25 +212,19 @@ pub struct SuiEventsPoller {
     hashi_btc_keys: HashiBTCKeys,
     /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
-    /// Timestamp from which the poller scans every checkpoint.
-    start_seconds: UnixSeconds,
-    /// Latest timestamp through which the poller has completely scanned transactions.
+    /// The time of the last checkpoint scanned. `ensure_start_is_served`
+    /// sets it for the start.
     cursor_seconds: UnixSeconds,
-    /// First checkpoint not yet scanned, once the initial timestamp lookup completes.
-    next_checkpoint_to_scan: Option<u64>,
-    /// Checkpoint timestamps cached to avoid repeating `GetCheckpoint` requests.
-    checkpoint_timestamps: BTreeMap<u64, UnixSeconds>,
-    /// Most recently fetched chain head as `(sequence_number, timestamp_secs)`.
-    observed_chain_head: Option<(u64, UnixSeconds)>,
-    /// Oldest checkpoint the node reported serving, 0 if it has not pruned.
-    lowest_available_checkpoint: u64,
+    /// The first checkpoint not yet scanned.
+    next_checkpoint: u64,
 }
 
 impl SuiEventsPoller {
+    /// A poller whose scan starts at checkpoint `start`.
     pub fn new(
         config: &SuiConfig,
         hashi_btc_keys: HashiBTCKeys,
-        start: UnixSeconds,
+        start: u64,
     ) -> anyhow::Result<Self> {
         let package_id = Address::from_str(&config.package_id)
             .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
@@ -224,36 +236,27 @@ impl SuiEventsPoller {
             package_versions,
             hashi_btc_keys,
             package_id: config.package_id.clone(),
-            start_seconds: start,
-            cursor_seconds: start,
-            next_checkpoint_to_scan: None,
-            checkpoint_timestamps: BTreeMap::new(),
-            observed_chain_head: None,
-            lowest_available_checkpoint: 0,
+            cursor_seconds: 0,
+            next_checkpoint: start,
         })
-    }
-
-    pub fn start_seconds(&self) -> UnixSeconds {
-        self.start_seconds
     }
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
         self.cursor_seconds
     }
 
-    /// The first checkpoint not yet scanned, once the start is known.
-    pub fn next_checkpoint(&self) -> Option<u64> {
-        self.next_checkpoint_to_scan
+    /// The first checkpoint not yet scanned.
+    pub fn next_checkpoint(&self) -> u64 {
+        self.next_checkpoint
     }
 
-    /// Resume the scan at `checkpoint`, which a snapshot saved.
-    /// `ensure_start_is_served` then sets the cursor.
-    pub fn resume_at(&mut self, checkpoint: u64) {
-        self.next_checkpoint_to_scan = Some(checkpoint);
+    /// The newest checkpoint the node serves.
+    pub async fn latest_checkpoint(&mut self) -> anyhow::Result<u64> {
+        Ok(self.checkpoint_range().await?.1)
     }
 
-    /// Scan through the checkpoint covering `up_to`, or the observed chain head,
-    /// but at most `MAX_CHECKPOINTS_PER_POLL` checkpoints.
+    /// Scan up to checkpoint `up_to`, inclusive, but at most
+    /// `MAX_CHECKPOINTS_PER_POLL` checkpoints.
     ///
     /// The timestamp cursor advances only through `watermark.checkpoint`, which
     /// is the inclusive boundary that `ListTransactions` reports as fully
@@ -261,41 +264,16 @@ impl SuiEventsPoller {
     /// The Sui SDK handles item and scan limits, resumable cursors,
     /// and retryable partial streams. A terminal failure discards the partial
     /// range; that range is retried and may be split.
-    pub async fn poll(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
-        if up_to <= self.cursor_seconds {
-            return Ok(PollOutcome::CursorUnmoved);
-        }
-
-        let start_checkpoint = match self.next_checkpoint_to_scan {
-            Some(checkpoint) => checkpoint,
-            None => self.first_checkpoint_to_scan().await?,
-        };
-        let (mut latest_sequence, mut latest_timestamp) = self
-            .observed_chain_head
-            .context("latest Sui checkpoint was not resolved")?;
-        if start_checkpoint > latest_sequence {
-            (latest_sequence, latest_timestamp) = self.refresh_chain_head().await?;
-            if start_checkpoint > latest_sequence {
-                return Ok(PollOutcome::CursorUnmoved);
-            }
-        }
-
-        let end_checkpoint = if latest_timestamp < up_to {
-            latest_sequence.saturating_add(1)
-        } else {
-            let (_, boundary) = self
-                .checkpoint_bracket_from_head(up_to, (latest_sequence, latest_timestamp))
-                .await?
-                .context("Sui does not yet have a checkpoint at the poll end time")?;
-            boundary.saturating_add(1)
-        };
-        if end_checkpoint <= start_checkpoint {
+    pub async fn poll(&mut self, up_to: u64) -> anyhow::Result<PollOutcome> {
+        let start_checkpoint = self.next_checkpoint;
+        if start_checkpoint > up_to {
             return Ok(PollOutcome::CursorUnmoved);
         }
         // A backlog is scanned in bounded ranges. The caller polls again while
         // the cursor advances, so the rest follows in the next polls.
-        let mut end_checkpoint =
-            end_checkpoint.min(start_checkpoint.saturating_add(MAX_CHECKPOINTS_PER_POLL));
+        let mut end_checkpoint = up_to
+            .saturating_add(1)
+            .min(start_checkpoint.saturating_add(MAX_CHECKPOINTS_PER_POLL));
 
         let mut range_attempt = 0u32;
         let scan = loop {
@@ -365,7 +343,7 @@ impl SuiEventsPoller {
         }
 
         let scanned_through_timestamp = self.checkpoint_timestamp(completed_checkpoint).await?;
-        self.next_checkpoint_to_scan = Some(completed_checkpoint.saturating_add(1));
+        self.next_checkpoint = completed_checkpoint.saturating_add(1);
         self.cursor_seconds = self.cursor_seconds.max(scanned_through_timestamp);
         tracing::info!(
             start_checkpoint,
@@ -380,132 +358,24 @@ impl SuiEventsPoller {
         Ok(PollOutcome::CursorAdvanced { events, findings })
     }
 
-    /// Fail unless the node still serves the start. A pruned start would
-    /// leave the UTXO pool incomplete for good. On success the first poll
-    /// does not probe again.
+    /// Fail unless the node still serves the start, then set the cursor to
+    /// the time of the checkpoint before the start. A pruned start would
+    /// leave the UTXO pool incomplete for good.
     pub async fn ensure_start_is_served(&mut self) -> anyhow::Result<()> {
-        if let Some(next) = self.next_checkpoint_to_scan {
-            self.refresh_chain_head().await?;
-            anyhow::ensure!(
-                self.lowest_available_checkpoint <= next,
-                "the Sui node has pruned checkpoint {next}, where the scan resumes. Use a Sui node that keeps the history from there",
-            );
-            // The cursor is the time of the last checkpoint scanned.
-            self.cursor_seconds = self.checkpoint_timestamp(next.saturating_sub(1)).await?;
-            self.start_seconds = self.cursor_seconds;
-            return Ok(());
-        }
-        let first_checkpoint = self.first_checkpoint_to_scan().await?;
+        let (lowest, _) = self.checkpoint_range().await?;
+        let previous = self.next_checkpoint.saturating_sub(1);
         anyhow::ensure!(
-            self.start_seconds == self.cursor_seconds,
-            "the Sui node has pruned the start {}: its scan would begin at {}. Use a Sui node that keeps the history from the bridge's genesis",
-            utc_timestamp(self.cursor_seconds),
-            utc_timestamp(self.start_seconds),
+            lowest == 0 || lowest.saturating_add(PRUNING_MARGIN_CHECKPOINTS) <= previous,
+            "the Sui node has pruned checkpoint {previous}, which the scan from checkpoint {} needs: it serves from {lowest}. Use a Sui node that keeps the history from there",
+            self.next_checkpoint,
         );
-        self.next_checkpoint_to_scan = Some(first_checkpoint);
+        self.cursor_seconds = self.checkpoint_timestamp(previous).await?;
         Ok(())
     }
 
-    /// The checkpoint before the cursor or, once the node has pruned that far, the oldest
-    /// one it serves, moving the scan's start past that checkpoint's second.
-    async fn first_checkpoint_to_scan(&mut self) -> anyhow::Result<u64> {
-        let (before, _) = self
-            .checkpoint_bracket(self.cursor_seconds)
-            .await?
-            .context("Sui does not yet have a checkpoint at the poll start time")?;
-        if before > 0 {
-            let before_timestamp = self.checkpoint_timestamp(before).await?;
-            if before_timestamp >= self.cursor_seconds {
-                // Transactions in unscanned earlier checkpoints are at most this second.
-                self.start_seconds = before_timestamp + 1;
-                tracing::warn!(
-                    requested_start = %utc_timestamp(self.cursor_seconds),
-                    scan_start = %utc_timestamp(self.start_seconds),
-                    checkpoint = before,
-                    "Sui node has pruned the requested start; scanning from its oldest checkpoint"
-                );
-            }
-        }
-        Ok(before)
-    }
-
-    /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
-    ///
-    /// Exponential probing finds a lower bound, then binary search resolves the
-    /// exact adjacent checkpoint boundary. When a predecessor checkpoint exists,
-    /// the lower bound is before the timestamp and the upper bound is at or after
-    /// it. At or before the oldest checkpoint the node serves, genesis unless it
-    /// prunes, both bounds are that checkpoint.
-    async fn checkpoint_bracket(
-        &mut self,
-        timestamp_secs: UnixSeconds,
-    ) -> anyhow::Result<Option<(u64, u64)>> {
-        let head = self.refresh_chain_head().await?;
-        self.checkpoint_bracket_from_head(timestamp_secs, head)
-            .await
-    }
-
-    async fn checkpoint_bracket_from_head(
-        &mut self,
-        timestamp_secs: UnixSeconds,
-        (latest_sequence, latest_timestamp): (u64, UnixSeconds),
-    ) -> anyhow::Result<Option<(u64, u64)>> {
-        tracing::info!(
-            target = %utc_timestamp(timestamp_secs),
-            latest_checkpoint = latest_sequence,
-            latest_timestamp = %utc_timestamp(latest_timestamp),
-            "resolving Sui checkpoint boundary"
-        );
-        if latest_timestamp < timestamp_secs {
-            return Ok(None);
-        }
-
-        let oldest = match self.lowest_available_checkpoint {
-            0 => 0,
-            lowest => lowest
-                .saturating_add(PRUNING_MARGIN_CHECKPOINTS)
-                .min(latest_sequence),
-        };
-        let elapsed = latest_timestamp.saturating_sub(timestamp_secs);
-        let mut distance = elapsed.saturating_mul(6).max(1);
-        let mut low_sequence = loop {
-            let probe = latest_sequence.saturating_sub(distance).max(oldest);
-            let timestamp = self.checkpoint_timestamp(probe).await?;
-            if timestamp < timestamp_secs {
-                break probe;
-            }
-            if probe == oldest {
-                return Ok(Some((oldest, oldest)));
-            }
-            distance = distance.saturating_mul(2);
-        };
-        let mut high_sequence = latest_sequence;
-
-        // Resolve the exact adjacent checkpoint boundary. A previously capped
-        // interpolation could leave a very wide but technically safe bracket
-        // for historical timestamps, forcing ListTransactions to scan many
-        // unrelated checkpoint ranges. Binary search keeps the lookup
-        // logarithmic even when checkpoint production has varied over time.
-        while high_sequence > low_sequence.saturating_add(1) {
-            let midpoint = low_sequence + (high_sequence - low_sequence) / 2;
-            let midpoint_timestamp = self.checkpoint_timestamp(midpoint).await?;
-            if midpoint_timestamp < timestamp_secs {
-                low_sequence = midpoint;
-            } else {
-                high_sequence = midpoint;
-            }
-        }
-
-        tracing::info!(
-            target = %utc_timestamp(timestamp_secs),
-            before_checkpoint = low_sequence,
-            at_or_after_checkpoint = high_sequence,
-            "resolved Sui checkpoint boundary"
-        );
-        Ok(Some((low_sequence, high_sequence)))
-    }
-
-    async fn refresh_chain_head(&mut self) -> anyhow::Result<(u64, UnixSeconds)> {
+    /// The oldest and the newest checkpoint the node serves. The oldest is 0
+    /// unless the node prunes.
+    async fn checkpoint_range(&mut self) -> anyhow::Result<(u64, u64)> {
         let service_info = self
             .client
             .ledger_client()
@@ -513,26 +383,17 @@ impl SuiEventsPoller {
             .await
             .context("failed to fetch Sui service info")?
             .into_inner();
-        let sequence_number = service_info
+        let latest = service_info
             .checkpoint_height
             .context("Sui service info is missing checkpoint_height")?;
-        let timestamp = service_info
-            .timestamp
-            .context("Sui service info is missing timestamp")?;
-        let timestamp_ms =
-            proto_to_timestamp_ms(timestamp).context("invalid Sui service info timestamp")?;
-        let latest = (sequence_number, unix_millis_to_seconds(timestamp_ms));
-        self.checkpoint_timestamps.insert(latest.0, latest.1);
-        self.observed_chain_head = Some(latest);
-        self.lowest_available_checkpoint = service_info.lowest_available_checkpoint.unwrap_or(0);
-        Ok(latest)
+        Ok((
+            service_info.lowest_available_checkpoint.unwrap_or(0),
+            latest,
+        ))
     }
 
-    /// The timestamp of checkpoint `sequence_number`, from the cache or the node.
+    /// The timestamp of checkpoint `sequence_number`, read from the node.
     async fn checkpoint_timestamp(&mut self, sequence_number: u64) -> anyhow::Result<UnixSeconds> {
-        if let Some(timestamp) = self.checkpoint_timestamps.get(&sequence_number) {
-            return Ok(*timestamp);
-        }
         let request = GetCheckpointRequest::by_sequence_number(sequence_number).with_read_mask(
             FieldMask::from_paths(["sequence_number", "summary.timestamp"]),
         );
@@ -555,8 +416,6 @@ impl SuiEventsPoller {
         let timestamp_ms =
             proto_to_timestamp_ms(timestamp).context("invalid Sui checkpoint timestamp")?;
         let timestamp_secs = unix_millis_to_seconds(timestamp_ms);
-        self.checkpoint_timestamps
-            .insert(actual_sequence, timestamp_secs);
         anyhow::ensure!(
             actual_sequence == sequence_number,
             "requested Sui checkpoint {sequence_number}, received {actual_sequence}"
@@ -749,6 +608,7 @@ pub mod tests {
     }
 
     const PUBLISH_DIGEST: &str = "11111111111111111111111111111111";
+    const PUBLISH_CHECKPOINT: u64 = 4_200;
     const PUBLISH_SECS: UnixSeconds = 1_690_000_000;
 
     #[tonic::async_trait]
@@ -773,6 +633,7 @@ pub mod tests {
                 return Err(tonic::Status::not_found("no such transaction"));
             }
             let mut transaction = ExecutedTransaction::default();
+            transaction.checkpoint = Some(PUBLISH_CHECKPOINT);
             transaction.timestamp = self
                 .timestamp
                 .map(|seconds| timestamp_ms_to_proto(seconds * 1_000));
@@ -807,14 +668,20 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn the_publish_time_is_the_package_previous_transaction_time() {
+    async fn the_genesis_is_the_checkpoint_and_time_of_the_publish_transaction() {
         let config = serve(PublishedPackageLedger {
             previous_transaction: Some(PUBLISH_DIGEST.to_string()),
             timestamp: Some(PUBLISH_SECS),
         })
         .await;
 
-        assert_eq!(package_publish_time(&config).await.unwrap(), PUBLISH_SECS);
+        assert_eq!(
+            package_genesis(&config).await.unwrap(),
+            Genesis {
+                checkpoint: PUBLISH_CHECKPOINT,
+                timestamp: PUBLISH_SECS,
+            }
+        );
     }
 
     #[tokio::test]
@@ -825,7 +692,7 @@ pub mod tests {
         })
         .await;
 
-        let error = format!("{:#}", package_publish_time(&config).await.unwrap_err());
+        let error = format!("{:#}", package_genesis(&config).await.unwrap_err());
 
         assert!(
             error.contains(&format!(
@@ -847,15 +714,14 @@ pub mod tests {
         }
     }
 
-    /// A poller that has scanned `[start, cursor)`. No Sui node serves it.
-    pub fn poller_scanned(start: UnixSeconds, cursor: UnixSeconds) -> SuiEventsPoller {
+    /// A poller whose cursor is at `cursor`. No Sui node serves it.
+    pub fn poller_scanned(cursor: UnixSeconds) -> SuiEventsPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
             package_id: PACKAGE_ID.to_string(),
         };
-        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), start).unwrap();
+        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
         poller.cursor_seconds = cursor;
-        poller.next_checkpoint_to_scan = Some(0);
         poller
     }
 
@@ -891,52 +757,36 @@ pub mod tests {
         }
     }
 
-    async fn pruned_poller_starting_at(sequence: u64) -> SuiEventsPoller {
-        let mut poller = poller_for(PrunedLedger {
+    /// A poller over `PrunedLedger` whose scan starts at checkpoint `start`.
+    async fn pruned_poller_starting_at(start: u64) -> SuiEventsPoller {
+        let config = serve(PrunedLedger {
             lowest: 100_000,
             head: 200_000,
         })
         .await;
-        poller.start_seconds = GENESIS_SECS + sequence;
-        poller.cursor_seconds = GENESIS_SECS + sequence;
-        poller
+        SuiEventsPoller::new(&config, test_hashi_btc_keys(), start).unwrap()
     }
 
     #[tokio::test]
-    async fn a_start_the_node_has_pruned_scans_from_its_oldest_checkpoint() {
-        let mut poller = pruned_poller_starting_at(50_000).await;
-        let oldest = 100_000 + PRUNING_MARGIN_CHECKPOINTS;
-
-        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), oldest);
-        assert_eq!(poller.start_seconds(), GENESIS_SECS + oldest + 1);
-    }
-
-    #[tokio::test]
-    async fn a_start_the_node_has_pruned_fails_the_guard() {
-        let mut poller = pruned_poller_starting_at(50_000).await;
-
-        let error = format!("{:#}", poller.ensure_start_is_served().await.unwrap_err());
-
-        assert!(error.contains("pruned the start"), "{error}");
-        assert_eq!(poller.next_checkpoint_to_scan, None);
-    }
-
-    #[tokio::test]
-    async fn a_start_the_node_serves_passes_the_guard_and_sets_the_first_checkpoint() {
+    async fn a_start_the_node_serves_sets_the_cursor_to_the_checkpoint_before() {
         let mut poller = pruned_poller_starting_at(130_000).await;
 
         poller.ensure_start_is_served().await.unwrap();
 
-        assert_eq!(poller.start_seconds(), GENESIS_SECS + 130_000);
-        assert_eq!(poller.next_checkpoint_to_scan, Some(129_999));
+        assert_eq!(poller.next_checkpoint(), 130_000);
+        assert_eq!(poller.cursor_seconds(), GENESIS_SECS + 129_999);
     }
 
     #[tokio::test]
-    async fn a_start_the_probe_would_overshoot_resolves_without_pruned_checkpoints() {
-        let mut poller = pruned_poller_starting_at(130_000).await;
+    async fn a_start_at_or_near_the_pruned_history_fails() {
+        // Below the oldest checkpoint, and inside the margin above it.
+        for start in [50_000, 100_000 + PRUNING_MARGIN_CHECKPOINTS] {
+            let mut poller = pruned_poller_starting_at(start).await;
 
-        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), 129_999);
-        assert_eq!(poller.start_seconds(), GENESIS_SECS + 130_000);
+            let error = format!("{:#}", poller.ensure_start_is_served().await.unwrap_err());
+
+            assert!(error.contains("has pruned checkpoint"), "{error}");
+        }
     }
 
     /// `PrunedLedger`'s checkpoints, plus a `ListTransactions` that records each
@@ -1000,19 +850,13 @@ pub mod tests {
             ranges: Arc::default(),
         };
         let mut poller = poller_for(ledger.clone()).await;
-        poller.start_seconds = GENESIS_SECS - 10;
-        poller.cursor_seconds = GENESIS_SECS - 10;
-        let head_time = GENESIS_SECS + 3 * MAX_CHECKPOINTS_PER_POLL;
 
         for expected_cursor_checkpoint in [MAX_CHECKPOINTS_PER_POLL, 2 * MAX_CHECKPOINTS_PER_POLL] {
             assert!(matches!(
-                poller.poll(head_time).await.unwrap(),
+                poller.poll(3 * MAX_CHECKPOINTS_PER_POLL).await.unwrap(),
                 PollOutcome::CursorAdvanced { .. }
             ));
-            assert_eq!(
-                poller.next_checkpoint_to_scan,
-                Some(expected_cursor_checkpoint)
-            );
+            assert_eq!(poller.next_checkpoint(), expected_cursor_checkpoint);
             assert_eq!(
                 poller.cursor_seconds(),
                 GENESIS_SECS + expected_cursor_checkpoint - 1
@@ -1025,19 +869,5 @@ pub mod tests {
                 (MAX_CHECKPOINTS_PER_POLL, 2 * MAX_CHECKPOINTS_PER_POLL),
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn an_unpruned_node_scans_from_genesis_for_an_earlier_start() {
-        let mut poller = poller_for(PrunedLedger {
-            lowest: 0,
-            head: 1_000,
-        })
-        .await;
-        poller.start_seconds = GENESIS_SECS - 10;
-        poller.cursor_seconds = GENESIS_SECS - 10;
-
-        assert_eq!(poller.first_checkpoint_to_scan().await.unwrap(), 0);
-        assert_eq!(poller.start_seconds(), GENESIS_SECS - 10);
     }
 }

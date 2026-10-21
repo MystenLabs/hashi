@@ -57,7 +57,7 @@ use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
-use crate::rpc::sui::package_publish_time;
+use crate::rpc::sui::package_genesis;
 use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -121,24 +121,25 @@ pub struct AuditorCore {
 
 impl AuditorCore {
     /// Resume from a snapshot's `state`, or start a first run at the
-    /// bridge's genesis: the time the Hashi package was published on Sui.
+    /// bridge's genesis: the transaction that published the Hashi package.
     pub async fn new(
         cfg: &Config,
         state: Option<AuditState>,
         utxo_pool: UtxoPool,
     ) -> anyhow::Result<Self> {
-        let start = match &state {
-            Some(state) => state.guardian_cursor,
+        let (guardian_start, sui_start) = match &state {
+            Some(state) => (state.guardian_cursor, state.sui_next_checkpoint),
             None => {
-                let genesis = package_publish_time(&cfg.sui).await?;
+                let genesis = package_genesis(&cfg.sui).await?;
                 tracing::info!(
-                    genesis = %utc_timestamp(genesis),
+                    genesis = %utc_timestamp(genesis.timestamp),
+                    genesis_checkpoint = genesis.checkpoint,
                     "first run: starting at the bridge's genesis with an empty UTXO pool"
                 );
-                genesis
+                (genesis.timestamp, genesis.checkpoint)
             }
         };
-        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, start).await?;
+        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
         let (hashi_btc_keys, hashi_object_id) = guardian_poller
             .read_hashi_identity(cfg.deployment.bitcoin_network)
             .await?;
@@ -147,8 +148,7 @@ impl AuditorCore {
             cfg.deployment.bitcoin_network,
         )?;
         tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
-        // On a resume, the Sui poller starts at the saved checkpoint instead.
-        let sui_poller = SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, start)?;
+        let sui_poller = SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?;
         let mut core = Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
@@ -160,7 +160,6 @@ impl AuditorCore {
             btc_client: BtcRpcClient::new(cfg, confirmations)?,
         };
         if let Some(state) = state {
-            core.sui_poller.resume_at(state.sui_next_checkpoint);
             core.restore(state);
         }
         Ok(core)
@@ -170,10 +169,7 @@ impl AuditorCore {
     /// the snapshot.
     pub fn state(&self, last_findings: BTreeMap<String, UnixSeconds>) -> AuditState {
         AuditState {
-            sui_next_checkpoint: self
-                .sui_poller
-                .next_checkpoint()
-                .expect("the start check sets the first Sui checkpoint"),
+            sui_next_checkpoint: self.sui_poller.next_checkpoint(),
             guardian_cursor: self.guardian_cursor(),
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
@@ -532,7 +528,14 @@ impl AuditorCore {
         self.guardian_poller.poll_one_hour().await
     }
 
-    pub async fn poll_sui(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
+    /// The newest checkpoint the Sui node serves.
+    pub async fn latest_sui_checkpoint(&mut self) -> anyhow::Result<u64> {
+        self.sui_poller.latest_checkpoint().await
+    }
+
+    /// Scan Sui up to checkpoint `up_to`, inclusive, one bounded range at a time.
+    /// Callers may loop to catch up.
+    pub async fn poll_sui(&mut self, up_to: u64) -> anyhow::Result<PollOutcome> {
         self.sui_poller.poll(up_to).await
     }
 
@@ -635,7 +638,7 @@ mod tests {
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
-            sui_poller: poller_scanned(approved_at - 3_600, approved_at),
+            sui_poller: poller_scanned(approved_at),
             btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         }
