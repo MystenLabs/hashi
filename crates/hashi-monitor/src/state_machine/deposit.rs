@@ -6,7 +6,6 @@
 
 use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
-use hashi_types::guardian::time::now_timestamp_secs;
 
 use crate::domain::BtcConfirmation;
 use crate::domain::ConfirmedDeposit;
@@ -18,10 +17,17 @@ use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::timing::Timing;
 
-/// What Bitcoin said about a deposit request's transaction.
+/// Lookups after the approval that find the transaction not yet confirmed
+/// before the approval is reported unbacked. The honest committee approves
+/// at the confirmation depth, so the first lookup may race it by seconds.
+const EMPTY_LOOKUPS_BEFORE_ALERT: u8 = 2;
+
+/// What Bitcoin said about a deposit request's transaction. Only a lookup
+/// that a synced node answered changes it: a failed RPC changes nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BtcAnswer {
-    /// Not confirmed yet; Bitcoin is still asked.
+    /// Not asked yet, or not confirmed yet: unknown to Bitcoin, in the
+    /// mempool, or fewer than `MIN_CONFIRMATIONS` deep. Bitcoin is still asked.
     Pending,
     /// Confirmed, and the claimed vout pays the claimed script.
     /// The amount may differ from E1's: the judge later checks it against E3.
@@ -51,22 +57,30 @@ enum BtcAnswer {
 ///
 /// It does not wait for the Sui `DepositApproved`. The first one that
 /// arrives while the machine is open is kept and judged against Bitcoin's
-/// answer when the machine closes. Until then, an approval Bitcoin has not
-/// matched by its deadline is a timing violation. One that arrives after
-/// the machine closed is judged against the pool by the auditor.
+/// answer when the machine closes. One that arrives after the machine
+/// closed is judged against the pool by the auditor.
+///
+/// The rules between the deposit's events:
+/// - E1 does not expect E2. A user may never pay, so a request that
+///   lapses is not a finding.
+/// - E2 does not expect E3. Sanctions and user mistakes leave valid
+///   deposits unapproved, so a missing E3 is not a finding yet.
+/// - E3 expects E2 already. `EMPTY_LOOKUPS_BEFORE_ALERT` lookups after E3
+///   that find no E2 report E3 unbacked, before the machine closes.
 pub struct DepositStateMachine {
     sui_request: SuiDepositRequestedEvent,
     /// The first Sui `DepositApproved` for this request, if it arrived while
     /// the machine was open.
     sui_approval: Option<SuiDepositApprovedEvent>,
-    /// When Bitcoin was last asked.
-    btc_checked_at: Option<UnixSeconds>,
+    /// Lookups since the approval that found the transaction not yet
+    /// confirmed.
+    empty_lookups_since_approval: u8,
     /// What Bitcoin said. The machine is closed once it is not `Pending`.
     btc_answer: BtcAnswer,
     /// How long Bitcoin is asked about the request.
     time_limit: u64,
     /// How far the deposit's Bitcoin time may follow its Sui approval. A
-    /// miner may date a block up to two hours ahead, and our lookups lag.
+    /// miner may date a block up to two hours ahead.
     approval_skew: u64,
 }
 
@@ -75,7 +89,7 @@ impl DepositStateMachine {
         Self {
             sui_request,
             sui_approval: None,
-            btc_checked_at: None,
+            empty_lookups_since_approval: 0,
             btc_answer: BtcAnswer::Pending,
             time_limit: timing.deposit_request_watch,
             approval_skew: timing.deposit_approval_skew,
@@ -166,27 +180,29 @@ impl DepositStateMachine {
     /// Look up the transaction on Bitcoin and keep the UTXO if it pays the
     /// claimed script. If that closes the machine, by an answer or by the
     /// lapse, the held Sui approval is judged. An error is the RPC's.
+    /// `checked_at` must be no later than the lookup.
     pub fn try_fetch_btc_tx(
         &mut self,
         btc_rpc_client: &BtcRpcClient,
+        checked_at: UnixSeconds,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
         if self.btc_answer != BtcAnswer::Pending {
             return Ok(Vec::new());
         }
 
         let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid())?;
-        Ok(self.record_lookup(now_timestamp_secs(), confirmation.as_ref()))
+        Ok(self.record_lookup(checked_at, confirmation.as_ref()))
     }
 
     /// Record a lookup made at `checked_at`, and Bitcoin's confirmation if
     /// any. A lookup past the watch that found nothing lapses the request.
     /// If the machine is now closed, the held Sui approval is judged.
+    /// Otherwise an empty lookup after the approval is counted.
     pub fn record_lookup(
         &mut self,
         checked_at: UnixSeconds,
         confirmation: Option<&BtcConfirmation>,
     ) -> Vec<MonitorFinding> {
-        self.btc_checked_at = Some(checked_at);
         match confirmation {
             Some(confirmation) => self.btc_answer = self.answer_from(confirmation),
             None if self.sui_request.timestamp_secs + self.time_limit <= checked_at => {
@@ -195,7 +211,23 @@ impl DepositStateMachine {
             // Not confirmed yet, and the watch is still open: stay Pending.
             None => {}
         }
+        if self.btc_answer == BtcAnswer::Pending {
+            return self.count_empty_lookup();
+        }
         self.judge_held_sui_approval()
+    }
+
+    /// Count a lookup that found the transaction not yet confirmed. The
+    /// count starts at the approval. Every lookup from the alert on reports.
+    fn count_empty_lookup(&mut self) -> Vec<MonitorFinding> {
+        let Some(sui) = &self.sui_approval else {
+            return Vec::new();
+        };
+        self.empty_lookups_since_approval = self.empty_lookups_since_approval.saturating_add(1);
+        if self.empty_lookups_since_approval < EMPTY_LOOKUPS_BEFORE_ALERT {
+            return Vec::new();
+        }
+        vec![MonitorFinding::DepositUnbacked { sui: sui.clone() }]
     }
 
     /// Bitcoin's confirmation of the transaction, read against the claim.
@@ -220,30 +252,6 @@ impl DepositStateMachine {
             );
         }
         BtcAnswer::Paid(deposit)
-    }
-
-    /// The timing rules between the deposit's events:
-    /// - E1 does not expect E2. A user may never pay, so a request that
-    ///   lapses is not a finding.
-    /// - E2 does not expect E3. Sanctions and user mistakes leave valid
-    ///   deposits unapproved, so a missing E3 is not a finding yet.
-    /// - E3 expects E2 by E3 plus `DEPOSIT_APPROVAL_SKEW`. This reports
-    ///   E2 missing while the machine is open; the machine judges it when
-    ///   it closes.
-    pub fn timing_violations(&self) -> Vec<MonitorFinding> {
-        // No E3: nothing is due.
-        let Some(sui) = &self.sui_approval else {
-            return Vec::new();
-        };
-        // E3 expects E2 by this time.
-        let deadline = sui.timestamp_secs + self.approval_skew;
-        // E2 is missing once a lookup at or past the deadline found nothing.
-        let e2_missing = self.btc_answer == BtcAnswer::Pending
-            && self.btc_checked_at.is_some_and(|cursor| deadline <= cursor);
-        if !e2_missing {
-            return Vec::new();
-        }
-        vec![MonitorFinding::DepositUnbacked { sui: sui.clone() }]
     }
 }
 
