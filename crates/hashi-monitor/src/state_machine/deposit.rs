@@ -27,7 +27,7 @@ const EMPTY_LOOKUPS_BEFORE_ALERT: u8 = 2;
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BtcAnswer {
     /// Not asked yet, or not confirmed yet: unknown to Bitcoin, in the
-    /// mempool, or fewer than `MIN_CONFIRMATIONS` deep. Bitcoin is still asked.
+    /// mempool, or below Hashi's confirmation threshold. Bitcoin is still asked.
     Pending,
     /// Confirmed, and the claimed vout pays the claimed script.
     /// The amount may differ from E1's: the judge later checks it against E3.

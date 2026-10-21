@@ -38,6 +38,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
+use sui_sdk_types::Address;
 use tracing::debug;
 
 pub struct GuardianWithdrawalsPoller {
@@ -66,11 +67,14 @@ impl GuardianWithdrawalsPoller {
         self.cursor.to_unix_seconds()
     }
 
-    /// The two keys every bridge address derives from. They never change. The
-    /// MPC master key comes from the KP-authorized genesis record and the
-    /// guardian's Bitcoin key from the latest ceremony record, both verified
-    /// against the allowlist.
-    pub async fn read_hashi_btc_keys(&mut self, network: Network) -> anyhow::Result<HashiBTCKeys> {
+    /// The two keys every bridge address derives from, and the Hashi object
+    /// id. They never change. The MPC master key and the object id come from
+    /// the KP-authorized genesis record and the guardian's Bitcoin key from
+    /// the latest ceremony record, both verified against the allowlist.
+    pub async fn read_hashi_identity(
+        &mut self,
+        network: Network,
+    ) -> anyhow::Result<(HashiBTCKeys, Address)> {
         let genesis = self
             .reader
             .read_genesis()
@@ -85,10 +89,11 @@ impl GuardianWithdrawalsPoller {
         let keys = HashiBTCKeys::new(ceremony.btc_master_pubkey, genesis.mpc_master_g, network);
         tracing::info!(
             change_script = %keys.script_pubkey(None),
-            "read the bridge keys from the guardian records"
+            hashi_object_id = %genesis.hashi_object_id,
+            "read the Hashi identity from the guardian records"
         );
         self.hashi_btc_keys = Some(keys.clone());
-        Ok(keys)
+        Ok((keys, genesis.hashi_object_id))
     }
 
     /// Poll one hourly Guardian S3 directory and advance to the next directory.

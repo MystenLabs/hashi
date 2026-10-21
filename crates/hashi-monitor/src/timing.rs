@@ -26,8 +26,8 @@
 //! - The UTXO pool: a UTXO the bridge holds is reported by its age on
 //!   Bitcoin, and by its absence from Bitcoin after a grace period.
 //!
-//! A Bitcoin event is timed by the block that gave the transaction
-//! `MIN_CONFIRMATIONS` in `rpc::btc`, not by the block that holds it.
+//! A Bitcoin event is timed by the block that gave the transaction Hashi's
+//! confirmation threshold (see `rpc::btc`), not by the block that holds it.
 
 use std::collections::BTreeMap;
 
@@ -42,8 +42,8 @@ use crate::domain::WithdrawalEventType;
 pub const WITHDRAWAL_E1_TO_E2_DELAY: u64 = 60 * 60;
 
 /// E2 -> E3. The signed transaction must confirm on Bitcoin within a day.
-/// E3 is timed by the block that gave it `MIN_CONFIRMATIONS`, so the bound
-/// includes the wait for those blocks, about 50 minutes.
+/// E3 is timed by the block that gave it the confirmation threshold, so the
+/// bound includes the wait for those blocks, about 50 minutes at six.
 pub const WITHDRAWAL_E2_TO_E3_DELAY: u64 = 24 * 60 * 60;
 
 /// E1 after E2. The guardian's request clock tolerance is five minutes.

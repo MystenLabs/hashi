@@ -58,9 +58,11 @@ use crate::config::Config;
 use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
+use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::approval::HashiApproval;
+use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -196,9 +198,14 @@ impl AuditorCore {
         let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
         let guardian_start = window_start.saturating_sub(cfg.timing.guardian_lookback());
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
-        let hashi_btc_keys = guardian_poller
-            .read_hashi_btc_keys(cfg.deployment.bitcoin_network)
+        let (hashi_btc_keys, hashi_object_id) = guardian_poller
+            .read_hashi_identity(cfg.deployment.bitcoin_network)
             .await?;
+        let confirmations = checked_confirmation_threshold(
+            read_confirmation_threshold(&cfg.sui, hashi_object_id).await?,
+            cfg.deployment.bitcoin_network,
+        )?;
+        tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
         Ok(Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
@@ -208,7 +215,7 @@ impl AuditorCore {
             suspect_spends: HashMap::new(),
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?,
-            btc_client: BtcRpcClient::new(cfg)?,
+            btc_client: BtcRpcClient::new(cfg, confirmations)?,
         })
     }
 
@@ -670,6 +677,7 @@ mod tests {
     use super::*;
     use crate::domain::BtcConfirmation;
     use crate::domain::DepositId;
+    use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
     use crate::rpc::sui::approval::tests::with_wrong_txid;
     use crate::rpc::sui::approval::tests::withdrawal_transaction;
     use crate::rpc::sui::tests::looked_up_approval;
@@ -701,7 +709,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         };
         let approval = looked_up_approval();
@@ -866,7 +874,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         };
         assert!(
@@ -899,7 +907,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         }
     }

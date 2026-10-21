@@ -34,6 +34,7 @@ use futures::StreamExt;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
+use hashi_types::move_types::Hashi;
 use hashi_types::move_types::PackageVersions;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -175,6 +176,32 @@ async fn publish_time(
         format!("invalid publish transaction timestamp of Hashi package {package_id}")
     })?;
     Ok(unix_millis_to_seconds(timestamp_ms))
+}
+
+/// Hashi's on-chain `bitcoin_confirmation_threshold`: the confirmations the
+/// committee waits for. It is 6 when unset, as in the Hashi node.
+pub async fn read_confirmation_threshold(
+    config: &SuiConfig,
+    hashi_object_id: Address,
+) -> anyhow::Result<u64> {
+    let mut client = connect(config)?;
+    let request = GetObjectRequest::new(&hashi_object_id).with_read_mask(FieldMask::from_paths([
+        Object::path_builder().contents().finish(),
+    ]));
+    let hashi: Hashi = client
+        .ledger_client()
+        .get_object(request)
+        .await
+        .with_context(|| format!("failed to fetch the Hashi object {hashi_object_id}"))?
+        .into_inner()
+        .object
+        .with_context(|| {
+            format!("Sui GetObject response is missing the Hashi object {hashi_object_id}")
+        })?
+        .contents()
+        .deserialize()
+        .with_context(|| format!("failed to decode the Hashi object {hashi_object_id}"))?;
+    Ok(hashi.config.get_u64("bitcoin_confirmation_threshold", 6))
 }
 
 pub struct SuiEventsPoller {
