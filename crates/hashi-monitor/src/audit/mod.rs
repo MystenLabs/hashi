@@ -58,9 +58,11 @@ use crate::config::Config;
 use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
+use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::approval::HashiApproval;
+use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -196,9 +198,14 @@ impl AuditorCore {
         let sui_start = window_start.saturating_sub(cfg.timing.sui_lookback());
         let guardian_start = window_start.saturating_sub(cfg.timing.guardian_lookback());
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
-        let hashi_btc_keys = guardian_poller
-            .read_hashi_btc_keys(cfg.deployment.bitcoin_network)
+        let (hashi_btc_keys, hashi_object_id) = guardian_poller
+            .read_hashi_identity(cfg.deployment.bitcoin_network)
             .await?;
+        let confirmations = checked_confirmation_threshold(
+            read_confirmation_threshold(&cfg.sui, hashi_object_id).await?,
+            cfg.deployment.bitcoin_network,
+        )?;
+        tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
         Ok(Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
@@ -208,7 +215,7 @@ impl AuditorCore {
             suspect_spends: HashMap::new(),
             guardian_poller,
             sui_poller: SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?,
-            btc_client: BtcRpcClient::new(cfg)?,
+            btc_client: BtcRpcClient::new(cfg, confirmations)?,
         })
     }
 
@@ -670,11 +677,13 @@ mod tests {
     use super::*;
     use crate::domain::BtcConfirmation;
     use crate::domain::DepositId;
+    use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
     use crate::rpc::sui::approval::tests::with_wrong_txid;
     use crate::rpc::sui::approval::tests::withdrawal_transaction;
     use crate::rpc::sui::tests::looked_up_approval;
     use crate::rpc::sui::tests::poller_scanned;
     use crate::rpc::sui::tests::poller_scanned_with;
+    use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
@@ -700,7 +709,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
             sui_poller: poller_scanned(start, cursor).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         };
         let approval = looked_up_approval();
@@ -865,7 +874,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         };
         assert!(
@@ -898,9 +907,112 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
             sui_poller: poller_scanned(approved_at - 3_600, approved_at).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         }
+    }
+
+    /// A deposit request for `txid(9):1` of `amount` to `p2wpkh(0x54)`, and
+    /// its Sui approval at time 200.
+    fn deposit_request_and_approval(
+        amount: u64,
+    ) -> (SuiDepositRequestedEvent, SuiDepositApprovedEvent) {
+        let request = SuiDepositRequestedEvent {
+            amount,
+            ..deposit_request()
+        };
+        let approval = approval_of(&request, 200);
+        (request, approval)
+    }
+
+    #[tokio::test]
+    async fn a_sui_approval_after_its_request_closed_is_checked_against_the_pool() {
+        let mut auditor = auditor_with_pool().await;
+        let (_, sui) = deposit_request_and_approval(50_000);
+        let unbacked = auditor.ingest(MonitorEvent::DepositApproved(sui.clone()));
+        assert!(matches!(
+            &unbacked[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+        ));
+
+        assert!(
+            auditor
+                .utxo_pool
+                .add_deposit(&ConfirmedDeposit {
+                    deposit_id: sui.deposit_id,
+                    amount: 50_000,
+                    script_pubkey: sui.script_pubkey.clone(),
+                    block_time: 150,
+                })
+                .is_none()
+        );
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositApproved(sui))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_request_keeps_its_sui_approval_until_bitcoin_answers() {
+        let mut auditor = auditor_with_pool().await;
+        // The request claims more than Bitcoin pays, and Hashi approves it.
+        let (request, sui) = deposit_request_and_approval(60_000);
+        let request_id = request.request_id;
+        assert!(
+            auditor
+                .ingest_batch(vec![
+                    MonitorEvent::DepositRequested(request),
+                    MonitorEvent::DepositApproved(sui.clone()),
+                ])
+                .is_empty()
+        );
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+
+        // Bitcoin answers: the machine judges the held approval.
+        let findings = auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                0,
+                Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x54))),
+            );
+        assert!(
+            matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, btc }] if *claimed == sui && btc.amount == 50_000)
+        );
+
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.pending_deposits.is_empty());
+        assert_eq!(auditor.utxo_pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sui_approval_of_a_request_bitcoin_did_not_back_is_unbacked() {
+        let mut auditor = auditor_with_pool().await;
+        let (request, sui) = deposit_request_and_approval(50_000);
+        let request_id = request.request_id;
+        auditor.ingest_batch(vec![
+            MonitorEvent::DepositRequested(request),
+            MonitorEvent::DepositApproved(sui.clone()),
+        ]);
+
+        // The output pays another script.
+        let findings = auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                0,
+                Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x55))),
+            );
+
+        assert!(matches!(
+            &findings[..],
+            [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
+        ));
+        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.utxo_pool.is_empty());
     }
 
     /// A complete withdrawal `txid(fill)` for `wid_seed`, spending `inputs`,

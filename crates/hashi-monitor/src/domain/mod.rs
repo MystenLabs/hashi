@@ -83,13 +83,13 @@ impl fmt::Display for MonitorEvent {
     }
 }
 
-/// A transaction mined at least `MIN_CONFIRMATIONS` blocks deep.
+/// A transaction mined at least Hashi's confirmation threshold deep.
 #[derive(Clone, Debug)]
 pub struct BtcConfirmation {
     /// The time of the block that holds the transaction. The recovery leaf's
     /// clock starts at this block, so a UTXO's age counts from here.
     pub block_time: UnixSeconds,
-    /// The time of the block that gave the transaction `MIN_CONFIRMATIONS`.
+    /// The time of the block that gave the transaction the threshold depth.
     /// The bridge acts on that block, so the Bitcoin events carry this time.
     pub confirmed_time: UnixSeconds,
     /// The outpoints the transaction spends, in order.

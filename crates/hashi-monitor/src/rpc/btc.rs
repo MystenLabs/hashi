@@ -8,26 +8,32 @@
 //! each pending transaction up by txid.
 //!
 //! How it works:
-//! 1. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
+//! 1. At startup, the auditor reads Hashi's on-chain
+//!    `bitcoin_confirmation_threshold` and gives it to the client. A
+//!    transaction counts as confirmed at that depth, as it does for the
+//!    committee. On mainnet, a threshold below `MAINNET_MIN_CONFIRMATIONS`
+//!    stops the monitor.
+//! 2. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
 //!    since a lagging node reports recent transactions as unconfirmed.
-//! 2. `prefetch_confirmations` looks all pending txids up in batches of
+//! 3. `prefetch_confirmations` looks all pending txids up in batches of
 //!    `HTTP_JSON_RPC_BATCH_SIZE`, with `HTTP_JSON_RPC_BATCHES_IN_FLIGHT`
 //!    batches sent at once, and `lookup_confirmation` serves each one from
 //!    that cache. A confirmed answer is kept across passes: a confirmation
-//!    `MIN_CONFIRMATIONS` deep does not change. `forget_unconfirmed` drops
+//!    at the threshold depth does not change. `forget_unconfirmed` drops
 //!    the rest at the start of each pass, so an unconfirmed transaction is
 //!    looked up again. An answer for a txid no longer asked for is dropped.
 //!    When a lookup fails, the batches that finished are kept, so the next
 //!    pass asks only about the rest.
-//! 3. A transaction with at least `MIN_CONFIRMATIONS` confirmations is
-//!    returned with the time of its own block and the time of the block that
-//!    gave it `MIN_CONFIRMATIONS`.
-//! 4. Requests are not paced: the node is the bridge's own. A request that
+//! 4. A transaction at the threshold depth is returned with the time of
+//!    its own block and the time of the block that gave it that depth.
+//! 5. Requests are not paced: the node is the bridge's own. A request that
 //!    fails to send, gets an HTTP 502, 503 or 504, or is rate limited is
 //!    retried with exponential backoff, `MAX_REQUEST_RETRIES` times. Core
 //!    answers a JSON-RPC error with HTTP 500, so 500 is not retried.
 //!
 //! Assumptions:
+//! - The threshold is read once. A governance change takes effect in the
+//!   monitor at its next restart.
 //! - An unconfirmed answer is never reused across passes. So the auditor
 //!   can stamp every answer with the pass's start time: the real lookup
 //!   is no earlier. A cached confirmed answer does not need a time.
@@ -49,6 +55,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bitcoin::BlockHash;
+use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
@@ -74,7 +81,20 @@ const LOOKUP_PROGRESS_EVERY: usize = 10_000;
 /// Retries of one request. The delays double from one second, so the
 /// last retry comes about a minute after the first failure.
 const MAX_REQUEST_RETRIES: usize = 6;
-const MIN_CONFIRMATIONS: u64 = 6;
+/// The lowest confirmation threshold the monitor accepts on Bitcoin
+/// mainnet. Hashi's launch tool refuses a lower one there too.
+pub const MAINNET_MIN_CONFIRMATIONS: u64 = 6;
+
+/// The on-chain confirmation threshold, refused on mainnet below
+/// `MAINNET_MIN_CONFIRMATIONS`.
+pub fn checked_confirmation_threshold(threshold: u64, network: Network) -> anyhow::Result<u64> {
+    anyhow::ensure!(
+        network != Network::Bitcoin || threshold >= MAINNET_MIN_CONFIRMATIONS,
+        "Hashi's bitcoin_confirmation_threshold is {threshold} on mainnet; \
+         the monitor needs at least {MAINNET_MIN_CONFIRMATIONS}"
+    );
+    Ok(threshold)
+}
 
 /// What Bitcoin holds at an outpoint. `Missing` and `Spent` differ by the
 /// transaction lookup, `Spent` and `Unspent` by the UTXO set.
@@ -101,6 +121,8 @@ pub struct BtcRpcClient {
 struct HttpJsonRpcTransport {
     rpc_url: String,
     headers: BTreeMap<String, String>,
+    /// Confirmations a transaction needs to count as confirmed.
+    confirmations: u64,
 }
 
 #[derive(Deserialize)]
@@ -158,7 +180,7 @@ struct LookupOutcome {
     error: Option<anyhow::Error>,
 }
 
-/// A transaction mined at least `MIN_CONFIRMATIONS` deep, before its block
+/// A transaction mined at least the threshold deep, before its block
 /// header is read.
 struct ConfirmedTx {
     block_hash: BlockHash,
@@ -168,16 +190,16 @@ struct ConfirmedTx {
 
 impl RawTransactionInfo {
     /// The block hash, inputs and outputs of a sufficiently confirmed transaction.
-    fn confirmed(self, txid: Txid) -> anyhow::Result<Option<ConfirmedTx>> {
+    fn confirmed(self, txid: Txid, confirmations: u64) -> anyhow::Result<Option<ConfirmedTx>> {
         let Some(block_hash) = self.blockhash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
         };
-        if self.confirmations < MIN_CONFIRMATIONS {
+        if self.confirmations < confirmations {
             debug!(
                 %txid,
                 confirmations = self.confirmations,
-                required_confirmations = MIN_CONFIRMATIONS,
+                required_confirmations = confirmations,
                 "bitcoin tx has insufficient confirmation depth"
             );
             return Ok(None);
@@ -201,11 +223,13 @@ impl RawTransactionInfo {
 }
 
 impl BtcRpcClient {
-    pub fn new(cfg: &Config) -> anyhow::Result<Self> {
+    /// A client that counts a transaction as confirmed at `confirmations`.
+    pub fn new(cfg: &Config, confirmations: u64) -> anyhow::Result<Self> {
         Ok(Self {
             transport: HttpJsonRpcTransport {
                 rpc_url: cfg.btc.rpc_url.clone(),
                 headers: cfg.btc.http_headers.clone(),
+                confirmations,
             },
             confirmation_cache: RefCell::new(HashMap::new()),
         })
@@ -234,7 +258,7 @@ impl BtcRpcClient {
     }
 
     /// Drop the unconfirmed answers, so the next lookup asks again. The
-    /// confirmed ones stay: a confirmation `MIN_CONFIRMATIONS` deep does not
+    /// confirmed ones stay: a confirmation at the threshold depth does not
     /// change.
     pub fn forget_unconfirmed(&self) {
         self.confirmation_cache
@@ -445,7 +469,7 @@ impl HttpJsonRpcTransport {
             block_hash,
             inputs,
             outputs,
-        }) = tx_info.confirmed(txid)?
+        }) = tx_info.confirmed(txid, self.confirmations)?
         else {
             return Ok(None);
         };
@@ -556,7 +580,7 @@ impl HttpJsonRpcTransport {
                     .context("bitcoin getrawtransaction batch response is missing its result")?,
             )
             .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-            confirmed.insert(txid, info.confirmed(txid)?);
+            confirmed.insert(txid, info.confirmed(txid, self.confirmations)?);
         }
         anyhow::ensure!(
             seen.len() == txids.len(),
@@ -597,15 +621,15 @@ impl HttpJsonRpcTransport {
     }
 
     /// For each block that holds a confirmed transaction: its own time, and
-    /// the time of the block `MIN_CONFIRMATIONS - 1` above it. Core counts the
+    /// the time of the block `confirmations - 1` above it. Core counts the
     /// holding block as the first confirmation, so that block is the one that
-    /// gave the transaction `MIN_CONFIRMATIONS`.
+    /// gave the transaction its `confirmations`.
     fn confirmation_times(
         &self,
         block_hashes: &[BlockHash],
     ) -> anyhow::Result<HashMap<BlockHash, (UnixSeconds, UnixSeconds)>> {
         let headers = self.block_headers(block_hashes)?;
-        let confirming_height = |header: &RawBlockHeader| header.height + MIN_CONFIRMATIONS - 1;
+        let confirming_height = |header: &RawBlockHeader| header.height + self.confirmations - 1;
         let confirming_heights = headers
             .values()
             .map(confirming_height)
@@ -843,7 +867,7 @@ mod tests {
     use super::BlockchainInfo;
     use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
-    use super::MIN_CONFIRMATIONS;
+    use super::MAINNET_MIN_CONFIRMATIONS;
     use super::OutpointState;
     use crate::config::BtcConfig;
     use crate::config::Config;
@@ -887,7 +911,7 @@ mod tests {
             .build()
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
-        let btc_rpc_client = BtcRpcClient::new(&cfg)?;
+        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
         btc_rpc_client.ensure_synced()?;
 
         let unknown_txid = txid(7);
@@ -914,7 +938,7 @@ mod tests {
             "expected one-confirmation transaction to remain pending"
         );
 
-        node.generate_blocks(MIN_CONFIRMATIONS - 1)?;
+        node.generate_blocks(MAINNET_MIN_CONFIRMATIONS - 1)?;
         btc_rpc_client.forget_unconfirmed();
 
         let confirmed = btc_rpc_client
@@ -972,7 +996,7 @@ mod tests {
         let signed: serde_json::Value = rpc.call("signrawtransactionwithwallet", &[unsigned])?;
         let signed_hex = signed["hex"].clone();
         let _txid: serde_json::Value = rpc.call("sendrawtransaction", &[signed_hex])?;
-        node.generate_blocks(MIN_CONFIRMATIONS)?;
+        node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
         Ok(())
     }
 
@@ -987,13 +1011,13 @@ mod tests {
             .build()
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
-        let btc_rpc_client = BtcRpcClient::new(&cfg)?;
+        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
         btc_rpc_client.ensure_synced()?;
 
         // Pay the wallet's own address so the test can spend the output later.
         let destination = node.get_new_address()?;
         let txid = node.send_to_address(&destination, Amount::from_sat(50_000))?;
-        node.generate_blocks(MIN_CONFIRMATIONS)?;
+        node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
         let paid = btc_rpc_client
             .lookup_confirmation(txid)?
             .expect("expected confirmed transaction");
@@ -1071,6 +1095,7 @@ mod tests {
         let transport = HttpJsonRpcTransport {
             rpc_url,
             headers: BTreeMap::new(),
+            confirmations: MAINNET_MIN_CONFIRMATIONS,
         };
 
         let response = transport
@@ -1094,6 +1119,7 @@ mod tests {
         let transport = HttpJsonRpcTransport {
             rpc_url,
             headers: BTreeMap::new(),
+            confirmations: MAINNET_MIN_CONFIRMATIONS,
         };
 
         let error = transport
@@ -1171,5 +1197,21 @@ mod tests {
         let mut info = blockchain_info(BLOCKCHAIN_INFO_SYNCED);
         info.headers = info.blocks + 1;
         assert!(info.ensure_synced().is_err());
+    }
+
+    #[test]
+    fn mainnet_refuses_a_confirmation_threshold_below_six() {
+        use super::checked_confirmation_threshold;
+        use bitcoin::Network;
+
+        assert!(checked_confirmation_threshold(5, Network::Bitcoin).is_err());
+        assert_eq!(
+            checked_confirmation_threshold(6, Network::Bitcoin).unwrap(),
+            6
+        );
+        assert_eq!(
+            checked_confirmation_threshold(2, Network::Regtest).unwrap(),
+            2
+        );
     }
 }

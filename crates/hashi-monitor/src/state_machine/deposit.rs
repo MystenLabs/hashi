@@ -27,7 +27,7 @@ const EMPTY_LOOKUPS_BEFORE_ALERT: u8 = 2;
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BtcAnswer {
     /// Not asked yet, or not confirmed yet: unknown to Bitcoin, in the
-    /// mempool, or fewer than `MIN_CONFIRMATIONS` deep. Bitcoin is still asked.
+    /// mempool, or below Hashi's confirmation threshold. Bitcoin is still asked.
     Pending,
     /// Confirmed, and the claimed vout pays the claimed script.
     /// The amount may differ from E1's: the judge later checks it against E3.
@@ -258,6 +258,7 @@ impl DepositStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::approval_of;
     use crate::test_utils::confirmation;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
@@ -265,6 +266,117 @@ mod tests {
 
     fn machine(request: SuiDepositRequestedEvent) -> DepositStateMachine {
         DepositStateMachine::new(request, &Timing::for_tests())
+    }
+
+    /// The approval of `deposit_request()`, at time 200.
+    fn approval() -> SuiDepositApprovedEvent {
+        approval_of(&deposit_request(), 200)
+    }
+
+    #[test]
+    fn a_held_sui_approval_is_judged_when_bitcoin_answers() {
+        let script = p2wpkh(0x54);
+        let mut sm = machine(deposit_request());
+        assert!(sm.add_sui_approval(approval()).is_empty());
+
+        // Bitcoin pays less than the request claims and Sui approves.
+        let findings = sm.record_lookup(500, Some(&confirmation(40_000, script)));
+        assert!(matches!(
+            &findings[..],
+            [MonitorFinding::DepositMismatch { btc, .. }] if btc.amount == 40_000
+        ));
+    }
+
+    #[test]
+    fn a_held_sui_approval_is_unbacked_when_the_request_lapses() {
+        let mut sm = machine(deposit_request());
+        sm.add_sui_approval(approval());
+
+        assert_eq!(
+            sm.record_lookup(100 + 1_000, None),
+            vec![MonitorFinding::DepositUnbacked { sui: approval() }]
+        );
+    }
+
+    #[test]
+    fn a_sui_approval_after_bitcoin_answered_is_judged_at_once() {
+        let script = p2wpkh(0x54);
+        let mut sm = machine(deposit_request());
+        assert!(
+            sm.record_lookup(500, Some(&confirmation(40_000, script)))
+                .is_empty()
+        );
+
+        assert!(matches!(
+            &sm.add_sui_approval(approval())[..],
+            [MonitorFinding::DepositMismatch { btc, .. }] if btc.amount == 40_000
+        ));
+    }
+
+    #[test]
+    fn a_repeated_request_with_other_contents_is_a_finding() {
+        let request = deposit_request();
+        let sm = machine(request.clone());
+
+        assert_eq!(sm.add_sui_request(&request), None);
+        let other_amount = SuiDepositRequestedEvent {
+            amount: 60_000,
+            ..request
+        };
+        assert!(matches!(
+            sm.add_sui_request(&other_amount),
+            Some(MonitorFinding::InvalidEventAdded(_))
+        ));
+    }
+
+    #[test]
+    fn a_sui_approval_that_differs_from_its_request_is_a_finding() {
+        let mut sm = machine(deposit_request());
+        let other_path = SuiDepositApprovedEvent {
+            script_pubkey: p2wpkh(0x55),
+            ..approval()
+        };
+
+        assert!(matches!(
+            &sm.add_sui_approval(other_path)[..],
+            [MonitorFinding::InvalidEventAdded(_)]
+        ));
+        assert_eq!(sm.sui_approval, None);
+    }
+
+    #[test]
+    fn a_later_sui_approval_keeps_the_first() {
+        let mut sm = machine(deposit_request());
+        let reapproval = SuiDepositApprovedEvent {
+            timestamp_secs: 900,
+            ..approval()
+        };
+
+        assert!(sm.add_sui_approval(approval()).is_empty());
+        assert!(sm.add_sui_approval(reapproval).is_empty());
+        assert_eq!(sm.sui_approval, Some(approval()));
+    }
+
+    #[test]
+    fn every_empty_lookup_from_the_second_after_the_approval_reports_it() {
+        let mut sm = machine(deposit_request());
+        // An empty lookup before the approval does not count.
+        assert!(sm.record_lookup(150, None).is_empty());
+        assert!(sm.add_sui_approval(approval()).is_empty());
+
+        // The first may race the committee's view of Bitcoin.
+        assert!(sm.record_lookup(300, None).is_empty());
+        let unbacked = vec![MonitorFinding::DepositUnbacked { sui: approval() }];
+        assert_eq!(sm.record_lookup(400, None), unbacked);
+        assert_eq!(sm.record_lookup(500, None), unbacked);
+
+        // A deposit Bitcoin confirms in time after all closes the machine
+        // without a new finding.
+        assert!(
+            sm.record_lookup(600, Some(&confirmation(50_000, p2wpkh(0x54))))
+                .is_empty()
+        );
+        assert!(sm.is_ready_for_gc());
     }
 
     #[test]

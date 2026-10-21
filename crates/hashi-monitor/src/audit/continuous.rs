@@ -352,6 +352,7 @@ mod tests {
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::rpc::btc::BtcRpcClient;
+    use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
     use crate::rpc::guardian::GuardianWithdrawalsPoller;
     use crate::rpc::sui::tests::looked_up_approval;
     use crate::rpc::sui::tests::poller_scanned;
@@ -415,7 +416,7 @@ mod tests {
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, guardian_cursor),
             sui_poller: poller_scanned(sui_start, guardian_cursor + 600).await,
-            btc_client: BtcRpcClient::new(&cfg).unwrap(),
+            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
         };
         assert!(
             inner
@@ -447,7 +448,7 @@ mod tests {
                 suspect_spends: HashMap::new(),
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, guardian_cursor),
                 sui_poller: poller_scanned(sui_start, guardian_cursor + 600).await,
-                btc_client: BtcRpcClient::new(cfg).unwrap(),
+                btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             },
             previous_restart_start: window_start,
             metrics: Arc::new(MonitorMetrics::new()),
