@@ -78,10 +78,10 @@ On the happy path, a reconfiguration runs these steps in order:
 8. The new committee runs the presigning protocol; signing withdrawal inputs
    resumes once its presignatures are ready.
 
-If Sui's epoch moves on before step 6 lands, the pending reconfiguration is
-resolved by [abort reconfig](#abort-reconfig) instead.
+If Sui's epoch moves on before step 6 lands, [abort reconfig](#abort-reconfig)
+resolves the pending reconfiguration instead.
 
-## Start Reconfig
+## Start reconfig
 
 Each Hashi node monitors Sui for epoch changes. When a new Sui epoch is
 detected and the Hashi epoch has not yet advanced to match, the node knows
@@ -120,7 +120,7 @@ floor on a normal reconfig would let validators brick reconfiguration by
 withholding registration.
 
 
-## DKG or Key Rotation
+## DKG or key rotation
 
 The MPC key protocol runs among the new committee members. Which protocol
 runs depends on whether this is the first Hashi epoch or a subsequent one:
@@ -149,7 +149,7 @@ collect its signatures over a `CommitteeTransitionRequest` with the
 does not activate a rotation without it. Initial DKG has no outgoing committee
 and skips this step.
 
-## End Reconfig
+## End reconfig
 
 A committee member submits the aggregate signature certificate onchain by
 calling `hashi::reconfig::end_reconfig`:
@@ -205,7 +205,7 @@ presignatures needed for the threshold Schnorr signing protocol (see
 commitment, resume as soon as `end_reconfig` lands; signing withdrawal inputs
 waits until the new committee's presignatures are ready.
 
-## Abort Reconfig
+## Abort reconfig
 
 ```mermaid
 graph LR

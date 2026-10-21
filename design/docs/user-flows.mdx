@@ -40,7 +40,7 @@ answer: >-
   validator stake weight.
 ---
 
-There are two main user flows for interacting with `hashi`: deposits, which
+`hashi` has 2 main user flows: deposits, which
 turn `BTC` into `hBTC` on Sui, and withdrawals, which turn `hBTC` back into
 native `BTC` at a Bitcoin address you specify. For the phase-by-phase details,
 see [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx).
@@ -57,8 +57,8 @@ or airdrop as an imitation.
 
 To use `BTC` on Sui (for example, as collateral for a loan), you must
 deposit your `BTC` to a Hashi Bitcoin address, spendable by the MPC committee
-together with the Guardian. The deposit address is not held by your own wallet
-keys. To try the flow without real `BTC`, see
+together with the Guardian. Your own wallet keys do not control the deposit
+address. To try the flow without real `BTC`, see
 [Running a test deposit on Testnet](#running-a-test-deposit-on-testnet), which
 uses Bitcoin Signet coins that have no value.
 

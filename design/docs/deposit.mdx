@@ -182,9 +182,8 @@ faulty or fraudulent approval and pause the service before funds are minted.
 While the service is paused, `approve_deposit` and `confirm_deposit` are both
 rejected, so pending approvals stay parked in the queue until the system is
 unpaused, unless the request expires first. The 24-hour expiry described in
-[Approve](#approve) counts from when the request is created, so it keeps
-running through the time-delay window; an expired request is deleted and the
-user can submit the UTXO again.
+[Approve](#approve) counts from request creation, so it keeps running through
+the time-delay window.
 
 If the committee rotates before the deposit is confirmed, the existing
 approval becomes invalid and the deposit must be re-approved by the new
