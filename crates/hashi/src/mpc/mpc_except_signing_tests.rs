@@ -15343,6 +15343,50 @@ fn test_handle_avid_nonce_message_rejects_a_zero_weight_sender() {
 }
 
 #[tokio::test]
+async fn send_messages_refuses_an_avid_batch_above_the_ceiling_before_storing_it() {
+    use proto::mpc_service_server::MpcService;
+    let setup = TestSetup::new(6);
+    let receiver = setup.create_manager(1);
+    let epoch = receiver.mpc_config.epoch;
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(receiver);
+    let service = crate::grpc::HttpService::new(hashi.clone());
+    let request = |batch_index: u32| {
+        let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+        let messages = fx.optimistic[1].1.clone();
+        let mut request =
+            tonic::Request::new(SendMessagesRequest { messages }.to_proto(epoch, false));
+        request.extensions_mut().insert(fx.dealer_addr);
+        request
+    };
+    let dealer = setup.address(0);
+
+    service.send_messages(request(4)).await.unwrap();
+    let refused = service.send_messages(request(5)).await.unwrap_err();
+
+    assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        refused.message().contains("ceiling 4"),
+        "{}",
+        refused.message()
+    );
+    let mpc_manager = hashi.mpc_manager().unwrap();
+    let mgr = mpc_manager.read().unwrap();
+    assert!(mgr.get_avid_round_state(4, &dealer).unwrap().is_some());
+    assert!(!mgr.current_avid_round_state.contains_key(&(5, dealer)));
+    assert!(mgr.read_avid_round_state(5, &dealer).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_decoded_output() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
@@ -19978,6 +20022,7 @@ fn stored_avid_state_is_refused_when_the_snapshot_is_for_another_epoch() {
         epoch,
         shape.protocol_type().clone(),
         voter.batch_size_per_weight,
+        shape.min_batch_presigs(),
         shape.current().clone(),
         None,
         None,
@@ -20023,6 +20068,7 @@ async fn retrieve_messages_serves_stored_avid_state_while_a_newer_snapshot_is_pu
         epoch,
         shape.protocol_type().clone(),
         restarted.batch_size_per_weight,
+        shape.min_batch_presigs(),
         shape.current().clone(),
         None,
         None,

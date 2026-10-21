@@ -334,11 +334,20 @@ impl MpcManager {
             .map(|((committee, nodes), threshold)| {
                 CommitteeShape::new(committee, nodes, threshold, &self.address)
             });
+        let min_batch_presigs = crate::mpc::service::presig_count(
+            self.required_nonce_weight() as usize,
+            Parameters {
+                t: self.mpc_config.threshold,
+                f: self.mpc_config.max_faulty,
+            },
+            self.batch_size_per_weight,
+        ) as u64;
         ShapeParams::new(
             self.mpc_config.epoch,
             self.previous_epoch,
             self.protocol_type.clone(),
             self.batch_size_per_weight,
+            min_batch_presigs,
             CommitteeShape::new(
                 &self.committee,
                 &self.mpc_config.nodes,
