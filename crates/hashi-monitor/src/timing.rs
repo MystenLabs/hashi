@@ -62,9 +62,9 @@ pub const DEPOSIT_APPROVAL_SKEW: u64 = 2 * 60 * 60;
 /// its request. Move marks a request expired after a day
 /// (`MAX_DEPOSIT_REQUEST_AGE_MS` in `deposit_queue.move`) and an honest
 /// leader deletes it then, so the user requests again, which is a new
-/// watch. But Move does not refuse to confirm an old request, so a
-/// committee that keeps one can confirm it later; a UTXO that confirms
-/// after the watch is seen only when the committee confirms it.
+/// watch. But Move does not refuse to approve an old request. A UTXO that
+/// confirms after the watch never enters the UTXO pool, so an approval of
+/// it is reported as `DepositUnbacked`.
 pub const DEPOSIT_REQUEST_WATCH: u64 = 2 * 24 * 60 * 60;
 
 /// Age of an unspent bridge UTXO that is a liveness finding. Honest coin

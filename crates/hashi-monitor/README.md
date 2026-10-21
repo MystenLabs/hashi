@@ -69,8 +69,9 @@ Bitcoin output pays the bridge. The committee cannot suppress it. Bitcoin is
 asked about the transaction for the watch period of two days. Assumption: an
 honest deposit confirms on Bitcoin within it. Move marks a request expired
 after a day and an honest leader deletes it, so a slow deposit is requested
-again. Move does not refuse to confirm an older request, though, so a UTXO
-that confirms after the watch is seen only when the committee confirms it.
+again. Move does not refuse to approve an older request, though. A UTXO that
+confirms after the watch never enters the monitor's UTXO pool, so an approval
+of it is judged against the pool and reported as `DepositUnbacked`.
 An output that pays the bridge script of a
 claimed derivation path is bridge money, whatever Move does with the request
 later; the monitor's UTXO pool takes it (IOP-747). A UTXO Move never confirms,
