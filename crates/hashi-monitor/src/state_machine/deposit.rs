@@ -109,7 +109,7 @@ impl DepositStateMachine {
         findings
     }
 
-    pub fn violations(&self) -> Vec<MonitorFinding> {
+    pub fn timing_violations(&self) -> Vec<MonitorFinding> {
         if self.btc_resolved {
             // Bitcoin resolved the deposit, so nothing is missing.
             return Vec::new();
@@ -266,13 +266,13 @@ mod tests {
     fn deposit_violations_wait_for_btc_check() {
         let mut sm = DepositStateMachine::new(deposit_event(100, 8), &Timing::for_tests());
 
-        assert!(sm.violations().is_empty());
+        assert!(sm.timing_violations().is_empty());
 
         sm.btc_checked_at = Some(109);
-        assert!(sm.violations().is_empty());
+        assert!(sm.timing_violations().is_empty());
 
         sm.btc_checked_at = Some(110);
-        let violations = sm.violations();
+        let violations = sm.timing_violations();
         assert_eq!(violations.len(), 1);
         assert_eq!(
             violations[0],

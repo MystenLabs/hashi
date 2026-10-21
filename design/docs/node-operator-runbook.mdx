@@ -1411,7 +1411,7 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 Notes:
 
 - `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [3.1](#31-validator-config).
-- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. It therefore only works after your registration is complete.
+- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. The endpoint accepts pushes only from committee members, so until your node is seated (at launch, or at a later committee formation if you register afterwards) each push is refused and logged as `unable to push metrics`. That is expected.
 - The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
 
 ### 8.3 Key metrics
@@ -1559,7 +1559,7 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ### 10.1 What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configure-hashi-backups). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](node-backup.mdx#monthly-off-machine-copy) for which one. Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it. Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Each archive holds:
 

@@ -342,20 +342,21 @@ Old shares can still reconstruct the active MPC key after resharing. Keeping
 backups indefinitely gives an attacker more time to collect enough decryptable
 backups from the same epoch to recover that key. Expiry limits this opportunity
 while preserving a recent disaster-recovery window. The monthly off-machine copies
-are kept despite this risk, so that the key can be recovered even if an attacker
-wipes every node.
+are kept longer, for three months, so that the key can be recovered even if an
+attacker wipes every node.
 
 Operators must configure deletion in each storage location, leaving out only the
-monthly copies; Hashi's newest-backup exception alone does not enforce this
-policy. Account for Object Lock and monitor deletion failures or delays. Remove
-temporary decrypted copies immediately after use.
+[monthly copies](#monthly-off-machine-copy), which you destroy by hand under their
+own rule; Hashi's newest-backup exception alone does not enforce this policy.
+Account for Object Lock and monitor deletion failures or delays. Remove temporary
+decrypted copies immediately after use.
 
 During an incident, pause expiry for backups needed for recovery: disable the
-applicable S3 lifecycle rules and other off-machine deletion jobs. Hashi's local
-cleanup still runs, so preserve encrypted copies outside `backup-dir` in a
-restricted location exempt from deletion. Confirm the copies are accessible;
-changing lifecycle rules is not instantaneous. Resume expiry and remove incident
-copies when recovery no longer needs them.
+applicable S3 lifecycle rules and other off-machine deletion jobs, and stop
+destroying monthly copies. Hashi's local cleanup still runs, so preserve encrypted
+copies outside `backup-dir` in a restricted location exempt from deletion. Confirm
+the copies are accessible; changing lifecycle rules is not instantaneous. Resume
+expiry and remove incident copies when recovery no longer needs them.
 
 ### Monthly off-machine copy
 
@@ -365,9 +366,19 @@ can delete what it can reach. Do not put it in the S3 bucket that receives
 automatic backups. Use that epoch's `-mpc-` archive, which holds the
 node's [recovery record](#catastrophic-mpc-key-recovery). Recovery only combines
 records from the same epoch, so every operator should copy the same epoch. Copy it
-within 14 days, before local cleanup and S3 lifecycle rules remove it. The 14-day
-[backup expiry](#backup-expiry) does not apply to these copies, so keep them out
-of every deletion rule. Keep a way to decrypt them too, even after you replace
+within 14 days, before local cleanup and S3 lifecycle rules remove it.
+
+Test each copy when you make it, on a machine outside the validator fleet, by
+exporting its recovery record with
+[`hashi backup export-mpc-recovery-record`](#sharing-recovery-records) to your
+`backup-pgp-cert`, then delete the export. If that epoch has no `-mpc-` archive or the
+export fails, keep your older copies and find out why. Do not copy a different epoch
+instead.
+
+Keep each copy for three months after its epoch, then destroy it everywhere it is
+stored, including old versions, replicas and snapshots. Destroy expired copies only
+after this month's copy passes its test, unless your node has left the committee.
+Keep a way to decrypt every copy you still hold, even after you replace
 `backup-pgp-cert`.
 
 ## Restore from a backup

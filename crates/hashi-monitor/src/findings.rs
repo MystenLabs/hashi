@@ -23,6 +23,8 @@ use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
+use crate::domain::MonitorWithdrawalEvent;
+use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
@@ -71,6 +73,22 @@ pub enum MonitorFinding {
     ExpectedEventMissing {
         event_id: MonitorEventId,
         event_type: MonitorEventType,
+        relation: EventRelation,
+        deadline: UnixSeconds,
+        cursor: UnixSeconds,
+    },
+    /// A withdrawal event came after its deadline in the timing table.
+    WithdrawalEventLate {
+        event: MonitorWithdrawalEvent,
+        relation: EventRelation,
+        deadline: UnixSeconds,
+        occurred_at: UnixSeconds, // same as event.timestamp
+    },
+    /// A withdrawal event is still missing after its deadline in the timing
+    /// table, at the cursor of its source.
+    WithdrawalEventMissing {
+        wid: WithdrawalID,
+        event_type: WithdrawalEventType,
         relation: EventRelation,
         deadline: UnixSeconds,
         cursor: UnixSeconds,
@@ -131,7 +149,7 @@ pub enum MonitorFinding {
         amount: u64,
     },
     /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
-    /// never held. The bridge spent a coin that no verified deposit or
+    /// never held. The bridge spent a UTXO that no verified deposit or
     /// change brought in, or the pool missed the UTXO's entry.
     UtxoUnknownInputSpent {
         outpoint: OutPoint,
@@ -223,6 +241,14 @@ impl MonitorFinding {
                 EventRelation::Predecessor => FindingCategory::Safety,
                 EventRelation::Successor => FindingCategory::Liveness,
             },
+            Self::WithdrawalEventLate { relation, .. } => match relation {
+                EventRelation::Predecessor => FindingCategory::Safety,
+                EventRelation::Successor => FindingCategory::Liveness,
+            },
+            Self::WithdrawalEventMissing { relation, .. } => match relation {
+                EventRelation::Predecessor => FindingCategory::Safety,
+                EventRelation::Successor => FindingCategory::Liveness,
+            },
             Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
@@ -271,6 +297,31 @@ impl fmt::Display for MonitorFinding {
             } => write!(
                 f,
                 "ExpectedEventMissing({event_id}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
+                utc_timestamp(*deadline),
+                utc_timestamp(*cursor),
+            ),
+            Self::WithdrawalEventLate {
+                event,
+                relation,
+                deadline,
+                occurred_at,
+            } => write!(
+                f,
+                "WithdrawalEventLate(event={}, relation={relation:?}, deadline={}, occurred_at={}, late_by={})",
+                MonitorEvent::Withdrawal(event.clone()),
+                utc_timestamp(*deadline),
+                utc_timestamp(*occurred_at),
+                human_duration(occurred_at.saturating_sub(*deadline)),
+            ),
+            Self::WithdrawalEventMissing {
+                wid,
+                event_type,
+                relation,
+                deadline,
+                cursor,
+            } => write!(
+                f,
+                "WithdrawalEventMissing(wid={wid}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
                 utc_timestamp(*deadline),
                 utc_timestamp(*cursor),
             ),
