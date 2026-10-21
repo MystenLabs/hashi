@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Fixtures shared by the test modules: the test bridge keys, Bitcoin ids
-//! and scripts, a confirmed transaction and a withdrawal transaction.
+//! and scripts, a confirmed transaction, a withdrawal transaction, and a
+//! deposit request.
 
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
@@ -18,7 +19,11 @@ use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
 
+use sui_sdk_types::Address;
+
 use crate::domain::BtcConfirmation;
+use crate::domain::DepositId;
+use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalTx;
 use crate::keys::HashiBTCKeys;
 
@@ -47,6 +52,18 @@ pub fn txid(fill: u8) -> Txid {
 /// A P2WPKH script whose key hash is 20 `fill` bytes.
 pub fn p2wpkh(fill: u8) -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([fill; 20]))
+}
+
+/// A request at time 100 for `txid(9):1`, claiming 50,000 sats to
+/// `p2wpkh(0x54)`. `confirmation(50_000, p2wpkh(0x54))` pays it.
+pub fn deposit_request() -> SuiDepositRequestedEvent {
+    SuiDepositRequestedEvent {
+        request_id: Address::new([0x61; 32]),
+        timestamp_secs: 100,
+        deposit_id: DepositId::new(txid(9), 1),
+        amount: 50_000,
+        script_pubkey: p2wpkh(0x54),
+    }
 }
 
 /// A confirmed transaction that pays `paid` sats to `script_pubkey` at vout 1.

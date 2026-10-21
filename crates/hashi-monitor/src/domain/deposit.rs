@@ -12,10 +12,11 @@ use bitcoin::ScriptBuf;
 use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
-use hashi_types::move_types::DepositConfirmed;
+use hashi_types::move_types::DepositApproved;
 use hashi_types::move_types::DepositRequested;
 use sui_sdk_types::Address;
 
+use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
 /// Stable identifier for a monitored deposit: its Bitcoin outpoint.
@@ -80,59 +81,74 @@ impl SuiDepositRequestedEvent {
     }
 }
 
+/// The monitor's view of `DepositApproved` on Sui: the committee's claim
+/// that a deposit is paid. Move mints only after an approval and its time
+/// delay, so judging the approval can alert before the mint. Move copies
+/// the UTXO from the request, so it names the request's outpoint, amount
+/// and path.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MonitorDepositEvent {
-    pub event_type: DepositEventType,
+pub struct SuiDepositApprovedEvent {
+    /// The approval's time on Move's clock. The time delay counts from it.
     pub timestamp_secs: UnixSeconds,
+    /// The Sui `DepositRequest` the approval answers.
+    pub request_id: Address,
     pub deposit_id: DepositId,
-    /// Satoshis in the deposit output. Sui gives the claimed amount, Bitcoin
-    /// the paid amount.
+    /// Satoshis to mint.
     pub amount: u64,
-    /// Script the deposit output pays. Sui gives the bridge address of the
-    /// claimed derivation path, Bitcoin the paid script.
+    /// The bridge script of the claimed derivation path.
     pub script_pubkey: ScriptBuf,
 }
 
-impl MonitorDepositEvent {
-    /// E2 from Hashi's `DepositConfirmed`. Its Move payload has no
-    /// timestamp, so the containing checkpoint's time is used. The claim's
-    /// derivation path becomes the bridge script the state machine compares
-    /// with the paid output.
-    pub fn from_sui(
-        event: DepositConfirmed,
-        checkpoint_timestamp_secs: UnixSeconds,
-        keys: &HashiBTCKeys,
-    ) -> Self {
+impl SuiDepositApprovedEvent {
+    /// The claim's derivation path becomes the bridge script that `judge`
+    /// compares with the paid output.
+    pub fn new(event: DepositApproved, keys: &HashiBTCKeys) -> Self {
         Self {
-            event_type: DepositEventType::E2HashiDeposited,
-            timestamp_secs: checkpoint_timestamp_secs,
+            timestamp_secs: unix_millis_to_seconds(event.approved_timestamp_ms),
+            request_id: event.request_id,
             deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
             amount: event.utxo.amount,
             script_pubkey: keys.script_pubkey(event.utxo.derivation_path.as_ref()),
         }
     }
 
-    /// E1 from Bitcoin's confirmation: the output at `deposit_id`'s vout, or
-    /// `None` if the transaction has no output there.
-    pub fn from_btc(confirmation: &BtcConfirmation, deposit_id: DepositId) -> Option<Self> {
-        let output = confirmation.outputs.get(deposit_id.vout() as usize)?;
-        Some(Self {
-            event_type: DepositEventType::E1BtcConfirmed,
-            timestamp_secs: confirmation.confirmed_time,
-            deposit_id,
-            amount: output.value.to_sat(),
-            script_pubkey: output.script_pubkey.clone(),
-        })
+    /// Whether the approval names `request` and its UTXO: the same
+    /// outpoint, amount and path. Move copies the UTXO from the request.
+    pub fn matches_request(&self, request: &SuiDepositRequestedEvent) -> bool {
+        self.request_id == request.request_id
+            && self.deposit_id == request.deposit_id
+            && self.amount == request.amount
+            && self.script_pubkey == request.script_pubkey
     }
-}
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DepositEventType {
-    /// deposit confirmed event on btc
-    E1BtcConfirmed,
-    /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
-    /// timestamp, supplied with the transaction by Sui gRPC.
-    E2HashiDeposited,
+    /// Judge the approval against `btc_deposit_info`, the deposit Bitcoin
+    /// confirmed at this outpoint, if any. It must exist, match the amount
+    /// and script, and be in a block no later than the approval plus `skew`.
+    pub fn judge(
+        &self,
+        btc_deposit_info: Option<&ConfirmedDeposit>,
+        skew: u64,
+    ) -> Vec<MonitorFinding> {
+        let Some(paid) = btc_deposit_info else {
+            return vec![MonitorFinding::DepositUnbacked { sui: self.clone() }];
+        };
+        let mut findings = Vec::new();
+        let deadline = self.timestamp_secs + skew;
+        if deadline < paid.block_time {
+            findings.push(MonitorFinding::DepositLate {
+                sui: self.clone(),
+                deadline,
+                block_time: paid.block_time,
+            });
+        }
+        if self.amount != paid.amount || self.script_pubkey != paid.script_pubkey {
+            findings.push(MonitorFinding::DepositMismatch {
+                sui: self.clone(),
+                btc: paid.clone(),
+            });
+        }
+        findings
+    }
 }
 
 /// A deposit Bitcoin confirmed at a bridge address. The UTXO pool records it.
