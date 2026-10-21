@@ -117,6 +117,7 @@ use hashi_types::committee::SignedMessage;
 use hashi_types::proto;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -130,6 +131,7 @@ const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
+const AVID_UNPROTECTED_INDICES_PER_DEALER: usize = 4;
 /// Per-call budget for pulling AVID dispersal artifacts from a cert's signers.
 const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const AVID_RETRIEVAL_CALL_RETRIES: usize = 2;
@@ -234,6 +236,7 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), TaggedAvidOutput>,
+    avid_party_phases: HashMap<u32, usize>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
     /// Which valid complaints `handle_complain_request` answers.
@@ -568,6 +571,7 @@ impl MpcManager {
             current_output: None,
             batch_size_per_weight,
             dealer_avid_nonce_outputs: BTreeMap::new(),
+            avid_party_phases: HashMap::new(),
             test_corrupt_shares_for,
             complaint_response_policy,
         };
@@ -854,6 +858,13 @@ impl MpcManager {
             let response = self.handle_avid_nonce_complaint_request(caller, request)?;
             if cache_is_current {
                 self.complaint_responses.insert(cache_key, response.clone());
+                if let ComplaintResponsesKey::NonceGeneration {
+                    batch_index,
+                    dealer,
+                } = cache_key
+                {
+                    self.cap_avid_dealer_state(dealer, batch_index);
+                }
             }
             return Ok(response);
         }
@@ -1246,6 +1257,7 @@ impl MpcManager {
         supersede: Option<(OnchainState, u64)>,
         metrics: &Metrics,
     ) -> MpcResult<NoncePartyOutcome> {
+        let party_phase = AvidPartyPhaseMark::new(mpc_manager, batch_index);
         let admission = Self::run_as_avid_nonce_party(
             mpc_manager,
             batch_index,
@@ -1256,6 +1268,7 @@ impl MpcManager {
         )
         .await?;
         let mut mgr = mpc_manager.write().unwrap();
+        party_phase.end(&mut mgr);
         let (pre_filter, dealers, outputs) = consume_certified_nonce_outputs(
             &mut mgr.dealer_avid_nonce_outputs,
             batch_index,
@@ -2265,6 +2278,7 @@ impl MpcManager {
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
         self.avid_held_echoes
             .insert((batch_index, dealer), Arc::new(held));
+        self.cap_avid_dealer_state(dealer, batch_index);
         Ok(())
     }
 
@@ -2457,6 +2471,7 @@ impl MpcManager {
         );
         self.current_avid_verified_common
             .insert((batch_index, dealer), verified_common);
+        self.cap_avid_dealer_state(dealer, batch_index);
         let confirm = AvssVoteMessagesHash {
             dealer_address: dealer,
             messages_hash: MessagesHash::from(avss_vote.common_message_hash.digest),
@@ -2799,6 +2814,7 @@ impl MpcManager {
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         self.current_avid_verified_common
             .insert((batch_index, dealer), verified_common.clone());
+        self.cap_avid_dealer_state(dealer, batch_index);
         Ok(verified_common)
     }
 
@@ -3904,6 +3920,7 @@ impl MpcManager {
                         cert_digest: None,
                     },
                 );
+                mgr.cap_avid_dealer_state(dealer, batch_index);
                 tracing::info!(
                     "AVID nonce shares recovered via complaint: dealer {:?}, \
                      batch_index={batch_index}, responses used {}",
@@ -4179,6 +4196,7 @@ impl MpcManager {
                     cert_digest: None,
                 },
             );
+            self.cap_avid_dealer_state(dealer, batch_index);
         }
         Ok((outcome, verified_common))
     }
@@ -4200,6 +4218,68 @@ impl MpcManager {
             ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
         });
+    }
+
+    fn begin_avid_party_phase(&mut self, batch_index: u32) {
+        *self.avid_party_phases.entry(batch_index).or_default() += 1;
+    }
+
+    fn end_avid_party_phase(&mut self, batch_index: u32) {
+        let remaining = self.avid_party_phases.get_mut(&batch_index).map(|running| {
+            *running -= 1;
+            *running
+        });
+        if remaining == Some(0) {
+            self.avid_party_phases.remove(&batch_index);
+        }
+    }
+
+    fn cap_avid_dealer_state(&mut self, dealer: Address, inserted: u32) {
+        let mut unprotected: BTreeSet<u32> = self
+            .current_avid_round_state
+            .keys()
+            .chain(self.current_avid_verified_common.keys())
+            .chain(self.dealer_avid_nonce_outputs.keys())
+            .chain(self.avid_held_echoes.keys())
+            .filter(|(_, entry_dealer)| *entry_dealer == dealer)
+            .map(|(batch_index, _)| *batch_index)
+            .chain(self.complaint_responses.keys().filter_map(|key| match key {
+                ComplaintResponsesKey::NonceGeneration {
+                    batch_index,
+                    dealer: entry_dealer,
+                } if *entry_dealer == dealer => Some(*batch_index),
+                _ => None,
+            }))
+            .collect();
+        unprotected.retain(|&batch_index| !self.avid_index_protected(batch_index, &dealer));
+        let excess = unprotected
+            .len()
+            .saturating_sub(AVID_UNPROTECTED_INDICES_PER_DEALER);
+        unprotected.remove(&inserted);
+        for evicted in unprotected.into_iter().take(excess) {
+            self.evict_avid_index(evicted, dealer);
+        }
+    }
+
+    fn avid_index_protected(&self, batch_index: u32, dealer: &Address) -> bool {
+        self.avid_party_phases.contains_key(&batch_index)
+            || self
+                .dealer_avid_nonce_outputs
+                .get(&(batch_index, *dealer))
+                .is_some_and(|output| output.cert_digest.is_some())
+    }
+
+    fn evict_avid_index(&mut self, batch_index: u32, dealer: Address) {
+        let key = (batch_index, dealer);
+        self.current_avid_round_state.remove(&key);
+        self.current_avid_verified_common.remove(&key);
+        self.dealer_avid_nonce_outputs.remove(&key);
+        self.avid_held_echoes.remove(&key);
+        self.complaint_responses
+            .remove(&ComplaintResponsesKey::NonceGeneration {
+                batch_index,
+                dealer,
+            });
     }
 
     fn process_certified_dkg_message(&mut self, dealer: Address) -> MpcResult<()> {
@@ -7120,6 +7200,41 @@ fn publish_outcome_label(e: &ChannelError) -> &'static str {
         ChannelError::Closed => "closed",
         ChannelError::Exhausted => "exhausted",
         ChannelError::Other(_) => "other",
+    }
+}
+
+struct AvidPartyPhaseMark {
+    mpc_manager: Arc<RwLock<MpcManager>>,
+    batch_index: u32,
+    armed: bool,
+}
+
+impl AvidPartyPhaseMark {
+    fn new(mpc_manager: &Arc<RwLock<MpcManager>>, batch_index: u32) -> Self {
+        mpc_manager
+            .write()
+            .unwrap()
+            .begin_avid_party_phase(batch_index);
+        Self {
+            mpc_manager: Arc::clone(mpc_manager),
+            batch_index,
+            armed: true,
+        }
+    }
+
+    fn end(mut self, mgr: &mut MpcManager) {
+        mgr.end_avid_party_phase(self.batch_index);
+        self.armed = false;
+    }
+}
+
+impl Drop for AvidPartyPhaseMark {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(mut mgr) = self.mpc_manager.write()
+        {
+            mgr.end_avid_party_phase(self.batch_index);
+        }
     }
 }
 
