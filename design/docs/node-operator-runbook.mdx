@@ -1375,7 +1375,7 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 Notes:
 
 - `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [3.1](#31-validator-config).
-- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. It therefore only works after your registration is complete.
+- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. The endpoint accepts pushes only from committee members, so until your node is seated (at launch, or at a later committee formation if you register afterwards) each push is refused and logged as `unable to push metrics`. That is expected.
 - The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
 
 ### 8.3 Key metrics
