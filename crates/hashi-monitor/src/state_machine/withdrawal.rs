@@ -34,7 +34,6 @@ use crate::domain::WithdrawalTx;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
-use crate::state_machine::BtcFetchOutcome;
 use crate::timing::Timing;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
@@ -249,10 +248,7 @@ impl WithdrawalStateMachine {
     }
 
     /// If expecting BTC confirmation, query BTC RPC and add the event if confirmed.
-    ///     - Returns `Ok(BtcFetchOutcome::NotExpected)` if a BTC event is not expected.
-    ///     - Returns `Ok(BtcFetchOutcome::Unconfirmed)` if checked but block not yet mined.
-    ///     - Returns `Ok(BtcFetchOutcome::Confirmed(findings))` if confirmed; `findings` may be empty.
-    ///     - Returns `Err` for BTC RPC/infrastructure failures.
+    /// Returns the findings from the new event. An error is the RPC's.
     ///
     /// `checked_at` must be no later than the lookup.
     pub fn try_fetch_btc_tx(
@@ -260,9 +256,9 @@ impl WithdrawalStateMachine {
         timing: &Timing,
         btc_rpc_client: &BtcRpcClient,
         checked_at: UnixSeconds,
-    ) -> anyhow::Result<BtcFetchOutcome> {
+    ) -> anyhow::Result<Vec<MonitorFinding>> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
-            return Ok(BtcFetchOutcome::NotExpected);
+            return Ok(Vec::new());
         }
 
         let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid)?;
@@ -281,9 +277,9 @@ impl WithdrawalStateMachine {
                     .get(WithdrawalEventType::E2GuardianApproved)
                     .expect("E3 is expected only after E2");
                 self.confirmed = Some(ConfirmedWithdrawal::from_confirmation(e2, confirmation));
-                BtcFetchOutcome::Confirmed(self.add_event(e_btc, timing))
+                self.add_event(e_btc, timing)
             }
-            None => BtcFetchOutcome::Unconfirmed,
+            None => Vec::new(),
         })
     }
 

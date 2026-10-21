@@ -63,7 +63,6 @@ use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::approval::HashiApproval;
 use crate::rpc::sui::read_confirmation_threshold;
-use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::OutPoint;
@@ -410,19 +409,11 @@ impl AuditorCore {
                 continue;
             }
 
-            // Fetch BTC info for expecting withdrawals
-            if sm.expects(WithdrawalEventType::E3BtcConfirmed)
-                && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?
-            {
-                findings.extend(new_findings);
-            }
+            findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
         }
 
         for sm in self.pending_deposits.values_mut() {
-            if sm.expects_btc() {
-                findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
-            }
+            findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
         }
 
         Ok(findings)

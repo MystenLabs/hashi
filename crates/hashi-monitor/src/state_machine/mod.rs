@@ -13,11 +13,3 @@ mod withdrawal;
 
 pub use deposit::DepositStateMachine;
 pub use withdrawal::WithdrawalStateMachine;
-
-use crate::findings::MonitorFinding;
-
-pub enum BtcFetchOutcome {
-    NotExpected,
-    Unconfirmed,
-    Confirmed(Vec<MonitorFinding>),
-}
