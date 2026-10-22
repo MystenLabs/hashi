@@ -1368,14 +1368,16 @@ impl Monitor {
         };
         let result = match rpc_result {
             Ok(tx_info) => match tx_info.into_model() {
-                Ok(tx_info) => {
-                    if tx_info.block_hash.is_some() {
-                        let confirmations = tx_info.confirmations.unwrap_or(0) as u32;
-                        Ok(TxStatus::Confirmed { confirmations })
-                    } else {
-                        Ok(TxStatus::InMempool)
-                    }
-                }
+                Ok(tx_info) => Ok(match (tx_info.block_hash, tx_info.confirmations) {
+                    (Some(_), Some(confirmations)) if confirmations > 0 => TxStatus::Confirmed {
+                        confirmations: confirmations as u32,
+                    },
+                    // Core's txindex can retain an orphaned block hash after a reorg
+                    // even when the transaction is absent from the mempool. Let the
+                    // existing NotFound recovery path rebroadcast it.
+                    (Some(_), _) => TxStatus::NotFound,
+                    (None, _) => TxStatus::InMempool,
+                }),
                 Err(e) => Err(anyhow::anyhow!("Failed to parse transaction info: {e}")),
             },
             Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
@@ -2828,6 +2830,65 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("start height 300000"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn orphaned_transaction_is_not_found() {
+        // Legacy one-input, one-output fixture from rust-bitcoin's transaction tests.
+        let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize_hex(concat!(
+            "0100000001a15d57094aa7a21a28cb20b59aab8fc7d1149a3bdbcddba9c622e4f5f6a99ece",
+            "010000006c493046022100f93bb0e7d8db7bd46e40132d1f8242026e045f03a0efe71bbb8e3f475e970d79",
+            "0221009337cd7f1f929f00cc6ff01f03729b069a7c21b59b1736ddfee5db5946c5da8c01",
+            "21033b9b137ee87d5a812d6f506efdd37f0affa7ffc310711c06c7f3e097c9447c52ffffffff",
+            "0100e1f505000000001976a9140389035a9225b3839e2bbf32d826a1e222031fd888ac00000000",
+        ))
+        .unwrap();
+        let txid = tx.compute_txid();
+        // txindex retains the old block hash even when the transaction is orphaned.
+        let result = serde_json::json!({
+            "hex": bitcoin::consensus::encode::serialize_hex(&tx),
+            "txid": txid.to_string(),
+            "hash": tx.compute_wtxid().to_string(),
+            "size": tx.total_size(),
+            "vsize": tx.vsize(),
+            "weight": tx.weight().to_wu(),
+            "version": tx.version.0,
+            "locktime": tx.lock_time.to_consensus_u32(),
+            "vin": [{
+                "txid": tx.input[0].previous_output.txid.to_string(),
+                "vout": tx.input[0].previous_output.vout,
+                "scriptSig": {
+                    "asm": tx.input[0].script_sig.to_asm_string(),
+                    "hex": tx.input[0].script_sig.to_hex_string(),
+                },
+                "sequence": tx.input[0].sequence.to_consensus_u32(),
+            }],
+            "vout": [{
+                "value": tx.output[0].value.to_btc(),
+                "n": 0,
+                "scriptPubKey": {
+                    "asm": tx.output[0].script_pubkey.to_asm_string(),
+                    "hex": tx.output[0].script_pubkey.to_hex_string(),
+                    "type": "pubkeyhash",
+                },
+            }],
+            "blockhash": block_hash(1).to_string(),
+            "confirmations": 0,
+        });
+        let rpc = stub_bitcoind(move |req| {
+            assert!(req.contains("\"getrawtransaction\""));
+            rpc_reply(req, result.clone(), serde_json::Value::Null)
+        })
+        .await;
+        let (result_tx, result_rx) = oneshot::channel();
+        let caller = Caller {
+            deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            result_tx,
+        };
+
+        Monitor::get_transaction_status(rpc, txid, caller).await;
+
+        assert_eq!(result_rx.await.unwrap().unwrap(), TxStatus::NotFound);
     }
 
     #[tokio::test]
