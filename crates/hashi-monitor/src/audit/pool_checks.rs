@@ -114,7 +114,6 @@ mod tests {
     use crate::domain::ConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::utxo_pool::SuspectSpend;
-    use crate::findings::FindingCategory;
     use crate::metrics::MonitorMetrics;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
@@ -166,7 +165,6 @@ mod tests {
                 amount: 5_000,
             }]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
         assert!(auditor.suspect_spends.is_empty());
     }
 

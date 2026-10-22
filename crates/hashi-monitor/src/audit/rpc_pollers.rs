@@ -104,6 +104,8 @@ impl Auditor {
             self.ingest_batch(events);
             self.metrics
                 .set_checked_through(SOURCE_SUI, self.rpc_pollers.sui_read_until());
+            // A first catch-up runs many ranges, so the heartbeat moves during it.
+            self.metrics.set_heartbeat(now_timestamp_secs());
         }
         Ok(())
     }
@@ -128,6 +130,7 @@ impl Auditor {
             self.ingest_batch(events);
             self.metrics
                 .set_checked_through(SOURCE_GUARDIAN, self.rpc_pollers.guardian_read_until());
+            self.metrics.set_heartbeat(now_timestamp_secs());
         }
         Ok(())
     }
@@ -200,6 +203,7 @@ impl Auditor {
         let started_at = now_timestamp_secs();
         let findings = self.fetch_btc_info(started_at)?;
         self.report_findings("btc", &findings);
+        self.btc_checked_through = started_at;
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
         Ok(())
     }

@@ -1,22 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The findings the monitor reports, and their category.
+//! The findings the monitor reports.
 //!
 //! Why it exists: every check in the pollers and the state machines reports
-//! its result as one value of `MonitorFinding`. The auditors log each
-//! finding at the level of its category, and the metrics count them by
-//! category.
+//! its result as one value of `MonitorFinding`. The auditor logs each
+//! finding, and the metrics record the time of the last one.
 //!
-//! The categories:
-//! - A liveness finding means a successor event is late or still missing
-//!   after its deadline.
-//! - A safety finding means a source contradicts another: a late or missing
-//!   predecessor, a contradictory event, a transaction or deposit that does
-//!   not match its claim, or a guardian clock that disagrees with S3.
-//! - `RpcInconsistency` is a safety finding where an RPC answer contradicts
-//!   one the monitor already holds. The bridge cannot cause it. The inner
-//!   enum names the contradiction.
+//! Assumptions:
+//! - Every finding needs an operator action, so all findings have one level.
+//!   A condition that needs no action is not a finding.
+//! - `RpcInconsistency` means an RPC answer contradicts one the monitor
+//!   already holds. The bridge cannot cause it. The inner enum names the
+//!   contradiction.
 
 use crate::domain::ConfirmedDeposit;
 use crate::domain::MonitorEvent;
@@ -43,21 +39,6 @@ use std::fmt;
 pub enum EventRelation {
     Predecessor,
     Successor,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FindingCategory {
-    Safety,
-    Liveness,
-}
-
-impl fmt::Display for FindingCategory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Safety => write!(f, "safety"),
-            Self::Liveness => write!(f, "liveness"),
-        }
-    }
 }
 
 /// Findings emitted by the monitor.
@@ -123,13 +104,12 @@ pub enum MonitorFinding {
     /// `RpcInconsistency`.
     RpcInconsistency(RpcInconsistency),
     /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
-    /// warn age, or past the critical age. The committee can spend a UTXO
-    /// alone 60 days after it confirms.
+    /// warn age. The committee can spend a UTXO alone 60 days after it
+    /// confirms.
     UtxoTooOld {
         outpoint: OutPoint,
         age_secs: u64,
         threshold_secs: u64,
-        critical: bool,
     },
     /// A UTXO in the monitor's UTXO pool was spent on Bitcoin, and no Hashi
     /// withdrawal confirmed on Bitcoin spent it.
@@ -143,6 +123,19 @@ pub enum MonitorFinding {
     UtxoUnknownInputSpent {
         outpoint: OutPoint,
         txid: Txid,
+    },
+    /// A source was last checked longer ago than its limit. Its events go
+    /// unchecked until it catches up.
+    SourceStale {
+        source: &'static str,
+        checked_through: UnixSeconds,
+        limit_secs: u64,
+    },
+    /// No snapshot save has succeeded for longer than the limit. A restart
+    /// repeats the work done since the last save.
+    SnapshotStale {
+        last_saved: UnixSeconds,
+        limit_secs: u64,
     },
     /// The time the guardian signed into a log differs from the time S3
     /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
@@ -214,39 +207,6 @@ impl fmt::Display for RpcInconsistency {
                 "UtxoVanished(outpoint={outpoint}, first_seen={})",
                 utc_timestamp(*first_seen),
             ),
-        }
-    }
-}
-
-impl MonitorFinding {
-    pub fn category(&self) -> FindingCategory {
-        match self {
-            Self::InvalidEventAdded(_) => FindingCategory::Safety,
-            Self::WithdrawalEventLate { relation, .. } => match relation {
-                EventRelation::Predecessor => FindingCategory::Safety,
-                EventRelation::Successor => FindingCategory::Liveness,
-            },
-            Self::WithdrawalEventMissing { relation, .. } => match relation {
-                EventRelation::Predecessor => FindingCategory::Safety,
-                EventRelation::Successor => FindingCategory::Liveness,
-            },
-            Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
-            Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
-            Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
-            Self::DepositUnbacked { .. } => FindingCategory::Safety,
-            Self::DepositLate { .. } => FindingCategory::Safety,
-            Self::DepositMismatch { .. } => FindingCategory::Safety,
-            Self::RpcInconsistency(_) => FindingCategory::Safety,
-            Self::UtxoTooOld { critical, .. } => {
-                if *critical {
-                    FindingCategory::Safety
-                } else {
-                    FindingCategory::Liveness
-                }
-            }
-            Self::UtxoUnexpectedSpend { .. } => FindingCategory::Safety,
-            Self::UtxoUnknownInputSpent { .. } => FindingCategory::Safety,
-            Self::GuardianClockSkew { .. } => FindingCategory::Safety,
         }
     }
 }
@@ -335,10 +295,9 @@ impl fmt::Display for MonitorFinding {
                 outpoint,
                 age_secs,
                 threshold_secs,
-                critical,
             } => write!(
                 f,
-                "UtxoTooOld(outpoint={outpoint}, age={}, threshold={}, critical={critical})",
+                "UtxoTooOld(outpoint={outpoint}, age={}, threshold={})",
                 human_duration(*age_secs),
                 human_duration(*threshold_secs),
             ),
@@ -349,6 +308,25 @@ impl fmt::Display for MonitorFinding {
             Self::UtxoUnknownInputSpent { outpoint, txid } => {
                 write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
             }
+            Self::SourceStale {
+                source,
+                checked_through,
+                limit_secs,
+            } => write!(
+                f,
+                "SourceStale(source={source}, checked_through={}, limit={})",
+                utc_timestamp(*checked_through),
+                human_duration(*limit_secs),
+            ),
+            Self::SnapshotStale {
+                last_saved,
+                limit_secs,
+            } => write!(
+                f,
+                "SnapshotStale(last_saved={}, limit={})",
+                utc_timestamp(*last_saved),
+                human_duration(*limit_secs),
+            ),
             Self::GuardianClockSkew {
                 session_id,
                 object_key,

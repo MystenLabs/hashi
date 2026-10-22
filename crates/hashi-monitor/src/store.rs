@@ -11,9 +11,9 @@
 //! 1. After each state check, the auditor saves a `Snapshot`: the deployment
 //!    it audits, its `AuditState`, and the UTXO pool. The audit state is the
 //!    position of each poller, every open state machine, the suspect spends
-//!    of the last pool check, and the time of the last finding of each
-//!    category. All of it is taken at one instant.
-//! 2. A restart loads the machines, restores the finding times, and resumes
+//!    of the last pool check, and the time of the last finding. All of it is
+//!    taken at one instant.
+//! 2. A restart loads the machines, restores the finding time, and resumes
 //!    each poller at its saved position. It reads no event twice and skips
 //!    none, so no flow is cut in two.
 //! 3. The bucket holds the snapshot as several objects. `SNAPSHOT_KEY` is a
@@ -32,7 +32,6 @@
 //! - The snapshot is durable. Without it, the next start is a first run from
 //!   genesis, which needs a Sui node that keeps the history.
 
-use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -92,8 +91,8 @@ pub struct AuditState {
     pub deposits: Vec<DepositStateMachine>,
     /// The spends the last pool check saw, still waiting for the Sui cursor.
     pub suspect_spends: Vec<(OutPoint, SuspectSpend)>,
-    /// The time of the last finding, by category label.
-    pub last_findings: BTreeMap<String, UnixSeconds>,
+    /// The time of the last finding, or 0.
+    pub last_finding: UnixSeconds,
 }
 
 impl Snapshot {
@@ -339,7 +338,7 @@ mod tests {
                     amount: 2_000,
                 },
             )],
-            last_findings: BTreeMap::from([("safety".to_string(), 1_700_000_500)]),
+            last_finding: 1_700_000_500,
         }
     }
 

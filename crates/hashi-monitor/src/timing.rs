@@ -67,16 +67,11 @@ pub const DEPOSIT_APPROVAL_SKEW: u64 = 2 * 60 * 60;
 /// it is reported as `DepositUnbacked`.
 pub const DEPOSIT_REQUEST_WATCH: u64 = 2 * 24 * 60 * 60;
 
-/// Age of an unspent bridge UTXO that is a liveness finding. Honest coin
-/// selection refreshes a UTXO older than 30 days
-/// (`RECOVERY_PRIORITY_AGE_BLOCKS` in the `hashi` crate), so a UTXO a day
-/// older than that was not refreshed.
-pub const UTXO_AGE_WARN: u64 = 31 * 24 * 60 * 60;
-
-/// Age of an unspent bridge UTXO that is a safety finding. The committee
-/// can spend a UTXO alone 60 days after it confirms, through the recovery
-/// leaf. Fifteen days before that leaves time to act.
-pub const UTXO_AGE_CRITICAL: u64 = 45 * 24 * 60 * 60;
+/// Age of an unspent bridge UTXO that is a finding. The committee can spend
+/// it alone at 60 days, so the finding leaves 20 days to act. Coin selection
+/// in the `hashi` crate spends UTXOs older than 30 days first
+/// (`RECOVERY_PRIORITY_AGE_BLOCKS`), but only as extra inputs of a withdrawal.
+pub const UTXO_MAX_AGE: u64 = 40 * 24 * 60 * 60;
 
 /// The bounds in force. `Default` is the protocol set above. Tests build
 /// their own with small numbers.
@@ -93,10 +88,8 @@ pub struct Timing {
     pub deposit_approval_skew: u64,
     /// How long Bitcoin is asked about a deposit request's transaction.
     pub deposit_request_watch: u64,
-    /// Age of an unspent bridge UTXO that is a liveness finding.
-    pub utxo_age_warn: u64,
-    /// Age of an unspent bridge UTXO that is a safety finding.
-    pub utxo_age_critical: u64,
+    /// Age of an unspent bridge UTXO that is a finding.
+    pub utxo_max_age: u64,
 }
 
 impl Default for Timing {
@@ -126,8 +119,7 @@ impl Default for Timing {
             .expect("one bound per non-terminal event"),
             deposit_approval_skew: DEPOSIT_APPROVAL_SKEW,
             deposit_request_watch: DEPOSIT_REQUEST_WATCH,
-            utxo_age_warn: UTXO_AGE_WARN,
-            utxo_age_critical: UTXO_AGE_CRITICAL,
+            utxo_max_age: UTXO_MAX_AGE,
         }
     }
 }
@@ -171,8 +163,7 @@ impl Timing {
             .expect("valid predecessor skews"),
             deposit_approval_skew: 10,
             deposit_request_watch: 1_000,
-            utxo_age_warn: 100,
-            utxo_age_critical: 200,
+            utxo_max_age: 100,
         }
     }
 }

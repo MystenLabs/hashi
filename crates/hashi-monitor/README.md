@@ -23,16 +23,20 @@ Audits the cross-system bridge flow on two parallel tracks.
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
 - **Successor existence**: for each non-terminal event, the next-event delay bound must hold.
 
-Findings are tagged as:
-- **liveness** when a successor is late or still missing after its deadline;
-- **safety** for a contradictory event, a late predecessor, a predecessor
-  still missing after its source cursor passes the deadline, an event the
-  Sui scan covered but never returned, a Hashi approval or a guardian log
+Every finding needs an operator action, so all findings have one level.
+The monitor reports a finding for:
+- a successor that is late or still missing after its deadline;
+- a contradictory event, a late predecessor, or a predecessor
+  still missing after its source cursor passes the deadline;
+- a Hashi approval or a guardian log
   whose txid does not match its inputs and outputs, a Hashi approval whose
   inputs and outputs differ from the guardian's, an approved deposit
   Bitcoin does not back, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
-  by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`).
+  by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`);
+- a source the monitor last checked longer ago than its limit
+  (`SourceStale`: one hour for Sui and Bitcoin, three hours for the guardian),
+  or no successful snapshot save for an hour (`SnapshotStale`).
 
 Move does not validate a Hashi approval's txid or change outputs. The monitor
 rebuilds the Bitcoin transaction from the approval and checks that the txid
@@ -105,10 +109,10 @@ Bitcoin fact changes it:
 
 Every operation is strict. One the pool already applied is a repeat and is
 skipped. One that contradicts
-the pool is a finding: **safety** `RpcInconsistency`, for `UtxoMismatch`
+the pool is a finding: `RpcInconsistency`, for `UtxoMismatch`
 when Bitcoin confirms a known outpoint with a second amount or script, and
 `UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
-transaction already spent, since Bitcoin cannot produce either; **safety**
+transaction already spent, since Bitcoin cannot produce either;
 `UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
 never held, since the bridge spent a UTXO that no verified deposit or change
 brought in; the pool records nothing for that spend. In one Bitcoin pass
@@ -126,16 +130,15 @@ built. See "Running the monitor" below.
 The monitor asks Bitcoin about every held UTXO at the first pool maintenance tick.
 It repeats successful checks once a day. The monitor reports:
 
-- **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
-  (31 days, since honest coin selection refreshes UTXOs older than 30);
-- **safety** `UtxoTooOld` past `UTXO_AGE_CRITICAL` (45 days), and
-  `UtxoUnexpectedSpend` when a UTXO was spent by a transaction that is not a
+- `UtxoTooOld` when a UTXO has sat unspent past `UTXO_MAX_AGE` (40 days).
+  The committee can spend it alone at 60 days, so this leaves 20 days to act;
+- `UtxoUnexpectedSpend` when a UTXO was spent by a transaction that is not a
   confirmed Hashi withdrawal. This one is not reported at once: a withdrawal
   committed since the last Sui poll can be mined already. The spend waits,
   and a state check reports it once the Sui cursor is past the time Bitcoin
   was asked and still no withdrawal explains it: none the monitor follows
   names the UTXO, and the pool took none that spent it;
-- **safety** `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
+- `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
   confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
   entered, so a missing answer is a reorg, a node without the transaction
   index, or a monitor bug.
@@ -145,9 +148,8 @@ spends it about an hour before the flow completes, and an incomplete flow
 has its own finding.
 
 A UTXO paid to a bridge address with no `DepositRequested`, or with a wrong
-derivation path, is invisible to the monitor and out of scope. A later check
-of the pool against Move's records will report a withheld deposit on the
-first day instead of at the warn age.
+derivation path, is invisible to the monitor and out of scope. A paid deposit
+that Move never approves stays in the pool and is reported at `UTXO_MAX_AGE`.
 
 ### Timeline semantics (withdrawals)
 The monitor polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports
@@ -177,7 +179,7 @@ cargo run -p hashi-monitor -- \
 The monitor keeps a snapshot in the bucket and saves it after every state
 check: the deployment it audits, the next Sui checkpoint and guardian hourly
 directory to read, every open flow, the spends the last pool check has not
-judged yet, the time of the last finding of each category, and the UTXO
+judged yet, the time of the last finding, and the UTXO
 pool. `snapshot.json` holds all of it except the
 spent record, plus the number of spent entries. The spent
 record only grows, so it lives in `spent/NNNNN.json` files of 10,000 entries
@@ -198,7 +200,7 @@ The scan from genesis runs in ranges of 10,000 checkpoints, about an hour of
 Sui each, and the state checks wait for it. On a busy network it takes hours.
 
 A restart resumes from the snapshot. It holds the saved flows again, sets
-the finding metrics to the saved times, and reads each source from its saved
+the finding metric to the saved time, and reads each source from its saved
 position, so it reads no event twice and skips none. A snapshot of another
 deployment is ignored and the run is a first run. A snapshot of another
 format version, one that does not parse, or one that lacks a spent file stops
@@ -238,8 +240,7 @@ are constants in `src/timing.rs`, each with its reason:
 | E2 after E3 skew | 2 h | a block time may lag real time by this |
 | deposit approval skew | 2 h | a deposit's block time may be after its Sui approval by this; a miner may date a block two hours ahead |
 | deposit request watch | 2 d | Bitcoin is asked about a deposit request's transaction for this; an honest deposit is assumed to confirm within it |
-| UTXO warn age | 31 d | an unspent bridge UTXO older than this is a liveness finding; honest coin selection refreshes UTXOs older than 30 days |
-| UTXO critical age | 45 d | an unspent bridge UTXO older than this is a safety finding; the recovery leaf opens at 60 days |
+| UTXO max age | 40 d | an unspent bridge UTXO older than this is a finding; the recovery leaf opens at 60 days |
 
 ```yaml
 # Deployment identity and builds accepted when auditing Guardian logs.
@@ -282,6 +283,19 @@ btc:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
 ```
+
+### Alerting
+
+The monitor decides what is wrong. An alerting system needs only these rules:
+
+1. `time() - hashi_monitor_last_finding_timestamp_seconds < 3600`: a finding
+   in the last hour. Its details are in the `monitor finding` ERROR lines.
+2. `up < 1`: the monitor cannot be scraped.
+3. `absent(up)`: no monitor runs.
+4. `time() - hashi_monitor_heartbeat_timestamp_seconds > 1800`: the audit task
+   is stuck. A hung task cannot report itself, so this rule watches from
+   outside. The task sets the heartbeat after each unit of work, also during
+   the first catch-up from genesis.
 
 ### Pool metrics
 

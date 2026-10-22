@@ -381,19 +381,11 @@ impl UtxoPool {
             match states.get(outpoint) {
                 Some(OutpointState::Unspent { block_time }) => {
                     let age_secs = now.saturating_sub(*block_time);
-                    if age_secs >= timing.utxo_age_critical {
+                    if age_secs >= timing.utxo_max_age {
                         findings.push(MonitorFinding::UtxoTooOld {
                             outpoint: *outpoint,
                             age_secs,
-                            threshold_secs: timing.utxo_age_critical,
-                            critical: true,
-                        });
-                    } else if age_secs >= timing.utxo_age_warn {
-                        findings.push(MonitorFinding::UtxoTooOld {
-                            outpoint: *outpoint,
-                            age_secs,
-                            threshold_secs: timing.utxo_age_warn,
-                            critical: false,
+                            threshold_secs: timing.utxo_max_age,
                         });
                     }
                 }
@@ -442,14 +434,12 @@ mod tests {
     use crate::domain::BtcConfirmation;
     use crate::domain::DepositId;
     use crate::domain::SuiDepositRequestedEvent;
-    use crate::findings::FindingCategory;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
 
     // `Timing::for_tests` values.
-    const WARN: u64 = 100;
-    const CRITICAL: u64 = 200;
+    const MAX_AGE: u64 = 100;
 
     fn outpoint(fill: u8) -> OutPoint {
         OutPoint {
@@ -599,7 +589,6 @@ mod tests {
                 seen_script: script(),
             })
         );
-        assert_eq!(finding.category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -661,7 +650,6 @@ mod tests {
                 }
             )]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -677,7 +665,6 @@ mod tests {
                 txid: txid(7),
             }]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
         assert_eq!(pool.outpoints(), vec![change_of(7)]);
         assert_eq!(pool.get_spent(&outpoint(9)), None);
     }
@@ -734,7 +721,6 @@ mod tests {
         let sui = sui_approval(2, 1_000, script());
         let findings = pool.check_sui_approval(&sui, SKEW);
         assert_eq!(findings, vec![MonitorFinding::DepositUnbacked { sui }]);
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -765,7 +751,6 @@ mod tests {
             assert!(
                 matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, .. }] if *claimed == sui)
             );
-            assert_eq!(findings[0].category(), FindingCategory::Safety);
         }
     }
 
@@ -789,40 +774,19 @@ mod tests {
     }
 
     #[test]
-    fn a_young_unspent_utxo_is_fine() {
+    fn an_unspent_utxo_is_reported_at_the_max_age() {
         let pool = pool_seen_at(0);
         let state = OutpointState::Unspent { block_time: 1_000 };
-        assert!(findings_one(&pool, Some(state), 1_000 + WARN - 1).is_empty());
-    }
+        assert!(findings_one(&pool, Some(state.clone()), 1_000 + MAX_AGE - 1).is_empty());
 
-    #[test]
-    fn an_unspent_utxo_is_reported_at_the_warn_age_then_the_critical_age() {
-        let pool = pool_seen_at(0);
-        let state = OutpointState::Unspent { block_time: 1_000 };
-
-        let warn = findings_one(&pool, Some(state.clone()), 1_000 + WARN);
         assert_eq!(
-            warn,
+            findings_one(&pool, Some(state), 1_000 + MAX_AGE),
             vec![MonitorFinding::UtxoTooOld {
                 outpoint: outpoint(1),
-                age_secs: WARN,
-                threshold_secs: WARN,
-                critical: false,
+                age_secs: MAX_AGE,
+                threshold_secs: MAX_AGE,
             }]
         );
-        assert_eq!(warn[0].category(), FindingCategory::Liveness);
-
-        let critical = findings_one(&pool, Some(state), 1_000 + CRITICAL);
-        assert_eq!(
-            critical,
-            vec![MonitorFinding::UtxoTooOld {
-                outpoint: outpoint(1),
-                age_secs: CRITICAL,
-                threshold_secs: CRITICAL,
-                critical: true,
-            }]
-        );
-        assert_eq!(critical[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -853,7 +817,6 @@ mod tests {
         let findings = findings_one(&pool, Some(OutpointState::Missing), 1_000);
 
         assert_eq!(findings, vec![vanished.clone()]);
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
         // No answer at all counts as missing.
         assert_eq!(findings_one(&pool, None, 1_000), vec![vanished]);
     }

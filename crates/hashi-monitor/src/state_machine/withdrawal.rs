@@ -161,11 +161,11 @@ impl WithdrawalStateMachine {
     /// checked against the pair's deadlines, so findings do not depend on
     /// ingestion order.
     ///
-    /// Event retention is based on structural validity, not finding category.
-    /// `MonitorFinding::InvalidEventAdded` denotes a contradictory, definite
-    /// safety issue, so it is returned immediately without storing the event.
-    /// A structurally valid event is stored and updates subsequent expectations
-    /// even when its timing produces a safety or liveness finding.
+    /// Event retention is based on structural validity.
+    /// `MonitorFinding::InvalidEventAdded` denotes a contradictory event, so
+    /// it is returned immediately without storing the event. A structurally
+    /// valid event is stored and updates subsequent expectations even when
+    /// its timing produces a finding.
     ///
     /// The return value contains every resulting finding. An empty vector means
     /// the event was accepted without one.
@@ -370,7 +370,6 @@ impl WithdrawalStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::findings::FindingCategory;
     use crate::test_utils::test_hashi_btc_keys;
     use crate::test_utils::txid;
     use crate::test_utils::withdrawal_tx;
@@ -656,7 +655,7 @@ mod tests {
             }
         );
 
-        // A missing E1 is judged by the Sui cursor, and is a safety finding.
+        // A missing E1 is judged by the Sui cursor.
         let sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E2GuardianApproved, 7, 100, 7),
             &timing,
@@ -677,11 +676,10 @@ mod tests {
                 cursor: 110,
             }]
         );
-        assert_eq!(violations[0].category(), FindingCategory::Safety);
     }
 
     #[test]
-    fn a_late_or_mismatched_hashi_approval_is_a_safety_finding() {
+    fn a_late_or_mismatched_hashi_approval_is_a_finding() {
         let timing = Timing::for_tests();
         let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 8, 100, 8);
 
@@ -697,7 +695,6 @@ mod tests {
                 occurred_at: 111,
             }]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
 
         let mut mismatched = WithdrawalStateMachine::new(guardian_approval, &timing);
         let findings = mismatched.add_event(
@@ -710,12 +707,11 @@ mod tests {
                 "invalid btc_txid".to_string()
             )]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
         assert!(mismatched.expects(WithdrawalEventType::E1HashiApproved));
     }
 
     #[test]
-    fn a_guardian_approval_past_its_skew_after_the_block_time_is_a_safety_finding() {
+    fn a_guardian_approval_past_its_skew_after_the_block_time_is_a_finding() {
         let timing = Timing::for_tests();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 6, 100, 6),
@@ -738,7 +734,6 @@ mod tests {
                 occurred_at: 150,
             }]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -756,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_output_not_paying_the_guardians_path_is_a_safety_finding() {
+    fn a_change_output_not_paying_the_guardians_path_is_a_finding() {
         let timing = Timing::for_tests();
         let e1 = event(WithdrawalEventType::E1HashiApproved, 5, 100, 5);
         let mut e2 = event(WithdrawalEventType::E2GuardianApproved, 5, 150, 5);
@@ -766,7 +761,6 @@ mod tests {
             sui: e1.tx.clone(),
             guardian: e2.tx.clone(),
         }];
-        assert_eq!(expected[0].category(), FindingCategory::Safety);
 
         let mut sm = WithdrawalStateMachine::new(e1.clone(), &timing);
         assert_eq!(sm.add_event(e2.clone(), &timing), expected);
@@ -778,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn an_output_sui_calls_change_and_the_guardian_calls_a_payout_is_a_safety_finding() {
+    fn an_output_sui_calls_change_and_the_guardian_calls_a_payout_is_a_finding() {
         let timing = Timing::for_tests();
         // The committee pays itself at vout 1, tells Sui it is change, and
         // tells the guardian it is a user payout.
