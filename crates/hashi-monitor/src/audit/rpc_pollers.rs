@@ -25,7 +25,7 @@ use crate::rpc::PollCursor;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
-use crate::rpc::sui::SuiEventsPoller;
+use crate::rpc::sui::SuiPoller;
 use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -38,11 +38,11 @@ use std::collections::HashSet;
 /// How far behind a source may fall before a `SourceStale` finding, in
 /// seconds. The guardian log is read by hourly directory, so it normally
 /// lags up to about 80 minutes. Sui and Bitcoin lag a few minutes.
-const SOURCE_STALE_LIMIT: u64 = 3 * 60 * 60;
+pub(super) const SOURCE_STALE_LIMIT: u64 = 3 * 60 * 60;
 
 pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
-    pub sui_poller: SuiEventsPoller,
+    pub sui_poller: SuiPoller,
     pub btc_client: BtcRpcClient,
     /// When the last full Bitcoin pass started. It starts at the startup
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
@@ -66,7 +66,8 @@ impl RpcPollers {
             cfg.deployment.bitcoin_network,
         )?;
         tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
-        let sui_poller = SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?;
+        let mut sui_poller = SuiPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?;
+        sui_poller.find_hbtc_treasury_cap(hashi_object_id).await?;
         Ok(Self {
             guardian_poller,
             sui_poller,
@@ -116,7 +117,7 @@ impl RpcPollers {
     }
 
     /// Fail unless the Sui node still serves the start. See
-    /// `SuiEventsPoller::ensure_start_is_served`.
+    /// `SuiPoller::ensure_start_is_served`.
     pub async fn ensure_sui_serves_start(&mut self) -> anyhow::Result<()> {
         self.sui_poller.ensure_start_is_served().await
     }

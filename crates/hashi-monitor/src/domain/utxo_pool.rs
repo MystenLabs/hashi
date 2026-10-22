@@ -233,6 +233,13 @@ impl UtxoPool {
     }
 
     /// The earliest block timestamp among held UTXOs.
+    /// The sum of the held amounts, in satoshis.
+    pub fn value(&self) -> u64 {
+        self.utxos
+            .values()
+            .fold(0, |sum, utxo| sum.saturating_add(utxo.amount))
+    }
+
     pub fn oldest_timestamp(&self) -> Option<UnixSeconds> {
         self.utxos.values().map(|utxo| utxo.first_seen).min()
     }

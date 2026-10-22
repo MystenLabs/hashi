@@ -39,6 +39,7 @@ use bitcoin::OutPoint;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use hashi_types::guardian::s3::S3HourDirectory;
+use hashi_types::guardian::time::UnixSeconds;
 use object_store::ObjectStore;
 use object_store::PutPayload;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -89,6 +90,8 @@ pub struct AuditState {
     pub deposits: Vec<DepositStateMachine>,
     /// The spends the last pool check saw, still waiting for the Sui cursor.
     pub suspect_spends: Vec<(OutPoint, SuspectSpend)>,
+    /// Since when the hBTC supply has exceeded the pool value, if it does.
+    pub hbtc_supply_above_pool_since: Option<UnixSeconds>,
 }
 
 impl Snapshot {
@@ -334,6 +337,7 @@ mod tests {
                     amount: 2_000,
                 },
             )],
+            hbtc_supply_above_pool_since: Some(1_700_000_600),
         }
     }
 

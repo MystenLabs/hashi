@@ -124,6 +124,13 @@ pub enum MonitorFinding {
         outpoint: OutPoint,
         txid: Txid,
     },
+    /// Sui's hBTC supply has exceeded the value of the UTXO pool since
+    /// `since`, for longer than the grace. Bitcoin does not back every hBTC.
+    HbtcSupplyExceedsPool {
+        hbtc_supply: u64,
+        pool_value: u64,
+        since: UnixSeconds,
+    },
     /// A source was last checked longer ago than its limit. Its events go
     /// unchecked until it catches up.
     SourceStale {
@@ -166,6 +173,7 @@ impl MonitorFinding {
             Self::UtxoTooOld { .. } => "UtxoTooOld",
             Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
             Self::UtxoUnknownInputSpent { .. } => "UtxoUnknownInputSpent",
+            Self::HbtcSupplyExceedsPool { .. } => "HbtcSupplyExceedsPool",
             Self::SourceStale { .. } => "SourceStale",
             Self::SnapshotStale { .. } => "SnapshotStale",
             Self::GuardianClockSkew { .. } => "GuardianClockSkew",
@@ -332,6 +340,16 @@ impl fmt::Display for MonitorFinding {
             Self::UtxoUnknownInputSpent { outpoint, txid } => {
                 write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
             }
+            Self::HbtcSupplyExceedsPool {
+                hbtc_supply,
+                pool_value,
+                since,
+            } => write!(
+                f,
+                "HbtcSupplyExceedsPool(hbtc_supply={hbtc_supply}, pool_value={pool_value}, excess={}, since={})",
+                hbtc_supply.saturating_sub(*pool_value),
+                utc_timestamp(*since),
+            ),
             Self::SourceStale {
                 source,
                 checked_through,
