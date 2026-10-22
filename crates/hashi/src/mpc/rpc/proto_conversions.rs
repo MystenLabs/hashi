@@ -61,17 +61,24 @@ fn serialize_bcs<T: Serialize>(value: &T) -> Bcs {
 /// Parse a share index map from proto.
 #[allow(clippy::result_large_err)]
 fn parse_rotation_messages_map(
-    map: &std::collections::HashMap<u32, Bcs>,
+    map: &proto::RotationMessages,
 ) -> Result<BTreeMap<ShareIndex, avss::Message>, TryFromProtoError> {
     let mut messages = BTreeMap::new();
-    for (&index, bcs) in map {
+    for entry in map.iter() {
+        let (index, bcs) = entry.map_err(|e| TryFromProtoError::invalid("rotation_messages", e))?;
         let share_index = u16::try_from(index)
             .ok()
             .and_then(ShareIndex::new)
             .ok_or_else(|| {
                 TryFromProtoError::invalid("rotation_messages.key", "index must be a non-zero u16")
             })?;
-        let message: avss::Message = deserialize_bcs(bcs, "rotation_messages.value")?;
+        if messages.contains_key(&share_index) {
+            return Err(TryFromProtoError::invalid(
+                "rotation_messages.key",
+                "index appears more than once",
+            ));
+        }
+        let message: avss::Message = deserialize_bcs(&bcs, "rotation_messages.value")?;
         messages.insert(share_index, message);
     }
     Ok(messages)
@@ -80,7 +87,7 @@ fn parse_rotation_messages_map(
 /// Convert rotation messages map to proto format.
 fn rotation_messages_to_proto(
     messages: &BTreeMap<ShareIndex, avss::Message>,
-) -> std::collections::HashMap<u32, Bcs> {
+) -> proto::RotationMessages {
     messages
         .iter()
         .map(|(idx, msg)| (idx.get() as u32, serialize_bcs(msg)))
@@ -186,9 +193,7 @@ impl types::SendMessagesRequest {
         let messages = match &self.messages {
             types::Messages::Dkg(message) => Messages::DkgMessage(serialize_bcs(message)),
             types::Messages::Rotation(messages) => {
-                Messages::RotationMessages(proto::RotationMessages {
-                    messages: rotation_messages_to_proto(messages),
-                })
+                Messages::RotationMessages(rotation_messages_to_proto(messages))
             }
             types::Messages::NonceGenerationAvid(avid) => {
                 Messages::AvidNonceMessage(avid_nonce_message_to_proto(avid))
@@ -215,7 +220,7 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
                 types::Messages::Dkg(message)
             }
             Some(Messages::RotationMessages(rotation)) => {
-                types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+                types::Messages::Rotation(parse_rotation_messages_map(rotation)?)
             }
             Some(Messages::AvidNonceMessage(avid)) => {
                 types::Messages::NonceGenerationAvid(avid_nonce_message_from_proto(avid)?)
@@ -326,8 +331,8 @@ impl RetrieveReply {
             Self::Rotation(blob) => {
                 let entries =
                     stored_rows::rotation_entries(shape, request.epoch, &request.dealer, blob)?;
-                Messages::RotationMessages(proto::RotationMessages {
-                    messages: entries
+                Messages::RotationMessages(
+                    entries
                         .into_iter()
                         .map(|(index, range)| {
                             (
@@ -336,7 +341,7 @@ impl RetrieveReply {
                             )
                         })
                         .collect(),
-                })
+                )
             }
             Self::Avid(retrieval) => {
                 Messages::AvidNonceRetrievalMessage(proto::AvidNonceRetrievalMessage {
@@ -367,7 +372,7 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
                 types::Messages::Dkg(message)
             }
             Some(Messages::RotationMessages(rotation)) => {
-                types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
+                types::Messages::Rotation(parse_rotation_messages_map(rotation)?)
             }
             Some(Messages::AvidNonceRetrievalMessage(retrieval)) => {
                 types::Messages::AvidNonceRetrieval(types::AvidNonceRetrievalMessage {

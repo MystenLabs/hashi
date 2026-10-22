@@ -5648,21 +5648,22 @@ fn test_certified_retrieval_decodes_a_rotation_map_as_its_rebuilt_blob() {
         .collect();
     let blob = bcs::to_bytes(&rotation).unwrap();
     let expected = Messages::Rotation(rotation).compute_hash();
-    let map_response = |entries: Vec<(u32, Vec<u8>)>| proto::RetrieveMessagesResponse {
-        messages: Some(
-            proto::retrieve_messages_response::Messages::RotationMessages(
-                proto::RotationMessages {
-                    messages: entries
+    let map_response = |entries: Vec<(u32, Vec<u8>)>| {
+        let wire = prost::Message::encode_to_vec(&proto::RetrieveMessagesResponse {
+            messages: Some(
+                proto::retrieve_messages_response::Messages::RotationMessages(
+                    entries
                         .into_iter()
                         .map(|(index, bytes)| (index, bcs_value(bytes)))
                         .collect(),
-                },
+                ),
             ),
-        ),
+        });
+        <proto::RetrieveMessagesResponse as prost::Message>::decode(wire.as_slice()).unwrap()
     };
     let retrieve = |entries| match response_checks::certified_retrieval(
         ProtocolTypeIndicator::KeyRotation,
-        &map_response(entries),
+        map_response(entries),
         expected,
     )
     .unwrap()
@@ -12346,12 +12347,10 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
         .unwrap()
         .bytes()
         .as_ptr_range();
-    assert_eq!(served.messages.len(), expected.len());
+    assert_eq!(served.len(), expected.len());
+    let served = served.iter().collect::<Result<HashMap<_, _>, _>>().unwrap();
     for (index, message) in expected.iter() {
-        let value = served.messages[&u32::from(index.get())]
-            .value
-            .as_ref()
-            .unwrap();
+        let value = served[&u32::from(index.get())].value.as_ref().unwrap();
         assert_eq!(&value[..], bcs::to_bytes(message).unwrap());
         assert!(cached.contains(&value.as_ptr()) && value.as_ptr_range().end <= cached.end);
     }
@@ -19504,17 +19503,21 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     let rotation_setup = RotationTestSetup::new();
     let dealer = rotation_setup.setup.address(0);
     let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
-    let Messages::Rotation(honest) = messages else {
-        unreachable!()
-    };
-    let mut oversized = honest.clone();
-    oversized.insert(
-        ShareIndex::new(u16::MAX).unwrap(),
-        honest.values().next().unwrap().clone(),
-    );
     let (mut receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
     receiver.previous_output = Some(dkg_output);
     let epoch = receiver.mpc_config.epoch;
+    let Some(proto::send_messages_request::Messages::RotationMessages(honest)) =
+        SendMessagesRequest { messages }.to_proto(epoch).messages
+    else {
+        unreachable!()
+    };
+    let honest = honest.iter().collect::<Result<Vec<_>, _>>().unwrap();
+    let mut unowned_first = honest.clone();
+    unowned_first[0].0 = u16::MAX.into();
+    let mut duplicated = honest.clone();
+    duplicated.last_mut().unwrap().0 = honest[0].0;
+    let mut oversized = honest.clone();
+    oversized.push((u16::MAX.into(), honest[0].1.clone()));
 
     let tmpdir = tempfile::Builder::new().tempdir().unwrap();
     let mut config = crate::config::Config::new_for_testing();
@@ -19529,13 +19532,13 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     hashi.set_mpc_manager(receiver);
     let mpc_lock = hashi.mpc_manager().unwrap();
     let service = crate::grpc::HttpService::new(hashi);
-    let send = |messages: &RotationMessages| {
-        let wire = prost::Message::encode_to_vec(
-            &SendMessagesRequest {
-                messages: Messages::Rotation(messages.clone()),
-            }
-            .to_proto(epoch),
-        );
+    let send = |map: proto::RotationMessages| {
+        let wire = prost::Message::encode_to_vec(&proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: Some(proto::send_messages_request::Messages::RotationMessages(
+                map,
+            )),
+        });
         let mut request = tonic::Request::new(
             <proto::SendMessagesRequest as prost::Message>::decode(wire.as_slice()).unwrap(),
         );
@@ -19548,23 +19551,42 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     };
 
     let held = mpc_lock.write().unwrap();
-    let handler = send(&oversized);
-    let refused = rt
-        .block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
-        .expect("the refusal waited for the manager lock")
-        .unwrap()
-        .unwrap_err();
+    for (entries, reason) in [
+        (
+            unowned_first,
+            "share index 65535 is zero or not owned by the dealer".to_string(),
+        ),
+        (
+            duplicated,
+            format!("share index {} appears more than once", honest[0].0),
+        ),
+        (
+            oversized,
+            format!(
+                "{} entries, at most {} allowed",
+                honest.len() + 1,
+                honest.len()
+            ),
+        ),
+    ] {
+        let handler = send(entries.into_iter().collect());
+        let refused = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
+            .expect("the refusal waited for the manager lock")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert!(
+            refused
+                .message()
+                .contains(&format!("count check: rotation_messages: {reason}")),
+            "{}",
+            refused.message()
+        );
+    }
     drop(held);
-    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
-    assert!(
-        refused
-            .message()
-            .contains("Share index 65535 does not belong to dealer"),
-        "{}",
-        refused.message()
-    );
 
-    let accepted = rt.block_on(send(&honest)).unwrap();
+    let accepted = rt.block_on(send(honest.into_iter().collect())).unwrap();
     assert!(accepted.is_ok(), "{accepted:?}");
 }
 

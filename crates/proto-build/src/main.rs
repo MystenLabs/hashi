@@ -67,6 +67,10 @@ fn main() {
         .boxed(".sui.hashi.v1alpha.OperatorInitRequest.request.withdraw")
         .extern_path(".google.rpc", "::sui_rpc::proto::google::rpc")
         .extern_path(".sui.rpc", "::sui_rpc::proto::sui::rpc")
+        .extern_path(
+            ".sui.hashi.v1alpha.RotationMessages",
+            "crate::proto::RotationMessages",
+        )
         .out_dir(&out_dir)
         .compile_fds(fds.clone())
     {

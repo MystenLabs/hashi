@@ -15,7 +15,7 @@ use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use hashi_types::proto;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 
@@ -50,16 +50,16 @@ impl Refused {
 
 pub(crate) fn certified_retrieval(
     protocol_type: ProtocolTypeIndicator,
-    response: &proto::RetrieveMessagesResponse,
+    response: proto::RetrieveMessagesResponse,
     expected: MessagesHash,
 ) -> Result<PreparedMessages, Refused> {
     use proto::retrieve_messages_response::Messages as Wire;
-    match (protocol_type, &response.messages) {
+    match (protocol_type, response.messages) {
         (ProtocolTypeIndicator::Dkg, Some(Wire::DkgMessage(message))) => {
-            Cached::certified(bytes(message), expected).map(PreparedMessages::Dkg)
+            Cached::certified(bytes(&message), expected).map(PreparedMessages::Dkg)
         }
         (ProtocolTypeIndicator::KeyRotation, Some(Wire::RotationMessages(map))) => {
-            rotation_blob(&map.messages)
+            rotation_blob(map)
                 .and_then(|blob| Cached::certified(&blob, expected).map(PreparedMessages::Rotation))
         }
         (protocol_type, _) => Err(Refused::Variant(format!(
@@ -143,22 +143,37 @@ pub(crate) fn complaint_response_limit(responder_weight: u16) -> usize {
     2 * count_check::avss_complaint_response_size(responder_weight) + 1024
 }
 
-fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, Refused> {
-    let mut entries = map
-        .iter()
-        .map(|(&index, message)| {
-            u16::try_from(index)
-                .ok()
-                .filter(|index| *index != 0)
-                .map(|index| (index.to_le_bytes(), bytes(message)))
-                .ok_or(Refused::Shape(index))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_unstable_by_key(|(key, _)| *key);
+fn rotation_blob(map: proto::RotationMessages) -> Result<Vec<u8>, Refused> {
+    const FIELD: &str = "rotation_messages";
+    let max = usize::from(u16::MAX);
+    (map.len() <= max)
+        .then_some(())
+        .ok_or(CountCheckError::TooMany {
+            field: FIELD,
+            found: map.len(),
+            max,
+        })?;
+    let mut entries = BTreeMap::new();
+    for entry in map.into_entries() {
+        let (key, message) = entry.map_err(|e| Refused::Decode(format!("{FIELD}: {e}")))?;
+        let index = u16::try_from(key)
+            .ok()
+            .filter(|index| *index != 0)
+            .ok_or(Refused::Shape(key))?;
+        if entries
+            .insert(index.to_le_bytes(), message.value.unwrap_or_default())
+            .is_some()
+        {
+            return Err(Refused::Count(CountCheckError::DuplicateKey {
+                field: FIELD,
+                index,
+            }));
+        }
+    }
     let mut blob = Vec::with_capacity(
         5 + entries
             .iter()
-            .map(|(key, message)| key.len() + message.len())
+            .map(|(key, value)| key.len() + value.len())
             .sum::<usize>(),
     );
     let mut count = entries.len();
@@ -167,9 +182,9 @@ fn rotation_blob(map: &HashMap<u32, Bcs>) -> Result<Vec<u8>, Refused> {
         count >>= 7;
     }
     blob.push(count as u8);
-    for (key, message) in entries {
-        blob.extend_from_slice(&key);
-        blob.extend_from_slice(message);
+    for (key, value) in &entries {
+        blob.extend_from_slice(key);
+        blob.extend_from_slice(value);
     }
     Ok(blob)
 }
@@ -213,5 +228,48 @@ mod tests {
             signature: Some(vec![0; 96].into()),
         };
         assert!(reply.encoded_len() <= crate::grpc::SIGNATURE_REPLY_LIMIT);
+    }
+
+    #[test]
+    fn a_held_rotation_map_is_refused_before_its_blob_is_rebuilt() {
+        let held = |entries: Vec<(u32, Bcs)>| {
+            let wire = proto::RetrieveMessagesResponse {
+                messages: Some(
+                    proto::retrieve_messages_response::Messages::RotationMessages(
+                        entries.into_iter().collect(),
+                    ),
+                ),
+            }
+            .encode_to_vec();
+            proto::RetrieveMessagesResponse::decode(wire.as_slice()).unwrap()
+        };
+        let refused = |response: proto::RetrieveMessagesResponse| {
+            certified_retrieval(
+                ProtocolTypeIndicator::KeyRotation,
+                response,
+                MessagesHash::from([7; 32]),
+            )
+            .err()
+            .unwrap()
+        };
+
+        assert!(matches!(
+            refused(held(
+                (0..=u32::from(u16::MAX))
+                    .map(|key| (key, Bcs::default()))
+                    .collect()
+            )),
+            Refused::Count(CountCheckError::TooMany { found: 65_536, .. })
+        ));
+        assert!(matches!(
+            refused(held(vec![(1, Bcs::default()), (1, Bcs::default())])),
+            Refused::Count(CountCheckError::DuplicateKey { index: 1, .. })
+        ));
+        assert!(matches!(
+            refused(
+                proto::RetrieveMessagesResponse::decode(&[0x12, 3, 0x0a, 1, 0x08][..]).unwrap()
+            ),
+            Refused::Decode(_)
+        ));
     }
 }
