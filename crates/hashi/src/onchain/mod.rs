@@ -2203,10 +2203,12 @@ async fn scrape_proposals(
 ) -> Result<(route::ContainerSeed, types::Proposals)> {
     let active_id = proposals.active.id;
     let executed_id = proposals.executed.id;
-    let ((mut active_seed, active), (executed_seed, executed)) = tokio::try_join!(
+    let ((mut active_seed, mut active), (executed_seed, executed)) = tokio::try_join!(
         scrape_proposal_bag(client.clone(), proposals.active, false, metrics),
         scrape_proposal_bag(client, proposals.executed, true, metrics),
     )?;
+    // Raced bag reads can overlap; executed membership is authoritative.
+    active.retain(|id, _| !executed.contains_key(id));
     active_seed.merge(executed_seed);
     Ok((
         active_seed,
@@ -2780,6 +2782,104 @@ mod boot_scrape_retry_tests {
                 .serve_with_incoming(incoming),
         );
         Client::new(format!("http://{addr}").as_str()).unwrap()
+    }
+
+    struct OverlappingProposalListing {
+        active_id: Address,
+        active: Vec<DynamicField>,
+        executed: Vec<DynamicField>,
+    }
+
+    #[tonic::async_trait]
+    impl StateService for OverlappingProposalListing {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let (fields, height) = if request.into_inner().parent() == self.active_id.to_string() {
+                (&self.active, "7")
+            } else {
+                (&self.executed, "8")
+            };
+            let mut response = tonic::Response::new(
+                ListDynamicFieldsResponse::default().with_dynamic_fields(fields.clone()),
+            );
+            response.metadata_mut().insert(
+                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+                height.parse().unwrap(),
+            );
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_proposal_bags_keep_executed_membership_only() {
+        let active_id = Address::from_static("0xa1");
+        let executed_id = Address::from_static("0xa2");
+        let overlapping_id = Address::from_static("0xb1");
+        let active_only_id = Address::from_static("0xb2");
+        let field = |id, wrapper_id: &str, executed| {
+            let proposal = move_types::Proposal {
+                id,
+                creator: Address::ZERO,
+                votes: vec![],
+                quorum_threshold_bps: 6667,
+                created_timestamp_ms: 123,
+                executed_timestamp_ms: if executed { Some(456) } else { None },
+                metadata: move_types::VecMap { contents: vec![] },
+                data: move_types::Upgrade {
+                    digest: vec![1, 2, 3],
+                    exclusive: true,
+                },
+            };
+            DynamicField::default()
+                .with_field_id(wrapper_id)
+                .with_field_object(Object::default().with_version(1))
+                .with_child_object(
+                    Object::default()
+                        .with_object_id(id.to_string())
+                        .with_version(if executed { 2 } else { 1 })
+                        .with_object_type("0x41::proposal::Proposal<0x42::upgrade::Upgrade>")
+                        .with_contents(Bcs::serialize(&proposal).unwrap()),
+                )
+        };
+        // The active read precedes execution, while the executed read follows it.
+        let client = spawn_state_service(OverlappingProposalListing {
+            active_id,
+            active: vec![
+                field(overlapping_id, "0xc1", false),
+                field(active_only_id, "0xc2", false),
+            ],
+            executed: vec![field(overlapping_id, "0xc3", true)],
+        })
+        .await;
+        let (_, proposals) = scrape_proposals(
+            client,
+            move_types::Proposals {
+                active: move_types::ObjectBag {
+                    id: active_id,
+                    size: 2,
+                },
+                executed: move_types::ObjectBag {
+                    id: executed_id,
+                    size: 1,
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(proposals.active_id, active_id);
+        assert_eq!(proposals.executed_id, executed_id);
+        assert_eq!(
+            proposals.active.keys().copied().collect::<Vec<_>>(),
+            vec![active_only_id],
+        );
+        assert_eq!(
+            proposals.executed.keys().copied().collect::<Vec<_>>(),
+            vec![overlapping_id],
+        );
     }
 
     struct VanishedFieldListing;
