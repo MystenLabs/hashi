@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FALLBACK_VERSION="testnet-v1.63.1"
+FALLBACK_VERSION="testnet-v1.82.2"
 S3_BASE_URL="https://sui-releases.s3-accelerate.amazonaws.com"
 
 echo "Detecting latest Sui testnet version with a published binary..."
