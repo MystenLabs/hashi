@@ -116,7 +116,10 @@ impl DepositStateMachine {
 
     /// The deposit Bitcoin confirmed, if any.
     pub fn into_confirmed(self) -> Option<ConfirmedDeposit> {
-        self.confirmed().cloned()
+        match self.btc_answer {
+            BtcAnswer::Paid(deposit) => Some(deposit),
+            BtcAnswer::Pending | BtcAnswer::NotPaid | BtcAnswer::Lapsed => None,
+        }
     }
 
     /// The request seen again. One with other contents is a finding and is

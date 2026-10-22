@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use hashi_types::guardian::time::UnixSeconds;
 use prometheus::Encoder;
+use prometheus::IntGauge;
 use prometheus::IntGaugeVec;
 use prometheus::Opts;
 use prometheus::Registry;
@@ -27,6 +28,8 @@ pub const SOURCE_SNAPSHOT: &str = "snapshot";
 
 pub struct MonitorMetrics {
     registry: Registry,
+    pool_utxo_count: IntGauge,
+    oldest_utxo_timestamp_seconds: IntGauge,
     /// Unix time of the latest finding per category; 0 until one is reported.
     last_finding_timestamp_seconds: IntGaugeVec,
     /// Unix time each source has been checked through: the Sui and guardian
@@ -63,6 +66,23 @@ impl MonitorMetrics {
         )
         .expect("valid metric");
 
+        let pool_utxo_count = IntGauge::new(
+            "hashi_monitor_pool_utxo_count",
+            "Number of UTXOs held in the monitor pool",
+        )
+        .expect("valid metric");
+        let oldest_utxo_timestamp_seconds = IntGauge::new(
+            "hashi_monitor_oldest_utxo_timestamp_seconds",
+            "Earliest held UTXO block timestamp in Unix seconds; 0 for an empty pool",
+        )
+        .expect("valid metric");
+        registry
+            .register(Box::new(pool_utxo_count.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(oldest_utxo_timestamp_seconds.clone()))
+            .expect("register");
+
         registry
             .register(Box::new(last_finding_timestamp_seconds.clone()))
             .expect("register");
@@ -89,6 +109,8 @@ impl MonitorMetrics {
 
         Self {
             registry,
+            pool_utxo_count,
+            oldest_utxo_timestamp_seconds,
             last_finding_timestamp_seconds,
             checked_through_timestamp_seconds,
         }
@@ -131,6 +153,13 @@ impl MonitorMetrics {
         self.checked_through_timestamp_seconds
             .with_label_values(&[source])
             .set(gauge_value(timestamp));
+    }
+
+    pub fn set_utxo_pool(&self, count: usize, oldest_timestamp: Option<UnixSeconds>) {
+        self.pool_utxo_count
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+        self.oldest_utxo_timestamp_seconds
+            .set(gauge_value(oldest_timestamp.unwrap_or_default()));
     }
 
     fn render(&self) -> String {

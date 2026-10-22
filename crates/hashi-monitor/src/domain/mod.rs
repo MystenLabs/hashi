@@ -21,6 +21,7 @@
 //! Formatting of times lives in `time`, and the bridge keys in `keys`.
 
 pub mod deposit;
+pub mod utxo_pool;
 pub mod withdrawal;
 
 use bitcoin::OutPoint;
