@@ -20,6 +20,7 @@ use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -414,21 +415,21 @@ fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> Fee
 /// counts, script-path 2-of-2 inputs, and the declared outputs. Matches the
 /// leader-side `TransactionBuilder::weight` term for term, so validator
 /// estimates cannot drift below what coin selection priced.
-fn estimated_withdrawal_tx_weight(
+fn estimated_withdrawal_tx_weight<'a>(
     input_count: usize,
-    outputs: &[OutputUtxo],
+    outputs: impl IntoIterator<Item = &'a OutputUtxo>,
 ) -> anyhow::Result<Weight> {
     let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * input_count as u64;
-    let output_weight: u64 = outputs
-        .iter()
-        .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .iter()
-        .sum();
+    let mut output_count = 0u64;
+    let mut output_weight = 0u64;
+    for output in outputs {
+        output_count += 1;
+        output_weight += hashi_bitcoin::output_weight_for_witness_program(&output.bitcoin_address)?;
+    }
     Ok(
         Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight)
             + utxo_pool::varint_weight(input_count as u64)
-            + utxo_pool::varint_weight(outputs.len() as u64),
+            + utxo_pool::varint_weight(output_count),
     )
 }
 
@@ -478,6 +479,92 @@ fn validate_commitment_shape(
         WITHDRAWAL_MAX_CHANGE_OUTPUTS,
     );
     Ok(())
+}
+
+pub(crate) fn check_commitment_shape(approval: &WithdrawalTxCommitment) -> anyhow::Result<()> {
+    anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
+    anyhow::ensure!(!approval.selected_utxos.is_empty(), "No selected UTXOs");
+    anyhow::ensure!(!approval.outputs.is_empty(), "No outputs");
+    validate_commitment_shape(
+        approval.request_ids.len(),
+        approval.selected_utxos.len(),
+        &approval.outputs,
+    )?;
+    let unique_request_ids: BTreeSet<_> = approval.request_ids.iter().collect();
+    anyhow::ensure!(
+        unique_request_ids.len() == approval.request_ids.len(),
+        "Duplicate request IDs"
+    );
+    let unique_utxo_ids: BTreeSet<_> = approval.selected_utxos.iter().collect();
+    anyhow::ensure!(
+        unique_utxo_ids.len() == approval.selected_utxos.len(),
+        "Duplicate UTXO IDs"
+    );
+    Ok(())
+}
+
+enum InputCheck {
+    Refused(Vec<RefusedItem>),
+    Passed {
+        utxos: Vec<Utxo>,
+        ancestors: (Weight, u64),
+    },
+}
+
+fn check_selected_inputs(
+    selected_utxos: &[UtxoId],
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+    mut refused: Vec<RefusedItem>,
+) -> InputCheck {
+    let mut ancestry = UnconfirmedAncestry::new(withdrawal_txns, utxo_records);
+    let mut utxos = Vec::with_capacity(selected_utxos.len());
+    for id in selected_utxos {
+        let refuse =
+            |reason, message| RefusedItem::new(CommitmentItem::Input(*id), reason, message);
+        let Some(record) = utxo_records.get(id) else {
+            refused.push(refuse(
+                "input_missing",
+                format!("UTXO {id:?} not found in the pool"),
+            ));
+            continue;
+        };
+        if let Some(spent_by) = record.spent_by {
+            refused.push(refuse(
+                "input_locked",
+                format!("UTXO {id:?} is locked by pending withdrawal {spent_by:?}"),
+            ));
+            continue;
+        }
+        let depth = ancestry.depth(record);
+        if depth >= MAX_ANCESTOR_DEPTH {
+            refused.push(refuse(
+                "input_ancestor_depth",
+                format!(
+                    "UTXO {id:?} has an unconfirmed ancestor chain of depth {depth} \
+                     which, together with the new transaction, would exceed \
+                     Bitcoin Core's ancestor limit of {MAX_ANCESTOR_DEPTH}"
+                ),
+            ));
+            continue;
+        }
+        utxos.push(record.utxo.clone());
+    }
+    if !refused.is_empty() {
+        return InputCheck::Refused(refused);
+    }
+    InputCheck::Passed {
+        utxos,
+        ancestors: ancestry.package(),
+    }
+}
+
+pub(crate) struct PreparedCommitment {
+    selected_utxos: Vec<Utxo>,
+    fee: u64,
+    tx_weight: Weight,
+    ancestor_weight: Weight,
+    ancestor_fee: u64,
 }
 
 fn below_withdrawal_dust(amount: u64) -> bool {
@@ -660,47 +747,21 @@ impl Hashi {
 
     // --- Step 2: Construction approval (with UTXO selection) ---
 
-    #[tracing::instrument(level = "info", skip_all, fields(bitcoin_txid = %approval.txid))]
-    pub async fn validate_and_sign_withdrawal_tx_commitment(
-        &self,
-        approval: &WithdrawalTxCommitment,
-    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        self.validate_withdrawal_tx_commitment(approval).await?;
-        self.sign_withdrawal_tx_commitment(approval)
-    }
-
     #[tracing::instrument(level = "debug", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
-        anyhow::ensure!(!approval.selected_utxos.is_empty(), "No selected UTXOs");
-        anyhow::ensure!(!approval.outputs.is_empty(), "No outputs");
+        let prepared = self.prepare_withdrawal_tx_commitment(approval)?;
+        let fee_rate = self.withdrawal_commitment_fee_rate().await?;
+        self.finish_withdrawal_tx_commitment(approval, &prepared, fee_rate)
+    }
 
-        // Check for duplicate request IDs
-        let unique_request_ids: std::collections::BTreeSet<_> =
-            approval.request_ids.iter().collect();
-        anyhow::ensure!(
-            unique_request_ids.len() == approval.request_ids.len(),
-            "Duplicate request IDs"
-        );
-
-        // Check for duplicate UTXO IDs
-        let unique_utxo_ids: std::collections::BTreeSet<_> =
-            approval.selected_utxos.iter().collect();
-        anyhow::ensure!(
-            unique_utxo_ids.len() == approval.selected_utxos.len(),
-            "Duplicate UTXO IDs"
-        );
-
-        // Leader and validators share the same compiled cap model, so a
-        // commitment an honest leader sized always validates here.
-        validate_commitment_shape(
-            approval.request_ids.len(),
-            approval.selected_utxos.len(),
-            &approval.outputs,
-        )?;
+    pub(crate) fn prepare_withdrawal_tx_commitment(
+        &self,
+        approval: &WithdrawalTxCommitment,
+    ) -> anyhow::Result<PreparedCommitment> {
+        check_commitment_shape(approval)?;
 
         // 1. Verify each request_id exists, is approved, and is not already
         //    committed into another withdrawal txn.
@@ -717,63 +778,21 @@ impl Hashi {
         //    full UTXO data. We look up via utxo_records so we can
         //    distinguish "missing" from "locked by another withdrawal" and
         //    also inspect the `produced_by` chain for ancestor depth.
-        let (utxo_records, withdrawal_txns) = {
+        let checked = {
+            // Only this call may run under the guard: another state read can deadlock.
             let state = self.onchain_state().state();
-            (
-                state.hashi().bitcoin().utxo_pool.utxo_records().clone(),
-                state
-                    .hashi()
-                    .bitcoin()
-                    .withdrawal_queue
-                    .withdrawal_txns()
-                    .clone(),
+            let bitcoin = state.hashi().bitcoin();
+            check_selected_inputs(
+                &approval.selected_utxos,
+                bitcoin.utxo_pool.utxo_records(),
+                bitcoin.withdrawal_queue.withdrawal_txns(),
+                refused,
             )
         };
-
-        let mut selected_records: Vec<&UtxoRecord> =
-            Vec::with_capacity(approval.selected_utxos.len());
-        for id in &approval.selected_utxos {
-            let refuse =
-                |reason, message| RefusedItem::new(CommitmentItem::Input(*id), reason, message);
-            let Some(record) = utxo_records.get(id) else {
-                refused.push(refuse(
-                    "input_missing",
-                    format!("UTXO {id:?} not found in the pool"),
-                ));
-                continue;
-            };
-            if let Some(spent_by) = record.spent_by {
-                refused.push(refuse(
-                    "input_locked",
-                    format!("UTXO {id:?} is locked by pending withdrawal {spent_by:?}"),
-                ));
-                continue;
-            }
-
-            // 2b. Verify that the UTXO's unconfirmed ancestor chain is not
-            //     deeper than Bitcoin Core's relay limit. The limit
-            //     (DEFAULT_ANCESTOR_LIMIT = 25) counts the candidate tx
-            //     itself, so the existing chain must leave room for the
-            //     transaction we are about to construct.
-            let depth = unconfirmed_ancestor_depth(record, &withdrawal_txns, &utxo_records);
-            if depth >= MAX_ANCESTOR_DEPTH {
-                refused.push(refuse(
-                    "input_ancestor_depth",
-                    format!(
-                        "UTXO {id:?} has an unconfirmed ancestor chain of depth {depth} \
-                         which, together with the new transaction, would exceed \
-                         Bitcoin Core's ancestor limit of {MAX_ANCESTOR_DEPTH}"
-                    ),
-                ));
-                continue;
-            }
-            selected_records.push(record);
-        }
-        if !refused.is_empty() {
-            return Err(RefusedItems(refused).into());
-        }
-
-        let selected_utxos: Vec<Utxo> = selected_records.iter().map(|r| r.utxo.clone()).collect();
+        let (selected_utxos, (ancestor_weight, ancestor_fee)) = match checked {
+            InputCheck::Refused(refused) => return Err(RefusedItems(refused).into()),
+            InputCheck::Passed { utxos, ancestors } => (utxos, ancestors),
+        };
 
         // 3. Verify output count: one per request, followed by zero or more
         //    trailing change outputs.
@@ -808,6 +827,7 @@ impl Hashi {
 
         // Verify each positional withdrawal output matches the expected amount and address.
         // request.btc_amount is the full withdrawal amount.
+        let mut refused = Vec::new();
         for (i, request) in requests.iter().enumerate() {
             let output = &approval.outputs[i];
             let expected_amount = request.btc_amount.saturating_sub(per_user_miner_fee);
@@ -867,66 +887,68 @@ impl Hashi {
                 .map(|limiter| limiter.view().config.max_bucket_capacity),
         )?;
 
-        // 6. Validate fee is reasonable. The ceiling covers the whole CPFP
-        //    package: a leader spending unconfirmed change must also cover
-        //    what its ancestors owe, so judging the transaction alone
-        //    would reject every legitimate rescue of a stalled settlement.
-        {
-            let tx_weight =
-                estimated_withdrawal_tx_weight(selected_utxos.len(), &approval.outputs)?;
+        let tx_weight = estimated_withdrawal_tx_weight(selected_utxos.len(), &approval.outputs)?;
+        let min_fee = self
+            .config
+            .withdrawal_min_fee_rate()
+            .max(FeeRate::from_sat_per_vb_unchecked(1))
+            .fee_wu(tx_weight)
+            .map(|a| a.to_sat())
+            .unwrap_or(0);
+        anyhow::ensure!(
+            fee >= min_fee,
+            "Fee {fee} sats is below minimum withdrawal fee {min_fee} sats"
+        );
+        Ok(PreparedCommitment {
+            selected_utxos,
+            fee,
+            tx_weight,
+            ancestor_weight,
+            ancestor_fee,
+        })
+    }
 
-            // Fee must honor the configured minimum and the relay floor (1 sat/vB).
-            let min_fee = self
-                .config
-                .withdrawal_min_fee_rate()
-                .max(FeeRate::from_sat_per_vb_unchecked(1))
-                .fee_wu(tx_weight)
-                .map(|a| a.to_sat())
-                .unwrap_or(0);
-            anyhow::ensure!(
-                fee >= min_fee,
-                "Fee {fee} sats is below minimum withdrawal fee {min_fee} sats"
-            );
+    pub(crate) async fn withdrawal_commitment_fee_rate(&self) -> anyhow::Result<FeeRate> {
+        let kyoto_fee_rate = self
+            .btc_monitor()
+            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
+            .await
+            .map_err(FeeEstimateUnavailable)?;
+        Ok(withdrawal_fee_rate(&self.config, kyoto_fee_rate))
+    }
 
-            // Allow the tolerance multiplier over what a correct leader
-            // would pay: its own fee plus any ancestor CPFP deficit.
-            let kyoto_fee_rate = self
-                .btc_monitor()
-                .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
-                .await
-                .map_err(FeeEstimateUnavailable)?;
-            let clamped_fee_rate = withdrawal_fee_rate(&self.config, kyoto_fee_rate);
-
-            let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
-                self,
-                &selected_records,
-                &withdrawal_txns,
-                &utxo_records,
-            );
-            let cpfp_deficit = clamped_fee_rate
-                .fee_wu(ancestor_weight)
-                .map(|a| a.to_sat())
-                .unwrap_or(0)
-                .saturating_sub(ancestor_fee);
-
-            let estimated_fee = clamped_fee_rate
-                .fee_wu(tx_weight)
-                .map(|a| a.to_sat())
-                .unwrap_or(0)
-                .saturating_add(cpfp_deficit);
-            let max_fee = estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
-            anyhow::ensure!(
-                fee <= max_fee,
-                "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
-                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x the estimate of \
-                 {estimated_fee} sats at {clamped_fee_rate}, including a \
-                 {cpfp_deficit} sat CPFP deficit for {ancestor_weight} of \
-                 unconfirmed ancestors)"
-            );
-        }
+    pub(crate) fn finish_withdrawal_tx_commitment(
+        &self,
+        approval: &WithdrawalTxCommitment,
+        prepared: &PreparedCommitment,
+        clamped_fee_rate: FeeRate,
+    ) -> anyhow::Result<()> {
+        let fee = prepared.fee;
+        let ancestor_weight = prepared.ancestor_weight;
+        // 6. The fee ceiling allows a multiple of what an honest leader pays,
+        //    including the CPFP deficit its unconfirmed ancestors owe.
+        let cpfp_deficit = clamped_fee_rate
+            .fee_wu(ancestor_weight)
+            .map(|a| a.to_sat())
+            .unwrap_or(0)
+            .saturating_sub(prepared.ancestor_fee);
+        let estimated_fee = clamped_fee_rate
+            .fee_wu(prepared.tx_weight)
+            .map(|a| a.to_sat())
+            .unwrap_or(0)
+            .saturating_add(cpfp_deficit);
+        let max_fee = estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
+        anyhow::ensure!(
+            fee <= max_fee,
+            "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
+             ({FEE_RATE_TOLERANCE_MULTIPLIER}x the estimate of \
+             {estimated_fee} sats at {clamped_fee_rate}, including a \
+             {cpfp_deficit} sat CPFP deficit for {ancestor_weight} of \
+             unconfirmed ancestors)"
+        );
 
         // 7. Rebuild unsigned tx and verify txid matches.
-        let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &approval.outputs)?;
+        let tx = self.build_unsigned_withdrawal_tx(&prepared.selected_utxos, &approval.outputs)?;
         let expected_txid = BitcoinTxid::from(tx.compute_txid());
         anyhow::ensure!(
             approval.txid == expected_txid,
@@ -967,7 +989,7 @@ impl Hashi {
         Ok(request)
     }
 
-    fn sign_withdrawal_tx_commitment(
+    pub(crate) fn sign_withdrawal_tx_commitment(
         &self,
         approval: &WithdrawalTxCommitment,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
@@ -1125,7 +1147,7 @@ impl Hashi {
                 let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
                 self.metrics.record_limiter_validate(
                     &result,
-                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
+                    metrics::GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
                 );
                 result.map_err(|e| {
                     anyhow!("Limiter rejected withdrawal {}: {e}", message.withdrawal_id)
@@ -1736,13 +1758,13 @@ impl Hashi {
         let tx_confirmations = fetch_withdrawal_tx_confirmations(self, &withdrawal_txns).await;
 
         // Map available (unlocked) UTXOs to UtxoCandidates.
+        let mut ancestry = UnconfirmedAncestry::new(&withdrawal_txns, &utxo_records);
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
             .filter(|r| {
                 r.spent_by.is_none()
                     && !excluded_inputs.contains(&r.utxo.id)
-                    && unconfirmed_ancestor_depth(r, &withdrawal_txns, &utxo_records)
-                        < MAX_ANCESTOR_DEPTH
+                    && ancestry.depth(r) < MAX_ANCESTOR_DEPTH
             })
             .map(|r| {
                 let status =
@@ -2324,104 +2346,104 @@ fn build_utxo_status(
 /// the deepest we can safely spend.
 pub const MAX_ANCESTOR_DEPTH: usize = 25;
 
-/// Count the number of unconfirmed ancestors for a UTXO record along its
-/// longest `produced_by` chain. Every ancestor that still appears in
-/// `withdrawal_txns` is conservatively treated as unconfirmed (we skip
-/// querying Bitcoin for actual confirmation counts). Commitment validation
-/// rejects UTXOs whose chain reaches `MAX_ANCESTOR_DEPTH`, and the builder
-/// skips the same UTXOs.
-fn unconfirmed_ancestor_depth(
-    record: &UtxoRecord,
-    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
-    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
-) -> usize {
-    record.produced_by.map_or(0, |producing_id| {
-        withdrawal_chain_depth(
-            producing_id,
+struct UnconfirmedAncestry<'a> {
+    withdrawal_txns: &'a BTreeMap<Address, WithdrawalTransaction>,
+    utxo_records: &'a BTreeMap<UtxoId, UtxoRecord>,
+    pending_txids: Option<HashSet<BitcoinTxid>>,
+    walked: HashMap<Address, Ancestor>,
+}
+
+struct Ancestor {
+    depth: usize,
+    weight: Weight,
+    fee: u64,
+}
+
+impl<'a> UnconfirmedAncestry<'a> {
+    fn new(
+        withdrawal_txns: &'a BTreeMap<Address, WithdrawalTransaction>,
+        utxo_records: &'a BTreeMap<UtxoId, UtxoRecord>,
+    ) -> Self {
+        Self {
             withdrawal_txns,
             utxo_records,
-            &mut HashMap::new(),
-        )
-    })
-}
-
-fn withdrawal_chain_depth(
-    wid: Address,
-    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
-    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
-    memo: &mut HashMap<Address, usize>,
-) -> usize {
-    if let Some(&depth) = memo.get(&wid) {
-        return depth;
-    }
-    let Some(txn) = withdrawal_txns.get(&wid) else {
-        return 0;
-    };
-    memo.insert(wid, MAX_ANCESTOR_DEPTH);
-    let deepest_parent = txn
-        .inputs
-        .iter()
-        .filter_map(|input| utxo_records.get(&input.id)?.produced_by)
-        .map(|parent| withdrawal_chain_depth(parent, withdrawal_txns, utxo_records, memo))
-        .max()
-        .unwrap_or(0);
-    let depth = 1 + deepest_parent;
-    memo.insert(wid, depth);
-    depth
-}
-
-/// Build the ancestor chain for a UTXO produced by `producing_id`. Each
-/// unconfirmed ancestor that still appears in `withdrawal_txns` gets
-/// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
-/// The walk is a BFS over the ancestor DAG, capped at
-/// [`MAX_ANCESTOR_DEPTH`] levels.
-/// Aggregate weight and fee of the unconfirmed ancestors of `records`,
-/// counted once each.
-///
-/// Mirrors `unconfirmed_ancestor_depth`: anything still in
-/// `withdrawal_txns` counts as unconfirmed, keeping validation
-/// deterministic without a Bitcoin round-trip. Entries linger until
-/// finality, so this is an upper bound on the leader's figure — it
-/// widens only the ceiling, which the on-chain per-request cap bounds.
-fn unconfirmed_ancestor_package(
-    hashi: &Hashi,
-    records: &[&UtxoRecord],
-    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
-    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
-) -> (Weight, u64) {
-    let mut seen: std::collections::HashSet<Address> = std::collections::HashSet::new();
-    let mut queue: std::collections::VecDeque<Address> = records
-        .iter()
-        .filter_map(|r| r.produced_by)
-        .collect::<std::collections::VecDeque<_>>();
-
-    let mut weight = Weight::ZERO;
-    let mut fee = 0u64;
-
-    while let Some(wid) = queue.pop_front() {
-        if !seen.insert(wid) {
-            continue;
+            pending_txids: None,
+            walked: HashMap::new(),
         }
+    }
+
+    fn depth(&mut self, record: &UtxoRecord) -> usize {
+        record
+            .produced_by
+            .map_or(0, |producing_id| self.chain_depth(producing_id))
+    }
+
+    fn package(&self) -> (Weight, u64) {
+        self.walked
+            .values()
+            .fold((Weight::ZERO, 0), |(weight, fee), ancestor| {
+                (weight + ancestor.weight, fee.saturating_add(ancestor.fee))
+            })
+    }
+
+    fn chain_depth(&mut self, wid: Address) -> usize {
+        if let Some(ancestor) = self.walked.get(&wid) {
+            return ancestor.depth;
+        }
+        let withdrawal_txns = self.withdrawal_txns;
         let Some(txn) = withdrawal_txns.get(&wid) else {
-            continue;
+            return 0;
         };
-        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()) else {
-            continue;
-        };
-
-        weight += signed_weight_of(&tx, txn.inputs.len());
-        let input_total: u64 = txn.inputs.iter().map(|u| u.amount).sum();
-        let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
-        fee = fee.saturating_add(input_total.saturating_sub(output_total));
-
-        for input_utxo in &txn.inputs {
-            if let Some(parent) = utxo_records.get(&input_utxo.id).and_then(|r| r.produced_by) {
-                queue.push_back(parent);
+        let (weight, fee) = withdrawal_txn_weight(txn).map_or((Weight::ZERO, 0), |weight| {
+            (weight, withdrawal_txn_fee(txn))
+        });
+        self.walked.insert(
+            wid,
+            Ancestor {
+                depth: MAX_ANCESTOR_DEPTH,
+                weight,
+                fee,
+            },
+        );
+        let mut deepest_parent = 0;
+        for input in &txn.inputs {
+            if let Some(parent) = self.parent(input) {
+                deepest_parent = deepest_parent.max(self.chain_depth(parent));
             }
         }
+        let depth = 1 + deepest_parent;
+        self.walked.insert(wid, Ancestor { depth, weight, fee });
+        depth
     }
 
-    (weight, fee)
+    fn parent(&mut self, input: &Utxo) -> Option<Address> {
+        let withdrawal_txns = self.withdrawal_txns;
+        let pending_txids = self
+            .pending_txids
+            .get_or_insert_with(|| withdrawal_txns.values().map(|txn| txn.txid).collect());
+        if !pending_txids.contains(&input.id.txid) {
+            return None;
+        }
+        self.utxo_records.get(&input.id)?.produced_by
+    }
+}
+
+fn withdrawal_txn_weight(txn: &WithdrawalTransaction) -> anyhow::Result<Weight> {
+    estimated_withdrawal_tx_weight(
+        txn.inputs.len(),
+        txn.withdrawal_outputs.iter().chain(&txn.change_outputs),
+    )
+}
+
+fn withdrawal_txn_fee(txn: &WithdrawalTransaction) -> u64 {
+    let input_total: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+    let output_total: u64 = txn
+        .withdrawal_outputs
+        .iter()
+        .chain(&txn.change_outputs)
+        .map(|o| o.amount)
+        .sum();
+    input_total.saturating_sub(output_total)
 }
 
 /// Weight of a withdrawal transaction once signed.
@@ -2789,6 +2811,7 @@ mod tests {
             let wid = Address::new([level; 32]);
             let mut txn = make_txn(vec![1; 3], vec![1], vec![1; 3]);
             txn.id = wid;
+            txn.txid = BitcoinTxid::new([level; 32]);
             txn.inputs = (0..3)
                 .map(|vout| Utxo {
                     id: test_utxo_id(level - 1, vout),
@@ -2806,16 +2829,114 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let tip = &utxo_records[&test_utxo_id(depth, 0)];
-            let _ = sender.send(unconfirmed_ancestor_depth(
-                tip,
-                &withdrawal_txns,
-                &utxo_records,
-            ));
+            let _ =
+                sender.send(UnconfirmedAncestry::new(&withdrawal_txns, &utxo_records).depth(tip));
         });
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(10)),
             Ok(usize::from(depth))
         );
+    }
+
+    fn change_chain(
+        levels: u8,
+    ) -> (
+        BTreeMap<Address, WithdrawalTransaction>,
+        BTreeMap<UtxoId, UtxoRecord>,
+    ) {
+        let mut withdrawal_txns = BTreeMap::new();
+        let mut utxo_records = BTreeMap::new();
+        for level in 1..=levels {
+            let wid = Address::new([level; 32]);
+            let mut txn = make_txn(vec![10_000], vec![1_000], vec![8_000]);
+            txn.id = wid;
+            txn.txid = BitcoinTxid::new([level; 32]);
+            txn.inputs[0].id = test_utxo_id(level - 1, 1);
+            withdrawal_txns.insert(wid, txn);
+            let change = test_utxo_id(level, 1);
+            let spender = (level < levels).then(|| Address::new([level + 1; 32]));
+            utxo_records.insert(change, test_utxo_record(change, Some(wid), spender));
+        }
+        (withdrawal_txns, utxo_records)
+    }
+
+    #[test]
+    fn selected_inputs_reach_every_ancestor_through_change() {
+        let (mut withdrawal_txns, utxo_records) = change_chain(2);
+        let expected_weight = withdrawal_txns
+            .values()
+            .map(|txn| {
+                let unsigned =
+                    hashi_bitcoin::unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()).unwrap();
+                signed_weight_of(&unsigned, txn.inputs.len())
+            })
+            .fold(Weight::ZERO, |sum, weight| sum + weight);
+        let mut unrelated = make_txn(vec![10_000], vec![1_000], vec![8_000]);
+        unrelated.id = Address::new([9; 32]);
+        unrelated.txid = BitcoinTxid::new([9; 32]);
+        withdrawal_txns.insert(unrelated.id, unrelated);
+        let InputCheck::Passed { utxos, ancestors } = check_selected_inputs(
+            &[test_utxo_id(2, 1)],
+            &utxo_records,
+            &withdrawal_txns,
+            vec![],
+        ) else {
+            panic!("a change input two levels deep passes");
+        };
+        assert_eq!(utxos.len(), 1);
+        assert_eq!(ancestors, (expected_weight, 2_000));
+
+        let (withdrawal_txns, utxo_records) = change_chain(25);
+        let InputCheck::Refused(refused) = check_selected_inputs(
+            &[test_utxo_id(25, 1)],
+            &utxo_records,
+            &withdrawal_txns,
+            vec![],
+        ) else {
+            panic!("a change input 25 levels deep is refused");
+        };
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].reason, "input_ancestor_depth");
+
+        let (withdrawal_txns, utxo_records) = change_chain(2);
+        let request = RefusedItem::new(
+            CommitmentItem::Request(Address::new([7; 32])),
+            "request_missing",
+            String::new(),
+        );
+        let InputCheck::Refused(refused) = check_selected_inputs(
+            &[test_utxo_id(2, 1)],
+            &utxo_records,
+            &withdrawal_txns,
+            vec![request],
+        ) else {
+            panic!("a refused request refuses the commitment");
+        };
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].reason, "request_missing");
+    }
+
+    #[test]
+    fn pending_txn_weight_matches_the_built_transaction() {
+        for inputs in [1, 252, 253, 400] {
+            for (withdrawals, change) in [(1, 0), (1, 2), (251, 1), (251, 2), (252, 2)] {
+                let mut txn = make_txn(
+                    vec![1_000; inputs],
+                    vec![1_000; withdrawals],
+                    vec![1_000; change],
+                );
+                for output in txn.withdrawal_outputs.iter_mut().step_by(2) {
+                    output.bitcoin_address = vec![1; 20];
+                }
+                let unsigned =
+                    hashi_bitcoin::unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()).unwrap();
+                assert_eq!(
+                    withdrawal_txn_weight(&txn).unwrap(),
+                    signed_weight_of(&unsigned, inputs),
+                    "{inputs} inputs, {withdrawals} withdrawal and {change} change outputs",
+                );
+            }
+        }
     }
 
     #[test]
