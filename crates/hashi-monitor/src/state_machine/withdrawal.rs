@@ -113,6 +113,13 @@ impl WithdrawalStateMachine {
             .any(|(event, _, _)| *event == event_type)
     }
 
+    /// Permit Bitcoin lookups only after both Sui and guardian approvals arrive.
+    pub fn expects_btc(&self) -> bool {
+        self.get(WithdrawalEventType::E1HashiApproved).is_some()
+            && self.get(WithdrawalEventType::E2GuardianApproved).is_some()
+            && self.expects(WithdrawalEventType::E3BtcConfirmed)
+    }
+
     /// Whether every expected event was seen, so the pool can take the flow
     /// and the auditor can drop it.
     ///
@@ -240,7 +247,7 @@ impl WithdrawalStateMachine {
         btc_rpc_client: &BtcRpcClient,
         checked_at: UnixSeconds,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
-        if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
+        if !self.expects_btc() {
             return Ok(Vec::new());
         }
 
@@ -437,6 +444,7 @@ mod tests {
             &timing,
         );
         assert!(sm.expects(WithdrawalEventType::E2GuardianApproved));
+        assert!(!sm.expects_btc());
 
         assert!(
             sm.add_event(
@@ -445,7 +453,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(sm.expects(WithdrawalEventType::E3BtcConfirmed));
+        assert!(sm.expects_btc());
 
         assert!(
             sm.add_event(
@@ -456,6 +464,27 @@ mod tests {
         );
 
         assert!(sm.is_ready_for_gc());
+        assert!(!sm.expects_btc());
+    }
+
+    #[test]
+    fn bitcoin_lookups_wait_for_sui_after_guardian_approval() {
+        let timing = Timing::for_tests();
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E2GuardianApproved, 9, 150, 7),
+            &timing,
+        );
+        assert!(sm.expects(WithdrawalEventType::E3BtcConfirmed));
+        assert!(!sm.expects_btc());
+
+        assert!(
+            sm.add_event(
+                event(WithdrawalEventType::E1HashiApproved, 9, 100, 7),
+                &timing,
+            )
+            .is_empty()
+        );
+        assert!(sm.expects_btc());
     }
 
     #[test]
@@ -479,7 +508,7 @@ mod tests {
         );
         assert!(sm.get(WithdrawalEventType::E2GuardianApproved).is_some());
         assert!(!sm.expects(WithdrawalEventType::E2GuardianApproved));
-        assert!(sm.expects(WithdrawalEventType::E3BtcConfirmed));
+        assert!(sm.expects_btc());
     }
 
     #[test]

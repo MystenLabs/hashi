@@ -11,10 +11,11 @@
 //! 1. Restore the source positions, flow machines, UTXO pool, and finding times from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
 //! 3. Read Sui events and guardian logs into the flow machines.
-//! 4. Check Bitcoin confirmations, then add completed flows to the pool before the next source poll.
-//! 5. Check the pool at startup and `UTXO_CHECK_INTERVAL` seconds after the last successful check.
-//! 6. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
-//! 7. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
+//! 4. Check Bitcoin confirmations after both withdrawal approvals arrive.
+//! 5. Update the pool every `POOL_MAINTENANCE_INTERVAL` and check Bitcoin when the daily check is due.
+//! 6. Run pool maintenance at startup. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
+//! 7. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
+//! 8. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //!
 //! Assumptions:
 //! - Sui must retain the required history at startup.
@@ -23,10 +24,8 @@
 use crate::config::Config;
 use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
-use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
-use crate::domain::PollOutcome;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::WithdrawalEventType;
@@ -38,12 +37,7 @@ use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SNAPSHOT;
 use crate::metrics::SOURCE_SUI;
 use crate::metrics::SOURCE_UTXO;
-use crate::rpc::btc::BtcRpcClient;
-use crate::rpc::btc::checked_confirmation_threshold;
-use crate::rpc::guardian::GuardianWithdrawalsPoller;
-use crate::rpc::sui::SuiEventsPoller;
 use crate::rpc::sui::package_genesis;
-use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use crate::store::AuditState;
@@ -58,6 +52,7 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use pool::SuspectSpend;
 use pool::UtxoPool;
+use rpc_pollers::RpcPollers;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -66,6 +61,7 @@ use std::time::Duration;
 use sui_sdk_types::Address;
 
 pub mod pool;
+mod rpc_pollers;
 
 /// How often Sui is polled. A deposit approval must reach the monitor
 /// early in Move's delay before the mint, ten minutes by default.
@@ -79,17 +75,20 @@ const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// How often the guardian's log is polled. The withdrawal bounds are hours.
 const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
+/// How often pool maintenance runs.
+const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// How long after a successful pool check the next one is due, in seconds.
 /// Every tick runs on the one audit task, so a check delays the polls by
 /// the time its batched lookups take.
 const UTXO_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
-/// How often the state checks run.
-const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
 /// The UTXOs held longest that the daily check logs, for a look at the
 /// pool's age without the findings.
 const OLDEST_UTXOS_LOGGED: usize = 20;
+
+/// How often the state checks run.
+const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {
@@ -127,15 +126,13 @@ pub struct Auditor {
     utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
-    guardian_poller: GuardianWithdrawalsPoller,
-    sui_poller: SuiEventsPoller,
-    btc_client: BtcRpcClient,
+    rpc_pollers: RpcPollers,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
     store: SnapshotStore,
     /// When the last successful pool check started. `None` until one
     /// succeeds in this run.
-    last_pool_check: Option<UnixSeconds>,
+    last_successful_pool_check: Option<UnixSeconds>,
 }
 
 impl Auditor {
@@ -175,40 +172,30 @@ impl Auditor {
                 (genesis.timestamp, genesis.checkpoint)
             }
         };
-        let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
-        let (hashi_btc_keys, hashi_object_id) = guardian_poller
-            .read_hashi_identity(cfg.deployment.bitcoin_network)
-            .await?;
-        let confirmations = checked_confirmation_threshold(
-            read_confirmation_threshold(&cfg.sui, hashi_object_id).await?,
-            cfg.deployment.bitcoin_network,
-        )?;
-        tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
-        let sui_poller = SuiEventsPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?;
+        let rpc_pollers = RpcPollers::new(cfg, guardian_start, sui_start).await?;
         let mut auditor = Self {
             cfg: cfg.clone(),
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             utxo_pool: pool,
             suspect_spends: HashMap::new(),
-            guardian_poller,
-            sui_poller,
-            btc_client: BtcRpcClient::new(cfg, confirmations)?,
+            rpc_pollers,
             metrics,
             store,
-            last_pool_check: None,
+            last_successful_pool_check: None,
         };
         if let Some(state) = state {
             auditor.restore(state);
         }
         // A pruned start leaves the pool incomplete.
-        auditor.ensure_sui_serves_start().await?;
+        auditor.rpc_pollers.ensure_sui_serves_start().await?;
+        auditor.metrics.set_checked_through(
+            SOURCE_SUI,
+            auditor.rpc_pollers.sui_last_read_checkpoint_timestamp(),
+        );
         auditor
             .metrics
-            .set_checked_through(SOURCE_SUI, auditor.sui_cursor());
-        auditor
-            .metrics
-            .set_checked_through(SOURCE_GUARDIAN, auditor.guardian_cursor());
+            .set_checked_through(SOURCE_GUARDIAN, auditor.rpc_pollers.guardian_cursor());
         // Check write access at startup. A missing bucket loads as empty.
         auditor
             .store
@@ -224,8 +211,8 @@ impl Auditor {
     /// the snapshot.
     fn state(&self) -> AuditState {
         AuditState {
-            sui_next_checkpoint: self.sui_poller.next_checkpoint(),
-            guardian_cursor: self.guardian_cursor(),
+            sui_next_checkpoint: self.rpc_pollers.sui_next_checkpoint(),
+            guardian_cursor: self.rpc_pollers.guardian_cursor(),
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
@@ -257,11 +244,11 @@ impl Auditor {
             .collect()
     }
 
-    /// Ask Bitcoin about every UTXO held in the UTXO pool and return the
-    /// findings. The spends the pool cannot explain are kept as suspects
-    /// for `judge_suspect_spends`.
-    pub fn check_utxo_pool(&mut self) -> anyhow::Result<Vec<MonitorFinding>> {
-        self.btc_client.ensure_synced()?;
+    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `judge_suspect_spends`.
+    /// Report findings and record the check time after success.
+    fn check_utxo_pool(&mut self) -> anyhow::Result<()> {
+        let started_at = now_timestamp_secs();
+        self.rpc_pollers.btc_client.ensure_synced()?;
         let pool = &self.utxo_pool;
         let outpoints = pool.outpoints();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
@@ -287,7 +274,10 @@ impl Auditor {
             held = pool.len(),
             "the UTXOs held longest, by block time:{oldest_lines}"
         );
-        let states = self.btc_client.lookup_outpoint_states(&outpoints)?;
+        let states = self
+            .rpc_pollers
+            .btc_client
+            .lookup_outpoint_states(&outpoints)?;
         let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),
@@ -299,7 +289,17 @@ impl Auditor {
         for (outpoint, suspect) in suspects {
             self.suspect_spends.entry(outpoint).or_insert(suspect);
         }
-        Ok(findings)
+        self.report_findings(SOURCE_UTXO, &findings);
+        self.metrics.set_checked_through(SOURCE_UTXO, started_at);
+        self.last_successful_pool_check = Some(started_at);
+        Ok(())
+    }
+
+    /// Whether a pool check is due at `now`: none has succeeded in this run,
+    /// or the last one started `UTXO_CHECK_INTERVAL` ago or more.
+    fn pool_check_due(&self, now: UnixSeconds) -> bool {
+        self.last_successful_pool_check
+            .is_none_or(|last| now.saturating_sub(last) >= UTXO_CHECK_INTERVAL)
     }
 
     /// Judge the spends the pool check saw. One is unexpected once the Sui
@@ -311,7 +311,7 @@ impl Auditor {
     pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let named = self.pending_inputs();
         let taken = |outpoint: &OutPoint| self.utxo_pool.is_spent(outpoint);
-        let sui_cursor = self.sui_cursor();
+        let sui_cursor = self.rpc_pollers.sui_last_read_checkpoint_timestamp();
         let mut findings = Vec::new();
         let mut judged = Vec::new();
         for (outpoint, suspect) in &self.suspect_spends {
@@ -384,60 +384,6 @@ impl Auditor {
         findings
     }
 
-    /// Pings Bitcoin RPC for all relevant withdrawals & deposits.
-    /// Returns domain findings and bubbles up infra errors. `started_at` is
-    /// taken before the lookups, so the machines record it as their check time.
-    pub fn fetch_btc_info(
-        &mut self,
-        started_at: UnixSeconds,
-    ) -> anyhow::Result<Vec<MonitorFinding>> {
-        self.btc_client.ensure_synced()?;
-        // A "not confirmed yet" answer goes stale. A confirmed one is kept
-        // until no flow names its txid.
-        self.btc_client.forget_unconfirmed();
-        let withdrawal_count = self
-            .pending_withdrawals
-            .values()
-            .filter(|sm| sm.expects(WithdrawalEventType::E3BtcConfirmed))
-            .count();
-        let deposit_count = self
-            .pending_deposits
-            .values()
-            .filter(|sm| sm.expects_btc())
-            .count();
-        let unique_txids = self
-            .pending_withdrawals
-            .values()
-            .filter(|sm| sm.expects(WithdrawalEventType::E3BtcConfirmed))
-            .map(WithdrawalStateMachine::btc_txid)
-            .chain(
-                self.pending_deposits
-                    .values()
-                    .filter(|sm| sm.expects_btc())
-                    .map(DepositStateMachine::btc_txid),
-            )
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        tracing::info!(
-            withdrawal_count,
-            deposit_count,
-            unique_txids = unique_txids.len(),
-            "starting bitcoin confirmation lookups"
-        );
-        self.btc_client.prefetch_confirmations(&unique_txids)?;
-        let mut findings = Vec::new();
-        for sm in self.pending_withdrawals.values_mut() {
-            findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
-        }
-
-        for sm in self.pending_deposits.values_mut() {
-            findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
-        }
-
-        Ok(findings)
-    }
-
     /// Remove the deposit machines that closed since the last call. Returns
     /// the deposits Bitcoin confirmed, for the pool.
     fn take_closed_deposits(&mut self) -> Vec<ConfirmedDeposit> {
@@ -486,27 +432,14 @@ impl Auditor {
     pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
-            findings.extend(sm.timing_violations(&self.cursors()));
+            findings.extend(sm.timing_violations(&self.rpc_pollers.cursors()));
         }
         findings
     }
 
-    /// Add every complete flow to the UTXO pool, then drop it:
-    /// the pool takes the UTXOs the flow moved. A closed deposit machine is
-    /// dropped too; it judged its `DepositApproved` when it closed. The pool
-    /// takes
-    /// every deposit before any withdrawal, and a withdrawal's change before
-    /// its inputs, so the order the flows completed in does not matter.
-    /// Call it right after the Bitcoin lookups and before any other poll:
-    /// Bitcoin confirms a withdrawal only after the flows that made its
-    /// inputs, and one round of lookups answers them all, so the inputs
-    /// enter the pool before the withdrawal spends them. Sui and the
-    /// guardian order the flows the same way: Move lets a withdrawal lock
-    /// only a UTXO an earlier event brought in, and the leader has the
-    /// guardian sign withdrawals one at a time, oldest first. A withdrawal that
-    /// never completes never reaches the pool: its inputs stay held, and
-    /// the daily check reports them once they are too old, on top of the
-    /// finding for its missing event.
+    /// Add complete flows to the pool, then remove closed machines.
+    /// Call between ticks, after all Bitcoin results have been processed.
+    /// For complete withdrawals, dependent state machines must already be closed or ready to close.
     pub fn add_to_pool_and_gc(&mut self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         let confirmed_deposits = self.take_closed_deposits();
@@ -578,46 +511,8 @@ impl Auditor {
         (self.pending_withdrawals.len(), self.pending_deposits.len())
     }
 
-    /// Advance the Guardian cursor by one hourly S3 directory. Callers may loop
-    /// to catch up multiple directories in one tick.
-    pub async fn poll_guardian(&mut self) -> anyhow::Result<PollOutcome> {
-        self.guardian_poller.poll_one_hour().await
-    }
-
-    /// The newest checkpoint the Sui node serves.
-    pub async fn latest_sui_checkpoint(&mut self) -> anyhow::Result<u64> {
-        self.sui_poller.latest_checkpoint().await
-    }
-
-    /// Scan Sui up to checkpoint `up_to`, inclusive, one bounded range at a time.
-    /// Callers may loop to catch up.
-    pub async fn poll_sui(&mut self, up_to: u64) -> anyhow::Result<PollOutcome> {
-        self.sui_poller.poll(up_to).await
-    }
-
-    /// Fail unless the Sui node still serves the start. See
-    /// `SuiEventsPoller::ensure_start_is_served`.
-    pub async fn ensure_sui_serves_start(&mut self) -> anyhow::Result<()> {
-        self.sui_poller.ensure_start_is_served().await
-    }
-
     pub fn utxo_pool(&self) -> &UtxoPool {
         &self.utxo_pool
-    }
-
-    fn cursors(&self) -> Cursors {
-        Cursors {
-            sui: self.sui_cursor(),
-            guardian: self.guardian_cursor(),
-        }
-    }
-
-    fn sui_cursor(&self) -> UnixSeconds {
-        self.sui_poller.cursor_seconds()
-    }
-
-    fn guardian_cursor(&self) -> UnixSeconds {
-        self.guardian_poller.cursor_seconds()
     }
 
     /// Save the snapshot. A failed save is logged and does not stop the
@@ -641,6 +536,22 @@ impl Auditor {
         self.metrics.record_findings(findings, now_timestamp_secs());
     }
 
+    /// Update the pool, delete closed state machines, then run a due Bitcoin check.
+    /// Retry failed checks at the next maintenance tick.
+    fn tick_pool_maintenance(&mut self) {
+        let pool_findings = self.add_to_pool_and_gc();
+        self.report_findings("pool", &pool_findings);
+        if self.pool_check_due(now_timestamp_secs())
+            && let Err(error) = self.check_utxo_pool()
+        {
+            tracing::warn!(
+                source = SOURCE_UTXO,
+                ?error,
+                "UTXO pool check failed; retrying at the next pool maintenance tick"
+            );
+        }
+    }
+
     /// Log the outcome of one source's initial catch-up. A failure does not
     /// stop the audit: the source's next tick retries it.
     fn log_initial_catch_up(source: &'static str, result: anyhow::Result<()>) {
@@ -648,71 +559,6 @@ impl Auditor {
             Ok(()) => tracing::info!(source, "finished initial catch-up"),
             Err(error) => tracing::warn!(source, ?error, "initial catch-up failed; continuing"),
         }
-    }
-
-    async fn tick_sui(&mut self) -> anyhow::Result<()> {
-        // The head at the tick's start bounds the tick, so it ends.
-        let up_to = self.latest_sui_checkpoint().await?;
-        while let PollOutcome::CursorAdvanced { events, findings } = self.poll_sui(up_to).await? {
-            self.report_findings("sui", &findings);
-            self.ingest_batch(events);
-            self.metrics
-                .set_checked_through(SOURCE_SUI, self.sui_cursor());
-        }
-        Ok(())
-    }
-
-    async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        while let PollOutcome::CursorAdvanced { events, findings } = self.poll_guardian().await? {
-            self.report_findings("guardian", &findings);
-            self.ingest_batch(events);
-            self.metrics
-                .set_checked_through(SOURCE_GUARDIAN, self.guardian_cursor());
-        }
-        Ok(())
-    }
-
-    /// Fails if the Bitcoin RPC fails.
-    fn tick_utxo_check(&mut self) -> anyhow::Result<()> {
-        let started_at = now_timestamp_secs();
-        let findings = self.check_utxo_pool()?;
-        self.report_findings(SOURCE_UTXO, &findings);
-        self.metrics.set_checked_through(SOURCE_UTXO, started_at);
-        self.last_pool_check = Some(started_at);
-        Ok(())
-    }
-
-    /// Whether a pool check is due at `now`: none has succeeded in this run,
-    /// or the last one started `UTXO_CHECK_INTERVAL` ago or more.
-    fn pool_check_due(&self, now: UnixSeconds) -> bool {
-        self.last_pool_check
-            .is_none_or(|last| now.saturating_sub(last) >= UTXO_CHECK_INTERVAL)
-    }
-
-    /// Fails if the Bitcoin RPC fails. The complete flows are added to the
-    /// UTXO pool here, right after the lookups and before any other poll, so
-    /// the pool sees a withdrawal's inputs enter before the withdrawal
-    /// spends them: Bitcoin confirms a withdrawal only after the deposits
-    /// and withdrawals that made its inputs, and one round of lookups
-    /// answers them all.
-    fn tick_btc(&mut self) -> anyhow::Result<()> {
-        let started_at = now_timestamp_secs();
-        let findings = self.fetch_btc_info(started_at)?;
-        self.report_findings("btc", &findings);
-        self.metrics.set_checked_through(SOURCE_BTC, started_at);
-        let pool_findings = self.add_to_pool_and_gc();
-        self.report_findings("pool", &pool_findings);
-        // After the pool update, so the check sees the flows that completed.
-        if self.pool_check_due(started_at)
-            && let Err(error) = self.tick_utxo_check()
-        {
-            tracing::warn!(
-                source = SOURCE_UTXO,
-                ?error,
-                "UTXO pool check failed; retrying at the next Bitcoin tick"
-            );
-        }
-        Ok(())
     }
 
     async fn tick_state_checks(&mut self) {
@@ -724,8 +570,8 @@ impl Auditor {
         let (withdrawals, deposits) = self.open_flows();
         tracing::info!(
             "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}",
-            utc_timestamp(self.guardian_cursor()),
-            utc_timestamp(self.sui_cursor()),
+            utc_timestamp(self.rpc_pollers.guardian_cursor()),
+            utc_timestamp(self.rpc_pollers.sui_last_read_checkpoint_timestamp()),
             withdrawals,
             deposits,
             self.oldest_open_withdrawals(),
@@ -736,26 +582,28 @@ impl Auditor {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         tracing::info!(
             "starting continuous audit:\n  sui_start={}\n  guardian_start={}",
-            utc_timestamp(self.sui_cursor()),
-            utc_timestamp(self.guardian_cursor()),
+            utc_timestamp(self.rpc_pollers.sui_last_read_checkpoint_timestamp()),
+            utc_timestamp(self.rpc_pollers.guardian_cursor()),
         );
         let sui = self.tick_sui().await;
         Self::log_initial_catch_up(SOURCE_SUI, sui);
         let guardian = self.tick_guardian().await;
         Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
-        // The first Bitcoin tick also runs the first pool check.
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
+        self.tick_pool_maintenance();
         self.tick_state_checks().await;
 
         let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(BTC_POLL_INTERVAL);
+        let mut pool_maintenance_ticker = tokio::time::interval(POOL_MAINTENANCE_INTERVAL);
         let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
 
         sui_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         guardian_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        pool_maintenance_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // The initial catch-up above handled startup; consume each immediate
@@ -763,6 +611,7 @@ impl Auditor {
         sui_ticker.tick().await;
         guardian_ticker.tick().await;
         btc_ticker.tick().await;
+        pool_maintenance_ticker.tick().await;
         state_checks_ticker.tick().await;
 
         loop {
@@ -781,6 +630,9 @@ impl Auditor {
                     if let Err(error) = self.tick_btc() {
                         tracing::warn!(source = "btc", ?error, "btc tick failed; continuing");
                     }
+                }
+                _ = pool_maintenance_ticker.tick() => {
+                    self.tick_pool_maintenance();
                 }
                 _ = state_checks_ticker.tick() => {
                     self.tick_state_checks().await;
@@ -817,11 +669,7 @@ mod tests {
     use crate::domain::ConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
-    use crate::rpc::btc::BtcRpcClient;
-    use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
-    use crate::rpc::guardian::GuardianWithdrawalsPoller;
     use crate::rpc::sui::tests::hashi_approval;
-    use crate::rpc::sui::tests::poller_scanned;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
@@ -888,13 +736,11 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
-            sui_poller: poller_scanned(approved_at),
-            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
+            rpc_pollers: RpcPollers::for_tests(&cfg, approved_at),
             cfg,
             metrics: Arc::new(MonitorMetrics::new()),
             store: SnapshotStore::in_memory(),
-            last_pool_check: None,
+            last_successful_pool_check: None,
         }
     }
 
@@ -1064,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn a_suspect_spend_waits_while_the_sui_cursor_is_not_past_its_time() {
         let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.sui_cursor();
+        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
         let outpoint = OutPoint {
             txid: txid(9),
             vout: 1,
@@ -1084,7 +930,7 @@ mod tests {
     #[tokio::test]
     async fn a_suspect_spend_is_unexpected_once_the_sui_cursor_is_past_its_time() {
         let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.sui_cursor();
+        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
         let outpoint = OutPoint {
             txid: txid(9),
             vout: 1,
@@ -1114,7 +960,7 @@ mod tests {
     async fn a_suspect_spend_a_withdrawal_names_is_cleared_without_a_finding() {
         let mut auditor = auditor_with_pool().await;
         let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.sui_cursor();
+        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
         // `withdrawal_tx` spends `txid(0x51):1`.
         let outpoint = OutPoint {
             txid: txid(0x51),
@@ -1140,7 +986,7 @@ mod tests {
     async fn a_suspect_spend_the_pool_took_a_withdrawal_for_is_cleared_without_a_finding() {
         let mut auditor = auditor_with_pool().await;
         let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.sui_cursor();
+        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
         // `withdrawal_tx` spends `txid(0x51):1`.
         let outpoint = OutPoint {
             txid: txid(0x51),
@@ -1185,12 +1031,10 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, cursor),
-            sui_poller: poller_scanned(cursor),
-            btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
+            rpc_pollers: RpcPollers::for_tests(cfg, cursor),
             metrics,
             store: SnapshotStore::in_memory(),
-            last_pool_check: None,
+            last_successful_pool_check: None,
         }
     }
 
@@ -1252,7 +1096,7 @@ mod tests {
         let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         assert!(auditor.pool_check_due(1_000));
 
-        auditor.last_pool_check = Some(1_000);
+        auditor.last_successful_pool_check = Some(1_000);
         assert!(!auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL - 1));
         assert!(auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL));
     }
