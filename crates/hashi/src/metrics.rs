@@ -82,7 +82,6 @@ pub struct Metrics {
     pub guardian_limiter_last_updated_at_seconds: IntGauge,
     pub unknown_caller_refused_total: IntCounterVec,
     pub mpc_rpc_caller_refused_total: IntCounterVec,
-    pub mpc_rotation_messages_received_total: IntCounterVec,
     pub mpc_peer_refusals_total: IntCounterVec,
     pub(crate) mpc_peer_refusals_first_timestamp_seconds: IntGaugeVec,
     pub(crate) mpc_refusals_total: IntCounterVec,
@@ -755,13 +754,6 @@ impl Metrics {
                 "hashi_mpc_rpc_caller_refused_total",
                 "MPC RPC calls refused by the committee membership check, by handler, caller and reason",
                 &["handler", "peer", "reason"],
-                registry,
-            )
-            .unwrap(),
-            mpc_rotation_messages_received_total: register_int_counter_vec_with_registry!(
-                "hashi_mpc_rotation_messages_received_total",
-                "SendMessages requests carrying rotation messages that passed the gates and decoded, by wire shape: map or blob",
-                &["shape"],
                 registry,
             )
             .unwrap(),

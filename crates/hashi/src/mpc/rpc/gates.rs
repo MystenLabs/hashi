@@ -58,15 +58,6 @@ pub(super) fn check_send_messages(
                 )
             })
         }
-        Some(Messages::RotationMessagesBcs(messages)) => {
-            reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)?;
-            let owned = rotation_shares_of(shape, sender)?;
-            count_checked(
-                sender,
-                count_check::check_rotation_messages(bytes(messages), current.avss_shape(), &owned)
-                    .map(drop),
-            )
-        }
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
         }

@@ -56,7 +56,6 @@ impl MpcService for HttpService {
             .metrics()
             .mpc_rpc_handler_process_duration_seconds
             .clone();
-        let rotation_received = self.metrics().mpc_rotation_messages_received_total.clone();
         let refusals = self.metrics().refusal_counters();
         let response = spawn_blocking(move || -> Result<_, Status> {
             let shape = service.shape_params()?;
@@ -76,16 +75,6 @@ impl MpcService for HttpService {
                 .map_err(|e| send_messages_error(sender, e))?;
             let internal_request = types::SendMessagesRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
-            if let Some(wire_shape) = rotation_wire_shape(&external_request) {
-                rotation_received.with_label_values(&[wire_shape]).inc();
-                if wire_shape == "map" && shape.current().rotation_messages_bcs() {
-                    tracing::warn!(
-                        "send_messages from {sender:?}: epoch {} rotation messages arrived as a \
-                         proto map, but the epoch's committee selects one BCS blob",
-                        shape.epoch()
-                    );
-                }
-            }
             drop(external_request);
             let prepared = PreparedMessages::new(internal_request.messages);
             let label = match &prepared {
@@ -453,9 +442,7 @@ fn send_messages_protocol(request: &SendMessagesRequest) -> &'static str {
     use hashi_types::proto::send_messages_request::Messages;
     match &request.messages {
         Some(Messages::DkgMessage(_)) => crate::metrics::MPC_LABEL_DKG,
-        Some(Messages::RotationMessages(_) | Messages::RotationMessagesBcs(_)) => {
-            crate::metrics::MPC_LABEL_KEY_ROTATION
-        }
+        Some(Messages::RotationMessages(_)) => crate::metrics::MPC_LABEL_KEY_ROTATION,
         Some(Messages::AvidNonceMessage(_)) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
         None => "unspecified",
     }
@@ -532,15 +519,6 @@ struct SetOnDrop(Arc<AtomicBool>);
 impl Drop for SetOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
-    }
-}
-
-fn rotation_wire_shape(request: &SendMessagesRequest) -> Option<&'static str> {
-    use hashi_types::proto::send_messages_request::Messages;
-    match &request.messages {
-        Some(Messages::RotationMessages(_)) => Some("map"),
-        Some(Messages::RotationMessagesBcs(_)) => Some("blob"),
-        _ => None,
     }
 }
 

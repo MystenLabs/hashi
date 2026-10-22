@@ -67,8 +67,8 @@ message AvidNonceEcho {
 }
 
 message SendMessagesRequest {
-  reserved 4;
-  reserved "nonce_message";
+  reserved 4, 6;
+  reserved "nonce_message", "rotation_messages_bcs";
 
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
@@ -82,9 +82,6 @@ message SendMessagesRequest {
 
     // For AVID nonce generation.
     AvidNonceMessage avid_nonce_message = 5;
-
-    // For key rotation: messages keyed by share index, as one BCS value.
-    sui.rpc.v2.Bcs rotation_messages_bcs = 6;
   }
 }
 
@@ -127,8 +124,8 @@ message AvidNonceRetrievalMessage {
 }
 
 message RetrieveMessagesResponse {
-  reserved 3;
-  reserved "nonce_message";
+  reserved 3, 5;
+  reserved "nonce_message", "rotation_messages_bcs";
 
   oneof messages {
     // For DKG: single dealer message.
@@ -139,9 +136,6 @@ message RetrieveMessagesResponse {
 
     // For AVID nonce generation: catch-up commitment and echo.
     AvidNonceRetrievalMessage avid_nonce_retrieval_message = 4;
-
-    // For key rotation: messages keyed by share index, as one BCS value.
-    sui.rpc.v2.Bcs rotation_messages_bcs = 5;
   }
 }
 
