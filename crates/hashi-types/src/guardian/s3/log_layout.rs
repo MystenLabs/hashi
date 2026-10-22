@@ -5,6 +5,10 @@ use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianResult;
 use crate::guardian::time::UnixSeconds;
 use anyhow::Context;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
 use std::convert::TryFrom;
 use std::fmt;
 use std::time::Duration;
@@ -160,6 +164,7 @@ impl S3SequencedKey {
 
 /// An S3 directory: prefix/YYYY/MM/DD/HH.
 /// All logs emitted within an hour are stored in the same directory, e.g., logs emitted between 12-1 PM are in `<prefix>`/12 directory.
+/// Serde stores the directory path as a string and validates it with `from_path` on load.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct S3HourDirectory {
     prefix: String,
@@ -288,6 +293,19 @@ impl fmt::Display for S3HourDirectory {
             "{}/{:04}/{:02}/{:02}/{:02}/",
             self.prefix, self.year, self.month, self.day, self.hour
         )
+    }
+}
+
+impl Serialize for S3HourDirectory {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for S3HourDirectory {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let path = String::deserialize(deserializer)?;
+        Self::from_path(&path).map_err(serde::de::Error::custom)
     }
 }
 
@@ -445,6 +463,12 @@ mod tests {
         let displayed = dir.to_string();
         let parsed = S3HourDirectory::from_path(&displayed).expect("roundtrip");
         assert_eq!(parsed, dir);
+        let serialized = serde_json::to_string(&dir).unwrap();
+        assert_eq!(serialized, format!("\"{displayed}\""));
+        assert_eq!(
+            serde_json::from_str::<S3HourDirectory>(&serialized).unwrap(),
+            dir
+        );
         // Also accept the trailing-slash-stripped form.
         let parsed_nopfx = S3HourDirectory::from_path(displayed.trim_end_matches('/'))
             .expect("roundtrip without trailing slash");
@@ -453,6 +477,7 @@ mod tests {
 
     #[test]
     fn test_from_path_rejects_wrong_shape() {
+        assert!(serde_json::from_str::<S3HourDirectory>(r#""withdraw/2024/13/15/14/""#).is_err());
         assert!(S3HourDirectory::from_path("withdraw/1969/12/31/23/").is_err());
         assert!(S3HourDirectory::from_path("withdraw/2024/03/15/").is_err()); // missing hour
         assert!(S3HourDirectory::from_path("withdraw/2024/03/15/14/extra/").is_err()); // too many parts

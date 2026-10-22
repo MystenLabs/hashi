@@ -132,29 +132,3 @@ mod tests {
         assert_eq!(human_timestamp_delta(100, 120).to_string(), "-20s");
     }
 }
-
-/// Serde adapter for a `UnixSeconds` field kept as the canonical UTC
-/// timestamp string, so a stored object is readable and editable by hand.
-pub mod utc_timestamp_serde {
-    use serde::Deserialize;
-    use serde::Deserializer;
-    use serde::Serializer;
-
-    use super::UnixSeconds;
-    use super::parse_utc_timestamp;
-    use super::utc_timestamp;
-
-    pub fn serialize<S: Serializer>(
-        timestamp: &UnixSeconds,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&utc_timestamp(*timestamp))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<UnixSeconds, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        parse_utc_timestamp(&value).map_err(serde::de::Error::custom)
-    }
-}

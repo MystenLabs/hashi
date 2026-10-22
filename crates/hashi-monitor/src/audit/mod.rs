@@ -37,6 +37,7 @@ use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SNAPSHOT;
 use crate::metrics::SOURCE_SUI;
 use crate::metrics::SOURCE_UTXO;
+use crate::rpc::PollCursor;
 use crate::rpc::sui::package_genesis;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -48,6 +49,7 @@ use crate::time::utc_timestamp;
 use bitcoin::OutPoint;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use pool::SuspectSpend;
@@ -147,7 +149,7 @@ impl Auditor {
             Some(snapshot) => {
                 tracing::info!(
                     sui_next_checkpoint = snapshot.state.sui_next_checkpoint,
-                    guardian_cursor = %utc_timestamp(snapshot.state.guardian_cursor),
+                    guardian_cursor = %utc_timestamp(snapshot.state.guardian_cursor.to_unix_seconds()),
                     withdrawals = snapshot.state.withdrawals.len(),
                     deposits = snapshot.state.deposits.len(),
                     suspect_spends = snapshot.state.suspect_spends.len(),
@@ -161,7 +163,7 @@ impl Auditor {
             None => (None, UtxoPool::default()),
         };
         let (guardian_start, sui_start) = match &state {
-            Some(state) => (state.guardian_cursor, state.sui_next_checkpoint),
+            Some(state) => (state.guardian_cursor.clone(), state.sui_next_checkpoint),
             None => {
                 let genesis = package_genesis(&cfg.sui).await?;
                 tracing::info!(
@@ -169,7 +171,10 @@ impl Auditor {
                     genesis_checkpoint = genesis.checkpoint,
                     "first run: starting at the bridge's genesis with an empty UTXO pool"
                 );
-                (genesis.timestamp, genesis.checkpoint)
+                (
+                    S3HourDirectory::withdraw(genesis.timestamp)?,
+                    genesis.checkpoint,
+                )
             }
         };
         let rpc_pollers = RpcPollers::new(cfg, guardian_start, sui_start).await?;
@@ -189,13 +194,12 @@ impl Auditor {
         }
         // A pruned start leaves the pool incomplete.
         auditor.rpc_pollers.ensure_sui_serves_start().await?;
-        auditor.metrics.set_checked_through(
-            SOURCE_SUI,
-            auditor.rpc_pollers.sui_last_read_checkpoint_timestamp(),
-        );
         auditor
             .metrics
-            .set_checked_through(SOURCE_GUARDIAN, auditor.rpc_pollers.guardian_cursor());
+            .set_checked_through(SOURCE_SUI, auditor.rpc_pollers.sui_read_until());
+        auditor
+            .metrics
+            .set_checked_through(SOURCE_GUARDIAN, auditor.rpc_pollers.guardian_read_until());
         // Check write access at startup. A missing bucket loads as empty.
         auditor
             .store
@@ -211,8 +215,8 @@ impl Auditor {
     /// the snapshot.
     fn state(&self) -> AuditState {
         AuditState {
-            sui_next_checkpoint: self.rpc_pollers.sui_next_checkpoint(),
-            guardian_cursor: self.rpc_pollers.guardian_cursor(),
+            sui_next_checkpoint: self.rpc_pollers.sui_poller.next_item_to_poll(),
+            guardian_cursor: self.rpc_pollers.guardian_poller.next_item_to_poll(),
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
@@ -311,7 +315,7 @@ impl Auditor {
     pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let named = self.pending_inputs();
         let taken = |outpoint: &OutPoint| self.utxo_pool.is_spent(outpoint);
-        let sui_cursor = self.rpc_pollers.sui_last_read_checkpoint_timestamp();
+        let sui_cursor = self.rpc_pollers.sui_read_until();
         let mut findings = Vec::new();
         let mut judged = Vec::new();
         for (outpoint, suspect) in &self.suspect_spends {
@@ -570,8 +574,8 @@ impl Auditor {
         let (withdrawals, deposits) = self.open_flows();
         tracing::info!(
             "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}",
-            utc_timestamp(self.rpc_pollers.guardian_cursor()),
-            utc_timestamp(self.rpc_pollers.sui_last_read_checkpoint_timestamp()),
+            utc_timestamp(self.rpc_pollers.guardian_read_until()),
+            utc_timestamp(self.rpc_pollers.sui_read_until()),
             withdrawals,
             deposits,
             self.oldest_open_withdrawals(),
@@ -582,8 +586,8 @@ impl Auditor {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         tracing::info!(
             "starting continuous audit:\n  sui_start={}\n  guardian_start={}",
-            utc_timestamp(self.rpc_pollers.sui_last_read_checkpoint_timestamp()),
-            utc_timestamp(self.rpc_pollers.guardian_cursor()),
+            utc_timestamp(self.rpc_pollers.sui_read_until()),
+            utc_timestamp(self.rpc_pollers.guardian_read_until()),
         );
         let sui = self.tick_sui().await;
         Self::log_initial_catch_up(SOURCE_SUI, sui);
@@ -910,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn a_suspect_spend_waits_while_the_sui_cursor_is_not_past_its_time() {
         let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
+        let cursor = auditor.rpc_pollers.sui_read_until();
         let outpoint = OutPoint {
             txid: txid(9),
             vout: 1,
@@ -930,7 +934,7 @@ mod tests {
     #[tokio::test]
     async fn a_suspect_spend_is_unexpected_once_the_sui_cursor_is_past_its_time() {
         let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
+        let cursor = auditor.rpc_pollers.sui_read_until();
         let outpoint = OutPoint {
             txid: txid(9),
             vout: 1,
@@ -960,7 +964,7 @@ mod tests {
     async fn a_suspect_spend_a_withdrawal_names_is_cleared_without_a_finding() {
         let mut auditor = auditor_with_pool().await;
         let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
+        let cursor = auditor.rpc_pollers.sui_read_until();
         // `withdrawal_tx` spends `txid(0x51):1`.
         let outpoint = OutPoint {
             txid: txid(0x51),
@@ -986,7 +990,7 @@ mod tests {
     async fn a_suspect_spend_the_pool_took_a_withdrawal_for_is_cleared_without_a_finding() {
         let mut auditor = auditor_with_pool().await;
         let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.rpc_pollers.sui_last_read_checkpoint_timestamp();
+        let cursor = auditor.rpc_pollers.sui_read_until();
         // `withdrawal_tx` spends `txid(0x51):1`.
         let outpoint = OutPoint {
             txid: txid(0x51),

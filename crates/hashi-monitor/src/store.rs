@@ -40,6 +40,7 @@ use anyhow::Context;
 use bitcoin::OutPoint;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use object_store::ObjectStore;
 use object_store::PutPayload;
@@ -85,10 +86,8 @@ pub struct Snapshot {
 pub struct AuditState {
     /// The first Sui checkpoint not yet scanned.
     pub sui_next_checkpoint: u64,
-    /// The first guardian hourly directory not yet read. Kept as a UTC
-    /// timestamp string, so an operator can read it.
-    #[serde(with = "crate::time::utc_timestamp_serde")]
-    pub guardian_cursor: UnixSeconds,
+    /// The next unread guardian directory, stored as its S3 path.
+    pub guardian_cursor: S3HourDirectory,
     pub withdrawals: Vec<WithdrawalStateMachine>,
     pub deposits: Vec<DepositStateMachine>,
     /// The spends the last pool check saw, still waiting for the Sui cursor.
@@ -327,7 +326,7 @@ mod tests {
         );
         AuditState {
             sui_next_checkpoint: 1_234,
-            guardian_cursor: 1_700_000_000,
+            guardian_cursor: S3HourDirectory::withdraw(1_700_000_000).unwrap(),
             withdrawals: vec![withdrawal],
             deposits: vec![DepositStateMachine::new(deposit_request())],
             suspect_spends: vec![(

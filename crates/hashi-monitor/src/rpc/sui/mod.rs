@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::rpc::PollCursor;
 use anyhow::Context;
 use futures::StreamExt;
 use hashi_types::guardian::time::UnixSeconds;
@@ -219,6 +220,18 @@ pub struct SuiEventsPoller {
     next_checkpoint: u64,
 }
 
+impl PollCursor for SuiEventsPoller {
+    type Position = u64;
+
+    fn read_until(&self) -> UnixSeconds {
+        self.last_read_checkpoint_timestamp
+    }
+
+    fn next_item_to_poll(&self) -> Self::Position {
+        self.next_checkpoint
+    }
+}
+
 impl SuiEventsPoller {
     /// A poller whose scan starts at checkpoint `start`.
     pub fn new(
@@ -239,15 +252,6 @@ impl SuiEventsPoller {
             last_read_checkpoint_timestamp: 0,
             next_checkpoint: start,
         })
-    }
-
-    pub fn last_read_checkpoint_timestamp(&self) -> UnixSeconds {
-        self.last_read_checkpoint_timestamp
-    }
-
-    /// The first checkpoint not yet scanned.
-    pub fn next_checkpoint(&self) -> u64 {
-        self.next_checkpoint
     }
 
     /// The newest checkpoint the node serves.
@@ -774,11 +778,8 @@ pub mod tests {
 
         poller.ensure_start_is_served().await.unwrap();
 
-        assert_eq!(poller.next_checkpoint(), 130_000);
-        assert_eq!(
-            poller.last_read_checkpoint_timestamp(),
-            GENESIS_SECS + 129_999
-        );
+        assert_eq!(poller.next_item_to_poll(), 130_000);
+        assert_eq!(poller.read_until(), GENESIS_SECS + 129_999);
     }
 
     #[tokio::test]
@@ -860,9 +861,9 @@ pub mod tests {
                 poller.poll(3 * MAX_CHECKPOINTS_PER_POLL).await.unwrap(),
                 PollOutcome::CursorAdvanced { .. }
             ));
-            assert_eq!(poller.next_checkpoint(), expected_cursor_checkpoint);
+            assert_eq!(poller.next_item_to_poll(), expected_cursor_checkpoint);
             assert_eq!(
-                poller.last_read_checkpoint_timestamp(),
+                poller.read_until(),
                 GENESIS_SECS + expected_cursor_checkpoint - 1
             );
         }

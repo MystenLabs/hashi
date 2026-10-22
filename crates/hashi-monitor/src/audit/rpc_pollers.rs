@@ -20,6 +20,7 @@ use crate::findings::MonitorFinding;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SUI;
+use crate::rpc::PollCursor;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
@@ -28,13 +29,14 @@ use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::Txid;
+use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
 
 pub struct RpcPollers {
-    guardian_poller: GuardianWithdrawalsPoller,
-    sui_poller: SuiEventsPoller,
+    pub guardian_poller: GuardianWithdrawalsPoller,
+    pub sui_poller: SuiEventsPoller,
     pub btc_client: BtcRpcClient,
 }
 
@@ -42,7 +44,7 @@ impl RpcPollers {
     /// Initialize the source handles at their saved or genesis positions.
     pub async fn new(
         cfg: &Config,
-        guardian_start: UnixSeconds,
+        guardian_start: S3HourDirectory,
         sui_start: u64,
     ) -> anyhow::Result<Self> {
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
@@ -64,8 +66,8 @@ impl RpcPollers {
 
     pub fn cursors(&self) -> Cursors {
         Cursors {
-            sui: self.sui_last_read_checkpoint_timestamp(),
-            guardian: self.guardian_cursor(),
+            sui: self.sui_read_until(),
+            guardian: self.guardian_read_until(),
         }
     }
 }
@@ -75,14 +77,8 @@ impl RpcPollers {
 // ====================
 
 impl RpcPollers {
-    /// The first Sui checkpoint not yet scanned.
-    pub fn sui_next_checkpoint(&self) -> u64 {
-        self.sui_poller.next_checkpoint()
-    }
-
-    /// The timestamp of the last Sui checkpoint read.
-    pub fn sui_last_read_checkpoint_timestamp(&self) -> UnixSeconds {
-        self.sui_poller.last_read_checkpoint_timestamp()
+    pub fn sui_read_until(&self) -> UnixSeconds {
+        self.sui_poller.read_until()
     }
 
     /// The newest checkpoint the Sui node serves.
@@ -106,10 +102,8 @@ impl Auditor {
         {
             self.report_findings("sui", &findings);
             self.ingest_batch(events);
-            self.metrics.set_checked_through(
-                SOURCE_SUI,
-                self.rpc_pollers.sui_last_read_checkpoint_timestamp(),
-            );
+            self.metrics
+                .set_checked_through(SOURCE_SUI, self.rpc_pollers.sui_read_until());
         }
         Ok(())
     }
@@ -120,9 +114,8 @@ impl Auditor {
 // ====================
 
 impl RpcPollers {
-    /// The next unread directory's start time gives both the resume position and the time boundary already read.
-    pub fn guardian_cursor(&self) -> UnixSeconds {
-        self.guardian_poller.cursor_seconds()
+    pub fn guardian_read_until(&self) -> UnixSeconds {
+        self.guardian_poller.read_until()
     }
 }
 
@@ -134,7 +127,7 @@ impl Auditor {
             self.report_findings("guardian", &findings);
             self.ingest_batch(events);
             self.metrics
-                .set_checked_through(SOURCE_GUARDIAN, self.rpc_pollers.guardian_cursor());
+                .set_checked_through(SOURCE_GUARDIAN, self.rpc_pollers.guardian_read_until());
         }
         Ok(())
     }
