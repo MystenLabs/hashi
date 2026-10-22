@@ -3211,7 +3211,6 @@ mod tests {
             for (epoch, key, value) in [
                 (true, EPOCH_KNOB, ConfigValue::U64(EPOCH_KNOB_VALUE)),
                 (false, INSTANT_KNOB, ConfigValue::U64(INSTANT_KNOB_VALUE)),
-                (true, "mpc_rotation_messages_bcs", ConfigValue::Bool(true)),
             ] {
                 crate::submit_proposal_through_quorum(
                     hashi_ids,
@@ -3263,27 +3262,6 @@ mod tests {
                 "Node {i} MPC key differs from node 0 after rotation"
             );
         }
-        let received = |shape: &str| -> u64 {
-            nodes
-                .iter()
-                .map(|node| {
-                    node.hashi()
-                        .metrics
-                        .mpc_rotation_messages_received_total
-                        .with_label_values(&[shape])
-                        .get()
-                })
-                .sum()
-        };
-        assert!(
-            received("blob") > 0,
-            "the rotation should have delivered its messages as one BCS blob"
-        );
-        assert_eq!(
-            received("map"),
-            0,
-            "no node should receive a proto map once the committee selects the blob"
-        );
 
         // Epoch 1 committee retains original defaults.
         let state = networks.hashi_network.nodes()[0].hashi().onchain_state();
@@ -3326,11 +3304,6 @@ mod tests {
             epoch1.config().get_u64(EPOCH_KNOB, 0),
             0,
             "epoch {initial_epoch} committee predates the epoch key and must not carry it"
-        );
-        assert!(
-            epoch2.config().mpc_rotation_messages_bcs()
-                && !epoch1.config().mpc_rotation_messages_bcs(),
-            "only the epoch {target_epoch} committee should select rotation messages as one BCS blob"
         );
         assert!(
             !epoch2

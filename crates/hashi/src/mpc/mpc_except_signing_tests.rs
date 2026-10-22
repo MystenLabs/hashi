@@ -12358,95 +12358,20 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
 }
 
 #[test]
-fn rotation_messages_round_trip_as_a_map_and_as_one_bcs_blob() {
+fn rotation_messages_round_trip_as_a_map() {
     let rotation_setup = RotationTestSetup::new();
     let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
     let request = SendMessagesRequest {
         messages: messages.clone(),
     };
-    let blob = request.to_proto(rotation_setup.setup.epoch(), true);
-    let map = request.to_proto(rotation_setup.setup.epoch(), false);
+    let map = request.to_proto(rotation_setup.setup.epoch());
 
-    assert!(matches!(
-        blob.messages,
-        Some(proto::send_messages_request::Messages::RotationMessagesBcs(
-            _
-        ))
-    ));
     assert!(matches!(
         map.messages,
         Some(proto::send_messages_request::Messages::RotationMessages(_))
     ));
-    for proto in [&blob, &map] {
-        let decoded = SendMessagesRequest::try_from(proto).unwrap();
-        assert_eq!(decoded.messages.compute_hash(), messages.compute_hash());
-    }
-}
-
-#[test]
-fn rotation_responses_take_the_shape_the_request_epochs_committee_selects() {
-    let rotation_setup = RotationTestSetup::new();
-    let dealer = rotation_setup.setup.address(0);
-    let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
-    let Messages::Rotation(rotation_messages) = &messages else {
-        unreachable!()
-    };
-    let (mut receiver, _) = rotation_setup.create_receiver_with_memory_store(2);
-    receiver.previous_reconfig_input = Some(receiver.shape_params().current().clone());
-    fn with_blob(committee: &RuntimeCommittee) -> RuntimeCommittee {
-        let mut entries = committee.config().entries().to_vec();
-        entries.push((
-            "mpc_rotation_messages_bcs".to_string(),
-            hashi_types::move_types::ConfigValue::Bool(true),
-        ));
-        Committee::with_config(
-            committee.members().to_vec(),
-            committee.epoch(),
-            hashi_types::move_types::Config::from_entries(entries),
-        )
-        .into()
-    }
-    receiver.committee = with_blob(&receiver.committee);
-    let blob = Bytes::from(bcs::to_bytes(rotation_messages).unwrap());
-    let reply = RetrieveReply::Rotation(blob.clone());
-    let request = |epoch| RetrieveMessagesRequest {
-        dealer,
-        protocol_type: ProtocolTypeIndicator::KeyRotation,
-        epoch,
-        batch_index: None,
-    };
-
-    let shape = receiver.shape_params();
-    let current = reply
-        .to_proto(&shape, &request(receiver.mpc_config.epoch))
-        .unwrap();
-    let previous = reply
-        .to_proto(&shape, &request(receiver.previous_epoch))
-        .unwrap();
-
-    let Some(proto::retrieve_messages_response::Messages::RotationMessagesBcs(served)) =
-        &current.messages
-    else {
-        panic!("expected one BCS blob for the current epoch");
-    };
-    assert_eq!(served.value.as_deref(), Some(&blob[..]));
-    assert!(matches!(
-        previous.messages,
-        Some(proto::retrieve_messages_response::Messages::RotationMessages(_))
-    ));
-    for response in [&current, &previous] {
-        let decoded = RetrieveMessagesResponse::try_from(response).unwrap();
-        assert_eq!(decoded.messages.compute_hash(), messages.compute_hash());
-    }
-
-    receiver.previous_committee = receiver.previous_committee.as_ref().map(with_blob);
-    let previous_with_blob = reply
-        .to_proto(&receiver.shape_params(), &request(receiver.previous_epoch))
-        .unwrap();
-    assert!(matches!(
-        previous_with_blob.messages,
-        Some(proto::retrieve_messages_response::Messages::RotationMessagesBcs(_))
-    ));
+    let decoded = SendMessagesRequest::try_from(&map).unwrap();
+    assert_eq!(decoded.messages.compute_hash(), messages.compute_hash());
 }
 
 #[test]
@@ -15363,8 +15288,7 @@ async fn send_messages_refuses_an_avid_batch_above_the_ceiling_before_storing_it
     let request = |batch_index: u32| {
         let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
         let messages = fx.optimistic[1].1.clone();
-        let mut request =
-            tonic::Request::new(SendMessagesRequest { messages }.to_proto(epoch, false));
+        let mut request = tonic::Request::new(SendMessagesRequest { messages }.to_proto(epoch));
         request.extensions_mut().insert(fx.dealer_addr);
         request
     };
@@ -19570,7 +19494,7 @@ fn send_messages_count_checks_before_the_manager_lock() {
 }
 
 #[test]
-fn a_rotation_blob_is_count_checked_before_the_manager_lock() {
+fn a_rotation_map_is_checked_before_the_manager_lock() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -19606,12 +19530,15 @@ fn a_rotation_blob_is_count_checked_before_the_manager_lock() {
     let mpc_lock = hashi.mpc_manager().unwrap();
     let service = crate::grpc::HttpService::new(hashi);
     let send = |messages: &RotationMessages| {
-        let mut request = tonic::Request::new(proto::SendMessagesRequest {
-            epoch: Some(epoch),
-            messages: Some(proto::send_messages_request::Messages::RotationMessagesBcs(
-                bcs::to_bytes(messages).unwrap().into(),
-            )),
-        });
+        let wire = prost::Message::encode_to_vec(
+            &SendMessagesRequest {
+                messages: Messages::Rotation(messages.clone()),
+            }
+            .to_proto(epoch),
+        );
+        let mut request = tonic::Request::new(
+            <proto::SendMessagesRequest as prost::Message>::decode(wire.as_slice()).unwrap(),
+        );
         request.extensions_mut().insert(dealer);
         let service = service.clone();
         rt.spawn(async move {
@@ -19630,7 +19557,9 @@ fn a_rotation_blob_is_count_checked_before_the_manager_lock() {
     drop(held);
     assert_eq!(refused.code(), tonic::Code::InvalidArgument);
     assert!(
-        refused.message().contains("count check: rotation_messages"),
+        refused
+            .message()
+            .contains("Share index 65535 does not belong to dealer"),
         "{}",
         refused.message()
     );

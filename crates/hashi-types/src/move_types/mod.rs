@@ -399,9 +399,6 @@ const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allow
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS: &str = "mpc_nonce_accumulation_window_ms";
 
-/// Governance adds this key; Move neither seeds nor reads it.
-const KEY_MPC_ROTATION_MESSAGES_BCS: &str = "mpc_rotation_messages_bcs";
-
 /// Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in `mpc_config.move`.
 pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 /// Mirrors `DEFAULT_MAX_FAULTY_IN_BASIS_POINTS` in `mpc_config.move`.
@@ -466,10 +463,6 @@ impl Config {
                 _ => None,
             })
             .unwrap_or(default)
-    }
-
-    pub fn mpc_rotation_messages_bcs(&self) -> bool {
-        self.get_bool(KEY_MPC_ROTATION_MESSAGES_BCS, false)
     }
 
     // ===== MPC parameters (mirror Move's `mpc_config` accessors) =====

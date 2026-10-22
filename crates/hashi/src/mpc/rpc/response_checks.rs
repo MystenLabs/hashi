@@ -58,9 +58,6 @@ pub(crate) fn certified_retrieval(
         (ProtocolTypeIndicator::Dkg, Some(Wire::DkgMessage(message))) => {
             Cached::certified(bytes(message), expected).map(PreparedMessages::Dkg)
         }
-        (ProtocolTypeIndicator::KeyRotation, Some(Wire::RotationMessagesBcs(blob))) => {
-            Cached::certified(bytes(blob), expected).map(PreparedMessages::Rotation)
-        }
         (ProtocolTypeIndicator::KeyRotation, Some(Wire::RotationMessages(map))) => {
             rotation_blob(&map.messages)
                 .and_then(|blob| Cached::certified(&blob, expected).map(PreparedMessages::Rotation))

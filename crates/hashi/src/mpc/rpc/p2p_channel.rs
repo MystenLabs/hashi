@@ -27,7 +27,6 @@ pub struct RpcP2PChannel {
     epoch: u64,
     protocol_label: &'static str,
     max_owned_shares: Option<usize>,
-    rotation_messages_bcs: bool,
 }
 
 impl RpcP2PChannel {
@@ -37,17 +36,11 @@ impl RpcP2PChannel {
             epoch,
             protocol_label,
             max_owned_shares: None,
-            rotation_messages_bcs: false,
         }
     }
 
     pub fn with_max_owned_shares(mut self, shares: usize) -> Self {
         self.max_owned_shares = Some(shares);
-        self
-    }
-
-    pub fn with_rotation_messages_bcs(mut self, enabled: bool) -> Self {
-        self.rotation_messages_bcs = enabled;
         self
     }
 
@@ -120,8 +113,7 @@ impl P2PChannel for RpcP2PChannel {
         let client = self
             .get_client(recipient)?
             .tighten_max_decoding_message_size(SIGNATURE_REPLY_LIMIT);
-        let proto_request =
-            self.build_request(request.to_proto(self.epoch, self.rotation_messages_bcs));
+        let proto_request = self.build_request(request.to_proto(self.epoch));
         let response = client
             .mpc_service_client()
             .send_messages(proto_request)
