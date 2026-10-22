@@ -875,14 +875,17 @@ impl Hashi {
             let tx_weight =
                 estimated_withdrawal_tx_weight(selected_utxos.len(), &approval.outputs)?;
 
-            // Fee must be at least the minimum relay fee (1 sat/vB).
-            let relay_min_fee = FeeRate::from_sat_per_vb_unchecked(1)
+            // Fee must honor the configured minimum and the relay floor (1 sat/vB).
+            let min_fee = self
+                .config
+                .withdrawal_min_fee_rate()
+                .max(FeeRate::from_sat_per_vb_unchecked(1))
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
                 .unwrap_or(0);
             anyhow::ensure!(
-                fee >= relay_min_fee,
-                "Fee {fee} sats is below minimum relay fee {relay_min_fee} sats"
+                fee >= min_fee,
+                "Fee {fee} sats is below minimum withdrawal fee {min_fee} sats"
             );
 
             // Allow the tolerance multiplier over what a correct leader
