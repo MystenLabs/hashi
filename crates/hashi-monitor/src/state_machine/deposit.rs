@@ -98,6 +98,10 @@ impl DepositStateMachine {
         self.sui_request.request_id
     }
 
+    pub fn requested_at(&self) -> UnixSeconds {
+        self.sui_request.timestamp_secs
+    }
+
     pub fn deposit_id(&self) -> DepositId {
         self.sui_request.deposit_id
     }

@@ -123,8 +123,8 @@ pruned; a spent UTXO is about 400 bytes. The pool is kept between runs in
 the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Running the monitor" below.
 
-Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
-held. The monitor reports:
+The monitor asks Bitcoin about every held UTXO at the first pool maintenance tick.
+It repeats successful checks once a day. The monitor reports:
 
 - **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
   (31 days, since honest coin selection refreshes UTXOs older than 30);
