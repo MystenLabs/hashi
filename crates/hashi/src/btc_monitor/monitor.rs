@@ -1375,7 +1375,14 @@ impl Monitor {
                     // Core's txindex can retain an orphaned block hash after a reorg
                     // even when the transaction is absent from the mempool. Let the
                     // existing NotFound recovery path rebroadcast it.
-                    (Some(_), _) => TxStatus::NotFound,
+                    (Some(block_hash), _) => {
+                        info!(
+                            %txid,
+                            %block_hash,
+                            "Transaction found in a stale block; treating as not found for rebroadcast"
+                        );
+                        TxStatus::NotFound
+                    }
                     (None, _) => TxStatus::InMempool,
                 }),
                 Err(e) => Err(anyhow::anyhow!("Failed to parse transaction info: {e}")),
