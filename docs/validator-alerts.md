@@ -33,7 +33,7 @@ Two principles shape this list:
 | Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
 | Withdrawal fails bitcoind | `increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0` | Your bitcoind says a signed withdrawal is invalid. If other operators see it too, withdrawals are broken: raise it in the operator channel. If only you see it, check your bitcoind. |
 | Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
-| Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing refusal rose in 1h (see the rules file) | For a shed counter, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). |
+| Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing or construction refusal rose in 1h (see the rules file) | For a shed counter, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). |
 | Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
 | MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
 | MPC peer refused        | A peer's MPC requests or responses were refused in 1h (see the rules file) | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch can also come from an honest signer that lost its stored copy. |
@@ -70,12 +70,12 @@ Dashboard-worthy but **not** alerts:
   `side`, `handler`, `protocol` and `reason`. A complaint that names no
   protocol counts as `unspecified`.
 - `hashi_peer_bridge_work_seconds_total` — seconds your node spent validating
-  and signing each peer's withdrawal signing requests, at most two at a time
-  per peer. A rate near 2 over an hour means the peer keeps both busy, which an
-  honest leader with a guardian does not unless your node is much slower than
-  its peers, or another member's bad partial signatures are slowing aggregation
-  (`hashi_mpc_partial_sig_mismatch_total` names that member when the blame is
-  certain).
+  and signing each peer's withdrawal signing and construction requests, at most
+  two at a time per peer. A rate near 2 over an hour means the peer keeps both
+  busy, which an honest leader with a guardian does not unless your node is much
+  slower than its peers, or another member's bad partial signatures are slowing
+  aggregation (`hashi_mpc_partial_sig_mismatch_total` names that member when the
+  blame is certain).
 
 ## What NOT to alert on
 

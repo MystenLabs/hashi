@@ -42,6 +42,8 @@ pub const MPC_PROTOCOL_METADATA_KEY: &str = "x-hashi-mpc-protocol";
 /// Decode limit for an MPC reply carrying one BLS signature.
 pub(crate) const SIGNATURE_REPLY_LIMIT: usize = 4 * 1024;
 
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
+
 #[derive(Clone)]
 pub struct Client {
     uri: http::Uri,
@@ -82,7 +84,7 @@ impl Client {
             .map_err(Into::into)
             .map_err(tonic::Status::from_error)?
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(40))
+            .timeout(REQUEST_TIMEOUT)
             .http2_keep_alive_interval(Duration::from_secs(5))
             .connect_lazy();
 

@@ -574,14 +574,14 @@ impl Metrics {
             .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
-                "SignWithdrawalTransaction, SignWithdrawalTxSigning and SignMpcInputSignatures calls refused, by caller and reason (committee, cap, busy or shape)",
+                "SignWithdrawalTransaction, SignWithdrawalTxSigning, SignMpcInputSignatures and SignWithdrawalTxConstruction calls refused, by caller and reason (committee, cap, busy or shape)",
                 &["peer", "reason"],
                 registry,
             )
             .unwrap(),
             peer_bridge_work_seconds_total: register_counter_vec_with_registry!(
                 "hashi_peer_bridge_work_seconds_total",
-                "Seconds withdrawal signing jobs ran on the blocking pool, by caller",
+                "Seconds withdrawal signing and construction jobs ran on the blocking pool, by caller",
                 &["peer"],
                 registry,
             )

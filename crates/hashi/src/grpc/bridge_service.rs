@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
+use std::sync::Arc;
+use std::time::Duration;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -23,6 +25,7 @@ use crate::withdrawals::WithdrawalApprovalError;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
+use crate::withdrawals::check_commitment_shape;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
@@ -135,14 +138,44 @@ impl BridgeService for HttpService {
         &self,
         request: Request<SignWithdrawalTxConstructionRequest>,
     ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
+        let admit_deadline = tokio::time::Instant::now() + CONSTRUCTION_ADMIT_WINDOW;
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        let member = self.admit_committee_member(caller)?;
         let approval = parse_withdrawal_tx_commitment(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&approval.txid));
-        let member_signature = self
+        check_commitment_shape(&approval)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let approval = Arc::new(approval);
+        let place = self.take_signing_place(&member)?;
+        let work_seconds = self.work_seconds(caller);
+        let gate = place.run_gate(work_seconds.clone());
+        let run = place.run().await;
+        let inner = self.inner.clone();
+        let job_approval = approval.clone();
+        let (prepared, _place) = run
+            .run_blocking(work_seconds, move || {
+                inner.prepare_withdrawal_tx_commitment(&job_approval)
+            })
+            .await;
+        let prepared = prepared.map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let fee_rate = self
             .inner
-            .validate_and_sign_withdrawal_tx_commitment(&approval)
+            .withdrawal_commitment_fee_rate()
+            .await
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let Some(run) = gate.admit(admit_deadline).await else {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_BUSY);
+            return Err(Status::unavailable(SIGNING_BUSY_MSG));
+        };
+        let inner = self.inner.clone();
+        let job_approval = approval.clone();
+        let member_signature = run
+            .run_blocking(move || {
+                inner.finish_withdrawal_tx_commitment(&job_approval, &prepared, fee_rate)?;
+                inner.sign_withdrawal_tx_commitment(&job_approval)
+            })
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!(
@@ -404,6 +437,9 @@ impl BridgeService for HttpService {
 
 const SIGNING_TASK_LIMIT_MSG: &str = "per-caller withdrawal signing limit reached";
 const SIGNING_BUSY_MSG: &str = "per-caller withdrawal signing queue is full";
+
+const CONSTRUCTION_ADMIT_WINDOW: Duration =
+    Duration::from_secs(super::client::REQUEST_TIMEOUT.as_secs() + 5);
 
 struct Member(Address);
 

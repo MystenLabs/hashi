@@ -208,10 +208,10 @@ groups:
           summary: "shed or refused traffic from peer {{ $labels.peer }} ({{ $labels.limit }})"
           description: >-
             {{ if or (eq $labels.limit "busy") (eq $labels.limit "shape") }}The peer
-            had more withdrawal signing requests queued or being checked here than
-            one caller may (busy), or sent a malformed one (shape). An honest leader does
-            neither unless it runs without a guardian (busy), however slow this
-            node is. Look the peer up with
+            had more withdrawal signing or construction requests in progress here than
+            one caller may (busy), or sent a malformed signing request (shape). An honest
+            leader does neither unless it runs without a guardian (busy), however slow
+            this node is. Look the peer up with
             `hashi committee -c hashi-cli.toml view {{ $labels.peer }}`.{{ else }}The
             peer may be misbehaving, or this node may be slow or have its limits
             set too low. Rule this node out first (hashi_request_latency), then
