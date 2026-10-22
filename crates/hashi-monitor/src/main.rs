@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-    let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(&cfg, metrics, store).await?;
+    let mut auditor = hashi_monitor::audit::Auditor::new(&cfg, metrics, store).await?;
     auditor.run().await?;
 
     Ok(())
