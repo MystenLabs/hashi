@@ -15386,6 +15386,58 @@ async fn send_messages_refuses_an_avid_batch_above_the_ceiling_before_storing_it
     assert!(mgr.read_avid_round_state(5, &dealer).unwrap().is_none());
 }
 
+#[test]
+fn a_dealer_over_the_avid_cap_loses_its_lowest_unprotected_index() {
+    let setup = TestSetup::new(6);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let mut receiver = setup.create_manager(1);
+    let mut deal = |receiver: &mut MpcManager, batch_index: u32| {
+        let builder = dealer
+            .create_avid_nonce_dealer_builder(batch_index, &mut rng)
+            .unwrap();
+        let optimistic = dealer.avid_nonce_optimistic_messages(&builder, batch_index);
+        let avss = extract_optimistic(&optimistic[1].1).clone();
+        receiver
+            .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss)
+            .unwrap();
+    };
+    for batch_index in 0..4 {
+        deal(&mut receiver, batch_index);
+    }
+    receiver.begin_avid_party_phase(1);
+    receiver
+        .dealer_avid_nonce_outputs
+        .get_mut(&(2, dealer_addr))
+        .unwrap()
+        .cert_digest = Some(MessagesHash::from([7; 32]));
+    for batch_index in 4..8 {
+        deal(&mut receiver, batch_index);
+    }
+    let mut round_states: Vec<u32> = receiver
+        .current_avid_round_state
+        .keys()
+        .filter(|(_, entry_dealer)| *entry_dealer == dealer_addr)
+        .map(|(batch_index, _)| *batch_index)
+        .collect();
+    round_states.sort_unstable();
+    assert_eq!(round_states, [1, 2, 4, 5, 6, 7]);
+    let outputs: Vec<u32> = receiver
+        .dealer_avid_nonce_outputs
+        .keys()
+        .filter(|(_, entry_dealer)| *entry_dealer == dealer_addr)
+        .map(|(batch_index, _)| *batch_index)
+        .collect();
+    assert_eq!(outputs, [1, 2, 4, 5, 6, 7]);
+    assert!(
+        receiver
+            .read_avid_round_state(3, &dealer_addr)
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_decoded_output() {
     let mut rng = rand::thread_rng();
