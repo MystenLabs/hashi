@@ -176,7 +176,8 @@ impl ContinuousAuditor {
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
-        let up_to = now_timestamp_secs();
+        // The head at the tick's start bounds the tick, so it ends.
+        let up_to = self.inner.latest_sui_checkpoint().await?;
         while let PollOutcome::CursorAdvanced { events, findings } =
             self.inner.poll_sui(up_to).await?
         {
@@ -358,7 +359,7 @@ mod tests {
                 utxo_pool: UtxoPool::default(),
                 suspect_spends: HashMap::new(),
                 guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, cursor),
-                sui_poller: poller_scanned(cursor, cursor),
+                sui_poller: poller_scanned(cursor),
                 btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             },
             metrics,
