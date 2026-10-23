@@ -149,6 +149,30 @@ pub enum MonitorFinding {
     },
 }
 
+impl MonitorFinding {
+    /// The variant name. Alerting labels each finding with it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::InvalidEventAdded(_) => "InvalidEventAdded",
+            Self::WithdrawalEventLate { .. } => "WithdrawalEventLate",
+            Self::WithdrawalEventMissing { .. } => "WithdrawalEventMissing",
+            Self::WithdrawalTxidMismatch { .. } => "WithdrawalTxidMismatch",
+            Self::WithdrawalTxUnbuildable { .. } => "WithdrawalTxUnbuildable",
+            Self::WithdrawalMismatch { .. } => "WithdrawalMismatch",
+            Self::DepositUnbacked { .. } => "DepositUnbacked",
+            Self::DepositLate { .. } => "DepositLate",
+            Self::DepositMismatch { .. } => "DepositMismatch",
+            Self::RpcInconsistency(_) => "RpcInconsistency",
+            Self::UtxoTooOld { .. } => "UtxoTooOld",
+            Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
+            Self::UtxoUnknownInputSpent { .. } => "UtxoUnknownInputSpent",
+            Self::SourceStale { .. } => "SourceStale",
+            Self::SnapshotStale { .. } => "SnapshotStale",
+            Self::GuardianClockSkew { .. } => "GuardianClockSkew",
+        }
+    }
+}
+
 /// An RPC answer that contradicts one the monitor already holds. A chain
 /// cannot produce it, so it is a lying node, a reorg, or a monitor bug.
 /// The bridge is not the cause, and an engineer has to look.

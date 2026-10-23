@@ -8,7 +8,7 @@
 //! - Metrics provide findings and source progress for alerts.
 //!
 //! How it works:
-//! 1. Restore the source positions, flow machines, UTXO pool, and finding times from a snapshot.
+//! 1. Restore the source positions, flow machines, and UTXO pool from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
@@ -139,7 +139,6 @@ impl Auditor {
                     utxos_spent = snapshot.pool.spent_len(),
                     "loaded the snapshot; resuming where it stopped"
                 );
-                metrics.restore_last_finding(snapshot.state.last_finding);
                 (Some(snapshot.state), snapshot.pool)
             }
             None => (None, UtxoPool::default()),
@@ -206,7 +205,6 @@ impl Auditor {
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
-            last_finding: self.metrics.last_finding(),
         }
     }
 
@@ -402,7 +400,6 @@ impl Auditor {
             self.oldest_open_withdrawals(),
             self.oldest_open_deposits(),
         );
-        // Before the save, so the snapshot keeps the finding time.
         let stale = self.rpc_pollers.stale_sources(now_timestamp_secs());
         self.report_findings("progress", &stale);
 
@@ -734,7 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restart_resumes_the_open_flows_the_pool_and_the_finding_times() {
+    async fn a_restart_resumes_the_open_flows_and_the_pool() {
         let cfg = Config::for_tests();
         let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         let deposit = ConfirmedDeposit {
@@ -758,16 +755,10 @@ mod tests {
 
         let snapshot = auditor.store.load().await.unwrap().unwrap();
         assert_eq!(snapshot.pool, *auditor.utxo_pool());
-        let metrics = Arc::new(MonitorMetrics::new());
-        metrics.restore_last_finding(snapshot.state.last_finding);
-        let mut resumed = auditor_with(&cfg, metrics);
+        let mut resumed = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         resumed.restore(snapshot.state);
 
         assert_eq!(resumed.detect_timing_violations(), missing);
-        assert_eq!(
-            resumed.metrics.last_finding(),
-            auditor.metrics.last_finding()
-        );
     }
 
     #[tokio::test]

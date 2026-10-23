@@ -28,8 +28,9 @@ pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
     oldest_utxo_timestamp_seconds: IntGauge,
-    /// Unix time of the latest finding; 0 until one is reported.
-    last_finding_timestamp_seconds: IntGauge,
+    /// Unix time of the latest finding of each kind. A kind has no series
+    /// until its first finding.
+    last_finding_timestamp_seconds: IntGaugeVec,
     /// Unix time each source has been checked through: the Sui and guardian
     /// cursors, and for Bitcoin, which is looked up rather than scanned, the
     /// start of the last pass over every pending confirmation, or the startup
@@ -48,9 +49,12 @@ impl Default for MonitorMetrics {
 impl MonitorMetrics {
     pub fn new() -> Self {
         let registry = Registry::new();
-        let last_finding_timestamp_seconds = IntGauge::new(
-            "hashi_monitor_last_finding_timestamp_seconds",
-            "Unix time of the latest monitor finding",
+        let last_finding_timestamp_seconds = IntGaugeVec::new(
+            Opts::new(
+                "hashi_monitor_last_finding_timestamp_seconds",
+                "Unix time of the latest monitor finding of each kind",
+            ),
+            &["kind"],
         )
         .expect("valid metric");
         let checked_through_timestamp_seconds = IntGaugeVec::new(
@@ -108,21 +112,11 @@ impl MonitorMetrics {
     }
 
     pub fn record_findings(&self, findings: &[MonitorFinding], now: UnixSeconds) {
-        if !findings.is_empty() {
-            self.last_finding_timestamp_seconds.set(gauge_value(now));
+        for finding in findings {
+            self.last_finding_timestamp_seconds
+                .with_label_values(&[finding.kind()])
+                .set(gauge_value(now));
         }
-    }
-
-    /// The time of the last finding, or 0. The snapshot keeps it, so a
-    /// restart does not lose a finding alerting has not read yet.
-    pub fn last_finding(&self) -> UnixSeconds {
-        UnixSeconds::try_from(self.last_finding_timestamp_seconds.get()).unwrap_or_default()
-    }
-
-    /// Set the last finding time that a snapshot saved.
-    pub fn restore_last_finding(&self, timestamp: UnixSeconds) {
-        self.last_finding_timestamp_seconds
-            .set(gauge_value(timestamp));
     }
 
     pub fn set_checked_through(&self, source: &str, timestamp: UnixSeconds) {
@@ -201,7 +195,6 @@ mod tests {
         let rendered = MonitorMetrics::new().render();
 
         for line in [
-            "hashi_monitor_last_finding_timestamp_seconds 0",
             r#"hashi_monitor_checked_through_timestamp_seconds{source="sui"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="btc"} 0"#,
@@ -209,21 +202,29 @@ mod tests {
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
         }
+        // A kind has no series until its first finding.
+        assert!(!rendered.contains("hashi_monitor_last_finding_timestamp_seconds{"));
     }
 
     #[test]
-    fn a_finding_sets_the_latest_timestamp() {
+    fn a_finding_sets_the_latest_timestamp_of_its_kind() {
         let metrics = MonitorMetrics::new();
         let finding = MonitorFinding::InvalidEventAdded("invalid wid".to_string());
 
         metrics.record_findings(std::slice::from_ref(&finding), 100);
         metrics.record_findings(&[], 150);
         metrics.record_findings(&[finding], 200);
+        let stale = MonitorFinding::SnapshotStale {
+            last_saved: 0,
+            limit_secs: 3_600,
+        };
+        metrics.record_findings(&[stale], 250);
         metrics.set_checked_through(SOURCE_GUARDIAN, 300);
 
         let rendered = metrics.render();
         for line in [
-            "hashi_monitor_last_finding_timestamp_seconds 200",
+            r#"hashi_monitor_last_finding_timestamp_seconds{kind="InvalidEventAdded"} 200"#,
+            r#"hashi_monitor_last_finding_timestamp_seconds{kind="SnapshotStale"} 250"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 300"#,
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");

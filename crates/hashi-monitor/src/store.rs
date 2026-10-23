@@ -11,11 +11,10 @@
 //! 1. After each state check, the auditor saves a `Snapshot`: the deployment
 //!    it audits, its `AuditState`, and the UTXO pool. The audit state is the
 //!    position of each poller, every open state machine, the suspect spends
-//!    of the last pool check, and the time of the last finding. All of it is
-//!    taken at one instant.
-//! 2. A restart loads the machines, restores the finding time, and resumes
-//!    each poller at its saved position. It reads no event twice and skips
-//!    none, so no flow is cut in two.
+//!    of the last pool check. All of it is taken at one instant.
+//! 2. A restart loads the machines and resumes each poller at its saved
+//!    position. It reads no event twice and skips none, so no flow is cut
+//!    in two.
 //! 3. The bucket holds the snapshot as several objects. `SNAPSHOT_KEY` is a
 //!    manifest with the audit state, the held UTXOs and the number of spent
 //!    entries. The spent record only grows, so it is kept apart in
@@ -40,7 +39,6 @@ use bitcoin::OutPoint;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use hashi_types::guardian::s3::S3HourDirectory;
-use hashi_types::guardian::time::UnixSeconds;
 use object_store::ObjectStore;
 use object_store::PutPayload;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -91,8 +89,6 @@ pub struct AuditState {
     pub deposits: Vec<DepositStateMachine>,
     /// The spends the last pool check saw, still waiting for the Sui cursor.
     pub suspect_spends: Vec<(OutPoint, SuspectSpend)>,
-    /// The time of the last finding, or 0.
-    pub last_finding: UnixSeconds,
 }
 
 impl Snapshot {
@@ -309,7 +305,7 @@ mod tests {
     use crate::timing::Timing;
     use bitcoin::ScriptBuf;
 
-    /// A state with one open withdrawal, one open deposit and a finding time.
+    /// A state with one open withdrawal, one open deposit and a suspect spend.
     fn state() -> AuditState {
         let approval = hashi_approval();
         let mut withdrawal = WithdrawalStateMachine::new(approval.clone(), &Timing::for_tests());
@@ -338,7 +334,6 @@ mod tests {
                     amount: 2_000,
                 },
             )],
-            last_finding: 1_700_000_500,
         }
     }
 

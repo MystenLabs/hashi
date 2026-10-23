@@ -179,8 +179,7 @@ cargo run -p hashi-monitor -- \
 The monitor keeps a snapshot in the bucket and saves it after every state
 check: the deployment it audits, the next Sui checkpoint and guardian hourly
 directory to read, every open flow, the spends the last pool check has not
-judged yet, the time of the last finding, and the UTXO
-pool. `snapshot.json` holds all of it except the
+judged yet, and the UTXO pool. `snapshot.json` holds all of it except the
 spent record, plus the number of spent entries. The spent
 record only grows, so it lives in `spent/NNNNN.json` files of 10,000 entries
 each. A save writes only the files with new entries, then `snapshot.json`. The monitor needs
@@ -199,9 +198,12 @@ restart, since a pruned start would leave the pool incomplete for good.
 The scan from genesis runs in ranges of 10,000 checkpoints, about an hour of
 Sui each, and the state checks wait for it. On a busy network it takes hours.
 
-A restart resumes from the snapshot. It holds the saved flows again, sets
-the finding metric to the saved time, and reads each source from its saved
-position, so it reads no event twice and skips none. A snapshot of another
+A restart resumes from the snapshot. It holds the saved flows again and
+reads each source from its saved position, so it reads no event twice and
+skips none. A restart clears the finding metric. A finding after the last
+save comes again: the restart reads Sui and guardian events again and checks
+Bitcoin and the pool again. A stale Bitcoin source or a stale snapshot is
+reported again only after its limit passes again. A snapshot of another
 deployment is ignored and the run is a first run. A snapshot of another
 format version, one that does not parse, or one that lacks a spent file stops
 the monitor at startup. Delete the objects to start over from genesis.
@@ -289,7 +291,8 @@ btc:
 The monitor decides what is wrong. An alerting system needs only these rules:
 
 1. `time() - hashi_monitor_last_finding_timestamp_seconds < 3600`: a finding
-   in the last hour. Its details are in the `monitor finding` ERROR lines.
+   in the last hour. The `kind` label names the finding, and each kind
+   fires on its own. Its details are in the `monitor finding` ERROR lines.
 2. `up < 1`: the monitor cannot be scraped.
 3. `absent(up)`: no monitor runs.
 
