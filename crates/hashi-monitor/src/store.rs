@@ -335,7 +335,7 @@ mod tests {
                     vout: 0,
                 },
                 SuspectSpend {
-                    asked_at: 1_700_000_100,
+                    checked_at: 1_700_000_100,
                     amount: 2_000,
                 },
             )],

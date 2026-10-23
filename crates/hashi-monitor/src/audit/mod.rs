@@ -10,16 +10,17 @@
 //! How it works:
 //! 1. Restore the source positions, flow machines, UTXO pool, and finding times from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
-//! 3. Read Sui events and guardian logs into the flow machines.
-//! 4. Check Bitcoin confirmations after both withdrawal approvals arrive.
-//! 5. Update the pool every `POOL_MAINTENANCE_INTERVAL` and check Bitcoin when the daily check is due.
-//! 6. Run pool maintenance at startup. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
-//! 7. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
-//! 8. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
+//! 3. Fail at startup if the Sui node has pruned the start checkpoint.
+//! 4. Read Sui events and guardian logs into the flow machines.
+//! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
+//! 6. Update the pool every `POOL_MAINTENANCE_INTERVAL` and check Bitcoin when the daily check is due.
+//! 7. Check Bitcoin at the first maintenance tick. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
+//! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
+//! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
+//! 10. Log a failed source tick. The next tick of that source retries it.
 //!
 //! Assumptions:
-//! - Sui must retain the required history at startup.
-//! - Source failures are temporary. The next source tick retries the operation.
+//! - A source that fails for good stops its cursor. The stale `checked_through` alert detects this.
 
 use crate::config::Config;
 use crate::domain::MonitorEvent;
@@ -45,19 +46,18 @@ use crate::store::Snapshot;
 use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
 use bitcoin::OutPoint;
-use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use rpc_pollers::RpcPollers;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
+mod pool_checks;
 mod pool_maintenance;
 mod rpc_pollers;
 
@@ -75,11 +75,6 @@ const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// How often pool maintenance runs.
 const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// How long after a successful pool check the next one is due, in seconds.
-/// Every tick runs on the one audit task, so a check delays the polls by
-/// the time its batched lookups take.
-const UTXO_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
 /// How often the state checks run.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -124,7 +119,7 @@ pub struct Auditor {
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
     store: SnapshotStore,
-    /// When the last successful pool check started. `None` until one
+    /// When the last successful pool check finished. `None` until one
     /// succeeds in this run.
     last_successful_pool_check: Option<UnixSeconds>,
 }
@@ -227,90 +222,6 @@ impl Auditor {
         self.suspect_spends.extend(state.suspect_spends);
     }
 
-    /// The inputs of every withdrawal the monitor follows. It spends them
-    /// on Bitcoin before its flow completes, so a spend of one is explained.
-    fn pending_inputs(&self) -> HashSet<OutPoint> {
-        self.pending_withdrawals
-            .values()
-            .flat_map(|sm| sm.tx().inputs.iter())
-            .map(|input| OutPoint {
-                txid: Txid::from(input.id.txid),
-                vout: input.id.vout,
-            })
-            .collect()
-    }
-
-    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `judge_suspect_spends`.
-    /// Report findings and record the check time after success.
-    fn check_utxo_pool(&mut self) -> anyhow::Result<()> {
-        let started_at = now_timestamp_secs();
-        let tip_height = self.rpc_pollers.btc_client.synced_height()?;
-        let pool = &self.utxo_pool;
-        let outpoints = pool.outpoints();
-        tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
-        // Before the lookups, so a withdrawal committed during them still
-        // waits for the Sui cursor.
-        let now = now_timestamp_secs();
-        let states = self
-            .rpc_pollers
-            .btc_client
-            .lookup_outpoint_states(&outpoints, tip_height)?;
-        let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
-        tracing::info!(
-            utxos = outpoints.len(),
-            findings = findings.len(),
-            suspects = suspects.len(),
-            "finished UTXO pool check"
-        );
-        // A suspect already waiting keeps its earlier time.
-        for (outpoint, suspect) in suspects {
-            self.suspect_spends.entry(outpoint).or_insert(suspect);
-        }
-        self.report_findings(SOURCE_UTXO, &findings);
-        self.metrics.set_checked_through(SOURCE_UTXO, started_at);
-        self.last_successful_pool_check = Some(started_at);
-        Ok(())
-    }
-
-    /// Whether a pool check is due at `now`: none has succeeded in this run,
-    /// or the last one started `UTXO_CHECK_INTERVAL` ago or more.
-    fn pool_check_due(&self, now: UnixSeconds) -> bool {
-        self.last_successful_pool_check
-            .is_none_or(|last| now.saturating_sub(last) >= UTXO_CHECK_INTERVAL)
-    }
-
-    /// Judge the spends the pool check saw. One is unexpected once the Sui
-    /// cursor is past the time Bitcoin was asked and still no withdrawal
-    /// explains it: every withdrawal committed before that time is known
-    /// by then. A withdrawal explains a spend when it names the UTXO as an
-    /// input, or when the pool took it and recorded the UTXO spent since.
-    /// Until the cursor is past, the suspect waits.
-    pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
-        let named = self.pending_inputs();
-        let taken = |outpoint: &OutPoint| self.utxo_pool.is_spent(outpoint);
-        let sui_cursor = self.rpc_pollers.sui_read_until();
-        let mut findings = Vec::new();
-        let mut judged = Vec::new();
-        for (outpoint, suspect) in &self.suspect_spends {
-            if sui_cursor <= suspect.asked_at {
-                continue;
-            }
-            judged.push(*outpoint);
-            if named.contains(outpoint) || taken(outpoint) {
-                tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
-            } else {
-                findings.push(MonitorFinding::UtxoUnexpectedSpend {
-                    outpoint: *outpoint,
-                    amount: suspect.amount,
-                });
-            }
-        }
-        for outpoint in judged {
-            self.suspect_spends.remove(&outpoint);
-        }
-        findings
-    }
-
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
         match event {
             MonitorEvent::Withdrawal(event) => self.ingest_withdrawal(event),
@@ -361,7 +272,7 @@ impl Auditor {
         findings
     }
 
-    pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
+    fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
             findings.extend(sm.timing_violations(&self.rpc_pollers.cursors()));
@@ -371,7 +282,7 @@ impl Auditor {
 
     /// The open withdrawals whose first event is the earliest, for the
     /// progress log. An operator sees what the audit still waits for.
-    pub fn oldest_open_withdrawals(&self) -> String {
+    fn oldest_open_withdrawals(&self) -> String {
         let earliest = self
             .pending_withdrawals
             .values()
@@ -398,8 +309,35 @@ impl Auditor {
         }
     }
 
+    /// Return the deposits with the earliest request timestamp for the progress log.
+    fn oldest_open_deposits(&self) -> String {
+        let earliest = self
+            .pending_deposits
+            .values()
+            .map(DepositStateMachine::requested_at)
+            .min();
+        let oldest = self
+            .pending_deposits
+            .values()
+            .filter(|sm| Some(sm.requested_at()) == earliest)
+            .map(|sm| {
+                format!(
+                    "request_id={}, deposit_id={}, requested_at={}",
+                    sm.request_id(),
+                    sm.deposit_id(),
+                    utc_timestamp(sm.requested_at()),
+                )
+            })
+            .collect::<Vec<_>>();
+        if oldest.is_empty() {
+            "none".to_string()
+        } else {
+            oldest.join("; ")
+        }
+    }
+
     /// The number of open withdrawal and deposit machines.
-    pub fn open_flows(&self) -> (usize, usize) {
+    fn open_flows(&self) -> (usize, usize) {
         (self.pending_withdrawals.len(), self.pending_deposits.len())
     }
 
@@ -445,12 +383,13 @@ impl Auditor {
 
         let (withdrawals, deposits) = self.open_flows();
         tracing::info!(
-            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}",
+            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}\n  oldest_deposits={}",
             utc_timestamp(self.rpc_pollers.guardian_read_until()),
             utc_timestamp(self.rpc_pollers.sui_read_until()),
             withdrawals,
             deposits,
             self.oldest_open_withdrawals(),
+            self.oldest_open_deposits(),
         );
         self.save_snapshot().await;
     }
@@ -467,8 +406,6 @@ impl Auditor {
         Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
-        self.tick_pool_maintenance();
-        self.tick_state_checks().await;
 
         let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
@@ -482,8 +419,7 @@ impl Auditor {
         pool_maintenance_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // The initial catch-up above handled startup; consume each immediate
-        // interval tick so the next pass runs one interval later.
+        // Consume each immediate tick so scheduled work starts after its interval.
         sui_ticker.tick().await;
         guardian_ticker.tick().await;
         btc_ticker.tick().await;
@@ -508,7 +444,9 @@ impl Auditor {
                     }
                 }
                 _ = pool_maintenance_ticker.tick() => {
-                    self.tick_pool_maintenance();
+                    if let Err(error) = self.tick_pool_maintenance() {
+                        tracing::warn!(source = SOURCE_UTXO, ?error, "pool maintenance failed; retrying at the next tick");
+                    }
                 }
                 _ = state_checks_ticker.tick() => {
                     self.tick_state_checks().await;
@@ -758,123 +696,9 @@ mod tests {
         WithdrawalStateMachine::complete_for_tests(approval, confirmation, timing)
     }
 
-    #[tokio::test]
-    async fn a_suspect_spend_waits_while_the_sui_cursor_is_not_past_its_time() {
-        let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.rpc_pollers.sui_read_until();
-        let outpoint = OutPoint {
-            txid: txid(9),
-            vout: 1,
-        };
-        auditor.suspect_spends.insert(
-            outpoint,
-            SuspectSpend {
-                asked_at: cursor,
-                amount: 5_000,
-            },
-        );
-
-        assert!(auditor.judge_suspect_spends().is_empty());
-        assert!(auditor.suspect_spends.contains_key(&outpoint));
-    }
-
-    #[tokio::test]
-    async fn a_suspect_spend_is_unexpected_once_the_sui_cursor_is_past_its_time() {
-        let mut auditor = auditor_with_pool().await;
-        let cursor = auditor.rpc_pollers.sui_read_until();
-        let outpoint = OutPoint {
-            txid: txid(9),
-            vout: 1,
-        };
-        auditor.suspect_spends.insert(
-            outpoint,
-            SuspectSpend {
-                asked_at: cursor - 1,
-                amount: 5_000,
-            },
-        );
-
-        let findings = auditor.judge_suspect_spends();
-
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::UtxoUnexpectedSpend {
-                outpoint,
-                amount: 5_000,
-            }]
-        );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
-        assert!(auditor.suspect_spends.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_suspect_spend_a_withdrawal_names_is_cleared_without_a_finding() {
-        let mut auditor = auditor_with_pool().await;
-        let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.rpc_pollers.sui_read_until();
-        // `withdrawal_tx` spends `txid(0x51):1`.
-        let outpoint = OutPoint {
-            txid: txid(0x51),
-            vout: 1,
-        };
-        auditor.suspect_spends.insert(
-            outpoint,
-            SuspectSpend {
-                asked_at: cursor - 1,
-                amount: 5_000,
-            },
-        );
-        auditor.pending_withdrawals.insert(
-            WithdrawalID::new([7; 32]),
-            complete_withdrawal(7, 7, vec![outpoint], &timing),
-        );
-
-        assert!(auditor.judge_suspect_spends().is_empty());
-        assert!(auditor.suspect_spends.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_suspect_spend_the_pool_took_a_withdrawal_for_is_cleared_without_a_finding() {
-        let mut auditor = auditor_with_pool().await;
-        let timing = auditor.cfg.timing.clone();
-        let cursor = auditor.rpc_pollers.sui_read_until();
-        // `withdrawal_tx` spends `txid(0x51):1`.
-        let outpoint = OutPoint {
-            txid: txid(0x51),
-            vout: 1,
-        };
-        auditor.suspect_spends.insert(
-            outpoint,
-            SuspectSpend {
-                asked_at: cursor - 1,
-                amount: 5_000,
-            },
-        );
-        // The withdrawal completed after the check: the pool took it, and
-        // the auditor no longer follows it.
-        let withdrawal = complete_withdrawal(7, 7, vec![outpoint], &timing);
-        let pool = &mut auditor.utxo_pool;
-        assert!(
-            pool.add_deposit(&ConfirmedDeposit {
-                deposit_id: DepositId::new(txid(0x51), 1),
-                amount: 5_000,
-                script_pubkey: p2wpkh(0x55),
-                block_time: 900,
-            })
-            .is_none()
-        );
-        assert!(
-            pool.add_withdrawals(&[withdrawal.confirmed().cloned().unwrap()])
-                .is_empty()
-        );
-
-        assert!(auditor.judge_suspect_spends().is_empty());
-        assert!(auditor.suspect_spends.is_empty());
-    }
-
     /// An auditor over an in-memory store, with both cursors two hours past
     /// `hashi_approval`.
-    fn auditor_with(cfg: &Config, metrics: Arc<MonitorMetrics>) -> Auditor {
+    pub fn auditor_with(cfg: &Config, metrics: Arc<MonitorMetrics>) -> Auditor {
         let cursor = hashi_approval().timestamp_secs + 7_200;
         Auditor {
             cfg: cfg.clone(),
@@ -939,15 +763,5 @@ mod tests {
         assert_eq!(this_deployments(&cfg, Some(other)), None);
 
         assert_eq!(this_deployments(&cfg, Some(ours.clone())), Some(ours));
-    }
-    #[tokio::test]
-    async fn a_pool_check_is_due_until_one_succeeds_and_a_day_after() {
-        let cfg = Config::for_tests();
-        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
-        assert!(auditor.pool_check_due(1_000));
-
-        auditor.last_successful_pool_check = Some(1_000);
-        assert!(!auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL - 1));
-        assert!(auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL));
     }
 }

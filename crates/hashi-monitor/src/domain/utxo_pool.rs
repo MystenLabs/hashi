@@ -132,11 +132,11 @@ pub struct SpentUtxo {
 }
 
 /// A held UTXO that Bitcoin reports spent, which no followed withdrawal
-/// explains. The auditor judges it once the Sui cursor is past `asked_at`.
+/// explains. The auditor judges it once the Sui cursor is past `checked_at`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SuspectSpend {
-    /// When Bitcoin was asked.
-    pub asked_at: UnixSeconds,
+    /// When the Bitcoin lookups finished.
+    pub checked_at: UnixSeconds,
     pub amount: u64,
 }
 
@@ -366,11 +366,9 @@ impl UtxoPool {
         }
     }
 
-    /// One pass over Bitcoin's answer for every UTXO held: the findings,
-    /// and the spent UTXOs as suspects. A spend is not a finding yet: a
-    /// withdrawal the monitor follows, or one committed since the last Sui
-    /// poll, can have spent the UTXO, and only the auditor can tell. A
-    /// UTXO with no answer counts as missing.
+    /// Check held outputs against Bitcoin results and return findings and suspect spends.
+    /// Use the lookup completion time `now` for ages and suspect timestamps.
+    /// The auditor judges suspects after Sui polling catches up.
     pub fn check(
         &self,
         states: &HashMap<OutPoint, OutpointState>,
@@ -403,7 +401,7 @@ impl UtxoPool {
                     suspects.insert(
                         *outpoint,
                         SuspectSpend {
-                            asked_at: now,
+                            checked_at: now,
                             amount: utxo.amount,
                         },
                     );
@@ -837,7 +835,7 @@ mod tests {
             HashMap::from([(
                 outpoint(1),
                 SuspectSpend {
-                    asked_at: 1,
+                    checked_at: 1,
                     amount: 1_000,
                 }
             )])

@@ -118,7 +118,9 @@ impl WithdrawalStateMachine {
             .any(|(event, _, _)| *event == event_type)
     }
 
-    /// Permit Bitcoin lookups only after both Sui and guardian approvals arrive.
+    /// Permit Bitcoin lookups only after both the Sui and guardian approvals arrive.
+    /// Sui approves a withdrawal after the flows that made its inputs, so the monitor has read them.
+    /// Thus every flow this one spends from is open or closed when this one closes.
     pub fn expects_btc(&self) -> bool {
         self.get(WithdrawalEventType::E1HashiApproved).is_some()
             && self.get(WithdrawalEventType::E2GuardianApproved).is_some()

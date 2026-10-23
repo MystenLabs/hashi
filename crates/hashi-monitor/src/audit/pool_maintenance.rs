@@ -9,8 +9,9 @@
 //!
 //! How it works:
 //! 1. Remove closed state machines, then add their complete flows to the pool.
-//! 2. Check Bitcoin at startup and when `UTXO_CHECK_INTERVAL` seconds have passed since the last successful check.
-//! 3. Retry failed checks at the next pool maintenance tick.
+//! 2. Check Bitcoin at the first maintenance tick.
+//! 3. Repeat successful checks after `UTXO_CHECK_INTERVAL` seconds.
+//! 4. Retry failed checks at the next pool maintenance tick.
 //!
 //! Assumptions:
 //! - Polling and maintenance ticks run sequentially.
@@ -25,7 +26,6 @@ use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::WithdrawalEventType;
 use crate::findings::MonitorFinding;
-use crate::metrics::SOURCE_UTXO;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -33,20 +33,15 @@ use hashi_types::guardian::time::now_timestamp_secs;
 impl Auditor {
     /// Update the pool from closed state machines, then run a due Bitcoin check.
     /// Retry failed checks at the next maintenance tick.
-    pub fn tick_pool_maintenance(&mut self) {
+    pub fn tick_pool_maintenance(&mut self) -> anyhow::Result<()> {
         let pool_findings = self.add_to_pool_and_gc();
         self.report_findings("pool", &pool_findings);
         self.metrics
             .set_utxo_pool(self.utxo_pool.len(), self.utxo_pool.oldest_timestamp());
-        if self.pool_check_due(now_timestamp_secs())
-            && let Err(error) = self.check_utxo_pool()
-        {
-            tracing::warn!(
-                source = SOURCE_UTXO,
-                ?error,
-                "UTXO pool check failed; retrying at the next pool maintenance tick"
-            );
+        if self.pool_check_due(now_timestamp_secs()) {
+            self.check_utxo_pool()?;
         }
+        Ok(())
     }
 
     /// Take closed machines and add their complete flows to the pool.
