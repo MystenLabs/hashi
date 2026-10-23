@@ -3,6 +3,12 @@
 
 //! Deposit state machine: the user's request resolved on Bitcoin, and
 //! its Sui approval.
+//!
+//! Note: one outpoint can have several machines. Move checks only its own
+//! pool when it takes a request or an approval, so two pending requests for
+//! one UTXO can both be requested and approved. Only the first
+//! `confirm_deposit` mints; the second aborts. Each request gets its own
+//! machine, and `UtxoPool::add` takes the second add of the UTXO as a repeat.
 
 use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;

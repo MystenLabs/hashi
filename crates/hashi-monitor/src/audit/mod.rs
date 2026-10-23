@@ -141,7 +141,6 @@ impl Auditor {
                     deposits = snapshot.state.deposits.len(),
                     suspect_spends = snapshot.state.suspect_spends.len(),
                     utxos_held = snapshot.pool.len(),
-                    utxos_spent = snapshot.pool.spent_len(),
                     "loaded the snapshot; resuming where it stopped"
                 );
                 (Some(snapshot.state), snapshot.pool)

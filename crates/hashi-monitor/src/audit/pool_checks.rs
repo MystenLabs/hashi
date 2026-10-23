@@ -81,17 +81,17 @@ impl Auditor {
     }
 
     /// Wait until Sui polling passes the lookup completion time.
-    /// Clear spends explained by pending withdrawals or the pool's spent record.
+    /// Clear spends that a pending withdrawal names or that the pool already took.
     /// Report the remaining spends as unexpected.
     pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
-        let named = self.pending_withdrawal_inputs();
+        let wsm_inputs = self.pending_withdrawal_inputs();
         let sui_cursor = self.rpc_pollers.sui_read_until();
         let mut findings = Vec::new();
         for (outpoint, suspect) in self
             .suspect_spends
             .extract_if(|_, suspect| sui_cursor > suspect.checked_at)
         {
-            if named.contains(&outpoint) || self.utxo_pool.is_spent(&outpoint) {
+            if wsm_inputs.contains(&outpoint) || !self.utxo_pool.holds(&outpoint) {
                 tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
             } else {
                 findings.push(MonitorFinding::UtxoUnexpectedSpend {
@@ -154,6 +154,17 @@ mod tests {
                 checked_at: cursor - 1,
                 amount: 5_000,
             },
+        );
+        assert!(
+            auditor
+                .utxo_pool
+                .add_deposit(&ConfirmedDeposit {
+                    deposit_id: DepositId::new(txid(9), 1),
+                    amount: 5_000,
+                    script_pubkey: p2wpkh(0x54),
+                    block_time: 900,
+                })
+                .is_none()
         );
 
         let findings = auditor.judge_suspect_spends();
