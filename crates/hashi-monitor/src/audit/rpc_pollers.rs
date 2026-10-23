@@ -35,15 +35,10 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
 
-/// How far behind Sui or Bitcoin may fall before a `SourceStale` finding,
-/// in seconds. Both are polled every few minutes.
-const SUI_STALE_LIMIT: u64 = 60 * 60;
-const BTC_STALE_LIMIT: u64 = 60 * 60;
-
-/// How far behind the guardian may fall before a `SourceStale` finding, in
-/// seconds. Its log is read by hourly directory, so it normally lags up to
-/// about 80 minutes.
-const GUARDIAN_STALE_LIMIT: u64 = 3 * 60 * 60;
+/// How far behind a source may fall before a `SourceStale` finding, in
+/// seconds. The guardian log is read by hourly directory, so it normally
+/// lags up to about 80 minutes. Sui and Bitcoin lag a few minutes.
+const SOURCE_STALE_LIMIT: u64 = 3 * 60 * 60;
 
 pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
@@ -51,7 +46,7 @@ pub struct RpcPollers {
     pub btc_client: BtcRpcClient,
     /// When the last full Bitcoin pass started. It starts at the startup
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
-    /// after `BTC_STALE_LIMIT`.
+    /// after `SOURCE_STALE_LIMIT`.
     btc_checked_through: UnixSeconds,
 }
 
@@ -87,26 +82,21 @@ impl RpcPollers {
         }
     }
 
-    /// A `SourceStale` finding for each source checked longer ago than its limit.
+    /// A `SourceStale` finding for each source checked longer ago than
+    /// `SOURCE_STALE_LIMIT`.
     pub fn stale_sources(&self, now: UnixSeconds) -> Vec<MonitorFinding> {
         [
-            (SOURCE_SUI, self.sui_read_until(), SUI_STALE_LIMIT),
-            (
-                SOURCE_GUARDIAN,
-                self.guardian_read_until(),
-                GUARDIAN_STALE_LIMIT,
-            ),
-            (SOURCE_BTC, self.btc_read_until(), BTC_STALE_LIMIT),
+            (SOURCE_SUI, self.sui_read_until()),
+            (SOURCE_GUARDIAN, self.guardian_read_until()),
+            (SOURCE_BTC, self.btc_read_until()),
         ]
         .into_iter()
-        .filter(|(_, checked_through, limit)| now.saturating_sub(*checked_through) > *limit)
-        .map(
-            |(source, checked_through, limit_secs)| MonitorFinding::SourceStale {
-                source,
-                checked_through,
-                limit_secs,
-            },
-        )
+        .filter(|(_, checked_through)| now.saturating_sub(*checked_through) > SOURCE_STALE_LIMIT)
+        .map(|(source, checked_through)| MonitorFinding::SourceStale {
+            source,
+            checked_through,
+            limit_secs: SOURCE_STALE_LIMIT,
+        })
         .collect()
     }
 }
@@ -288,13 +278,15 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert!(stale(sui + SUI_STALE_LIMIT).is_empty());
+        // The guardian cursor is at the start of the hour, behind Sui.
+        assert!(guardian < sui);
+        assert!(stale(guardian + SOURCE_STALE_LIMIT).is_empty());
         assert_eq!(
-            stale(sui + SUI_STALE_LIMIT + 1),
-            vec![SOURCE_SUI, SOURCE_BTC]
+            stale(guardian + SOURCE_STALE_LIMIT + 1),
+            vec![SOURCE_GUARDIAN]
         );
         assert_eq!(
-            stale(guardian + GUARDIAN_STALE_LIMIT + 1),
+            stale(sui + SOURCE_STALE_LIMIT + 1),
             vec![SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC]
         );
     }

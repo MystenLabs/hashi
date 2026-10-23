@@ -35,7 +35,7 @@ The monitor reports a finding for:
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`);
 - a source the monitor last checked longer ago than its limit
-  (`SourceStale`: one hour for Sui and Bitcoin, three hours for the guardian),
+  (`SourceStale`: three hours for each source),
   or no successful snapshot save for an hour (`SnapshotStale`).
 
 Move does not validate a Hashi approval's txid or change outputs. The monitor
