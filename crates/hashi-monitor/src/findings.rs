@@ -10,9 +10,12 @@
 //! Assumptions:
 //! - Every finding needs an operator action, so all findings have one level.
 //!   A condition that needs no action is not a finding.
-//! - `RpcInconsistency` means an RPC answer contradicts one the monitor
-//!   already holds. The bridge cannot cause it. The inner enum names the
-//!   contradiction.
+//! - `BtcRpcInconsistency` means a Bitcoin RPC answer contradicts one the
+//!   monitor already holds. The bridge cannot cause it. The inner enum names
+//!   the contradiction.
+//! - `GuardianInconsistency` means a guardian log that an honest guardian
+//!   cannot write. The guardian is the cause. The inner enum names the rule
+//!   it breaks.
 
 use crate::domain::ConfirmedDeposit;
 use crate::domain::MonitorEvent;
@@ -100,9 +103,9 @@ pub enum MonitorFinding {
         sui: SuiDepositApprovedEvent,
         btc: ConfirmedDeposit,
     },
-    /// An RPC answer contradicts one the monitor already holds. See
-    /// `RpcInconsistency`.
-    RpcInconsistency(RpcInconsistency),
+    /// A Bitcoin RPC answer contradicts one the monitor already holds. See
+    /// `BtcRpcInconsistency`.
+    BtcRpcInconsistency(BtcRpcInconsistency),
     /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
     /// warn age. The committee can spend a UTXO alone 60 days after it
     /// confirms.
@@ -154,6 +157,9 @@ pub enum MonitorFinding {
         /// S3's `LastModified` time.
         stored_at_ms: UnixMillis,
     },
+    /// The guardian's logs break a rule that an honest guardian keeps. See
+    /// `GuardianInconsistency`.
+    GuardianInconsistency(GuardianInconsistency),
 }
 
 impl MonitorFinding {
@@ -169,7 +175,7 @@ impl MonitorFinding {
             Self::DepositUnbacked { .. } => "DepositUnbacked",
             Self::DepositLate { .. } => "DepositLate",
             Self::DepositMismatch { .. } => "DepositMismatch",
-            Self::RpcInconsistency(_) => "RpcInconsistency",
+            Self::BtcRpcInconsistency(_) => "BtcRpcInconsistency",
             Self::UtxoTooOld { .. } => "UtxoTooOld",
             Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
             Self::UtxoUnknownInputSpent { .. } => "UtxoUnknownInputSpent",
@@ -177,15 +183,16 @@ impl MonitorFinding {
             Self::SourceStale { .. } => "SourceStale",
             Self::SnapshotStale { .. } => "SnapshotStale",
             Self::GuardianClockSkew { .. } => "GuardianClockSkew",
+            Self::GuardianInconsistency(_) => "GuardianInconsistency",
         }
     }
 }
 
-/// An RPC answer that contradicts one the monitor already holds. A chain
-/// cannot produce it, so it is a lying node, a reorg, or a monitor bug.
-/// The bridge is not the cause, and an engineer has to look.
+/// A Bitcoin RPC answer that contradicts one the monitor already holds. A
+/// chain cannot produce it, so it is a lying node, a reorg, or a monitor
+/// bug. The bridge is not the cause, and an engineer has to look.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RpcInconsistency {
+pub enum BtcRpcInconsistency {
     /// Bitcoin confirmed an outpoint the monitor's UTXO pool knows with a
     /// second amount or script. An output has one of each.
     UtxoMismatch {
@@ -203,7 +210,49 @@ pub enum RpcInconsistency {
     },
 }
 
-impl fmt::Display for RpcInconsistency {
+/// A guardian log that an honest guardian cannot write. The guardian is
+/// the cause, and an engineer has to look.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GuardianInconsistency {
+    /// Two withdrawal logs have the same seq. The guardian's limiter takes
+    /// each seq once, so two guardian sessions signed from one limiter state.
+    SeqDuplicate { seq: u64, object_key: String },
+    /// No withdrawal log has `seq` by `expect_by`, but a later seq has one.
+    /// The guardian signed a withdrawal without a log, or a log was lost.
+    SeqGap { seq: u64, expect_by: UnixSeconds },
+    /// A withdrawal log skips more than a few seqs: its seq is far above
+    /// `next_seq`, the seq that the monitor expects next.
+    SeqJump {
+        next_seq: u64,
+        seq: u64,
+        object_key: String,
+    },
+}
+
+impl fmt::Display for GuardianInconsistency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SeqDuplicate { seq, object_key } => {
+                write!(f, "SeqDuplicate(seq={seq}, key={object_key})")
+            }
+            Self::SeqGap { seq, expect_by } => write!(
+                f,
+                "SeqGap(seq={seq}, expect_by={})",
+                utc_timestamp(*expect_by)
+            ),
+            Self::SeqJump {
+                next_seq,
+                seq,
+                object_key,
+            } => write!(
+                f,
+                "SeqJump(next_seq={next_seq}, seq={seq}, key={object_key})"
+            ),
+        }
+    }
+}
+
+impl fmt::Display for BtcRpcInconsistency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UtxoMismatch {
@@ -305,8 +354,8 @@ impl fmt::Display for MonitorFinding {
                 sui.script_pubkey,
                 btc.script_pubkey,
             ),
-            Self::RpcInconsistency(inconsistency) => {
-                write!(f, "RpcInconsistency({inconsistency})")
+            Self::BtcRpcInconsistency(inconsistency) => {
+                write!(f, "BtcRpcInconsistency({inconsistency})")
             }
             Self::UtxoTooOld {
                 outpoint,
@@ -370,6 +419,9 @@ impl fmt::Display for MonitorFinding {
                     utc_timestamp(stored_at),
                     human_timestamp_delta(stored_at, logged_at),
                 )
+            }
+            Self::GuardianInconsistency(inconsistency) => {
+                write!(f, "GuardianInconsistency({inconsistency})")
             }
         }
     }

@@ -160,10 +160,21 @@ impl GuardianReader {
         &mut self,
         dir: &S3HourDirectory,
     ) -> GuardianResult<Vec<VerifiedLogEntry>> {
-        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
+        self.read_logs_in_dir_where(dir, |_| true).await
+    }
 
-        let mut out = Vec::with_capacity(all_logs.len());
-        for log in all_logs {
+    /// Read and verify the records in a directory for one hour whose keys
+    /// `keep` selects. The history check still covers every key, so a caller
+    /// can read a directory that is still filling, a part at a time.
+    pub async fn read_logs_in_dir_where(
+        &mut self,
+        dir: &S3HourDirectory,
+        keep: impl Fn(&str) -> bool,
+    ) -> GuardianResult<Vec<VerifiedLogEntry>> {
+        let logs = self.s3.list_log_records_in_dir(dir, keep).await?;
+
+        let mut out = Vec::with_capacity(logs.len());
+        for log in logs {
             let verified_log = self.verify_record(log, false).await?;
             out.push(verified_log);
         }

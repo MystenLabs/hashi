@@ -34,6 +34,11 @@ The monitor reports a finding for:
   Bitcoin does not back, or a guardian
   withdrawal log whose signed time differs from its S3 `LastModified` time
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`);
+- a break in the guardian's seq order (`GuardianInconsistency`): two
+  withdrawal logs with the same `seq`, a `seq` without a log by the end of
+  the hour after a higher seq appeared, or a skip of more than 10 seqs. The
+  guardian's limiter takes each seq once, in order, so two logs for one seq
+  mean that two guardian sessions signed from one limiter state;
 - a source the monitor last checked longer ago than its limit
   (`SourceStale`: three hours for each source),
   or no successful snapshot save for 12 hours (`SnapshotStale`);
@@ -113,7 +118,7 @@ Bitcoin fact changes it:
 
 Every operation is strict. A second add of a held UTXO is a repeat and is
 skipped. One that contradicts
-the pool is a finding: `RpcInconsistency` `UtxoMismatch` when
+the pool is a finding: `BtcRpcInconsistency` `UtxoMismatch` when
 Bitcoin confirms a held outpoint with a second amount or script, since
 Bitcoin cannot produce it; `UtxoUnknownInputSpent` when a
 confirmed withdrawal spends a UTXO the pool does not hold, since the bridge
@@ -143,7 +148,7 @@ It repeats successful checks once a day. The monitor reports:
   and a state check reports it once the Sui cursor is past the time Bitcoin
   was asked and still no withdrawal explains it: none the monitor follows
   names the UTXO, and the pool took none that spent it;
-- `RpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
+- `BtcRpcInconsistency` for `UtxoVanished` when a UTXO Bitcoin
   confirmed does not exist on Bitcoin. Every UTXO held was confirmed when it
   entered, so a missing answer is a reorg, a node without the transaction
   index, or a monitor bug.
@@ -162,6 +167,9 @@ findings as they appear.
 
 - The first run reads Sui and the guardian log from the bridge's genesis,
   so the monitor sees every flow from its first event.
+- The monitor reads the guardian's current hour directory every five
+  minutes, while it fills, so an E2 arrives within about five minutes of
+  its log.
 - A restart resumes each source exactly where the last run stopped, with
   the open flows the last run held.
 
@@ -182,9 +190,10 @@ cargo run -p hashi-monitor -- \
   --snapshot-bucket my-hashi-monitor-snapshot
 ```
 The monitor keeps a snapshot in the bucket and saves it after every state
-check: the deployment it audits, the next Sui checkpoint and guardian hourly
-directory to read, every open flow, the spends the last pool check has not
-judged yet, and the UTXO pool, all in `snapshot.json`. The monitor needs
+check: the deployment it audits, the next Sui checkpoint, the guardian hourly
+directory with the logs and the seqs read so far, every open flow, the
+spends the last pool check has not judged yet, and the UTXO pool, all in
+`snapshot.json`. The monitor needs
 read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
 or, on GKE, its workload identity, and fails to start without it. It must be
 the bucket's only writer.

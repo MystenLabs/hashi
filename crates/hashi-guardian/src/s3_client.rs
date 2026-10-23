@@ -554,17 +554,19 @@ impl GuardianS3Client {
         Ok(seen_keys.into_iter().collect())
     }
 
-    /// Batch read with prefix-history and object-lock validation.
+    /// Batch read with prefix-history and object-lock validation. The list
+    /// checks every key in `dir`, but only the keys that `keep` selects are read.
     ///
     /// Each returned record's signed object key is checked against the actual
     /// S3 key from which it was read.
-    pub async fn list_all_log_records_in_dir(
+    pub async fn list_log_records_in_dir(
         &self,
         dir: &S3HourDirectory,
+        keep: impl Fn(&str) -> bool,
     ) -> GuardianResult<Vec<StoredLogRecord>> {
         let keys = self.list_keys(&dir.to_string()).await?;
-        let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
+        let mut out = Vec::new();
+        for key in keys.into_iter().filter(|key| keep(key)) {
             // The prefix history was checked above. Immutable batch logs also
             // require an unexpired Compliance lock covering their retention policy.
             out.push(

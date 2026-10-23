@@ -18,7 +18,7 @@
 //!    change. The guardian's E2 labels the change; the monitor verifies it.
 //! 4. In one pass, every add comes before every spend.
 //! 5. A second add of a held UTXO is a repeat. A second amount or script is
-//!    an `RpcInconsistency`. A spend of a UTXO the pool does not hold is
+//!    an `BtcRpcInconsistency`. A spend of a UTXO the pool does not hold is
 //!    `UtxoUnknownInputSpent`.
 //! 6. A `DepositApproved` must match a held deposit's amount and script.
 //! 7. Once a day, `check` asks Bitcoin about every held UTXO. It reports old,
@@ -47,8 +47,8 @@ use crate::domain::ConfirmedDeposit;
 use crate::domain::ConfirmedWithdrawal;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::UtxoOrigin;
+use crate::findings::BtcRpcInconsistency;
 use crate::findings::MonitorFinding;
-use crate::findings::RpcInconsistency;
 use crate::rpc::btc::OutpointState;
 use crate::timing::Timing;
 
@@ -220,8 +220,8 @@ impl UtxoPool {
             return None;
         };
         let same = held.amount == utxo.amount && held.script_pubkey == utxo.script_pubkey;
-        (!same).then_some(MonitorFinding::RpcInconsistency(
-            RpcInconsistency::UtxoMismatch {
+        (!same).then_some(MonitorFinding::BtcRpcInconsistency(
+            BtcRpcInconsistency::UtxoMismatch {
                 outpoint,
                 held_amount: held.amount,
                 seen_amount: utxo.amount,
@@ -273,8 +273,8 @@ impl UtxoPool {
                     );
                 }
                 Some(OutpointState::Missing) | None => {
-                    findings.push(MonitorFinding::RpcInconsistency(
-                        RpcInconsistency::UtxoVanished {
+                    findings.push(MonitorFinding::BtcRpcInconsistency(
+                        BtcRpcInconsistency::UtxoVanished {
                             outpoint: *outpoint,
                             first_seen: utxo.first_seen,
                         },
@@ -439,7 +439,7 @@ mod tests {
         let finding = pool.add_deposit(&deposit(1, 1_001, 900)).unwrap();
         assert_eq!(
             finding,
-            MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoMismatch {
+            MonitorFinding::BtcRpcInconsistency(BtcRpcInconsistency::UtxoMismatch {
                 outpoint: outpoint(1),
                 held_amount: 1_000,
                 seen_amount: 1_001,
@@ -459,7 +459,7 @@ mod tests {
 
         assert_eq!(
             finding,
-            MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoMismatch {
+            MonitorFinding::BtcRpcInconsistency(BtcRpcInconsistency::UtxoMismatch {
                 outpoint: outpoint(1),
                 held_amount: 1_000,
                 seen_amount: 1_000,
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn a_missing_utxo_is_an_rpc_inconsistency() {
         let pool = pool_seen_at(1_000);
-        let vanished = MonitorFinding::RpcInconsistency(RpcInconsistency::UtxoVanished {
+        let vanished = MonitorFinding::BtcRpcInconsistency(BtcRpcInconsistency::UtxoVanished {
             outpoint: outpoint(1),
             first_seen: 1_000,
         });
