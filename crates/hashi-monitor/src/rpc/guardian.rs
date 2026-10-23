@@ -30,6 +30,7 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
+use crate::rpc::PollCursor;
 use crate::time::utc_timestamp;
 use anyhow::Context;
 use bitcoin::Network;
@@ -51,20 +52,29 @@ pub struct GuardianWithdrawalsPoller {
     hashi_btc_keys: Option<HashiBTCKeys>,
 }
 
+impl PollCursor for GuardianWithdrawalsPoller {
+    type Position = S3HourDirectory;
+
+    /// The next unread directory's start time also marks the end of the read range.
+    fn read_until(&self) -> UnixSeconds {
+        self.cursor.to_unix_seconds()
+    }
+
+    fn next_item_to_poll(&self) -> Self::Position {
+        self.cursor.clone()
+    }
+}
+
 impl GuardianWithdrawalsPoller {
     /// Fails if S3 cannot be reached.
-    pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(config: &Config, start: S3HourDirectory) -> anyhow::Result<Self> {
         let s3_credentials =
             hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
         Ok(Self {
             reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
-            cursor: S3HourDirectory::withdraw(start)?,
+            cursor: start,
             hashi_btc_keys: None,
         })
-    }
-
-    pub fn cursor_seconds(&self) -> UnixSeconds {
-        self.cursor.to_unix_seconds()
     }
 
     /// The two keys every bridge address derives from, and the Hashi object

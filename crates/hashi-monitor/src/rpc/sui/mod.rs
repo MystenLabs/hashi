@@ -10,8 +10,8 @@
 //! 1. The poller starts at a checkpoint: on a first run, the one that holds
 //!    the Hashi package's publish transaction; on a resume, the one the
 //!    snapshot saved. Before the first poll, it checks that the node still
-//!    serves the start. Its cursor in seconds is then the time of the
-//!    checkpoint before the start.
+//!    serves the start. It sets the progress timestamp from the checkpoint
+//!    before the start.
 //! 2. Each poll lists the transactions that emit a monitored event, from the
 //!    next checkpoint through the checkpoint the caller names, but at most
 //!    `MAX_CHECKPOINTS_PER_POLL` checkpoints. The caller names the chain head
@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::rpc::PollCursor;
 use anyhow::Context;
 use futures::StreamExt;
 use hashi_types::guardian::time::UnixSeconds;
@@ -214,9 +215,21 @@ pub struct SuiEventsPoller {
     package_id: String,
     /// The time of the last checkpoint scanned. `ensure_start_is_served`
     /// sets it for the start.
-    cursor_seconds: UnixSeconds,
+    last_read_checkpoint_timestamp: UnixSeconds,
     /// The first checkpoint not yet scanned.
     next_checkpoint: u64,
+}
+
+impl PollCursor for SuiEventsPoller {
+    type Position = u64;
+
+    fn read_until(&self) -> UnixSeconds {
+        self.last_read_checkpoint_timestamp
+    }
+
+    fn next_item_to_poll(&self) -> Self::Position {
+        self.next_checkpoint
+    }
 }
 
 impl SuiEventsPoller {
@@ -236,18 +249,9 @@ impl SuiEventsPoller {
             package_versions,
             hashi_btc_keys,
             package_id: config.package_id.clone(),
-            cursor_seconds: 0,
+            last_read_checkpoint_timestamp: 0,
             next_checkpoint: start,
         })
-    }
-
-    pub fn cursor_seconds(&self) -> UnixSeconds {
-        self.cursor_seconds
-    }
-
-    /// The first checkpoint not yet scanned.
-    pub fn next_checkpoint(&self) -> u64 {
-        self.next_checkpoint
     }
 
     /// The newest checkpoint the node serves.
@@ -258,10 +262,10 @@ impl SuiEventsPoller {
     /// Scan up to checkpoint `up_to`, inclusive, but at most
     /// `MAX_CHECKPOINTS_PER_POLL` checkpoints.
     ///
-    /// The timestamp cursor advances only through `watermark.checkpoint`, which
+    /// The progress timestamp advances only through `watermark.checkpoint`, which
     /// is the inclusive boundary that `ListTransactions` reports as fully
     /// covered. Each transaction's nested events provide the Hashi payloads.
-    /// The Sui SDK handles item and scan limits, resumable cursors,
+    /// The Sui SDK handles item and scan limits, resumable scans,
     /// and retryable partial streams. A terminal failure discards the partial
     /// range; that range is retried and may be split.
     pub async fn poll(&mut self, up_to: u64) -> anyhow::Result<PollOutcome> {
@@ -344,13 +348,15 @@ impl SuiEventsPoller {
 
         let scanned_through_timestamp = self.checkpoint_timestamp(completed_checkpoint).await?;
         self.next_checkpoint = completed_checkpoint.saturating_add(1);
-        self.cursor_seconds = self.cursor_seconds.max(scanned_through_timestamp);
+        self.last_read_checkpoint_timestamp = self
+            .last_read_checkpoint_timestamp
+            .max(scanned_through_timestamp);
         tracing::info!(
             start_checkpoint,
             end_checkpoint,
             completed_checkpoint,
             end_reason = ?scan.end_reason,
-            cursor = %utc_timestamp(self.cursor_seconds),
+            last_read_checkpoint_timestamp = %utc_timestamp(self.last_read_checkpoint_timestamp),
             events = events.len(),
             findings = findings.len(),
             "completed Sui event range"
@@ -358,9 +364,8 @@ impl SuiEventsPoller {
         Ok(PollOutcome::CursorAdvanced { events, findings })
     }
 
-    /// Fail unless the node still serves the start, then set the cursor to
-    /// the time of the checkpoint before the start. A pruned start would
-    /// leave the UTXO pool incomplete for good.
+    /// Verify that the node retains the required history.
+    /// Set `last_read_checkpoint_timestamp` from the checkpoint before `next_checkpoint`.
     pub async fn ensure_start_is_served(&mut self) -> anyhow::Result<()> {
         let (lowest, _) = self.checkpoint_range().await?;
         let previous = self.next_checkpoint.saturating_sub(1);
@@ -369,7 +374,7 @@ impl SuiEventsPoller {
             "the Sui node has pruned checkpoint {previous}, which the scan from checkpoint {} needs: it serves from {lowest}. Use a Sui node that keeps the history from there",
             self.next_checkpoint,
         );
-        self.cursor_seconds = self.checkpoint_timestamp(previous).await?;
+        self.last_read_checkpoint_timestamp = self.checkpoint_timestamp(previous).await?;
         Ok(())
     }
 
@@ -714,14 +719,14 @@ pub mod tests {
         }
     }
 
-    /// A poller whose cursor is at `cursor`. No Sui node serves it.
-    pub fn poller_scanned(cursor: UnixSeconds) -> SuiEventsPoller {
+    /// A poller checked through `last_read_checkpoint_timestamp`. No Sui node serves it.
+    pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiEventsPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
             package_id: PACKAGE_ID.to_string(),
         };
         let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
-        poller.cursor_seconds = cursor;
+        poller.last_read_checkpoint_timestamp = last_read_checkpoint_timestamp;
         poller
     }
 
@@ -768,13 +773,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn a_start_the_node_serves_sets_the_cursor_to_the_checkpoint_before() {
+    async fn a_served_start_sets_progress_to_the_previous_checkpoint_time() {
         let mut poller = pruned_poller_starting_at(130_000).await;
 
         poller.ensure_start_is_served().await.unwrap();
 
-        assert_eq!(poller.next_checkpoint(), 130_000);
-        assert_eq!(poller.cursor_seconds(), GENESIS_SECS + 129_999);
+        assert_eq!(poller.next_item_to_poll(), 130_000);
+        assert_eq!(poller.read_until(), GENESIS_SECS + 129_999);
     }
 
     #[tokio::test]
@@ -856,9 +861,9 @@ pub mod tests {
                 poller.poll(3 * MAX_CHECKPOINTS_PER_POLL).await.unwrap(),
                 PollOutcome::CursorAdvanced { .. }
             ));
-            assert_eq!(poller.next_checkpoint(), expected_cursor_checkpoint);
+            assert_eq!(poller.next_item_to_poll(), expected_cursor_checkpoint);
             assert_eq!(
-                poller.cursor_seconds(),
+                poller.read_until(),
                 GENESIS_SECS + expected_cursor_checkpoint - 1
             );
         }
