@@ -1,97 +1,37 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The monitor's own view of the bridge's UTXOs, anchored on Bitcoin.
+//! The monitor's own record of the UTXOs the bridge holds, built from Bitcoin facts.
 //!
-//! Why it exists: Move's `utxo_records` is written by the committee. A
-//! compromised committee can mark a UTXO spent on Move without spending it on
-//! Bitcoin, or keep a deposit out of Move, then spend the UTXO alone once the
-//! 60-day recovery leaf opens. This pool only changes on a Bitcoin fact, so
-//! the committee cannot make a UTXO leave it or keep one out of it.
-//!
-//! Scope: this module does two things. It keeps an accurate record of the
-//! UTXOs Hashi holds, built from Bitcoin facts alone. It makes every
-//! operation safe to repeat, so the same fact given twice changes nothing.
-//! The pool is Bitcoin's answers for the outputs the bridge's events name:
-//! a deposit request names an outpoint, a withdrawal names a txid, and the
-//! pool keeps what Bitcoin confirms for them. The one label Bitcoin cannot
-//! give, which outputs of a withdrawal are change, comes from the guardian,
-//! and it is verified: the monitor derives each change script from the
-//! guardian's path and the layout must hash to the txid.
-//! It does not detect a committee that pollutes the pool on Move, such as
-//! a mint for a UTXO already spent. Only a comparison of Move's records
-//! against this pool can do that, and that is a separate check.
+//! Why it exists: the committee writes Move's `utxo_records`. A compromised
+//! committee can mark a UTXO spent on Move without spending it, or keep a
+//! deposit out of Move, then spend the UTXO alone when the 60-day recovery
+//! leaf opens. Only a Bitcoin fact changes this pool, so the committee
+//! cannot remove a UTXO from it or keep one out.
 //!
 //! How it works:
-//! 1. The pool starts empty, at the bridge's genesis. Move's records are
-//!    never read for it. The continuous auditor keeps it in its snapshot,
-//!    so a restart resumes with the pool the last run built.
-//! 2. A UTXO is added when Bitcoin confirms a deposit request's output at
-//!    the bridge script of the claimed path. The committee is not needed.
-//! 3. When a withdrawal flow is complete, E1, E2 and E3 seen, its change
-//!    outputs are added and its inputs move to the spent record, with the
-//!    spending txid. The inputs and amounts come from the confirmed Bitcoin
-//!    transaction. Which outputs are change comes from E2: the guardian
-//!    labels each output from paths it derives itself, and the committee's
-//!    E1 is not trusted for it. A withdrawal that never completes never
-//!    touches the pool, so its inputs stay held and the daily check reports
-//!    them once they are too old, on top of the finding for its missing
-//!    event. The auditor feeds
-//!    the pool right after its Bitcoin lookups, so a withdrawal's inputs
-//!    have entered before the withdrawal spends them.
-//! 4. Every operation is strict. An operation the pool already applied is a
-//!    repeat and is skipped. For example, two requests for one UTXO give
-//!    the pool the same deposit twice.
-//!    An operation that contradicts the pool is a finding. An outpoint
-//!    confirmed with a second amount or script, or a UTXO spent by a second
-//!    transaction, is an `RpcInconsistency`: Bitcoin cannot produce it. A
-//!    spend of a UTXO the pool never held is `UtxoUnknownInputSpent`. The
-//!    pool records nothing for that last spend: the finding is the signal.
-//! 5. In one pass, every add comes before every spend. A pass can answer a
-//!    deposit and the withdrawal that spends it, or a withdrawal and the one
-//!    that spends its change, in any order.
-//! 6. A `DepositApproved`, which Hashi needs before it mints, whose
-//!    request's machine has closed is checked against the pool: the pool
-//!    must hold the UTXO, or have spent it, as a deposit with the same
-//!    amount and script. One that arrives earlier is judged by its machine,
-//!    by the same rule. So every hBTC minted matches BTC that Bitcoin shows
-//!    paid to the bridge. A late approval can come after the pool spent
-//!    the UTXO. The spent record keeps the amount and script, so a spent
-//!    UTXO is still found.
-//! 7. Once a day the monitor asks Bitcoin about every UTXO held. `check`
-//!    turns the answers into findings. An unspent UTXO is reported by age.
-//!    A spent UTXO is a spend outside Hashi. A missing UTXO is a phantom:
-//!    every UTXO held was confirmed when it entered, so a missing answer is
-//!    an RPC inconsistency. A UTXO that a withdrawal the monitor follows
-//!    spends is not checked: Bitcoin spends it about an hour before the
-//!    flow completes, and an incomplete flow has its own finding.
+//! 1. The pool starts empty at the bridge's genesis. The snapshot keeps it
+//!    across restarts.
+//! 2. A deposit enters when Bitcoin confirms the request's output at the
+//!    bridge script of the claimed path.
+//! 3. A complete withdrawal (E1, E2, E3) removes its inputs and adds its
+//!    change. The guardian's E2 labels the change; the monitor verifies it.
+//! 4. In one pass, every add comes before every spend.
+//! 5. A second add of a held UTXO is a repeat. A second amount or script is
+//!    an `RpcInconsistency`. A spend of a UTXO the pool does not hold is
+//!    `UtxoUnknownInputSpent`.
+//! 6. A `DepositApproved` must match a held deposit's amount and script.
+//! 7. Once a day, `check` asks Bitcoin about every held UTXO. It reports old,
+//!    spent and missing UTXOs.
+//! 8. The pool keeps no record of spent UTXOs. Move refuses a request after
+//!    the first DC, so every add for a UTXO comes before its spend.
 //!
-//! Differences from Move's pool: this pool can hold a UTXO that Move never
-//! holds, with no fault of the committee. Two causes:
-//! - Sanctions (IOP-820): a member's AML screening rejects the deposit. The
-//!   UTXO is real bridge money, but no `DepositApproved` follows, so it
-//!   stays outside Move until the recovery leaf opens.
-//! - User mistakes: the pool takes a UTXO that pays the bridge script of the
-//!   claimed path, but an honest committee approves only a correct, live
-//!   request. A request with a wrong amount is rejected; the pool keeps the
-//!   UTXO at the amount Bitcoin paid. A request whose transaction confirms
-//!   after Move marks it expired (one day) but within the watch
-//!   (`DEPOSIT_REQUEST_WATCH`) is deleted. In both cases Move holds the UTXO
-//!   only once the user sends a correct request again.
-//!
-//! Invariants:
-//! - An outpoint is held or spent, never both.
-//! - The spent record is never pruned, and it only grows: an entry is added
-//!   once and never changes. The snapshot keeps it in files by that order.
-//! - The pool is a function of Bitcoin facts alone: a UTXO's time is its
-//!   block time, so two monitors build the same pool.
+//! The pool can hold a UTXO that Move never holds, for example a deposit
+//! that AML screening rejects or a request with a wrong amount.
 //!
 //! Assumptions:
-//! - The first run starts at the bridge's genesis on a fullnode that still
-//!   serves the history, so every UTXO is seen enter. A UTXO paid to a bridge
-//!   address with no `DepositRequested`, or with a wrong derivation path, is
-//!   invisible to the monitor and out of scope. A withdrawal that spends such
-//!   a UTXO is reported as a spend of an unknown UTXO.
+//! - The first run starts at genesis, so the monitor sees every UTXO enter.
+//! - Sui and the guardian deliver each event once: no repeat and no miss.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -123,14 +63,6 @@ pub struct Utxo {
     pub first_seen: UnixSeconds,
 }
 
-/// A UTXO a confirmed Hashi withdrawal spent.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SpentUtxo {
-    #[serde(flatten)]
-    pub utxo: Utxo,
-    pub spent_by: Txid,
-}
-
 /// A held UTXO that Bitcoin reports spent, which no followed withdrawal
 /// explains. The auditor judges it once the Sui cursor is past `checked_at`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,14 +72,10 @@ pub struct SuspectSpend {
     pub amount: u64,
 }
 
-/// The UTXOs the bridge holds and the UTXOs it spent, by Bitcoin's account.
+/// The UTXOs the bridge holds, by Bitcoin's account.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UtxoPool {
     utxos: BTreeMap<OutPoint, Utxo>,
-    spent: BTreeMap<OutPoint, SpentUtxo>,
-    /// The spent outpoints in the order the pool spent them. The record
-    /// only grows, so a prefix of this list never changes.
-    spent_order: Vec<OutPoint>,
 }
 
 /// A held UTXO as stored: a JSON map needs string keys, so a list.
@@ -156,14 +84,6 @@ pub struct UtxoWire {
     outpoint: OutPoint,
     #[serde(flatten)]
     utxo: Utxo,
-}
-
-/// A spent UTXO as stored.
-#[derive(Deserialize, Serialize)]
-pub struct SpentUtxoWire {
-    pub outpoint: OutPoint,
-    #[serde(flatten)]
-    pub spent: SpentUtxo,
 }
 
 impl UtxoPool {
@@ -178,43 +98,19 @@ impl UtxoPool {
             .collect()
     }
 
-    /// The spent UTXOs at positions `range` of the order the pool spent
-    /// them in, ready to store.
-    pub fn spent_to_wire(&self, range: std::ops::Range<usize>) -> Vec<SpentUtxoWire> {
-        self.spent_order[range]
-            .iter()
-            .map(|outpoint| SpentUtxoWire {
-                outpoint: *outpoint,
-                spent: self.spent[outpoint].clone(),
-            })
-            .collect()
-    }
-
-    /// A pool from stored parts. `spent` is in the order the pool spent them.
-    pub fn from_wire(held: Vec<UtxoWire>, spent: Vec<SpentUtxoWire>) -> Self {
-        let mut pool = Self {
+    /// A pool from its stored UTXOs.
+    pub fn from_wire(held: Vec<UtxoWire>) -> Self {
+        Self {
             utxos: held
                 .into_iter()
                 .map(|wire| (wire.outpoint, wire.utxo))
                 .collect(),
-            ..Self::default()
-        };
-        for wire in spent {
-            pool.record_spent(wire.outpoint, wire.spent);
-        }
-        pool
-    }
-
-    /// Add to the spent record. A UTXO already in it keeps its entry.
-    fn record_spent(&mut self, outpoint: OutPoint, spent: SpentUtxo) {
-        if self.spent.insert(outpoint, spent).is_none() {
-            self.spent_order.push(outpoint);
         }
     }
 
-    /// Whether a withdrawal the pool took spent the UTXO.
-    pub fn is_spent(&self, outpoint: &OutPoint) -> bool {
-        self.spent.contains_key(outpoint)
+    /// Whether the pool holds the UTXO.
+    pub fn holds(&self, outpoint: &OutPoint) -> bool {
+        self.utxos.contains_key(outpoint)
     }
 
     /// The number of UTXOs held.
@@ -225,11 +121,6 @@ impl UtxoPool {
     /// Whether no UTXO is held.
     pub fn is_empty(&self) -> bool {
         self.utxos.is_empty()
-    }
-
-    /// The number of UTXOs in the spent record.
-    pub fn spent_len(&self) -> usize {
-        self.spent.len()
     }
 
     /// The earliest block timestamp among held UTXOs.
@@ -263,7 +154,7 @@ impl UtxoPool {
     }
 
     /// Check the Sui `DepositApproved` against the pool: the UTXO must be a
-    /// deposit the pool holds or spent. See `SuiDepositApprovedEvent::judge`.
+    /// deposit the pool holds. See `SuiDepositApprovedEvent::judge`.
     pub fn check_sui_approval(
         &self,
         sui: &SuiDepositApprovedEvent,
@@ -273,7 +164,6 @@ impl UtxoPool {
         let paid = self
             .utxos
             .get(&outpoint)
-            .or_else(|| self.spent.get(&outpoint).map(|spent| &spent.utxo))
             .filter(|utxo| utxo.origin == UtxoOrigin::Deposit)
             .map(|utxo| ConfirmedDeposit {
                 deposit_id: sui.deposit_id,
@@ -322,18 +212,12 @@ impl UtxoPool {
             .collect()
     }
 
-    /// Add a UTXO. One already held or spent with the same amount and
-    /// script is a repeat and keeps its entry. One that differs is a finding.
+    /// Add a UTXO. One already held with the same amount and script is a
+    /// repeat and keeps its entry. One that differs is a finding.
     fn add(&mut self, outpoint: OutPoint, utxo: Utxo) -> Option<MonitorFinding> {
-        let held = match (self.utxos.get(&outpoint), self.spent.get(&outpoint)) {
-            (Some(held), _) => held,
-            // Not a finding: the utxo pool is sourced from Bitcoin RPC node, so a
-            // second add of a spent UTXO is a repeat.
-            (None, Some(spent)) => &spent.utxo,
-            (None, None) => {
-                self.utxos.insert(outpoint, utxo);
-                return None;
-            }
+        let Some(held) = self.utxos.get(&outpoint) else {
+            self.utxos.insert(outpoint, utxo);
+            return None;
         };
         let same = held.amount == utxo.amount && held.script_pubkey == utxo.script_pubkey;
         (!same).then_some(MonitorFinding::RpcInconsistency(
@@ -347,30 +231,13 @@ impl UtxoPool {
         ))
     }
 
-    /// Spend a UTXO by the transaction `txid`. One already spent by it is a
-    /// repeat. One spent by another transaction, or never held, is a finding.
+    /// Spend a UTXO by the transaction `txid`. One the pool does not hold is
+    /// a finding.
     fn spend(&mut self, outpoint: OutPoint, txid: Txid) -> Option<MonitorFinding> {
-        if let Some(utxo) = self.utxos.remove(&outpoint) {
-            self.record_spent(
-                outpoint,
-                SpentUtxo {
-                    utxo,
-                    spent_by: txid,
-                },
-            );
-            return None;
-        }
-        match self.spent.get(&outpoint) {
-            Some(spent) if spent.spent_by == txid => None,
-            Some(spent) => Some(MonitorFinding::RpcInconsistency(
-                RpcInconsistency::UtxoSpentTwice {
-                    outpoint,
-                    first_txid: spent.spent_by,
-                    second_txid: txid,
-                },
-            )),
-            None => Some(MonitorFinding::UtxoUnknownInputSpent { outpoint, txid }),
-        }
+        self.utxos
+            .remove(&outpoint)
+            .is_none()
+            .then_some(MonitorFinding::UtxoUnknownInputSpent { outpoint, txid })
     }
 
     /// Check held outputs against Bitcoin results and return findings and suspect spends.
@@ -423,10 +290,6 @@ impl UtxoPool {
 impl UtxoPool {
     pub fn get(&self, outpoint: &OutPoint) -> Option<&Utxo> {
         self.utxos.get(outpoint)
-    }
-
-    pub fn get_spent(&self, outpoint: &OutPoint) -> Option<&SpentUtxo> {
-        self.spent.get(outpoint)
     }
 }
 
@@ -553,18 +416,6 @@ mod tests {
                 first_seen: 700
             })
         );
-        assert_eq!(
-            pool.get_spent(&outpoint(1)),
-            Some(&SpentUtxo {
-                utxo: Utxo {
-                    amount: 1_000,
-                    script_pubkey: script(),
-                    origin: UtxoOrigin::Deposit,
-                    first_seen: 500
-                },
-                spent_by: txid(7),
-            })
-        );
     }
 
     #[test]
@@ -620,42 +471,18 @@ mod tests {
     }
 
     #[test]
-    fn a_second_add_of_a_spent_utxo_is_a_repeat() {
+    fn a_second_spend_of_a_utxo_is_a_spend_of_an_unknown_utxo() {
         let mut pool = pool_with_one();
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
-
-        assert!(pool.add_deposit(&deposit(1, 1_000, 900)).is_none());
-        assert!(pool.get(&outpoint(1)).is_none());
-        assert_eq!(pool.get_spent(&outpoint(1)).unwrap().spent_by, txid(7));
-
-        assert!(matches!(
-            pool.add_deposit(&deposit(1, 1_001, 900)),
-            Some(MonitorFinding::RpcInconsistency(
-                RpcInconsistency::UtxoMismatch { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn a_repeated_spend_is_a_repeat_and_a_second_spender_is_a_finding() {
-        let mut pool = pool_with_one();
-        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
-
-        assert!(
-            pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])])
-                .is_empty()
-        );
 
         let findings = pool.add_withdrawals(&[withdrawal(8, vec![outpoint(1)])]);
+
         assert_eq!(
             findings,
-            vec![MonitorFinding::RpcInconsistency(
-                RpcInconsistency::UtxoSpentTwice {
-                    outpoint: outpoint(1),
-                    first_txid: txid(7),
-                    second_txid: txid(8),
-                }
-            )]
+            vec![MonitorFinding::UtxoUnknownInputSpent {
+                outpoint: outpoint(1),
+                txid: txid(8),
+            }]
         );
     }
 
@@ -673,7 +500,6 @@ mod tests {
             }]
         );
         assert_eq!(pool.outpoints(), vec![change_of(7)]);
-        assert_eq!(pool.get_spent(&outpoint(9)), None);
     }
 
     #[test]
@@ -687,7 +513,6 @@ mod tests {
 
         assert!(findings.is_empty());
         assert_eq!(pool.outpoints(), vec![change_of(8)]);
-        assert_eq!(pool.get_spent(&change_of(7)).unwrap().spent_by, txid(8));
     }
 
     const SKEW: u64 = 10;
@@ -712,13 +537,16 @@ mod tests {
     }
 
     #[test]
-    fn an_approval_of_a_spent_deposit_is_backed() {
+    fn an_approval_of_a_spent_deposit_is_unbacked() {
+        // Move refuses this approval, so the pool need not remember spends.
         let mut pool = pool_with_one();
         pool.add_withdrawals(&[withdrawal(5, vec![outpoint(1)])]);
-        assert!(pool.is_spent(&outpoint(1)));
 
         let sui = sui_approval(1, 1_000, script());
-        assert!(pool.check_sui_approval(&sui, SKEW).is_empty());
+        assert_eq!(
+            pool.check_sui_approval(&sui, SKEW),
+            vec![MonitorFinding::DepositUnbacked { sui }]
+        );
     }
 
     #[test]
@@ -841,7 +669,7 @@ mod tests {
 
         assert!(findings.is_empty());
         assert!(suspects.is_empty());
-        assert!(pool.is_spent(&outpoint(1)));
+        assert!(!pool.holds(&outpoint(1)));
     }
 
     #[test]
@@ -850,23 +678,8 @@ mod tests {
         pool.add_deposit(&deposit(2, 2_000, 1_500));
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
-        let loaded =
-            UtxoPool::from_wire(pool.held_to_wire(), pool.spent_to_wire(0..pool.spent_len()));
+        let loaded = UtxoPool::from_wire(pool.held_to_wire());
 
         assert_eq!(loaded, pool);
-    }
-
-    #[test]
-    fn the_spent_record_keeps_the_order_the_pool_spent_in() {
-        let mut pool = pool_with_one();
-        pool.add_deposit(&deposit(2, 2_000, 1_500));
-        pool.add_withdrawals(&[withdrawal(7, vec![outpoint(2)])]);
-        pool.add_withdrawals(&[withdrawal(8, vec![outpoint(1)])]);
-
-        let spent = pool.spent_to_wire(0..2);
-
-        assert_eq!(spent[0].outpoint, outpoint(2));
-        assert_eq!(spent[1].outpoint, outpoint(1));
-        assert_eq!(pool.spent_to_wire(1..2)[0].outpoint, outpoint(1));
     }
 }

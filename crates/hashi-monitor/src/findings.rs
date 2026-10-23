@@ -195,13 +195,6 @@ pub enum RpcInconsistency {
         held_script: ScriptBuf,
         seen_script: ScriptBuf,
     },
-    /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
-    /// records as spent by another confirmed transaction.
-    UtxoSpentTwice {
-        outpoint: OutPoint,
-        first_txid: Txid,
-        second_txid: Txid,
-    },
     /// A UTXO the monitor's UTXO pool holds does not exist on Bitcoin, and
     /// its grace period has passed. Bitcoin confirmed it once.
     UtxoVanished {
@@ -222,14 +215,6 @@ impl fmt::Display for RpcInconsistency {
             } => write!(
                 f,
                 "UtxoMismatch(outpoint={outpoint}, held_amount={held_amount}, seen_amount={seen_amount}, held_script={held_script:x}, seen_script={seen_script:x})"
-            ),
-            Self::UtxoSpentTwice {
-                outpoint,
-                first_txid,
-                second_txid,
-            } => write!(
-                f,
-                "UtxoSpentTwice(outpoint={outpoint}, first_txid={first_txid}, second_txid={second_txid})"
             ),
             Self::UtxoVanished {
                 outpoint,

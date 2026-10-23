@@ -99,8 +99,8 @@ Bitcoin fact changes it:
 - A UTXO enters when Bitcoin confirms a deposit request's output at the
   bridge script of the claimed path. The committee is not needed.
 - When a withdrawal flow is complete, E1, E2 and E3 seen, its change
-  outputs enter and its inputs move to a spent record, with the spending
-  txid. The inputs and amounts come from the confirmed Bitcoin transaction.
+  outputs enter and its inputs leave. The inputs and amounts come from the
+  confirmed Bitcoin transaction.
   Which outputs are change comes from E2: the guardian labels each output
   from paths it derives itself. A withdrawal that never completes never
   touches the pool.
@@ -111,23 +111,24 @@ Bitcoin fact changes it:
   Sui scan can deliver a deposit request and the withdrawal that spends it in
   one poll; the pool waits for the lookups that follow.
 
-Every operation is strict. One the pool already applied is a repeat and is
+Every operation is strict. A second add of a held UTXO is a repeat and is
 skipped. One that contradicts
-the pool is a finding: `RpcInconsistency`, for `UtxoMismatch`
-when Bitcoin confirms a known outpoint with a second amount or script, and
-`UtxoSpentTwice` when a confirmed withdrawal spends a UTXO another confirmed
-transaction already spent, since Bitcoin cannot produce either;
-`UtxoUnknownInputSpent` when a confirmed withdrawal spends a UTXO the pool
-never held, since the bridge spent a UTXO that no verified deposit or change
-brought in; the pool records nothing for that spend. In one Bitcoin pass
+the pool is a finding: `RpcInconsistency` `UtxoMismatch` when
+Bitcoin confirms a held outpoint with a second amount or script, since
+Bitcoin cannot produce it; `UtxoUnknownInputSpent` when a
+confirmed withdrawal spends a UTXO the pool does not hold, since the bridge
+spent a UTXO that no verified deposit or change brought in; the pool records
+nothing for that spend. In one Bitcoin pass
 every add comes before every spend, so a pass
 that answers a deposit and the withdrawal that spends it is right in any
 order.
 
 Move's records are never read for the pool. The pool starts empty on the
 first run, which starts at the bridge's genesis on a fullnode that still
-serves the history, so every UTXO is seen enter. The spent record is never
-pruned; a spent UTXO is about 400 bytes. The pool is kept between runs in
+serves the history, so every UTXO is seen enter. The pool keeps no record
+of spent UTXOs. It does not need one: the monitor reads each event once, and
+Move refuses a deposit request or approval for a UTXO it holds or spent.
+The pool is kept between runs in
 the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Running the monitor" below.
 
@@ -183,10 +184,7 @@ cargo run -p hashi-monitor -- \
 The monitor keeps a snapshot in the bucket and saves it after every state
 check: the deployment it audits, the next Sui checkpoint and guardian hourly
 directory to read, every open flow, the spends the last pool check has not
-judged yet, and the UTXO pool. `snapshot.json` holds all of it except the
-spent record, plus the number of spent entries. The spent
-record only grows, so it lives in `spent/NNNNN.json` files of 10,000 entries
-each. A save writes only the files with new entries, then `snapshot.json`. The monitor needs
+judged yet, and the UTXO pool, all in `snapshot.json`. The monitor needs
 read and write access to the bucket, through `GOOGLE_APPLICATION_CREDENTIALS`
 or, on GKE, its workload identity, and fails to start without it. It must be
 the bucket's only writer.
@@ -209,8 +207,8 @@ save comes again: the restart reads Sui and guardian events again and checks
 Bitcoin and the pool again. A stale Bitcoin source or a stale snapshot is
 reported again only after its limit passes again. A snapshot of another
 deployment is ignored and the run is a first run. A snapshot of another
-format version, one that does not parse, or one that lacks a spent file stops
-the monitor at startup. Delete the objects to start over from genesis.
+format version or one that does not parse stops the monitor at startup.
+Delete `snapshot.json` to start over from genesis.
 
 A flow that never completes stays open in the snapshot, and the monitor
 reports its missing event at every state check.
