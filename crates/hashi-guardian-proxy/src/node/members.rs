@@ -284,7 +284,7 @@ async fn read_member_keys(
     Ok((members, checkpoint_timestamp_ms))
 }
 
-async fn get_committee(
+pub(super) async fn get_committee(
     sui: &mut sui_rpc::Client,
     committees: Address,
     epoch: u64,
