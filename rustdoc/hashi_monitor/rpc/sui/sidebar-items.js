@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["package_genesis","read_confirmation_threshold"],"mod":["approval","hbtc_supply"],"struct":["Genesis","SuiPoll","SuiPoller"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["GuardianError"],"struct":["CryptoVerificationError"],"type":["CryptoVerificationResult","GuardianResult"]};

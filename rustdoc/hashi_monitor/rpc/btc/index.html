@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The Bitcoin client: confirmation lookups over HTTP JSON-RPC."><title>hashi_monitor::rpc::btc - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module btc</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../hashi_monitor/index.html">hashi_<wbr>monitor</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module btc</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In hashi_<wbr>monitor::<wbr>rpc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">hashi_monitor</a>::<wbr><a href="../index.html">rpc</a></div><h1>Module <span>btc</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/hashi_monitor/rpc/btc.rs.html#4-1186">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The Bitcoin client: confirmation lookups over HTTP JSON-RPC.</p>
+<p>Why it exists: the withdrawal E3 and the deposit E1 are Bitcoin
+confirmations. Bitcoin has no event stream to scan, so the auditor looks
+each pending transaction up by txid.</p>
+<p>Why one height:</p>
+<ul>
+<li>A parent transaction creates an output that a dependent transaction spends.</li>
+<li>At one height, the dependent cannot have more confirmations than its parent.</li>
+<li>All lookups in a tick use one captured height, including lookups in different batches.</li>
+<li>New blocks between RPC responses must not complete a dependent machine before its parent is ready to close.</li>
+<li>Pool maintenance needs each complete flow’s parent machine already closed or ready to close.</li>
+</ul>
+<p>How it works:</p>
+<ol>
+<li>At startup, the auditor reads Hashi’s on-chain
+<code>bitcoin_confirmation_threshold</code> and gives it to the client. A
+transaction counts as confirmed at that depth, as it does for the
+committee. On mainnet, a threshold below <code>MAINNET_MIN_CONFIRMATIONS</code>
+stops the monitor.</li>
+<li>Before a pass, <code>synced_height</code> checks the node and returns its height.
+All batches use this height to calculate confirmation depth.
+Blocks that arrive during the pass count on the next pass.</li>
+<li><code>prefetch_confirmations</code> looks all pending txids up in batches of
+<code>HTTP_JSON_RPC_BATCH_SIZE</code>, with <code>HTTP_JSON_RPC_BATCHES_IN_FLIGHT</code>
+batches sent at once, and <code>lookup_confirmation</code> serves each one from
+that cache. A confirmed answer is kept across passes: a confirmation
+at the threshold depth does not change. <code>forget_unconfirmed</code> drops
+the rest at the start of each pass, so an unconfirmed transaction is
+looked up again. An answer for a txid no longer asked for is dropped.
+When a lookup fails, the batches that finished are kept, so the next
+pass asks only about the rest.</li>
+<li>A transaction at the threshold depth is returned with the time of
+its own block and the time of the block that gave it that depth.</li>
+<li>Requests are not paced: the node is the bridge’s own. A request that
+fails to send, gets an HTTP 502, 503 or 504, or is rate limited is
+retried with exponential backoff, <code>MAX_REQUEST_RETRIES</code> times. Core
+answers a JSON-RPC error with HTTP 500, so 500 is not retried.</li>
+</ol>
+<p>Assumptions:</p>
+<ul>
+<li>The threshold is read once. A governance change takes effect in the
+monitor at its next restart.</li>
+<li>An unconfirmed answer is never reused across passes. So the auditor
+can stamp every answer with the pass’s start time: the real lookup
+is no earlier. A cached confirmed answer does not need a time.</li>
+<li>The endpoint serves <code>getrawtransaction</code> with verbose output, which
+needs <code>txindex</code> or a hosted provider.</li>
+<li>A request that still fails after the retries fails the pass, which
+is retried on the next tick.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BtcRpcClient.html" title="struct hashi_monitor::rpc::btc::BtcRpcClient">BtcRpc<wbr>Client</a></dt></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.OutpointState.html" title="enum hashi_monitor::rpc::btc::OutpointState">Outpoint<wbr>State</a></dt><dd>What Bitcoin holds at an outpoint. <code>Missing</code> and <code>Spent</code> differ by the
+transaction lookup, <code>Spent</code> and <code>Unspent</code> by the UTXO set.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAINNET_MIN_CONFIRMATIONS.html" title="constant hashi_monitor::rpc::btc::MAINNET_MIN_CONFIRMATIONS">MAINNET_<wbr>MIN_<wbr>CONFIRMATIONS</a></dt><dd>The lowest confirmation threshold the monitor accepts on Bitcoin
+mainnet. Hashi’s launch tool refuses a lower one there too.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.checked_confirmation_threshold.html" title="fn hashi_monitor::rpc::btc::checked_confirmation_threshold">checked_<wbr>confirmation_<wbr>threshold</a></dt><dd>The on-chain confirmation threshold, refused on mainnet below
+<code>MAINNET_MIN_CONFIRMATIONS</code>.</dd></dl></section></div></main></body></html>

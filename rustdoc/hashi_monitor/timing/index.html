@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Timing bounds of the withdrawal and deposit flows. Timing bounds of the withdrawal and deposit flows."><title>hashi_monitor::timing - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module timing</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../hashi_monitor/index.html">hashi_<wbr>monitor</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module timing</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate hashi_<wbr>monitor</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">hashi_monitor</a></div><h1>Module <span>timing</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/hashi_monitor/timing.rs.html#4-233">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Timing bounds of the withdrawal and deposit flows.
+Timing bounds of the withdrawal and deposit flows.</p>
+<p>Why it exists: the bounds describe the protocol, not a deployment. The
+guardian signs within minutes of a Hashi approval, a Bitcoin block time
+may run hours off real time, and six confirmations take about an hour.
+Every environment runs the same values, so they live here and not in the
+config file.</p>
+<p>How to change a bound: edit the constant and its reason below. If an
+environment ever needs a different set, select it on
+<code>deployment.retention_environment</code> and keep both sets in this file.</p>
+<p>The bounds, with E1, E2 and E3 as in <code>domain</code>:</p>
+<ul>
+<li>Withdrawals: each successor must follow its predecessor within its
+delay. Each predecessor may be recorded after its successor by at most
+its skew.</li>
+<li>Deposits: the deposit’s block time may be after the Hashi
+approval by at most the skew. The Bitcoin event is the user’s
+payment, so no delay bounds it.</li>
+<li>Deposit requests: Bitcoin is asked about a request’s transaction for
+the watch period. The monitor assumes an honest deposit confirms on
+Bitcoin within it.</li>
+<li>The UTXO pool: a UTXO the bridge holds is reported by its age on
+Bitcoin, and by its absence from Bitcoin after a grace period.</li>
+</ul>
+<p>A Bitcoin event is timed by the block that gave the transaction Hashi’s
+confirmation threshold (see <code>rpc::btc</code>), not by the block that holds it.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.EventBounds.html" title="struct hashi_monitor::timing::EventBounds">Event<wbr>Bounds</a></dt><dd>One bound per non-terminal withdrawal event.</dd><dt><a class="struct" href="struct.Timing.html" title="struct hashi_monitor::timing::Timing">Timing</a></dt><dd>The bounds in force. <code>Default</code> is the protocol set above. Tests build
+their own with small numbers.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEPOSIT_APPROVAL_SKEW.html" title="constant hashi_monitor::timing::DEPOSIT_APPROVAL_SKEW">DEPOSIT_<wbr>APPROVAL_<wbr>SKEW</a></dt><dd>A deposit’s Bitcoin block after its Sui <code>DepositApproved</code>. A miner may
+date a block up to two hours ahead of real time.</dd><dt><a class="constant" href="constant.DEPOSIT_REQUEST_WATCH.html" title="constant hashi_monitor::timing::DEPOSIT_REQUEST_WATCH">DEPOSIT_<wbr>REQUEST_<wbr>WATCH</a></dt><dd>How long Bitcoin is asked about a deposit request’s transaction.
+Assumption: an honest deposit confirms on Bitcoin within two days of
+its request. Move marks a request expired after a day
+(<code>MAX_DEPOSIT_REQUEST_AGE_MS</code> in <code>deposit_queue.move</code>) and an honest
+leader deletes it then, so the user requests again, which is a new
+watch. But Move does not refuse to approve an old request. A UTXO that
+confirms after the watch never enters the UTXO pool, so an approval of
+it is reported as <code>DepositUnbacked</code>.</dd><dt><a class="constant" href="constant.UTXO_MAX_AGE.html" title="constant hashi_monitor::timing::UTXO_MAX_AGE">UTXO_<wbr>MAX_<wbr>AGE</a></dt><dd>Age of an unspent bridge UTXO that is a finding. The committee can spend
+it alone at 60 days, so the finding leaves 20 days to act. Coin selection
+in the <code>hashi</code> crate spends UTXOs older than 30 days first
+(<code>RECOVERY_PRIORITY_AGE_BLOCKS</code>), but only as extra inputs of a withdrawal.</dd><dt><a class="constant" href="constant.WITHDRAWAL_E1_AFTER_E2_SKEW.html" title="constant hashi_monitor::timing::WITHDRAWAL_E1_AFTER_E2_SKEW">WITHDRAWAL_<wbr>E1_<wbr>AFTER_<wbr>E2_<wbr>SKEW</a></dt><dd>E1 after E2. The guardian’s request clock tolerance is five minutes.</dd><dt><a class="constant" href="constant.WITHDRAWAL_E1_TO_E2_DELAY.html" title="constant hashi_monitor::timing::WITHDRAWAL_E1_TO_E2_DELAY">WITHDRAWAL_<wbr>E1_<wbr>TO_<wbr>E2_<wbr>DELAY</a></dt><dd>E1 -&gt; E2. The guardian signs about 15 minutes after a Hashi approval on
+testnet. An hour covers a guardian restart or a reconfiguration.</dd><dt><a class="constant" href="constant.WITHDRAWAL_E2_AFTER_E3_SKEW.html" title="constant hashi_monitor::timing::WITHDRAWAL_E2_AFTER_E3_SKEW">WITHDRAWAL_<wbr>E2_<wbr>AFTER_<wbr>E3_<wbr>SKEW</a></dt><dd>E2 after E3. A block time is set by its miner and need only exceed the
+median of the last 11 blocks, which lags real time by about an hour.</dd><dt><a class="constant" href="constant.WITHDRAWAL_E2_TO_E3_DELAY.html" title="constant hashi_monitor::timing::WITHDRAWAL_E2_TO_E3_DELAY">WITHDRAWAL_<wbr>E2_<wbr>TO_<wbr>E3_<wbr>DELAY</a></dt><dd>E2 -&gt; E3. The signed transaction must confirm on Bitcoin within a day.
+E3 is timed by the block that gave it the confirmation threshold, so the
+bound includes the wait for those blocks, about 50 minutes at six.</dd></dl></section></div></main></body></html>

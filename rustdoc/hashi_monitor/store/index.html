@@ -1,0 +1,26 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The snapshot a continuous audit resumes from after a restart. The continuous auditor’s snapshot: the whole audit state, so a restart continues where the last run stopped."><title>hashi_monitor::store - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module store</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../hashi_monitor/index.html">hashi_<wbr>monitor</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module store</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate hashi_<wbr>monitor</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">hashi_monitor</a></div><h1>Module <span>store</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/hashi_monitor/store.rs.html#4-303">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The snapshot a continuous audit resumes from after a restart.
+The continuous auditor’s snapshot: the whole audit state, so a restart
+continues where the last run stopped.</p>
+<p>Why it exists: without it, every restart would re-audit from the bridge’s
+genesis to rebuild the UTXO pool, and report every old finding again.</p>
+<p>How it works:</p>
+<ol>
+<li>After each state check, the auditor saves a <code>Snapshot</code>: the deployment
+it audits, its <code>AuditState</code>, and the UTXO pool. The audit state is the
+position of each poller, every open state machine, the suspect spends
+of the last pool check. All of it is taken at one instant.</li>
+<li>A restart loads the machines and resumes each poller at its saved
+position. It reads no event twice and skips none, so no flow is cut
+in two.</li>
+<li>The bucket holds the snapshot as one object, <code>SNAPSHOT_KEY</code>. A save
+replaces it whole.</li>
+</ol>
+<p>Assumptions:</p>
+<ul>
+<li>Only the monitor writes the bucket.</li>
+<li>A snapshot of another <code>SNAPSHOT_VERSION</code> fails the load. The operator
+deletes it, and the next start is a first run from genesis.</li>
+<li>The snapshot is durable. Without it, the next start is a first run from
+genesis, which needs a Sui node that keeps the history.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AuditState.html" title="struct hashi_monitor::store::AuditState">Audit<wbr>State</a></dt><dd>The auditor’s state apart from the UTXO pool.</dd><dt><a class="struct" href="struct.Snapshot.html" title="struct hashi_monitor::store::Snapshot">Snapshot</a></dt><dd>What the continuous auditor keeps between runs.</dd><dt><a class="struct" href="struct.SnapshotStore.html" title="struct hashi_monitor::store::SnapshotStore">Snapshot<wbr>Store</a></dt><dd>The bucket that keeps the snapshot.</dd></dl></section></div></main></body></html>

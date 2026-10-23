@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ResignationAction"],"fn":["refuse_resignation_state","remove_inactive","resign","withdraw_resignation"]};
