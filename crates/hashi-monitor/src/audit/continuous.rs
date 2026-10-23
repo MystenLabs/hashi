@@ -21,8 +21,10 @@
 //!    violations, log the progress, and save the snapshot. The complete flows are
 //!    added to the UTXO pool in the Bitcoin tick, right after its lookups,
 //!    so the pool takes a withdrawal only once Bitcoin has answered for its
-//!    inputs. The pool is checked against Bitcoin once at startup and then
-//!    every `UTXO_CHECK_INTERVAL`. A spend that check cannot explain waits
+//!    inputs. The Bitcoin tick then checks the pool against Bitcoin when a
+//!    check is due: at startup, and `UTXO_CHECK_INTERVAL` after the last
+//!    check that succeeded. So a failed check runs again at the next
+//!    Bitcoin tick. A spend that check cannot explain waits
 //!    for the Sui cursor to pass the time Bitcoin was asked, then a state
 //!    check judges it.
 //! 4. Every finding is logged and recorded in the metrics, and each source's
@@ -52,6 +54,7 @@ use crate::store::AuditState;
 use crate::store::Snapshot;
 use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
+use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
 /// How often Sui is polled. A deposit approval must reach the monitor
@@ -66,10 +69,10 @@ const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// How often the guardian's log is polled. The withdrawal bounds are hours.
 const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
-/// How often every UTXO in the pool is checked against Bitcoin. Every
-/// tick runs on the one audit task, so this pass delays the polls by the
-/// time its batched lookups take.
-const UTXO_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long after a successful pool check the next one is due, in seconds.
+/// Every tick runs on the one audit task, so a check delays the polls by
+/// the time its batched lookups take.
+const UTXO_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
 /// How often the state checks run.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -81,6 +84,9 @@ pub struct ContinuousAuditor {
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
     store: SnapshotStore,
+    /// When the last successful pool check started. `None` until one
+    /// succeeds in this run.
+    last_pool_check: Option<UnixSeconds>,
 }
 
 impl ContinuousAuditor {
@@ -118,6 +124,7 @@ impl ContinuousAuditor {
             inner,
             metrics,
             store,
+            last_pool_check: None,
         };
         // Fail now on a bucket that is missing or read-only: a missing one
         // loads as empty.
@@ -202,12 +209,20 @@ impl ContinuousAuditor {
     }
 
     /// Fails if the Bitcoin RPC fails.
-    async fn tick_utxo_check(&mut self) -> anyhow::Result<()> {
+    fn tick_utxo_check(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
         let findings = self.inner.check_utxo_pool()?;
         self.report_findings(SOURCE_UTXO, &findings);
         self.metrics.set_checked_through(SOURCE_UTXO, started_at);
+        self.last_pool_check = Some(started_at);
         Ok(())
+    }
+
+    /// Whether a pool check is due at `now`: none has succeeded in this run,
+    /// or the last one started `UTXO_CHECK_INTERVAL` ago or more.
+    fn pool_check_due(&self, now: UnixSeconds) -> bool {
+        self.last_pool_check
+            .is_none_or(|last| now.saturating_sub(last) >= UTXO_CHECK_INTERVAL)
     }
 
     /// Fails if the Bitcoin RPC fails. The complete flows are added to the
@@ -223,6 +238,16 @@ impl ContinuousAuditor {
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
         let pool_findings = self.inner.add_to_pool_and_gc();
         self.report_findings("pool", &pool_findings);
+        // After the pool update, so the check sees the flows that completed.
+        if self.pool_check_due(started_at)
+            && let Err(error) = self.tick_utxo_check()
+        {
+            tracing::warn!(
+                source = SOURCE_UTXO,
+                ?error,
+                "UTXO pool check failed; retrying at the next Bitcoin tick"
+            );
+        }
         Ok(())
     }
 
@@ -254,25 +279,20 @@ impl ContinuousAuditor {
         Self::log_initial_catch_up(SOURCE_SUI, sui);
         let guardian = self.tick_guardian().await;
         Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
+        // The first Bitcoin tick also runs the first pool check.
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
-        // After the Bitcoin tick, which moved the confirmed withdrawals and
-        // deposits through the pool.
-        let utxo = self.tick_utxo_check().await;
-        Self::log_initial_catch_up(SOURCE_UTXO, utxo);
         self.tick_state_checks().await;
 
         let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(BTC_POLL_INTERVAL);
         let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
-        let mut utxo_ticker = tokio::time::interval(UTXO_CHECK_INTERVAL);
 
         sui_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         guardian_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        utxo_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // The initial catch-up above handled startup; consume each immediate
         // interval tick so the next pass runs one interval later.
@@ -280,7 +300,6 @@ impl ContinuousAuditor {
         guardian_ticker.tick().await;
         btc_ticker.tick().await;
         state_checks_ticker.tick().await;
-        utxo_ticker.tick().await;
 
         loop {
             tokio::select! {
@@ -301,11 +320,6 @@ impl ContinuousAuditor {
                 }
                 _ = state_checks_ticker.tick() => {
                     self.tick_state_checks().await;
-                }
-                _ = utxo_ticker.tick() => {
-                    if let Err(error) = self.tick_utxo_check().await {
-                        tracing::warn!(source = SOURCE_UTXO, ?error, "UTXO pool check failed; continuing");
-                    }
                 }
             }
         }
@@ -364,6 +378,7 @@ mod tests {
             },
             metrics,
             store: SnapshotStore::in_memory(),
+            last_pool_check: None,
         }
     }
 
@@ -417,5 +432,16 @@ mod tests {
         assert_eq!(this_deployments(&cfg, Some(other)), None);
 
         assert_eq!(this_deployments(&cfg, Some(ours.clone())), Some(ours));
+    }
+
+    #[tokio::test]
+    async fn a_pool_check_is_due_until_one_succeeds_and_a_day_after() {
+        let cfg = Config::for_tests();
+        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
+        assert!(auditor.pool_check_due(1_000));
+
+        auditor.last_pool_check = Some(1_000);
+        assert!(!auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL - 1));
+        assert!(auditor.pool_check_due(1_000 + UTXO_CHECK_INTERVAL));
     }
 }
