@@ -124,8 +124,7 @@ the monitor's snapshot, so a restart resumes with the pool the last run
 built. See "Running the monitor" below.
 
 Once a day, and once at startup, the monitor asks Bitcoin about every UTXO
-held. It first logs the twenty UTXOs held longest, by block time, with each
-one's age, amount and origin. Then it reports:
+held. The monitor reports:
 
 - **liveness** `UtxoTooOld` when a UTXO has sat unspent past `UTXO_AGE_WARN`
   (31 days, since honest coin selection refreshes UTXOs older than 30);
@@ -282,4 +281,19 @@ btc:
   # http_headers:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
+```
+
+### Pool metrics
+
+Every five minutes, pool maintenance updates these gauges:
+
+- `hashi_monitor_pool_utxo_count`: the number of held UTXOs.
+- `hashi_monitor_oldest_utxo_timestamp_seconds`: the earliest held UTXO block timestamp.
+  An empty pool gives zero.
+
+Use this query to graph the oldest held UTXO age in days:
+
+```promql
+((time() - hashi_monitor_oldest_utxo_timestamp_seconds) / 86400)
+and (hashi_monitor_pool_utxo_count > 0)
 ```

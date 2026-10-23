@@ -49,11 +49,11 @@ use object_store::path::Path;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::audit::pool::SpentUtxoWire;
-use crate::audit::pool::SuspectSpend;
-use crate::audit::pool::UtxoPool;
-use crate::audit::pool::UtxoWire;
 use crate::config::Config;
+use crate::domain::utxo_pool::SpentUtxoWire;
+use crate::domain::utxo_pool::SuspectSpend;
+use crate::domain::utxo_pool::UtxoPool;
+use crate::domain::utxo_pool::UtxoWire;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 
@@ -298,12 +298,12 @@ impl SnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::pool::SpentUtxo;
-    use crate::audit::pool::Utxo;
     use crate::domain::ConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::UtxoOrigin;
     use crate::domain::WithdrawalEventType;
+    use crate::domain::utxo_pool::SpentUtxo;
+    use crate::domain::utxo_pool::Utxo;
     use crate::rpc::sui::tests::hashi_approval;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;

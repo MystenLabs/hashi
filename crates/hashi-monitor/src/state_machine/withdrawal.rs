@@ -103,6 +103,11 @@ impl WithdrawalStateMachine {
         self.confirmed.as_ref()
     }
 
+    /// The withdrawal Bitcoin confirmed, if any.
+    pub fn into_confirmed(self) -> Option<ConfirmedWithdrawal> {
+        self.confirmed
+    }
+
     pub fn wid(&self) -> WithdrawalID {
         self.wid
     }
