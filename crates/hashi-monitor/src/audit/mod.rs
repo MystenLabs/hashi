@@ -80,16 +80,6 @@ const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often the state checks run.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How far behind Sui or Bitcoin may fall before a `SourceStale` finding,
-/// in seconds. Both are polled every few minutes.
-const SUI_STALE_LIMIT: u64 = 60 * 60;
-const BTC_STALE_LIMIT: u64 = 60 * 60;
-
-/// How far behind the guardian may fall before a `SourceStale` finding, in
-/// seconds. Its log is read by hourly directory, so it normally lags up to
-/// about 80 minutes.
-const GUARDIAN_STALE_LIMIT: u64 = 3 * 60 * 60;
-
 /// How long snapshot saves may fail before a `SnapshotStale` finding, in
 /// seconds.
 const SNAPSHOT_STALE_LIMIT: u64 = 60 * 60;
@@ -125,8 +115,6 @@ pub struct Auditor {
     /// When the last successful pool check finished. `None` until one
     /// succeeds in this run.
     last_successful_pool_check: Option<UnixSeconds>,
-    /// When the last full Bitcoin pass started. 0 until one succeeds.
-    btc_checked_through: UnixSeconds,
     /// When the last snapshot save succeeded.
     last_snapshot_save: UnixSeconds,
 }
@@ -182,7 +170,6 @@ impl Auditor {
             metrics,
             store,
             last_successful_pool_check: None,
-            btc_checked_through: 0,
             last_snapshot_save: 0,
         };
         if let Some(state) = state {
@@ -196,6 +183,9 @@ impl Auditor {
         auditor
             .metrics
             .set_checked_through(SOURCE_GUARDIAN, auditor.rpc_pollers.guardian_read_until());
+        auditor
+            .metrics
+            .set_checked_through(SOURCE_BTC, auditor.rpc_pollers.btc_read_until());
         // Check write access at startup. A missing bucket loads as empty.
         auditor
             .store
@@ -372,33 +362,6 @@ impl Auditor {
         }
     }
 
-    /// A `SourceStale` finding for each source checked longer ago than its limit.
-    fn stale_sources(&self, now: UnixSeconds) -> Vec<MonitorFinding> {
-        [
-            (
-                SOURCE_SUI,
-                self.rpc_pollers.sui_read_until(),
-                SUI_STALE_LIMIT,
-            ),
-            (
-                SOURCE_GUARDIAN,
-                self.rpc_pollers.guardian_read_until(),
-                GUARDIAN_STALE_LIMIT,
-            ),
-            (SOURCE_BTC, self.btc_checked_through, BTC_STALE_LIMIT),
-        ]
-        .into_iter()
-        .filter(|(_, checked_through, limit)| now.saturating_sub(*checked_through) > *limit)
-        .map(
-            |(source, checked_through, limit_secs)| MonitorFinding::SourceStale {
-                source,
-                checked_through,
-                limit_secs,
-            },
-        )
-        .collect()
-    }
-
     /// A `SnapshotStale` finding if no save has succeeded within the limit.
     fn stale_snapshot(&self, now: UnixSeconds) -> Option<MonitorFinding> {
         (now.saturating_sub(self.last_snapshot_save) > SNAPSHOT_STALE_LIMIT).then_some(
@@ -440,7 +403,7 @@ impl Auditor {
             self.oldest_open_deposits(),
         );
         // Before the save, so the snapshot keeps the finding time.
-        let stale = self.stale_sources(now_timestamp_secs());
+        let stale = self.rpc_pollers.stale_sources(now_timestamp_secs());
         self.report_findings("progress", &stale);
 
         self.save_snapshot().await;
@@ -610,7 +573,6 @@ mod tests {
             metrics: Arc::new(MonitorMetrics::new()),
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
-            btc_checked_through: approved_at,
             last_snapshot_save: approved_at,
         }
     }
@@ -767,7 +729,6 @@ mod tests {
             metrics,
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
-            btc_checked_through: cursor,
             last_snapshot_save: cursor,
         }
     }
@@ -806,34 +767,6 @@ mod tests {
         assert_eq!(
             resumed.metrics.last_finding(),
             auditor.metrics.last_finding()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_source_behind_its_limit_is_stale() {
-        let mut auditor = auditor_with(&Config::for_tests(), Arc::new(MonitorMetrics::new()));
-        let sui = auditor.rpc_pollers.sui_read_until();
-        let guardian = auditor.rpc_pollers.guardian_read_until();
-        auditor.btc_checked_through = sui;
-        let stale = |now| {
-            auditor
-                .stale_sources(now)
-                .into_iter()
-                .map(|finding| match finding {
-                    MonitorFinding::SourceStale { source, .. } => source,
-                    other => panic!("unexpected {other}"),
-                })
-                .collect::<Vec<_>>()
-        };
-
-        assert!(stale(sui + SUI_STALE_LIMIT).is_empty());
-        assert_eq!(
-            stale(sui + SUI_STALE_LIMIT + 1),
-            vec![SOURCE_SUI, SOURCE_BTC]
-        );
-        assert_eq!(
-            stale(guardian + GUARDIAN_STALE_LIMIT + 1),
-            vec![SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC]
         );
     }
 

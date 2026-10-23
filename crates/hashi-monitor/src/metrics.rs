@@ -32,8 +32,9 @@ pub struct MonitorMetrics {
     last_finding_timestamp_seconds: IntGauge,
     /// Unix time each source has been checked through: the Sui and guardian
     /// cursors, and for Bitcoin, which is looked up rather than scanned, the
-    /// start of the last pass over every pending confirmation. For the
-    /// snapshot, the time of the last successful save.
+    /// start of the last pass over every pending confirmation, or the startup
+    /// time before the first pass. For the snapshot, the time of the last
+    /// successful save.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
 }
