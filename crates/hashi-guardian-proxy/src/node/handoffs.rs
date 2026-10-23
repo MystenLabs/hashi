@@ -1,20 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The proxy forwards a committee handoff only once the chain stores one
-//! between the same two epochs. The outgoing committee certifies a handoff
-//! while its reconfig is still pending, and a pending reconfig can abort: a
-//! guardian that took the certificate early would follow a committee the chain
-//! never activated, with no way back. The chain stores a handoff only when its
-//! reconfig completes (`end_reconfig`), and never changes or removes one, so a
-//! stored handoff stays stored however stale the read that found it.
+//! The proxy checks committee transitions against completed Sui handoffs.
 //!
-//! A handoff is matched only by the epochs it leaves and reaches, which is how
-//! `submit_committee_handoff` tells a completed one. Its certificate and
-//! committee are not compared with the chain's: an epoch only ever forms one
-//! committee (it is the Sui epoch of its `start_reconfig`, and an abort needs
-//! that epoch to have passed), and the enclave verifies the certificate over
-//! the committee it is sent.
+//! Why it exists:
+//! A compromised committee can sign a different committee for the same epoch.
+//! A pending reconfiguration can also abort before Sui activates its committee.
+//!
+//! How it works:
+//! 1. Read the completed handoff from Sui.
+//! 2. Read its destination committee.
+//! 3. Compare the request committee with the stored committee.
+//! 4. Forward the request only when the committees match.
+//!
+//! Assumptions:
+//! - Sui preserves completed handoffs and their destination committees.
+//! - The enclave verifies the request certificate.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::metrics::ProxyMetrics;
+use crate::node::members::get_committee;
 use crate::node::members::get_object;
 use crate::node::members::ChainSource;
 
@@ -47,16 +49,14 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tonic::async_trait]
 pub trait HandoffSource: Send + Sync + 'static {
-    /// The epoch activated by the handoff the chain stores out of `from_epoch`,
-    /// if it stores one.
-    async fn next_epoch(&self, from_epoch: u64) -> anyhow::Result<Option<u64>>;
+    /// Read the completed handoff and its destination committee.
+    async fn handoff(&self, from_epoch: u64) -> anyhow::Result<Option<move_types::Committee>>;
 }
 
 pub struct HandoffGate {
     source: Box<dyn HandoffSource>,
-    /// The stored handoffs read so far: the epoch each leaves, to the one it
-    /// activates.
-    stored: Mutex<HashMap<u64, u64>>,
+    /// Map each source epoch to its completed destination committee.
+    stored: Mutex<HashMap<u64, Arc<move_types::Committee>>>,
     metrics: Arc<ProxyMetrics>,
 }
 
@@ -69,8 +69,7 @@ impl HandoffGate {
         }
     }
 
-    /// Admit `transitions` only if each matches a stored handoff by its two
-    /// epochs alone, and each leaves the epoch the one before it reached.
+    /// Require equal committees and consecutive completed handoffs.
     pub async fn admit(
         &self,
         transitions: &[proto::SignedCommitteeTransition],
@@ -93,25 +92,39 @@ impl HandoffGate {
             if reached.is_some_and(|reached| reached != from_epoch) {
                 return Err(Refusal::NotConsecutive);
             }
-            let stored = self.stored_next_epoch(from_epoch).await?;
-            if stored != Some(to_epoch) {
+            let Some(stored) = self.stored_committee(from_epoch).await? else {
+                return Err(Refusal::NotOnChain {
+                    from_epoch,
+                    to_epoch,
+                });
+            };
+            if stored.epoch != to_epoch {
                 warn!(
                     from_epoch,
                     to_epoch,
-                    ?stored,
+                    stored = stored.epoch,
                     "Refusing a committee handoff the chain does not store."
                 );
-                return Err(match stored {
-                    Some(stored) => Refusal::Superseded {
-                        from_epoch,
-                        to_epoch,
-                        stored,
-                    },
-                    None => Refusal::NotOnChain {
-                        from_epoch,
-                        to_epoch,
-                    },
+                return Err(Refusal::Superseded {
+                    from_epoch,
+                    to_epoch,
+                    stored: stored.epoch,
                 });
+            }
+            let committee = transition
+                .data
+                .as_ref()
+                .and_then(|data| data.new_committee.as_ref())
+                .cloned()
+                .ok_or(Refusal::Malformed)?;
+            let committee =
+                move_types::Committee::try_from(committee).map_err(|_| Refusal::Malformed)?;
+            if committee != *stored {
+                warn!(
+                    from_epoch,
+                    to_epoch, "Refusing a committee that differs from Sui."
+                );
+                return Err(Refusal::CommitteeMismatch);
             }
             reached = Some(to_epoch);
         }
@@ -120,25 +133,29 @@ impl HandoffGate {
 
     /// Stored handoffs are remembered, so replaying the chain's history costs no
     /// reads, and each request at most one lookup that finds nothing.
-    async fn stored_next_epoch(&self, from_epoch: u64) -> Result<Option<u64>, Refusal> {
-        let known = self.stored().get(&from_epoch).copied();
+    async fn stored_committee(
+        &self,
+        from_epoch: u64,
+    ) -> Result<Option<Arc<move_types::Committee>>, Refusal> {
+        let known = self.stored().get(&from_epoch).cloned();
         if known.is_some() {
             return Ok(known);
         }
-        let read = tokio::time::timeout(LOOKUP_TIMEOUT, self.source.next_epoch(from_epoch))
+        let read = tokio::time::timeout(LOOKUP_TIMEOUT, self.source.handoff(from_epoch))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {LOOKUP_TIMEOUT:?}")))
             .map_err(|e| {
                 warn!(from_epoch, error = %format!("{e:#}"), "Committee handoff read failed.");
                 Refusal::ChainUnavailable
             })?;
-        if let Some(next_epoch) = read {
-            self.stored().insert(from_epoch, next_epoch);
+        let read = read.map(Arc::new);
+        if let Some(handoff) = &read {
+            self.stored().insert(from_epoch, handoff.clone());
         }
         Ok(read)
     }
 
-    fn stored(&self) -> MutexGuard<'_, HashMap<u64, u64>> {
+    fn stored(&self) -> MutexGuard<'_, HashMap<u64, Arc<move_types::Committee>>> {
         self.stored.lock().expect("stored handoffs mutex poisoned")
     }
 }
@@ -168,6 +185,7 @@ enum Refusal {
         to_epoch: u64,
         stored: u64,
     },
+    CommitteeMismatch,
     ChainUnavailable,
 }
 
@@ -178,15 +196,14 @@ impl Refusal {
             Self::NotConsecutive => "not_consecutive",
             Self::NotOnChain { .. } => "not_on_chain",
             Self::Superseded { .. } => "superseded",
+            Self::CommitteeMismatch => "committee_mismatch",
             Self::ChainUnavailable => "chain_unavailable",
         }
     }
 
     fn status(self) -> Status {
         match self {
-            Self::Malformed => {
-                Status::invalid_argument("malformed committee transition: missing an epoch")
-            }
+            Self::Malformed => Status::invalid_argument("malformed committee transition"),
             Self::NotConsecutive => Status::invalid_argument(
                 "committee transitions are not consecutive: each must leave the epoch the one \
                  before it reached",
@@ -206,6 +223,9 @@ impl Refusal {
                 "the chain stores a handoff from epoch {from_epoch} to epoch {stored}, not to \
                  epoch {to_epoch}"
             )),
+            Self::CommitteeMismatch => Status::failed_precondition(
+                "request committee differs from the completed Sui handoff's committee",
+            ),
             Self::ChainUnavailable => Status::unavailable("committee handoffs unavailable; retry"),
         }
     }
@@ -213,18 +233,17 @@ impl Refusal {
 
 #[tonic::async_trait]
 impl HandoffSource for ChainSource {
-    async fn next_epoch(&self, from_epoch: u64) -> anyhow::Result<Option<u64>> {
-        read_next_epoch(self.sui.clone(), self.hashi_object_id().await?, from_epoch).await
+    async fn handoff(&self, from_epoch: u64) -> anyhow::Result<Option<move_types::Committee>> {
+        read_handoff(self.sui.clone(), self.hashi_object_id().await?, from_epoch).await
     }
 }
 
-/// The epoch activated by the handoff out of `from_epoch`, which `end_reconfig`
-/// stores in the committee set's `committees` bag.
-async fn read_next_epoch(
+/// Read a completed handoff and its destination committee from Sui.
+async fn read_handoff(
     mut sui: sui_rpc::Client,
     hashi_object_id: Address,
     from_epoch: u64,
-) -> anyhow::Result<Option<u64>> {
+) -> anyhow::Result<Option<move_types::Committee>> {
     let response = sui
         .ledger_client()
         .get_object(
@@ -264,7 +283,14 @@ async fn read_next_epoch(
     let field: Option<
         move_types::Field<move_types::CommitteeHandoffKey, move_types::CommitteeHandoff>,
     > = get_object(&mut sui, field_id).await?;
-    Ok(field.map(|field| field.value.next_epoch))
+    let Some(field) = field else {
+        return Ok(None);
+    };
+    let next_epoch = field.value.next_epoch;
+    let committee = get_committee(&mut sui, root.committees.committees.id, next_epoch)
+        .await?
+        .with_context(|| format!("no committee for completed handoff to epoch {next_epoch}"))?;
+    Ok(Some(committee))
 }
 
 #[cfg(test)]
@@ -290,9 +316,12 @@ pub(crate) mod test_utils {
 
     #[tonic::async_trait]
     impl HandoffSource for StoredHandoffs {
-        async fn next_epoch(&self, from_epoch: u64) -> anyhow::Result<Option<u64>> {
+        async fn handoff(&self, from_epoch: u64) -> anyhow::Result<Option<move_types::Committee>> {
             self.lookups.fetch_add(1, Ordering::SeqCst);
-            Ok(self.next_epochs.get(&from_epoch).copied())
+            Ok(self
+                .next_epochs
+                .get(&from_epoch)
+                .map(|&next_epoch| committee(next_epoch)))
         }
     }
 
@@ -304,15 +333,32 @@ pub(crate) mod test_utils {
         ))
     }
 
-    /// A transition carrying only the epochs the gate reads.
+    /// Make a committee with deterministic wire fields.
+    pub(crate) fn committee(epoch: u64) -> move_types::Committee {
+        move_types::Committee {
+            epoch,
+            members: vec![move_types::CommitteeMember {
+                validator_address: Address::ZERO,
+                public_key: vec![1; 96],
+                encryption_public_key: vec![2; 32],
+                weight: 1,
+                extra_fields: move_types::Config::default(),
+            }],
+            total_weight: 1,
+            config: move_types::Config::default(),
+        }
+    }
+
+    /// Make a transition with the deterministic committee.
     pub(crate) fn transition(from_epoch: u64, to_epoch: u64) -> proto::SignedCommitteeTransition {
         proto::SignedCommitteeTransition {
-            data: Some(proto::CommitteeTransition {
-                new_committee: Some(proto::Committee {
-                    epoch: Some(to_epoch),
-                    ..Default::default()
-                }),
-            }),
+            data: Some(
+                hashi_types::guardian::proto_conversions::committee_transition_to_pb(
+                    &hashi_types::guardian::CommitteeTransitionRequest {
+                        new_committee: committee(to_epoch),
+                    },
+                ),
+            ),
             committee_signature: Some(proto::CommitteeSignature {
                 epoch: Some(from_epoch),
                 ..Default::default()
@@ -334,7 +380,7 @@ mod tests {
 
     #[tonic::async_trait]
     impl HandoffSource for Unreadable {
-        async fn next_epoch(&self, _: u64) -> anyhow::Result<Option<u64>> {
+        async fn handoff(&self, _: u64) -> anyhow::Result<Option<move_types::Committee>> {
             Err(anyhow::anyhow!("sui unavailable"))
         }
     }
@@ -344,7 +390,7 @@ mod tests {
 
     #[tonic::async_trait]
     impl HandoffSource for Stuck {
-        async fn next_epoch(&self, _: u64) -> anyhow::Result<Option<u64>> {
+        async fn handoff(&self, _: u64) -> anyhow::Result<Option<move_types::Committee>> {
             std::future::pending().await
         }
     }
@@ -403,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_a_stored_handoff_once() {
+    async fn reads_a_stored_committee_once() {
         let chain = StoredHandoffs::new(&[(5, 7)]);
         let lookups = chain.lookups.clone();
         let (gate, _) = gate(chain);
@@ -417,6 +463,100 @@ mod tests {
         gate.admit(&[transition(7, 9)]).await.unwrap_err();
         gate.admit(&[transition(7, 9)]).await.unwrap_err();
         assert_eq!(lookups.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn refuses_changed_committee_fields_before_and_after_caching() {
+        use hashi_types::guardian::proto_conversions::committee_transition_to_pb;
+        use hashi_types::guardian::CommitteeTransitionRequest;
+        use move_types::Config;
+        use move_types::ConfigValue;
+
+        let original = test_utils::committee(7);
+        let mut changed = Vec::new();
+        let mut committee = original.clone();
+        committee.total_weight += 1;
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.config = Config::from_entries(vec![("test".into(), ConfigValue::U64(1))]);
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members[0].validator_address = Address::new([1; 32]);
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members[0].public_key[0] ^= 1;
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members[0].encryption_public_key[0] ^= 1;
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members[0].weight += 1;
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members[0].extra_fields =
+            Config::from_entries(vec![("test".into(), ConfigValue::U64(1))]);
+        changed.push(committee);
+        let mut committee = original.clone();
+        committee.members.clear();
+        changed.push(committee);
+
+        for committee in changed {
+            let chain = StoredHandoffs::new(&[(5, 7)]);
+            let lookups = chain.lookups.clone();
+            let (gate, metrics) = gate(chain);
+            let mut request = transition(5, 7);
+            request.data = Some(committee_transition_to_pb(&CommitteeTransitionRequest {
+                new_committee: committee,
+            }));
+            for _ in 0..2 {
+                let err = gate
+                    .admit(std::slice::from_ref(&request))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.code(), Code::FailedPrecondition);
+            }
+            assert_eq!(refused(&metrics, "committee_mismatch"), 2);
+            assert_eq!(lookups.load(Ordering::SeqCst), 1);
+            gate.admit(&[transition(5, 7)]).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_malformed_committee_bytes() {
+        let (gate, metrics) = gate(StoredHandoffs::new(&[(5, 7)]));
+        let mut missing_config = transition(5, 7);
+        missing_config
+            .data
+            .as_mut()
+            .unwrap()
+            .new_committee
+            .as_mut()
+            .unwrap()
+            .config = None;
+        let mut invalid_config = transition(5, 7);
+        invalid_config
+            .data
+            .as_mut()
+            .unwrap()
+            .new_committee
+            .as_mut()
+            .unwrap()
+            .config = Some(vec![255].into());
+        let mut missing_member_weight = transition(5, 7);
+        missing_member_weight
+            .data
+            .as_mut()
+            .unwrap()
+            .new_committee
+            .as_mut()
+            .unwrap()
+            .members[0]
+            .weight = None;
+        for request in [missing_config, invalid_config, missing_member_weight] {
+            let err = gate.admit(&[request]).await.unwrap_err();
+            assert_eq!(err.code(), Code::InvalidArgument);
+        }
+        assert_eq!(refused(&metrics, "malformed"), 3);
     }
 
     #[tokio::test]
