@@ -8,7 +8,7 @@
 //! - Metrics provide findings and source progress for alerts.
 //!
 //! How it works:
-//! 1. Restore the source positions, flow machines, UTXO pool, and finding times from a snapshot.
+//! 1. Restore the source positions, flow machines, and UTXO pool from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
@@ -18,9 +18,11 @@
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //! 10. Log a failed source tick. The next tick of that source retries it.
+//! 11. At each state tick, report a source or a snapshot save that is behind its limit.
 //!
 //! Assumptions:
-//! - A source that fails for good stops its cursor. The stale `checked_through` alert detects this.
+//! - Every tick runs on one task. The first catch-up blocks the state tick,
+//!   so a first run reports no stale source while it catches up.
 
 use crate::config::Config;
 use crate::domain::MonitorEvent;
@@ -29,7 +31,6 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::utxo_pool::SuspectSpend;
 use crate::domain::utxo_pool::UtxoPool;
-use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
@@ -79,27 +80,19 @@ const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often the state checks run.
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How long snapshot saves may fail before a `SnapshotStale` finding, in
+/// seconds. A failed save costs only a longer replay at the next restart.
+const SNAPSHOT_STALE_LIMIT: u64 = 12 * 60 * 60;
+
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {
-        let category = finding.category();
-        match category {
-            FindingCategory::Safety => tracing::error!(
-                source,
-                phase,
-                %category,
-                total = findings.len(),
-                finding = %finding,
-                "monitor finding"
-            ),
-            FindingCategory::Liveness => tracing::warn!(
-                source,
-                phase,
-                %category,
-                total = findings.len(),
-                finding = %finding,
-                "monitor finding"
-            ),
-        }
+        tracing::error!(
+            source,
+            phase,
+            total = findings.len(),
+            finding = %finding,
+            "monitor finding"
+        );
     }
 }
 
@@ -122,6 +115,8 @@ pub struct Auditor {
     /// When the last successful pool check finished. `None` until one
     /// succeeds in this run.
     last_successful_pool_check: Option<UnixSeconds>,
+    /// When the last snapshot save succeeded.
+    last_snapshot_save: UnixSeconds,
 }
 
 impl Auditor {
@@ -144,7 +139,6 @@ impl Auditor {
                     utxos_spent = snapshot.pool.spent_len(),
                     "loaded the snapshot; resuming where it stopped"
                 );
-                metrics.restore_last_findings(&snapshot.state.last_findings);
                 (Some(snapshot.state), snapshot.pool)
             }
             None => (None, UtxoPool::default()),
@@ -175,6 +169,7 @@ impl Auditor {
             metrics,
             store,
             last_successful_pool_check: None,
+            last_snapshot_save: 0,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -187,14 +182,17 @@ impl Auditor {
         auditor
             .metrics
             .set_checked_through(SOURCE_GUARDIAN, auditor.rpc_pollers.guardian_read_until());
+        auditor
+            .metrics
+            .set_checked_through(SOURCE_BTC, auditor.rpc_pollers.btc_read_until());
         // Check write access at startup. A missing bucket loads as empty.
         auditor
             .store
             .save(&auditor.cfg, auditor.state(), auditor.utxo_pool())
             .await?;
-        auditor
-            .metrics
-            .set_checked_through(SOURCE_SNAPSHOT, now_timestamp_secs());
+        let now = now_timestamp_secs();
+        auditor.last_snapshot_save = now;
+        auditor.metrics.set_checked_through(SOURCE_SNAPSHOT, now);
         Ok(auditor)
     }
 
@@ -207,7 +205,6 @@ impl Auditor {
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
-            last_findings: self.metrics.last_findings(),
         }
     }
 
@@ -348,17 +345,29 @@ impl Auditor {
     /// Save the snapshot. A failed save is logged and does not stop the
     /// audit; the next state check saves again. Alerting watches the time
     /// of the last good save.
-    async fn save_snapshot(&self) {
+    async fn save_snapshot(&mut self) {
         let saved = self
             .store
             .save(&self.cfg, self.state(), self.utxo_pool())
             .await;
         match saved {
-            Ok(()) => self
-                .metrics
-                .set_checked_through(SOURCE_SNAPSHOT, now_timestamp_secs()),
+            Ok(()) => {
+                self.last_snapshot_save = now_timestamp_secs();
+                self.metrics
+                    .set_checked_through(SOURCE_SNAPSHOT, self.last_snapshot_save);
+            }
             Err(error) => tracing::error!(?error, "failed to save the snapshot; continuing"),
         }
+    }
+
+    /// A `SnapshotStale` finding if no save has succeeded within the limit.
+    fn stale_snapshot(&self, now: UnixSeconds) -> Option<MonitorFinding> {
+        (now.saturating_sub(self.last_snapshot_save) > SNAPSHOT_STALE_LIMIT).then_some(
+            MonitorFinding::SnapshotStale {
+                last_saved: self.last_snapshot_save,
+                limit_secs: SNAPSHOT_STALE_LIMIT,
+            },
+        )
     }
 
     fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
@@ -391,7 +400,13 @@ impl Auditor {
             self.oldest_open_withdrawals(),
             self.oldest_open_deposits(),
         );
+        let stale = self.rpc_pollers.stale_sources(now_timestamp_secs());
+        self.report_findings("progress", &stale);
+
         self.save_snapshot().await;
+        // After the save, so a save that succeeds now is not reported.
+        let stale = self.stale_snapshot(now_timestamp_secs());
+        self.report_findings("progress", stale.as_slice());
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -555,6 +570,7 @@ mod tests {
             metrics: Arc::new(MonitorMetrics::new()),
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            last_snapshot_save: approved_at,
         }
     }
 
@@ -710,11 +726,12 @@ mod tests {
             metrics,
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            last_snapshot_save: cursor,
         }
     }
 
     #[tokio::test]
-    async fn a_restart_resumes_the_open_flows_the_pool_and_the_finding_times() {
+    async fn a_restart_resumes_the_open_flows_and_the_pool() {
         let cfg = Config::for_tests();
         let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         let deposit = ConfirmedDeposit {
@@ -738,15 +755,24 @@ mod tests {
 
         let snapshot = auditor.store.load().await.unwrap().unwrap();
         assert_eq!(snapshot.pool, *auditor.utxo_pool());
-        let metrics = Arc::new(MonitorMetrics::new());
-        metrics.restore_last_findings(&snapshot.state.last_findings);
-        let mut resumed = auditor_with(&cfg, metrics);
+        let mut resumed = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         resumed.restore(snapshot.state);
 
         assert_eq!(resumed.detect_timing_violations(), missing);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_not_saved_within_its_limit_is_stale() {
+        let mut auditor = auditor_with(&Config::for_tests(), Arc::new(MonitorMetrics::new()));
+        auditor.last_snapshot_save = 1_000;
+
+        assert_eq!(auditor.stale_snapshot(1_000 + SNAPSHOT_STALE_LIMIT), None);
         assert_eq!(
-            resumed.metrics.last_findings(),
-            auditor.metrics.last_findings()
+            auditor.stale_snapshot(1_000 + SNAPSHOT_STALE_LIMIT + 1),
+            Some(MonitorFinding::SnapshotStale {
+                last_saved: 1_000,
+                limit_secs: SNAPSHOT_STALE_LIMIT,
+            })
         );
     }
 

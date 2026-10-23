@@ -4,13 +4,14 @@
 //! The auditor polls Sui, guardian logs, and Bitcoin through these methods.
 //!
 //! Why it exists:
-//! - `RpcPollers` owns the three source handles.
+//! - `RpcPollers` owns the three source handles and records how far each source is checked.
 //! - Auditor tick handlers read each source and update the flow machines.
 //!
 //! How it works:
 //! 1. Read Sui events and guardian logs into the flow machines.
 //! 2. Check Bitcoin confirmations after each withdrawal has both Sui and guardian approvals.
-//! 3. Leave pool updates and checks to the auditor scheduler.
+//! 3. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
+//! 4. Leave pool updates and checks to the auditor scheduler.
 
 use super::Auditor;
 use crate::config::Config;
@@ -34,10 +35,19 @@ use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
 
+/// How far behind a source may fall before a `SourceStale` finding, in
+/// seconds. The guardian log is read by hourly directory, so it normally
+/// lags up to about 80 minutes. Sui and Bitcoin lag a few minutes.
+const SOURCE_STALE_LIMIT: u64 = 3 * 60 * 60;
+
 pub struct RpcPollers {
     pub guardian_poller: GuardianWithdrawalsPoller,
     pub sui_poller: SuiEventsPoller,
     pub btc_client: BtcRpcClient,
+    /// When the last full Bitcoin pass started. It starts at the startup
+    /// time. Thus a Bitcoin node that is down at startup becomes stale only
+    /// after `SOURCE_STALE_LIMIT`.
+    btc_checked_through: UnixSeconds,
 }
 
 impl RpcPollers {
@@ -61,6 +71,7 @@ impl RpcPollers {
             guardian_poller,
             sui_poller,
             btc_client: BtcRpcClient::new(cfg, confirmations)?,
+            btc_checked_through: now_timestamp_secs(),
         })
     }
 
@@ -69,6 +80,24 @@ impl RpcPollers {
             sui: self.sui_read_until(),
             guardian: self.guardian_read_until(),
         }
+    }
+
+    /// A `SourceStale` finding for each source checked longer ago than
+    /// `SOURCE_STALE_LIMIT`.
+    pub fn stale_sources(&self, now: UnixSeconds) -> Vec<MonitorFinding> {
+        [
+            (SOURCE_SUI, self.sui_read_until()),
+            (SOURCE_GUARDIAN, self.guardian_read_until()),
+            (SOURCE_BTC, self.btc_read_until()),
+        ]
+        .into_iter()
+        .filter(|(_, checked_through)| now.saturating_sub(*checked_through) > SOURCE_STALE_LIMIT)
+        .map(|(source, checked_through)| MonitorFinding::SourceStale {
+            source,
+            checked_through,
+            limit_secs: SOURCE_STALE_LIMIT,
+        })
+        .collect()
     }
 }
 
@@ -137,6 +166,12 @@ impl Auditor {
 //       Bitcoin
 // ====================
 
+impl RpcPollers {
+    pub fn btc_read_until(&self) -> UnixSeconds {
+        self.btc_checked_through
+    }
+}
+
 impl Auditor {
     /// Collect Bitcoin lookup targets and log their counts.
     fn txids_to_poll(&self) -> Vec<Txid> {
@@ -200,6 +235,7 @@ impl Auditor {
         let started_at = now_timestamp_secs();
         let findings = self.fetch_btc_info(started_at)?;
         self.report_findings("btc", &findings);
+        self.rpc_pollers.btc_checked_through = started_at;
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
         Ok(())
     }
@@ -216,6 +252,42 @@ impl RpcPollers {
             guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, timestamp),
             sui_poller: poller_scanned(timestamp),
             btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
+            btc_checked_through: timestamp,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_source_behind_its_limit_is_stale() {
+        let mut pollers = RpcPollers::for_tests(&Config::for_tests(), 1_700_000_000);
+        let sui = pollers.sui_read_until();
+        let guardian = pollers.guardian_read_until();
+        pollers.btc_checked_through = sui;
+        let stale = |now| {
+            pollers
+                .stale_sources(now)
+                .into_iter()
+                .map(|finding| match finding {
+                    MonitorFinding::SourceStale { source, .. } => source,
+                    other => panic!("unexpected {other}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The guardian cursor is at the start of the hour, behind Sui.
+        assert!(guardian < sui);
+        assert!(stale(guardian + SOURCE_STALE_LIMIT).is_empty());
+        assert_eq!(
+            stale(guardian + SOURCE_STALE_LIMIT + 1),
+            vec![SOURCE_GUARDIAN]
+        );
+        assert_eq!(
+            stale(sui + SOURCE_STALE_LIMIT + 1),
+            vec![SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC]
+        );
     }
 }

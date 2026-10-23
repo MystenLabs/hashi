@@ -103,7 +103,6 @@ pub mod tests {
 
     use std::collections::BTreeMap;
 
-    use crate::findings::FindingCategory;
     use crate::test_utils::test_hashi_btc_keys;
     use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::BitcoinAddress;
@@ -298,7 +297,6 @@ pub mod tests {
                 computed,
             }]
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -355,7 +353,6 @@ pub mod tests {
             ),
             "{findings:?}"
         );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
     }
 
     #[test]

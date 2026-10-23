@@ -3,7 +3,6 @@
 
 //! Prometheus metrics for continuous audits, served at `/metrics`.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hashi_types::guardian::time::UnixSeconds;
@@ -15,7 +14,6 @@ use prometheus::Registry;
 use prometheus::TextEncoder;
 use tracing::info;
 
-use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 
 pub const SOURCE_SUI: &str = "sui";
@@ -30,12 +28,14 @@ pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
     oldest_utxo_timestamp_seconds: IntGauge,
-    /// Unix time of the latest finding per category; 0 until one is reported.
+    /// Unix time of the latest finding of each kind. A kind has no series
+    /// until its first finding.
     last_finding_timestamp_seconds: IntGaugeVec,
     /// Unix time each source has been checked through: the Sui and guardian
     /// cursors, and for Bitcoin, which is looked up rather than scanned, the
-    /// start of the last pass over every pending confirmation. For the
-    /// snapshot, the time of the last successful save.
+    /// start of the last pass over every pending confirmation, or the startup
+    /// time before the first pass. For the snapshot, the time of the last
+    /// successful save.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
 }
@@ -52,9 +52,9 @@ impl MonitorMetrics {
         let last_finding_timestamp_seconds = IntGaugeVec::new(
             Opts::new(
                 "hashi_monitor_last_finding_timestamp_seconds",
-                "Unix time of the latest monitor finding by category",
+                "Unix time of the latest monitor finding of each kind",
             ),
-            &["category"],
+            &["kind"],
         )
         .expect("valid metric");
         let checked_through_timestamp_seconds = IntGaugeVec::new(
@@ -90,11 +90,6 @@ impl MonitorMetrics {
             .register(Box::new(checked_through_timestamp_seconds.clone()))
             .expect("register");
 
-        for category in [FindingCategory::Safety, FindingCategory::Liveness] {
-            last_finding_timestamp_seconds
-                .with_label_values(&[category.to_string().as_str()])
-                .set(0);
-        }
         for source in [
             SOURCE_SUI,
             SOURCE_GUARDIAN,
@@ -119,33 +114,8 @@ impl MonitorMetrics {
     pub fn record_findings(&self, findings: &[MonitorFinding], now: UnixSeconds) {
         for finding in findings {
             self.last_finding_timestamp_seconds
-                .with_label_values(&[finding.category().to_string().as_str()])
+                .with_label_values(&[finding.kind()])
                 .set(gauge_value(now));
-        }
-    }
-
-    /// The time of the last finding, by category label. The snapshot keeps
-    /// it, so a restart does not lose a finding alerting has not read yet.
-    pub fn last_findings(&self) -> BTreeMap<String, UnixSeconds> {
-        [FindingCategory::Safety, FindingCategory::Liveness]
-            .into_iter()
-            .map(|category| {
-                let label = category.to_string();
-                let value = self
-                    .last_finding_timestamp_seconds
-                    .with_label_values(&[label.as_str()])
-                    .get();
-                (label, UnixSeconds::try_from(value).unwrap_or_default())
-            })
-            .collect()
-    }
-
-    /// Set the last finding times that a snapshot saved.
-    pub fn restore_last_findings(&self, last_findings: &BTreeMap<String, UnixSeconds>) {
-        for (label, timestamp) in last_findings {
-            self.last_finding_timestamp_seconds
-                .with_label_values(&[label.as_str()])
-                .set(gauge_value(*timestamp));
         }
     }
 
@@ -191,11 +161,7 @@ fn gauge_value(timestamp: UnixSeconds) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use hashi_types::guardian::WithdrawalID;
-
     use super::*;
-    use crate::domain::WithdrawalEventType;
-    use crate::findings::EventRelation;
 
     #[tokio::test]
     async fn the_metrics_route_serves_the_registry() {
@@ -229,8 +195,6 @@ mod tests {
         let rendered = MonitorMetrics::new().render();
 
         for line in [
-            r#"hashi_monitor_last_finding_timestamp_seconds{category="safety"} 0"#,
-            r#"hashi_monitor_last_finding_timestamp_seconds{category="liveness"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="sui"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="btc"} 0"#,
@@ -238,30 +202,29 @@ mod tests {
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
         }
+        // A kind has no series until its first finding.
+        assert!(!rendered.contains("hashi_monitor_last_finding_timestamp_seconds{"));
     }
 
     #[test]
-    fn findings_set_the_latest_timestamp_of_their_category() {
+    fn a_finding_sets_the_latest_timestamp_of_its_kind() {
         let metrics = MonitorMetrics::new();
-        let liveness = MonitorFinding::WithdrawalEventMissing {
-            wid: WithdrawalID::new([1; 32]),
-            event_type: WithdrawalEventType::E3BtcConfirmed,
-            relation: EventRelation::Successor,
-            deadline: 50,
-            cursor: 60,
-        };
+        let finding = MonitorFinding::InvalidEventAdded("invalid wid".to_string());
 
-        metrics.record_findings(
-            &[MonitorFinding::InvalidEventAdded("invalid wid".to_string())],
-            100,
-        );
-        metrics.record_findings(&[liveness], 200);
+        metrics.record_findings(std::slice::from_ref(&finding), 100);
+        metrics.record_findings(&[], 150);
+        metrics.record_findings(&[finding], 200);
+        let stale = MonitorFinding::SnapshotStale {
+            last_saved: 0,
+            limit_secs: 3_600,
+        };
+        metrics.record_findings(&[stale], 250);
         metrics.set_checked_through(SOURCE_GUARDIAN, 300);
 
         let rendered = metrics.render();
         for line in [
-            r#"hashi_monitor_last_finding_timestamp_seconds{category="safety"} 100"#,
-            r#"hashi_monitor_last_finding_timestamp_seconds{category="liveness"} 200"#,
+            r#"hashi_monitor_last_finding_timestamp_seconds{kind="InvalidEventAdded"} 200"#,
+            r#"hashi_monitor_last_finding_timestamp_seconds{kind="SnapshotStale"} 250"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 300"#,
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
