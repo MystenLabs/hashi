@@ -29,7 +29,6 @@ use std::time::Instant;
 
 use anyhow::Context;
 use bitcoin::OutPoint;
-use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use object_store::ObjectStore;
 use object_store::PutPayload;
@@ -42,6 +41,7 @@ use crate::config::Config;
 use crate::domain::utxo_pool::SuspectSpend;
 use crate::domain::utxo_pool::UtxoPool;
 use crate::domain::utxo_pool::UtxoWire;
+use crate::rpc::guardian::GuardianCursor;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 
@@ -67,8 +67,8 @@ pub struct Snapshot {
 pub struct AuditState {
     /// The first Sui checkpoint not yet scanned.
     pub sui_next_checkpoint: u64,
-    /// The next unread guardian directory, stored as its S3 path.
-    pub guardian_cursor: S3HourDirectory,
+    /// The guardian directory read now, and its seq state.
+    pub guardian_cursor: GuardianCursor,
     pub withdrawals: Vec<WithdrawalStateMachine>,
     pub deposits: Vec<DepositStateMachine>,
     /// The spends the last pool check saw, still waiting for the Sui cursor.
@@ -202,6 +202,7 @@ mod tests {
     use crate::test_utils::txid;
     use crate::timing::Timing;
     use bitcoin::ScriptBuf;
+    use hashi_types::guardian::s3::S3HourDirectory;
 
     /// A state with one open withdrawal, one open deposit and a suspect spend.
     fn state() -> AuditState {
@@ -219,7 +220,7 @@ mod tests {
         );
         AuditState {
             sui_next_checkpoint: 1_234,
-            guardian_cursor: S3HourDirectory::withdraw(1_700_000_000).unwrap(),
+            guardian_cursor: GuardianCursor::new(S3HourDirectory::withdraw(1_700_000_000).unwrap()),
             withdrawals: vec![withdrawal],
             deposits: vec![DepositStateMachine::new(deposit_request())],
             suspect_spends: vec![(

@@ -40,6 +40,7 @@ use crate::metrics::SOURCE_SNAPSHOT;
 use crate::metrics::SOURCE_SUI;
 use crate::metrics::SOURCE_UTXO;
 use crate::rpc::PollCursor;
+use crate::rpc::guardian::GuardianCursor;
 use crate::rpc::sui::package_genesis;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -74,8 +75,9 @@ const SUI_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// `SUI_POLL_INTERVAL` the alert comes within five minutes of it.
 const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
-/// How often the guardian's log is polled. The withdrawal bounds are hours.
-const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// How often the guardian's log is polled. Each poll lists the current
+/// directory and reads only its new logs. The withdrawal bounds are hours.
+const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often pool maintenance runs.
 const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -136,7 +138,7 @@ impl Auditor {
             Some(snapshot) => {
                 tracing::info!(
                     sui_next_checkpoint = snapshot.state.sui_next_checkpoint,
-                    guardian_cursor = %utc_timestamp(snapshot.state.guardian_cursor.to_unix_seconds()),
+                    guardian_cursor = %utc_timestamp(snapshot.state.guardian_cursor.read_until()),
                     withdrawals = snapshot.state.withdrawals.len(),
                     deposits = snapshot.state.deposits.len(),
                     suspect_spends = snapshot.state.suspect_spends.len(),
@@ -157,7 +159,7 @@ impl Auditor {
                     "first run: starting at the bridge's genesis with an empty UTXO pool"
                 );
                 (
-                    S3HourDirectory::withdraw(genesis.timestamp)?,
+                    GuardianCursor::new(S3HourDirectory::withdraw(genesis.timestamp)?),
                     genesis.checkpoint,
                 )
             }

@@ -24,20 +24,21 @@ use crate::metrics::SOURCE_SUI;
 use crate::rpc::PollCursor;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
+use crate::rpc::guardian::GuardianCursor;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiPoller;
 use crate::rpc::sui::read_confirmation_threshold;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::Txid;
-use hashi_types::guardian::s3::S3HourDirectory;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
 
 /// How far behind a source may fall before a `SourceStale` finding, in
-/// seconds. The guardian log is read by hourly directory, so it normally
-/// lags up to about 80 minutes. Sui and Bitcoin lag a few minutes.
+/// seconds. The guardian cursor is the start of the current hour directory,
+/// which is finished 10 minutes after the hour, at the next poll. So it
+/// normally lags up to about 75 minutes. Sui and Bitcoin lag a few minutes.
 pub(super) const SOURCE_STALE_LIMIT: u64 = 3 * 60 * 60;
 
 pub struct RpcPollers {
@@ -54,7 +55,7 @@ impl RpcPollers {
     /// Initialize the source handles at their saved or genesis positions.
     pub async fn new(
         cfg: &Config,
-        guardian_start: S3HourDirectory,
+        guardian_start: GuardianCursor,
         sui_start: u64,
     ) -> anyhow::Result<Self> {
         let mut guardian_poller = GuardianWithdrawalsPoller::new(cfg, guardian_start).await?;
@@ -150,16 +151,18 @@ impl RpcPollers {
 }
 
 impl Auditor {
+    /// Read every finished directory, then the new logs of the current one.
     pub async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        while let PollOutcome::CursorAdvanced { events, findings } =
-            self.rpc_pollers.guardian_poller.poll_one_hour().await?
-        {
-            self.report_findings("guardian", &findings);
-            self.ingest_batch(events);
+        loop {
+            let poll = self.rpc_pollers.guardian_poller.poll().await?;
+            self.report_findings("guardian", &poll.findings);
+            self.ingest_batch(poll.events);
             self.metrics
                 .set_checked_through(SOURCE_GUARDIAN, self.rpc_pollers.guardian_read_until());
+            if !poll.dir_done {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 }
 
