@@ -81,8 +81,8 @@ const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How long snapshot saves may fail before a `SnapshotStale` finding, in
-/// seconds.
-const SNAPSHOT_STALE_LIMIT: u64 = 60 * 60;
+/// seconds. A failed save costs only a longer replay at the next restart.
+const SNAPSHOT_STALE_LIMIT: u64 = 12 * 60 * 60;
 
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {

@@ -36,7 +36,7 @@ The monitor reports a finding for:
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`);
 - a source the monitor last checked longer ago than its limit
   (`SourceStale`: three hours for each source),
-  or no successful snapshot save for an hour (`SnapshotStale`).
+  or no successful snapshot save for 12 hours (`SnapshotStale`).
 
 Move does not validate a Hashi approval's txid or change outputs. The monitor
 rebuilds the Bitcoin transaction from the approval and checks that the txid
