@@ -341,7 +341,7 @@ impl CommitteeSet {
     }
 
     pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &RuntimeCommittee)> {
-        if self.pending_epoch_change().is_some() {
+        if self.pending_epoch_change() == Some(target) {
             let prev_ep = self.epoch();
             self.committees().get(&prev_ep).map(|c| (prev_ep, c))
         } else {
@@ -1141,6 +1141,15 @@ mod tests {
         assert_eq!(
             set.previous_committee_for_target(6).map(|(e, _)| e),
             Some(5)
+        );
+    }
+
+    #[test]
+    fn previous_committee_for_target_recovery_during_pending_rotation() {
+        let set = set_with(1, Some(2), &[0, 1, 2]);
+        assert_eq!(
+            set.previous_committee_for_target(1).map(|(e, _)| e),
+            Some(0)
         );
     }
 
