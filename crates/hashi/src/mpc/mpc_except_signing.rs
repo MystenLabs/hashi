@@ -6972,7 +6972,7 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
                         match spawn_blocking(move || {
                             response_checks::certified_retrieval(
                                 protocol_type,
-                                &response,
+                                response,
                                 expected_hash,
                             )
                         })

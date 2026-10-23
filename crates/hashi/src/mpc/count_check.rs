@@ -76,6 +76,12 @@ pub enum CountCheckError {
     KeyOrder { field: &'static str },
     #[error("{field}: share index {index} is zero or not owned by the dealer")]
     UnownedKey { field: &'static str, index: u16 },
+    #[error("{field}: key {key} is not a u16 share index")]
+    KeyRange { field: &'static str, key: u32 },
+    #[error("{field}: share index {index} appears more than once")]
+    DuplicateKey { field: &'static str, index: u16 },
+    #[error("{field}: an entry doesn't parse: {reason}")]
+    BadEntry { field: &'static str, reason: String },
     #[error("{field}: party {party} is not in the committee")]
     UnknownParty { field: &'static str, party: u16 },
     #[error("{field}: unknown variant {variant}")]

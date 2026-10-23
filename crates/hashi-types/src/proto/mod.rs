@@ -1,6 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+mod mpc_key_rotation_messages;
+
+pub use mpc_key_rotation_messages::RotationMessages;
+
 // Include the generated proto definitions
 include!("generated/sui.hashi.v1alpha.rs");
 

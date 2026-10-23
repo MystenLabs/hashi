@@ -3,6 +3,7 @@
 
 use super::caller_membership::Refusal;
 use crate::mpc::count_check;
+use crate::mpc::count_check::AvssShape;
 use crate::mpc::count_check::CountCheckError;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
@@ -12,6 +13,7 @@ use crate::mpc::types::ProtocolType;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::proto;
+use std::collections::BTreeSet;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
 
@@ -43,20 +45,10 @@ pub(super) fn check_send_messages(
         Some(Messages::RotationMessages(rotation)) => {
             reject_kind_mismatch(shape, sender, ProtocolType::KeyRotation)?;
             let owned = rotation_shares_of(shape, sender)?;
-            rotation.messages.iter().try_for_each(|(&index, message)| {
-                u16::try_from(index)
-                    .ok()
-                    .and_then(ShareIndex::new)
-                    .filter(|share_index| owned.contains(share_index))
-                    .ok_or_else(|| MpcError::InvalidMessage {
-                        sender,
-                        reason: format!("Share index {index} does not belong to dealer"),
-                    })?;
-                count_checked(
-                    sender,
-                    count_check::check_avss_message(bytes(message), current.avss_shape()),
-                )
-            })
+            count_checked(
+                sender,
+                check_rotation_map(rotation, &owned, current.avss_shape()),
+            )
         }
         Some(Messages::AvidNonceMessage(avid)) => {
             check_avid_nonce_message(shape, sender, holder, avid)
@@ -194,6 +186,43 @@ fn rotation_shares_of(shape: &ShapeParams, dealer: Address) -> MpcResult<Vec<Sha
             sender: dealer,
             reason: "Dealer not in previous committee".into(),
         })
+}
+
+fn check_rotation_map(
+    rotation: &proto::RotationMessages,
+    owned: &[ShareIndex],
+    shape: AvssShape,
+) -> Result<(), CountCheckError> {
+    const FIELD: &str = "rotation_messages";
+    (rotation.len() <= owned.len())
+        .then_some(())
+        .ok_or(CountCheckError::TooMany {
+            field: FIELD,
+            found: rotation.len(),
+            max: owned.len(),
+        })?;
+    let mut seen = BTreeSet::new();
+    rotation.iter().try_for_each(|entry| {
+        let (key, message) = entry.map_err(|e| CountCheckError::BadEntry {
+            field: FIELD,
+            reason: e.to_string(),
+        })?;
+        let index =
+            u16::try_from(key).map_err(|_| CountCheckError::KeyRange { field: FIELD, key })?;
+        ShareIndex::new(index)
+            .filter(|share_index| owned.contains(share_index))
+            .ok_or(CountCheckError::UnownedKey {
+                field: FIELD,
+                index,
+            })?;
+        seen.insert(index)
+            .then_some(())
+            .ok_or(CountCheckError::DuplicateKey {
+                field: FIELD,
+                index,
+            })?;
+        count_check::check_avss_message(bytes(&message), shape)
+    })
 }
 
 fn reject_kind_mismatch(shape: &ShapeParams, sender: Address, kind: ProtocolType) -> MpcResult<()> {

@@ -3745,11 +3745,6 @@ pub mod guardian_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotationMessages {
-    #[prost(map = "uint32, message", tag = "1")]
-    pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AvidNonceMessage {
     /// Which nonce generation round within the epoch.
@@ -3814,7 +3809,7 @@ pub mod send_messages_request {
         DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
         /// For key rotation: messages keyed by share index.
         #[prost(message, tag = "3")]
-        RotationMessages(super::RotationMessages),
+        RotationMessages(crate::proto::RotationMessages),
         /// For AVID nonce generation.
         #[prost(message, tag = "5")]
         AvidNonceMessage(super::AvidNonceMessage),
@@ -3867,7 +3862,7 @@ pub mod retrieve_messages_response {
         DkgMessage(::sui_rpc::proto::sui::rpc::v2::Bcs),
         /// For key rotation: messages keyed by share index.
         #[prost(message, tag = "2")]
-        RotationMessages(super::RotationMessages),
+        RotationMessages(crate::proto::RotationMessages),
         /// For AVID nonce generation: catch-up commitment and echo.
         #[prost(message, tag = "4")]
         AvidNonceRetrievalMessage(super::AvidNonceRetrievalMessage),
