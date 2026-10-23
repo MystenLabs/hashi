@@ -19898,7 +19898,7 @@ fn a_manager_rebuilt_during_a_pending_reconfig_takes_rotation_ownership_from_the
 
     let shape = setup.create_manager(0).shape_params();
 
-    assert_eq!(shape.previous_epoch(), epoch);
+    assert_eq!(shape.previous_epoch(), epoch - 1);
     assert_eq!(
         shape
             .dealing_committee_for_epoch(epoch)
