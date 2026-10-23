@@ -244,7 +244,7 @@ impl Auditor {
     /// Report findings and record the check time after success.
     fn check_utxo_pool(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
-        self.rpc_pollers.btc_client.ensure_synced()?;
+        let tip_height = self.rpc_pollers.btc_client.synced_height()?;
         let pool = &self.utxo_pool;
         let outpoints = pool.outpoints();
         tracing::info!(utxos = outpoints.len(), "starting UTXO pool check");
@@ -254,7 +254,7 @@ impl Auditor {
         let states = self
             .rpc_pollers
             .btc_client
-            .lookup_outpoint_states(&outpoints)?;
+            .lookup_outpoint_states(&outpoints, tip_height)?;
         let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),

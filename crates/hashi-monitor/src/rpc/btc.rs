@@ -7,14 +7,22 @@
 //! confirmations. Bitcoin has no event stream to scan, so the auditor looks
 //! each pending transaction up by txid.
 //!
+//! Why one height:
+//! - A parent transaction creates an output that a dependent transaction spends.
+//! - At one height, the dependent cannot have more confirmations than its parent.
+//! - All lookups in a tick use one captured height, including lookups in different batches.
+//! - New blocks between RPC responses must not complete a dependent machine before its parent is ready to close.
+//! - Pool maintenance needs each complete flow's parent machine already closed or ready to close.
+//!
 //! How it works:
 //! 1. At startup, the auditor reads Hashi's on-chain
 //!    `bitcoin_confirmation_threshold` and gives it to the client. A
 //!    transaction counts as confirmed at that depth, as it does for the
 //!    committee. On mainnet, a threshold below `MAINNET_MIN_CONFIRMATIONS`
 //!    stops the monitor.
-//! 2. Before a pass, `ensure_synced` fails while bitcoind lags its peers,
-//!    since a lagging node reports recent transactions as unconfirmed.
+//! 2. Before a pass, `synced_height` checks the node and returns its height.
+//!    All batches use this height to calculate confirmation depth.
+//!    Blocks that arrive during the pass count on the next pass.
 //! 3. `prefetch_confirmations` looks all pending txids up in batches of
 //!    `HTTP_JSON_RPC_BATCH_SIZE`, with `HTTP_JSON_RPC_BATCHES_IN_FLIGHT`
 //!    batches sent at once, and `lookup_confirmation` serves each one from
@@ -122,7 +130,7 @@ struct HttpJsonRpcTransport {
     rpc_url: String,
     headers: BTreeMap<String, String>,
     /// Confirmations a transaction needs to count as confirmed.
-    confirmations: u64,
+    required_confirmations: u64,
 }
 
 #[derive(Deserialize)]
@@ -180,28 +188,21 @@ struct LookupOutcome {
     error: Option<anyhow::Error>,
 }
 
-/// A transaction mined at least the threshold deep, before its block
-/// header is read.
-struct ConfirmedTx {
+/// A mined transaction before its block header is read.
+struct MinedTx {
     block_hash: BlockHash,
     inputs: Vec<OutPoint>,
     outputs: Vec<TxOut>,
 }
 
 impl RawTransactionInfo {
-    /// The block hash, inputs and outputs of a sufficiently confirmed transaction.
-    fn confirmed(self, txid: Txid, confirmations: u64) -> anyhow::Result<Option<ConfirmedTx>> {
+    /// The block hash, inputs, and outputs of a mined transaction.
+    fn mined(self, txid: Txid) -> anyhow::Result<Option<MinedTx>> {
         let Some(block_hash) = self.blockhash else {
             debug!(%txid, "bitcoin tx found but not mined yet");
             return Ok(None);
         };
-        if self.confirmations < confirmations {
-            debug!(
-                %txid,
-                confirmations = self.confirmations,
-                required_confirmations = confirmations,
-                "bitcoin tx has insufficient confirmation depth"
-            );
+        if self.confirmations == 0 {
             return Ok(None);
         }
 
@@ -214,7 +215,7 @@ impl RawTransactionInfo {
             "bitcoin returned transaction {} for {txid}",
             tx.compute_txid()
         );
-        Ok(Some(ConfirmedTx {
+        Ok(Some(MinedTx {
             block_hash,
             inputs: tx.input.iter().map(|input| input.previous_output).collect(),
             outputs: tx.output,
@@ -223,21 +224,20 @@ impl RawTransactionInfo {
 }
 
 impl BtcRpcClient {
-    /// A client that counts a transaction as confirmed at `confirmations`.
-    pub fn new(cfg: &Config, confirmations: u64) -> anyhow::Result<Self> {
+    /// A client that counts a transaction as confirmed at `required_confirmations`.
+    pub fn new(cfg: &Config, required_confirmations: u64) -> anyhow::Result<Self> {
         Ok(Self {
             transport: HttpJsonRpcTransport {
                 rpc_url: cfg.btc.rpc_url.clone(),
                 headers: cfg.btc.http_headers.clone(),
-                confirmations,
+                required_confirmations,
             },
             confirmation_cache: RefCell::new(HashMap::new()),
         })
     }
 
-    /// Fail while bitcoind lags its peers: a lagging node reports recent
-    /// transactions as unconfirmed, which reads as a missing Bitcoin event.
-    pub fn ensure_synced(&self) -> anyhow::Result<()> {
+    /// Return the node height after the synchronization check succeeds.
+    pub fn synced_height(&self) -> anyhow::Result<u64> {
         let response = self
             .transport
             .call("getblockchaininfo", serde_json::json!([]))?;
@@ -254,7 +254,8 @@ impl BtcRpcClient {
                 .context("bitcoin getblockchaininfo response is missing its result")?,
         )
         .context("failed to parse bitcoin blockchain info")?;
-        info.ensure_synced()
+        info.ensure_synced()?;
+        Ok(info.blocks)
     }
 
     /// Drop the unconfirmed answers, so the next lookup asks again. The
@@ -266,11 +267,9 @@ impl BtcRpcClient {
             .retain(|_, confirmation| confirmation.is_some());
     }
 
-    /// Look up every txid the cache has no confirmed answer for, and keep
-    /// the answers. An answer for a txid not in `txids` is dropped: no flow
-    /// names it anymore. When the lookup fails, the batches that finished
-    /// are kept before the error is returned.
-    pub fn prefetch_confirmations(&self, txids: &[Txid]) -> anyhow::Result<()> {
+    /// Fetch missing confirmations at `tip_height` and remove answers absent from `txids`.
+    /// Keep completed batches if another batch fails.
+    pub fn prefetch_confirmations(&self, txids: &[Txid], tip_height: u64) -> anyhow::Result<()> {
         let asked = txids.iter().copied().collect::<HashSet<_>>();
         let missing = {
             let cache = self.confirmation_cache.borrow();
@@ -285,7 +284,7 @@ impl BtcRpcClient {
             looked_up = missing.len(),
             "bitcoin confirmations served from the cache"
         );
-        let outcome = self.transport.lookup_confirmations(&missing);
+        let outcome = self.transport.lookup_confirmations(&missing, tip_height);
         let mut cache = self.confirmation_cache.borrow_mut();
         cache.extend(outcome.confirmations);
         cache.retain(|txid, _| asked.contains(txid));
@@ -301,7 +300,8 @@ impl BtcRpcClient {
         if let Some(result) = self.confirmation_cache.borrow().get(&txid) {
             return Ok(result.clone());
         }
-        let result = self.transport.lookup_confirmation(txid)?;
+        let tip_height = self.synced_height()?;
+        let result = self.transport.lookup_confirmation(txid, tip_height)?;
         self.confirmation_cache
             .borrow_mut()
             .insert(txid, result.clone());
@@ -313,6 +313,7 @@ impl BtcRpcClient {
     pub fn lookup_outpoint_states(
         &self,
         outpoints: &[OutPoint],
+        tip_height: u64,
     ) -> anyhow::Result<HashMap<OutPoint, OutpointState>> {
         let txids = outpoints
             .iter()
@@ -320,7 +321,7 @@ impl BtcRpcClient {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let outcome = self.transport.lookup_confirmations(&txids);
+        let outcome = self.transport.lookup_confirmations(&txids, tip_height);
         if let Some(error) = outcome.error {
             return Err(error);
         }
@@ -443,55 +444,21 @@ impl HttpJsonRpcTransport {
         Ok(())
     }
 
-    fn lookup_confirmation(&self, txid: Txid) -> anyhow::Result<Option<BtcConfirmation>> {
-        let response = self.call(
-            "getrawtransaction",
-            serde_json::json!([txid.to_string(), true]),
-        )?;
-        if let Some(error) = response.error {
-            if error.code == -5 {
-                debug!(%txid, "bitcoin tx not found in mempool or chain yet");
-                return Ok(None);
-            }
-            anyhow::bail!(
-                "bitcoin getrawtransaction failed for {txid}: {} ({})",
-                error.message,
-                error.code
-            );
-        }
-        let tx_info: RawTransactionInfo = serde_json::from_value(
-            response
-                .result
-                .context("bitcoin getrawtransaction response is missing its result")?,
-        )
-        .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-        let Some(ConfirmedTx {
-            block_hash,
-            inputs,
-            outputs,
-        }) = tx_info.confirmed(txid, self.confirmations)?
-        else {
-            return Ok(None);
-        };
-
-        let times = self.confirmation_times(&[block_hash])?;
-        let (block_time, confirmed_time) = times
-            .get(&block_hash)
-            .copied()
-            .with_context(|| format!("missing block times for {block_hash}"))?;
-        Ok(Some(BtcConfirmation {
-            block_time,
-            confirmed_time,
-            inputs,
-            outputs,
-        }))
+    fn lookup_confirmation(
+        &self,
+        txid: Txid,
+        tip_height: u64,
+    ) -> anyhow::Result<Option<BtcConfirmation>> {
+        self.lookup_confirmation_batch(&[txid], tip_height)?
+            .remove(&txid)
+            .with_context(|| format!("missing bitcoin lookup result for {txid}"))
     }
 
     /// Look every txid up, `HTTP_JSON_RPC_BATCHES_IN_FLIGHT` batches at a
     /// time. Each worker takes the next batch until none is left. The first
     /// failure stops the others at their next batch. The answers of the
     /// batches that finished are returned with that error.
-    fn lookup_confirmations(&self, txids: &[Txid]) -> LookupOutcome {
+    fn lookup_confirmations(&self, txids: &[Txid], tip_height: u64) -> LookupOutcome {
         let batches = txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).collect::<Vec<_>>();
         let next_batch = AtomicUsize::new(0);
         let processed = AtomicUsize::new(0);
@@ -501,7 +468,7 @@ impl HttpJsonRpcTransport {
                 scope.spawn(|| {
                     while let Some(batch) = batches.get(next_batch.fetch_add(1, Ordering::Relaxed))
                     {
-                        let result = self.lookup_confirmation_batch(batch);
+                        let result = self.lookup_confirmation_batch(batch, tip_height);
                         if result.is_err() {
                             next_batch.store(batches.len(), Ordering::Relaxed);
                         }
@@ -539,6 +506,7 @@ impl HttpJsonRpcTransport {
     fn lookup_confirmation_batch(
         &self,
         txids: &[Txid],
+        tip_height: u64,
     ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
         let requests = txids
             .iter()
@@ -554,7 +522,7 @@ impl HttpJsonRpcTransport {
             .collect::<Vec<_>>();
         let responses = self.call_batch(&requests)?;
         let mut seen = HashSet::with_capacity(txids.len());
-        let mut confirmed = HashMap::with_capacity(txids.len());
+        let mut mined = HashMap::with_capacity(txids.len());
 
         for response in responses {
             let index = response_index(&response, txids.len())?;
@@ -565,7 +533,7 @@ impl HttpJsonRpcTransport {
             let txid = txids[index];
             if let Some(error) = response.error {
                 if error.code == -5 {
-                    confirmed.insert(txid, None);
+                    mined.insert(txid, None);
                     continue;
                 }
                 anyhow::bail!(
@@ -580,7 +548,7 @@ impl HttpJsonRpcTransport {
                     .context("bitcoin getrawtransaction batch response is missing its result")?,
             )
             .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-            confirmed.insert(txid, info.confirmed(txid, self.confirmations)?);
+            mined.insert(txid, info.mined(txid)?);
         }
         anyhow::ensure!(
             seen.len() == txids.len(),
@@ -589,47 +557,44 @@ impl HttpJsonRpcTransport {
             txids.len()
         );
 
-        let unique_block_hashes = confirmed
+        let mined_block_hashes = mined
             .values()
             .flatten()
             .map(|tx| tx.block_hash)
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let times = self.confirmation_times(&unique_block_hashes)?;
+        let confirmed_block_times = self.confirmed_block_times(&mined_block_hashes, tip_height)?;
 
-        confirmed
+        Ok(mined
             .into_iter()
-            .map(|(txid, confirmed)| {
-                let confirmation = confirmed
-                    .map(|tx| {
-                        let (block_time, confirmed_time) =
-                            times.get(&tx.block_hash).copied().with_context(|| {
-                                format!("missing block times for {}", tx.block_hash)
-                            })?;
-                        Ok::<_, anyhow::Error>(BtcConfirmation {
+            .map(|(txid, transaction)| {
+                let confirmation = transaction.and_then(|tx| {
+                    confirmed_block_times.get(&tx.block_hash).map(
+                        |&(block_time, confirmed_time)| BtcConfirmation {
                             block_time,
                             confirmed_time,
                             inputs: tx.inputs,
                             outputs: tx.outputs,
-                        })
-                    })
-                    .transpose()?;
-                Ok((txid, confirmation))
+                        },
+                    )
+                });
+                (txid, confirmation)
             })
-            .collect()
+            .collect())
     }
 
-    /// For each block that holds a confirmed transaction: its own time, and
-    /// the time of the block `confirmations - 1` above it. Core counts the
-    /// holding block as the first confirmation, so that block is the one that
-    /// gave the transaction its `confirmations`.
-    fn confirmation_times(
+    /// Return block and confirmation times for blocks deep enough at `tip_height`.
+    /// The holding block counts as the first confirmation.
+    fn confirmed_block_times(
         &self,
         block_hashes: &[BlockHash],
+        tip_height: u64,
     ) -> anyhow::Result<HashMap<BlockHash, (UnixSeconds, UnixSeconds)>> {
-        let headers = self.block_headers(block_hashes)?;
-        let confirming_height = |header: &RawBlockHeader| header.height + self.confirmations - 1;
+        let mut headers = self.block_headers(block_hashes)?;
+        let confirming_height =
+            |header: &RawBlockHeader| header.height + self.required_confirmations - 1;
+        headers.retain(|_, header| confirming_height(header) <= tip_height);
         let confirming_heights = headers
             .values()
             .map(confirming_height)
@@ -640,12 +605,9 @@ impl HttpJsonRpcTransport {
         let confirming_headers =
             self.block_headers(&confirming_hashes.values().copied().collect::<Vec<_>>())?;
 
-        block_hashes
+        headers
             .iter()
-            .map(|hash| {
-                let header = headers
-                    .get(hash)
-                    .with_context(|| format!("missing block header for {hash}"))?;
+            .map(|(hash, header)| {
                 let height = confirming_height(header);
                 let confirming_hash = confirming_hashes
                     .get(&height)
@@ -912,7 +874,7 @@ mod tests {
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
         let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
-        btc_rpc_client.ensure_synced()?;
+        btc_rpc_client.synced_height()?;
 
         let unknown_txid = txid(7);
         let unknown = btc_rpc_client.lookup_confirmation(unknown_txid)?;
@@ -938,7 +900,13 @@ mod tests {
             "expected one-confirmation transaction to remain pending"
         );
 
+        let earlier_tip_height = btc_rpc_client.synced_height()?;
         node.generate_blocks(MAINNET_MIN_CONFIRMATIONS - 1)?;
+        btc_rpc_client.prefetch_confirmations(&[txid], earlier_tip_height)?;
+        assert!(
+            btc_rpc_client.lookup_confirmation(txid)?.is_none(),
+            "blocks after the captured tip must not confirm the transaction"
+        );
         btc_rpc_client.forget_unconfirmed();
 
         let confirmed = btc_rpc_client
@@ -948,11 +916,11 @@ mod tests {
         // the txids asked for.
         btc_rpc_client.forget_unconfirmed();
         assert_eq!(btc_rpc_client.cached_confirmations(), 1);
-        btc_rpc_client.prefetch_confirmations(&[txid])?;
+        btc_rpc_client.prefetch_confirmations(&[txid], node.get_block_count()?)?;
         assert_eq!(btc_rpc_client.cached_confirmations(), 1);
-        btc_rpc_client.prefetch_confirmations(&[])?;
+        btc_rpc_client.prefetch_confirmations(&[], node.get_block_count()?)?;
         assert_eq!(btc_rpc_client.cached_confirmations(), 0);
-        btc_rpc_client.prefetch_confirmations(&[txid])?;
+        btc_rpc_client.prefetch_confirmations(&[txid], node.get_block_count()?)?;
         assert_eq!(btc_rpc_client.cached_confirmations(), 1);
         assert!(
             confirmed.outputs.iter().any(|output| {
@@ -1012,7 +980,7 @@ mod tests {
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
         let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
-        btc_rpc_client.ensure_synced()?;
+        btc_rpc_client.synced_height()?;
 
         // Pay the wallet's own address so the test can spend the output later.
         let destination = node.get_new_address()?;
@@ -1036,7 +1004,8 @@ mod tests {
             vout: 0,
         };
 
-        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint, out_of_range, unknown])?;
+        let states = btc_rpc_client
+            .lookup_outpoint_states(&[outpoint, out_of_range, unknown], node.get_block_count()?)?;
         assert_eq!(
             states[&outpoint],
             OutpointState::Unspent {
@@ -1048,7 +1017,7 @@ mod tests {
 
         spend_outpoint(&node, outpoint)?;
 
-        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint])?;
+        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint], node.get_block_count()?)?;
         assert_eq!(states[&outpoint], OutpointState::Spent);
 
         Ok(())
@@ -1095,7 +1064,7 @@ mod tests {
         let transport = HttpJsonRpcTransport {
             rpc_url,
             headers: BTreeMap::new(),
-            confirmations: MAINNET_MIN_CONFIRMATIONS,
+            required_confirmations: MAINNET_MIN_CONFIRMATIONS,
         };
 
         let response = transport
@@ -1119,7 +1088,7 @@ mod tests {
         let transport = HttpJsonRpcTransport {
             rpc_url,
             headers: BTreeMap::new(),
-            confirmations: MAINNET_MIN_CONFIRMATIONS,
+            required_confirmations: MAINNET_MIN_CONFIRMATIONS,
         };
 
         let error = transport

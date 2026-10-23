@@ -166,14 +166,14 @@ impl Auditor {
     /// Returns domain findings and bubbles up infra errors. `started_at` is
     /// taken before the lookups, so the machines record it as their check time.
     fn fetch_btc_info(&mut self, started_at: UnixSeconds) -> anyhow::Result<Vec<MonitorFinding>> {
-        self.rpc_pollers.btc_client.ensure_synced()?;
+        let tip_height = self.rpc_pollers.btc_client.synced_height()?;
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
         self.rpc_pollers.btc_client.forget_unconfirmed();
         let unique_txids = self.txids_to_poll();
         self.rpc_pollers
             .btc_client
-            .prefetch_confirmations(&unique_txids)?;
+            .prefetch_confirmations(&unique_txids, tip_height)?;
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
             findings.extend(sm.try_fetch_btc_tx(
