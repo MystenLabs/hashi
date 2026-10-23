@@ -41,7 +41,6 @@ use std::fmt;
 
 use hashi_types::guardian::time::UnixSeconds;
 
-use crate::findings::MonitorFinding;
 use crate::time::utc_timestamp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,14 +124,4 @@ impl Cursors {
             }
         }
     }
-}
-
-/// Outcome of a guardian or Sui poll.
-pub enum PollOutcome {
-    /// The events of the newly scanned range, and the findings of events that failed a check.
-    CursorAdvanced {
-        events: Vec<MonitorEvent>,
-        findings: Vec<MonitorFinding>,
-    },
-    CursorUnmoved,
 }
