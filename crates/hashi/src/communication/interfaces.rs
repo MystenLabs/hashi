@@ -5,7 +5,6 @@
 
 use crate::mpc::ComplainRequest;
 use crate::mpc::GetPublicMpcOutputRequest;
-use crate::mpc::GetPublicMpcOutputResponse;
 use crate::mpc::RetrieveMessagesRequest;
 use crate::mpc::SendMessagesRequest;
 use crate::mpc::SendMessagesResponse;
@@ -82,7 +81,8 @@ pub trait P2PChannel: Send + Sync {
         &self,
         party: &Address,
         request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse>;
+        response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse>;
 
     async fn get_partial_signatures(
         &self,

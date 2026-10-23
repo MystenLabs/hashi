@@ -20,6 +20,7 @@ use crate::metrics::STORED_ROW_LOAD;
 use crate::metrics::STORED_ROW_READ;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
+use crate::mpc::rpc::public_output_response_limit;
 use crate::mpc::rpc::response_checks;
 use crate::mpc::shape_params::CommitteeShape;
 use crate::mpc::shape_params::ShapeParams;
@@ -137,6 +138,8 @@ const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const AVID_RETRIEVAL_CALL_RETRIES: usize = 2;
 const AVID_LOCAL_READ_ATTEMPTS: usize = 3;
 const AVID_LOCAL_READ_RETRY_DELAY: Duration = Duration::from_millis(200);
+const PUBLIC_OUTPUT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const PUBLIC_OUTPUT_CALL_RETRIES: usize = 1;
 
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
@@ -5791,6 +5794,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
         onchain_mpc_key: &[u8],
+        metrics: &Metrics,
     ) -> MpcResult<PublicMpcOutput> {
         let (previous_committee, previous_nodes, epoch) = {
             let mgr = mpc_manager.read().unwrap();
@@ -5803,6 +5807,8 @@ impl MpcManager {
             })?;
             (previous_committee, previous_nodes, mgr.previous_epoch)
         };
+        let total_weight = previous_nodes.total_weight();
+        let response_limit = public_output_response_limit(total_weight);
         let request = GetPublicMpcOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
@@ -5816,17 +5822,49 @@ impl MpcManager {
                     .unwrap_or(0);
                 let req = request.clone();
                 async move {
-                    let result = p2p_channel.get_public_mpc_output(&addr, &req).await;
+                    let result = with_timeout_and_retry_budget(
+                        || p2p_channel.get_public_mpc_output(&addr, &req, response_limit),
+                        PUBLIC_OUTPUT_CALL_TIMEOUT,
+                        PUBLIC_OUTPUT_CALL_RETRIES,
+                    )
+                    .await;
                     (addr, weight, result)
                 }
             })
             .collect();
+        let refusals = metrics.refusal_counters();
         let mut responses: HashMap<[u8; 32], (PublicMpcOutput, u64)> = HashMap::new();
         let mut contradicting: Vec<Address> = Vec::new();
         let mut contradicting_weight = 0u64;
         let mut agreed = None;
         while let Some((addr, weight, result)) = futures.next().await {
-            match result {
+            let checked = match result {
+                Ok(response) => {
+                    spawn_blocking(move || response_checks::public_output(&response, total_weight))
+                        .await
+                }
+                Err(e) => {
+                    count_response_too_large(
+                        &refusals,
+                        &addr,
+                        "get_public_mpc_output",
+                        MPC_LABEL_KEY_ROTATION,
+                        &e,
+                    );
+                    tracing::info!("Failed to get public MPC output from {}: {}", addr, e);
+                    continue;
+                }
+            };
+            match checked {
+                Err(reason) => {
+                    refusals.response(
+                        &addr,
+                        "get_public_mpc_output",
+                        MPC_LABEL_KEY_ROTATION,
+                        reason.label(),
+                    );
+                    tracing::warn!("Public MPC output from {addr:?} refused: {reason}");
+                }
                 Ok(response)
                     if contradicts_onchain_key(&response.output.public_key, onchain_mpc_key) =>
                 {
@@ -5843,9 +5881,6 @@ impl MpcManager {
                         agreed = Some(output.clone());
                         break;
                     }
-                }
-                Err(e) => {
-                    tracing::info!("Failed to get public MPC output from {}: {}", addr, e);
                 }
             }
         }
@@ -5938,6 +5973,7 @@ impl MpcManager {
                         p2p_channel,
                         threshold_opt,
                         onchain_mpc_key,
+                        metrics,
                     )
                     .await?
                 }
@@ -5952,6 +5988,7 @@ impl MpcManager {
                 p2p_channel,
                 threshold_opt,
                 onchain_mpc_key,
+                metrics,
             )
             .await?
         };
@@ -5968,6 +6005,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         threshold_opt: Option<u16>,
         onchain_mpc_key: &[u8],
+        metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
         let threshold = threshold_opt.ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous threshold".into())
@@ -5977,6 +6015,7 @@ impl MpcManager {
             p2p_channel,
             threshold as u64,
             onchain_mpc_key,
+            metrics,
         )
         .await?;
         Ok(MpcOutput {

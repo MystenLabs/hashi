@@ -9,4 +9,5 @@ pub(crate) mod response_checks;
 mod service;
 
 pub use p2p_channel::RpcP2PChannel;
+pub(crate) use proto_conversions::public_output_response_limit;
 pub(crate) use service::signing_error_to_status;

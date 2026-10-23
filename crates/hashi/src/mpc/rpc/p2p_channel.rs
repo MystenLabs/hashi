@@ -12,7 +12,6 @@ use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::GetPublicMpcOutputRequest;
-use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::RetrieveMessagesRequest;
 use crate::mpc::types::SendMessagesRequest;
 use crate::mpc::types::SendMessagesResponse;
@@ -161,16 +160,18 @@ impl P2PChannel for RpcP2PChannel {
         &self,
         party: &Address,
         request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
-        let client = self.get_client(party)?;
+        response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
+        let client = self
+            .get_client(party)?
+            .tighten_max_decoding_message_size(response_limit);
         let proto_request = self.build_request(request.to_proto());
         let response = client
             .mpc_service_client()
             .get_public_mpc_output(proto_request)
             .await
             .map_err(map_status)?;
-        GetPublicMpcOutputResponse::try_from(response.get_ref())
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+        Ok(response.into_inner())
     }
 
     async fn get_partial_signatures(

@@ -1624,7 +1624,6 @@ pub(crate) mod tests {
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
     use crate::mpc::types::GetPublicMpcOutputRequest;
-    use crate::mpc::types::GetPublicMpcOutputResponse;
     use crate::mpc::types::RetrieveMessagesRequest;
     use crate::mpc::types::SendMessagesRequest;
     use crate::mpc::types::SendMessagesResponse;
@@ -1785,7 +1784,8 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(
@@ -1839,7 +1839,8 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(
@@ -1939,7 +1940,8 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(
@@ -2002,7 +2004,8 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(
@@ -2017,8 +2020,8 @@ pub(crate) mod tests {
                 Err(ChannelError::NotReady("reconciling".into()))
             } else {
                 Ok(GetPartialSignaturesResponse {
-                    partial_sigs: std::collections::BTreeMap::new(),
-                    signing_nonces: std::collections::BTreeMap::new(),
+                    partial_sigs: BTreeMap::new(),
+                    signing_nonces: BTreeMap::new(),
                 })
             }
         }
@@ -2058,7 +2061,8 @@ pub(crate) mod tests {
             &self,
             _: &Address,
             _: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             unimplemented!()
         }
         async fn get_partial_signatures(

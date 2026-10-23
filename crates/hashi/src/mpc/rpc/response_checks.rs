@@ -7,6 +7,7 @@ use crate::mpc::count_check::CountCheckError;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::types::AvidNonceRetrievalMessage;
+use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::Messages;
 use crate::mpc::types::MessagesHash;
 use crate::mpc::types::ProtocolTypeIndicator;
@@ -139,6 +140,21 @@ pub(crate) fn avid_complaint_response(
     bcs::from_bytes(bytes(avid)).map_err(complaint_decode_refused)
 }
 
+pub(crate) fn public_output(
+    response: &proto::GetPublicMpcOutputResponse,
+    total_weight: u16,
+) -> Result<GetPublicMpcOutputResponse, Refused> {
+    let max = usize::from(total_weight);
+    (response.commitments.len() <= max)
+        .then_some(())
+        .ok_or(CountCheckError::TooMany {
+            field: "commitments",
+            found: response.commitments.len(),
+            max,
+        })?;
+    GetPublicMpcOutputResponse::try_from(response).map_err(|e| Refused::Decode(e.to_string()))
+}
+
 pub(crate) fn complaint_response_limit(responder_weight: u16) -> usize {
     2 * count_check::avss_complaint_response_size(responder_weight) + 1024
 }
@@ -200,12 +216,26 @@ fn bytes(bcs: &Bcs) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mpc::rpc::public_output_response_limit;
     use crate::mpc::types::ComplaintResponse;
+    use crate::mpc::types::PublicMpcOutput;
     use fastcrypto::groups::GroupElement;
     use fastcrypto_tbls::polynomial::Eval;
+    use fastcrypto_tbls::threshold_schnorr::G;
     use fastcrypto_tbls::threshold_schnorr::S;
     use fastcrypto_tbls::types::ShareIndex;
     use prost::Message;
+
+    fn honest_public_output(total_weight: u16) -> proto::GetPublicMpcOutputResponse {
+        proto::GetPublicMpcOutputResponse::from(&GetPublicMpcOutputResponse {
+            output: PublicMpcOutput {
+                public_key: G::generator(),
+                commitments: (1..=total_weight)
+                    .map(|index| (ShareIndex::new(index).unwrap(), G::generator()))
+                    .collect(),
+            },
+        })
+    }
 
     #[test]
     fn complaint_and_signature_reply_limits_admit_the_largest_honest_replies() {
@@ -270,6 +300,32 @@ mod tests {
                 proto::RetrieveMessagesResponse::decode(&[0x12, 3, 0x0a, 1, 0x08][..]).unwrap()
             ),
             Refused::Decode(_)
+        ));
+    }
+
+    #[test]
+    fn public_output_limit_admits_the_largest_honest_reply() {
+        for total_weight in [1, 100, 10_000] {
+            assert!(
+                honest_public_output(total_weight).encoded_len()
+                    <= public_output_response_limit(total_weight)
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_output_with_more_commitments_than_shares_is_refused_before_decoding() {
+        let honest = honest_public_output(4);
+        assert!(public_output(&honest, 4).is_ok());
+        let mut padded = honest;
+        padded.commitments.insert(5, Bcs::from(vec![0xff; 33]));
+        assert!(matches!(
+            public_output(&padded, 4),
+            Err(Refused::Count(CountCheckError::TooMany {
+                found: 5,
+                max: 4,
+                ..
+            }))
         ));
     }
 }

@@ -41,6 +41,18 @@ pub(crate) fn partial_sigs_response_limit(requested_ids: usize, max_owned: usize
 
 const MAX_PARTIAL_SIGS_BLOB_BYTES: usize = 3 + u16::MAX as usize * 34;
 
+pub(crate) fn public_output_response_limit(total_weight: u16) -> usize {
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto_tbls::threshold_schnorr::G;
+    use prost::Message;
+    let entry = proto::GetPublicMpcOutputResponse {
+        public_key: None,
+        commitments: [(u32::from(u16::MAX), serialize_bcs(&G::generator()))].into(),
+    }
+    .encoded_len();
+    2 * usize::from(total_weight) * entry + 1024
+}
+
 /// Deserialize a BCS-encoded proto field.
 #[allow(clippy::result_large_err)]
 fn deserialize_bcs<'de, T: Deserialize<'de>>(

@@ -591,7 +591,8 @@ impl P2PChannel for MockP2PChannel {
         &self,
         party: &Address,
         request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -604,6 +605,15 @@ impl P2PChannel for MockP2PChannel {
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
+        let response = proto::GetPublicMpcOutputResponse::from(&response);
+        if prost::Message::encoded_len(&response) > response_limit {
+            return Err(crate::communication::ChannelError::ResponseTooLarge(
+                format!(
+                    "response of {} bytes exceeds the {response_limit}-byte limit",
+                    prost::Message::encoded_len(&response)
+                ),
+            ));
+        }
         Ok(response)
     }
 
@@ -752,7 +762,8 @@ impl P2PChannel for FailingP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -824,7 +835,8 @@ impl P2PChannel for SucceedingP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         unimplemented!("SucceedingP2PChannel does not implement get_public_mpc_output")
     }
 
@@ -895,8 +907,11 @@ impl<P: P2PChannel> P2PChannel for FlakyP2PChannel<P> {
         &self,
         party: &Address,
         request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
-        self.inner.get_public_mpc_output(party, request).await
+        response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
+        self.inner
+            .get_public_mpc_output(party, request, response_limit)
+            .await
     }
 
     async fn get_partial_signatures(
@@ -989,7 +1004,8 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         unimplemented!("PartiallyFailingP2PChannel does not implement get_public_mpc_output")
     }
 
@@ -1052,7 +1068,8 @@ impl P2PChannel for PreCollectedP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         unimplemented!("PreCollectedP2PChannel does not implement get_public_mpc_output")
     }
 
@@ -5531,7 +5548,8 @@ impl P2PChannel for ScriptedRetrievalChannel {
         &self,
         _: &Address,
         _: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         unimplemented!()
     }
 
@@ -6475,8 +6493,11 @@ impl P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
-        self.inner.get_public_mpc_output(party, request).await
+        response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
+        self.inner
+            .get_public_mpc_output(party, request, response_limit)
+            .await
     }
 
     async fn get_partial_signatures(
@@ -9147,17 +9168,22 @@ async fn test_prepare_previous_output_adopts_only_the_on_chain_key() {
             &self,
             party: &Address,
             _request: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _response_limit: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             if let Some(output) = self.immediate.get(party) {
-                return Ok(GetPublicMpcOutputResponse {
-                    output: output.clone(),
-                });
+                return Ok(proto::GetPublicMpcOutputResponse::from(
+                    &GetPublicMpcOutputResponse {
+                        output: output.clone(),
+                    },
+                ));
             }
             if let Some(output) = self.delayed.get(party) {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                return Ok(GetPublicMpcOutputResponse {
-                    output: output.clone(),
-                });
+                return Ok(proto::GetPublicMpcOutputResponse::from(
+                    &GetPublicMpcOutputResponse {
+                        output: output.clone(),
+                    },
+                ));
             }
             Err(crate::communication::ChannelError::RequestFailed(
                 "no output".into(),
@@ -14139,7 +14165,8 @@ impl P2PChannel for BundleScenarioP2PChannel {
         &self,
         _party: &Address,
         _request: &GetPublicMpcOutputRequest,
-    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        _response_limit: usize,
+    ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
         unimplemented!("BundleScenarioP2PChannel does not implement get_public_mpc_output")
     }
 
@@ -17654,7 +17681,8 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
             &self,
             _party: &Address,
             request: &GetPublicMpcOutputRequest,
-        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            _response_limit: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
             self.captured.lock().unwrap().push(request.epoch);
             Err(crate::communication::ChannelError::RequestFailed(
                 "spy".into(),
@@ -17675,7 +17703,9 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
     };
 
     let mgr_arc = Arc::new(RwLock::new(manager));
-    let _ = MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1, &[]).await;
+    let _ =
+        MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1, &[], &test_metrics())
+            .await;
 
     let captured = captured.lock().unwrap();
     assert!(
@@ -17689,6 +17719,95 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
              not current-1; got {epoch}",
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_public_output_member_that_never_answers_is_timed_out_and_retried_once() {
+    let mut setup = TestSetup::new(5);
+    let current_epoch = setup.committee_set.epoch();
+    make_jumped_committee_set(&mut setup, current_epoch - 3);
+    let manager = setup.create_manager(0);
+    let members = manager.previous_committee.as_ref().unwrap().members().len();
+    let limit =
+        public_output_response_limit(manager.previous_nodes.as_ref().unwrap().total_weight());
+
+    struct SilentChannel {
+        calls: Arc<std::sync::Mutex<HashMap<Address, Vec<usize>>>>,
+    }
+    #[async_trait::async_trait]
+    impl P2PChannel for SilentChannel {
+        async fn send_messages(
+            &self,
+            _party: &Address,
+            _request: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _party: &Address,
+            _request: &RetrieveMessagesRequest,
+        ) -> ChannelResult<proto::RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _party: &Address,
+            _request: &ComplainRequest,
+            _response_limit: Option<usize>,
+        ) -> ChannelResult<proto::ComplainResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            party: &Address,
+            _request: &GetPublicMpcOutputRequest,
+            response_limit: usize,
+        ) -> ChannelResult<proto::GetPublicMpcOutputResponse> {
+            self.calls
+                .lock()
+                .unwrap()
+                .entry(*party)
+                .or_default()
+                .push(response_limit);
+            std::future::pending().await
+        }
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!()
+        }
+    }
+
+    let calls = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let channel = SilentChannel {
+        calls: calls.clone(),
+    };
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(120),
+        MpcManager::fetch_public_mpc_output_from_quorum(
+            &Arc::new(RwLock::new(manager)),
+            &channel,
+            1,
+            &[],
+            &test_metrics(),
+        ),
+    )
+    .await
+    .expect("the fetch waited on a member that never answers");
+
+    assert!(
+        matches!(fetched, Err(MpcError::NotEnoughApprovals { .. })),
+        "{fetched:?}"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), members);
+    assert!(
+        calls.values().all(|limits| *limits == [limit; 2]),
+        "{calls:?}"
+    );
 }
 
 #[test]
