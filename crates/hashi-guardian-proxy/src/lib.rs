@@ -153,6 +153,10 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[1; 32])
     }
 
+    fn other_member_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+    }
+
     /// The stub answers attested info only with the metadata it checks was
     /// forwarded.
     fn attested<T>(message: T) -> tonic::Request<T> {
@@ -198,7 +202,7 @@ mod tests {
     }
 
     /// The real router over a stub guardian, on both listeners, with
-    /// `member_key` on the allowlist.
+    /// `member_key` and `other_member_key` on the allowlist.
     async fn spawn_proxy() -> Proxy {
         let (stub, backend) = spawn_stub().await;
         let metrics = Arc::new(ProxyMetrics::new());
@@ -223,7 +227,7 @@ mod tests {
             Duration::from_secs(1),
         );
         let allowlist = Arc::new(MemberAllowlist::new(metrics.clone()));
-        allowlist.store(snapshot(&[&member_key()]));
+        allowlist.store(snapshot(&[&member_key(), &other_member_key()]));
         let app = router(
             guardian,
             relay,
@@ -321,6 +325,27 @@ mod tests {
             .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_member_gets_one_committee_update_per_interval() {
+        let proxy = spawn_proxy().await;
+        let mut node = proxy.node(&member_key());
+        let update = proto::UpdateCommitteeChainRequest::default;
+
+        node.update_committee_chain(update()).await.unwrap();
+        let resent = node.update_committee_chain(update()).await.unwrap_err();
+        assert_eq!(resent.code(), Code::ResourceExhausted);
+        assert_eq!(proxy.stub.update_committee_calls.load(Ordering::SeqCst), 1);
+
+        // The handoff gate limits by the key the member gate admitted, so
+        // another member is not held back.
+        proxy
+            .node(&other_member_key())
+            .update_committee_chain(update())
+            .await
+            .unwrap();
+        assert_eq!(proxy.stub.update_committee_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

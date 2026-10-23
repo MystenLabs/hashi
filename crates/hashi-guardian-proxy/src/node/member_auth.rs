@@ -36,11 +36,16 @@ impl MemberGate {
         Self { allowlist, metrics }
     }
 
-    /// Only the node listener takes client certificates, and it requires an
-    /// Ed25519 one, so a key means the call came in on the node listener.
-    fn admit(&self, route: Route, client_tls_key: Option<[u8; 32]>) -> Result<(), Refusal> {
+    /// The member a node RPC is admitted from; other routes need none. Only
+    /// the node listener takes client certificates, and it requires an Ed25519
+    /// one, so a key means the call came in on the node listener.
+    fn admit(
+        &self,
+        route: Route,
+        client_tls_key: Option<[u8; 32]>,
+    ) -> Result<Option<MemberKey>, Refusal> {
         let key = match (route, client_tls_key) {
-            (Route::GuardianInfo, _) | (Route::Public, None) => return Ok(()),
+            (Route::GuardianInfo, _) | (Route::Public, None) => return Ok(None),
             (Route::Public, Some(_)) => return Err(Refusal::PublicOnly),
             (Route::Node, None) => return Err(Refusal::NoClientCert),
             (Route::Node, Some(key)) => key,
@@ -52,13 +57,13 @@ impl MemberGate {
         if !snapshot.members.contains(&key) {
             return Err(Refusal::NotMember);
         }
-        Ok(())
+        Ok(Some(MemberKey(key)))
     }
 }
 
 pub async fn require_committee_member(
     State(gate): State<Arc<MemberGate>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let client_tls_key = request
@@ -67,7 +72,12 @@ pub async fn require_committee_member(
         .and_then(|certs| certs.peer_certs().first())
         .and_then(tls::node_tls_key);
     match gate.admit(Route::of(request.uri().path()), client_tls_key) {
-        Ok(()) => next.run(request).await,
+        Ok(member) => {
+            if let Some(member) = member {
+                request.extensions_mut().insert(member);
+            }
+            next.run(request).await
+        }
         Err(refusal) => {
             gate.metrics
                 .member_refused
@@ -75,6 +85,21 @@ pub async fn require_committee_member(
                 .inc();
             refuse(&request, refusal)
         }
+    }
+}
+
+/// The registered TLS key of the committee member a node RPC came from, which
+/// the gate sets on each one it admits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MemberKey(pub [u8; 32]);
+
+impl MemberKey {
+    pub fn of<T>(request: &tonic::Request<T>) -> Result<Self, Status> {
+        request
+            .extensions()
+            .get::<Self>()
+            .copied()
+            .ok_or_else(|| Status::internal("the request carries no admitted committee member"))
     }
 }
 
@@ -190,7 +215,10 @@ mod tests {
     fn admits_a_member_and_refuses_everyone_else() {
         let gate = gate_with_member();
         let outsider = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
-        assert_eq!(gate.admit(Route::Node, tls_key(&member_key())), Ok(()));
+        assert_eq!(
+            gate.admit(Route::Node, tls_key(&member_key())),
+            Ok(tls_key(&member_key()).map(MemberKey))
+        );
         assert_eq!(
             gate.admit(Route::Node, tls_key(&outsider)),
             Err(Refusal::NotMember)
@@ -203,9 +231,9 @@ mod tests {
         let gate = gate_with_member();
         let outsider = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
         for client_tls_key in [None, tls_key(&member_key()), tls_key(&outsider)] {
-            assert_eq!(gate.admit(Route::GuardianInfo, client_tls_key), Ok(()));
+            assert_eq!(gate.admit(Route::GuardianInfo, client_tls_key), Ok(None));
         }
-        assert_eq!(gate.admit(Route::Public, None), Ok(()));
+        assert_eq!(gate.admit(Route::Public, None), Ok(None));
         for client_tls_key in [tls_key(&member_key()), tls_key(&outsider)] {
             assert_eq!(
                 gate.admit(Route::Public, client_tls_key),
