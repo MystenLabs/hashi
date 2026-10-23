@@ -61,9 +61,7 @@ use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiEventsPoller;
-use crate::rpc::sui::approval::HashiApproval;
 use crate::rpc::sui::read_confirmation_threshold;
-use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::OutPoint;
@@ -410,19 +408,11 @@ impl AuditorCore {
                 continue;
             }
 
-            // Fetch BTC info for expecting withdrawals
-            if sm.expects(WithdrawalEventType::E3BtcConfirmed)
-                && let BtcFetchOutcome::Confirmed(new_findings) =
-                    sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?
-            {
-                findings.extend(new_findings);
-            }
+            findings.extend(sm.try_fetch_btc_tx(&self.cfg.timing, &self.btc_client, started_at)?);
         }
 
         for sm in self.pending_deposits.values_mut() {
-            if sm.expects_btc() {
-                findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
-            }
+            findings.extend(sm.try_fetch_btc_tx(&self.btc_client, started_at)?);
         }
 
         Ok(findings)
@@ -471,56 +461,6 @@ impl AuditorCore {
             .filter(|sm| sm.is_since(self.window_start) && sm.is_ready_for_gc())
             .filter_map(|sm| sm.confirmed().cloned())
             .collect()
-    }
-
-    /// Fetches each overdue Hashi approval from Sui. One for the guardian's txid inside the
-    /// scanned range is also a `SuiScanMissedEvent`; one whose lookup fails stays missing.
-    pub async fn fetch_missing_hashi_approvals(&mut self) -> Vec<MonitorFinding> {
-        let cursors = self.cursors();
-        let missing = self
-            .pending_withdrawals
-            .values()
-            .filter(|sm| sm.is_since(self.window_start) && sm.is_missing_hashi_approval(&cursors))
-            .map(|sm| (sm.wid(), sm.btc_txid()))
-            .collect::<Vec<_>>();
-        let mut findings = Vec::new();
-        let mut approvals = Vec::new();
-        for (wid, btc_txid) in missing {
-            match self.sui_poller.fetch_withdrawal_approval(wid).await {
-                Ok(Some(HashiApproval::Rejected(rejection))) => findings.extend(rejection),
-                Ok(Some(HashiApproval::Valid(approval))) => {
-                    // A contradiction, not a scan miss: the state machine rejects even a scanned one.
-                    if approval.btc_txid != btc_txid {
-                        findings.push(MonitorFinding::InvalidEventAdded(
-                            "invalid btc_txid".to_string(),
-                        ));
-                        continue;
-                    }
-                    if self.sui_poller.has_scanned(approval.timestamp_secs) {
-                        findings.push(MonitorFinding::SuiScanMissedEvent {
-                            event: MonitorEvent::Withdrawal(approval.clone()),
-                            cursor: cursors.sui,
-                        });
-                    } else {
-                        tracing::info!(
-                            %wid,
-                            approved_at = %utc_timestamp(approval.timestamp_secs),
-                            "fetched Hashi approval missing from the Sui event scan"
-                        );
-                    }
-                    approvals.push(MonitorEvent::Withdrawal(approval));
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    source = "sui",
-                    %wid,
-                    ?error,
-                    "Hashi approval lookup failed; reporting it missing"
-                ),
-            }
-        }
-        findings.extend(self.ingest_batch(approvals));
-        findings
     }
 
     pub fn detect_timing_violations(&self) -> Vec<MonitorFinding> {
@@ -678,11 +618,8 @@ mod tests {
     use crate::domain::BtcConfirmation;
     use crate::domain::DepositId;
     use crate::rpc::btc::MAINNET_MIN_CONFIRMATIONS;
-    use crate::rpc::sui::approval::tests::with_wrong_txid;
-    use crate::rpc::sui::approval::tests::withdrawal_transaction;
-    use crate::rpc::sui::tests::looked_up_approval;
+    use crate::rpc::sui::tests::hashi_approval;
     use crate::rpc::sui::tests::poller_scanned;
-    use crate::rpc::sui::tests::poller_scanned_with;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
@@ -691,47 +628,11 @@ mod tests {
     use crate::timing::Timing;
     use bitcoin::Amount;
     use bitcoin::TxOut;
-    use bitcoin::hashes::Hash as _;
-
-    /// An auditor holding a guardian approval for `btc_txid` of `looked_up_approval`'s
-    /// withdrawal, whose Sui scan covered `[start, cursor)` without its E1.
-    async fn auditor_missing_approval(
-        start: UnixSeconds,
-        cursor: UnixSeconds,
-        btc_txid: Txid,
-    ) -> AuditorCore {
-        let cfg = Config::for_tests();
-        let mut auditor = AuditorCore {
-            pending_withdrawals: HashMap::new(),
-            pending_deposits: HashMap::new(),
-            window_start: 0,
-            utxo_pool: UtxoPool::default(),
-            suspect_spends: HashMap::new(),
-            guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, 0),
-            sui_poller: poller_scanned(start, cursor).await,
-            btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
-            cfg,
-        };
-        let approval = looked_up_approval();
-        let findings = auditor.ingest(MonitorEvent::Withdrawal(MonitorWithdrawalEvent {
-            event_type: WithdrawalEventType::E2GuardianApproved,
-            timestamp_secs: approval.timestamp_secs + 7,
-            btc_txid,
-            ..approval
-        }));
-        assert!(findings.is_empty());
-        auditor
-    }
 
     #[tokio::test]
     async fn a_replayed_deposit_request_is_ingested_once() {
-        let approval = looked_up_approval();
-        let mut auditor = auditor_missing_approval(
-            approval.timestamp_secs,
-            approval.timestamp_secs,
-            approval.btc_txid,
-        )
-        .await;
+        let approval = hashi_approval();
+        let mut auditor = auditor_with_pool().await;
         let request = SuiDepositRequestedEvent {
             timestamp_secs: approval.timestamp_secs,
             deposit_id: DepositId::new(approval.btc_txid, 0),
@@ -775,91 +676,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_approval_inside_the_scanned_range_is_a_scan_miss() {
-        let approval = looked_up_approval();
-        let cursor = approval.timestamp_secs + 3_600;
-        let mut auditor =
-            auditor_missing_approval(approval.timestamp_secs - 3_600, cursor, approval.btc_txid)
-                .await;
-
-        let findings = auditor.fetch_missing_hashi_approvals().await;
-
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::SuiScanMissedEvent {
-                event: MonitorEvent::Withdrawal(approval),
-                cursor,
-            }]
-        );
-        assert_eq!(findings[0].category(), FindingCategory::Safety);
-        // The approval is ingested, so it is not also reported missing.
-        assert!(auditor.detect_timing_violations().is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_approval_from_before_the_scan_is_ingested_without_a_finding() {
-        let approval = looked_up_approval();
-        let approved_at = approval.timestamp_secs;
-        let mut auditor =
-            auditor_missing_approval(approved_at + 1, approved_at + 3_600, approval.btc_txid).await;
-
-        assert!(auditor.fetch_missing_hashi_approvals().await.is_empty());
-        assert!(auditor.detect_timing_violations().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_looked_up_approval_with_a_wrong_txid_is_rejected() {
-        let approval = looked_up_approval();
-        let cursor = approval.timestamp_secs + 3_600;
-        let mut auditor =
-            auditor_missing_approval(approval.timestamp_secs - 3_600, cursor, approval.btc_txid)
-                .await;
-        let txn = with_wrong_txid(withdrawal_transaction(approval.wid));
-        auditor.sui_poller =
-            poller_scanned_with(txn.clone(), approval.timestamp_secs - 3_600, cursor).await;
-
-        let findings = auditor.fetch_missing_hashi_approvals().await;
-
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::WithdrawalTxidMismatch {
-                wid: approval.wid,
-                claimed: txn.txid.into(),
-                computed: approval.btc_txid,
-            }]
-        );
-        // The rejected approval is not ingested, so the E1 stays missing.
-        assert!(matches!(
-            auditor.detect_timing_violations()[..],
-            [MonitorFinding::WithdrawalEventMissing { .. }]
-        ));
-    }
-
-    #[tokio::test]
-    async fn an_approval_contradicting_the_guardian_txid_is_not_a_scan_miss() {
-        let approved_at = looked_up_approval().timestamp_secs;
-        let guardian_txid = Txid::from_byte_array([9; 32]);
-        let mut auditor =
-            auditor_missing_approval(approved_at - 3_600, approved_at + 3_600, guardian_txid).await;
-
-        let findings = auditor.fetch_missing_hashi_approvals().await;
-
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::InvalidEventAdded(
-                "invalid btc_txid".to_string()
-            )]
-        );
-        assert!(matches!(
-            auditor.detect_timing_violations()[..],
-            [MonitorFinding::WithdrawalEventMissing { .. }]
-        ));
-    }
-
-    #[tokio::test]
     async fn an_open_withdrawal_holds_the_restart_start_at_its_earliest_event() {
         let cfg = Config::for_tests();
-        let approval = looked_up_approval();
+        let approval = hashi_approval();
         let approved_at = approval.timestamp_secs;
         let signature = MonitorWithdrawalEvent {
             event_type: WithdrawalEventType::E2GuardianApproved,
@@ -873,7 +692,7 @@ mod tests {
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at + 7_200),
-            sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200).await,
+            sui_poller: poller_scanned(approved_at - 3_600, approved_at + 7_200),
             btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         };
@@ -898,7 +717,7 @@ mod tests {
     /// An auditor with an empty UTXO pool and no flows.
     async fn auditor_with_pool() -> AuditorCore {
         let cfg = Config::for_tests();
-        let approved_at = looked_up_approval().timestamp_secs;
+        let approved_at = hashi_approval().timestamp_secs;
         AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
@@ -906,7 +725,7 @@ mod tests {
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::for_tests(&cfg, approved_at),
-            sui_poller: poller_scanned(approved_at - 3_600, approved_at).await,
+            sui_poller: poller_scanned(approved_at - 3_600, approved_at),
             btc_client: BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             cfg,
         }

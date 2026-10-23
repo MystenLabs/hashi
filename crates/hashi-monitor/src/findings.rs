@@ -78,12 +78,6 @@ pub enum MonitorFinding {
         deadline: UnixSeconds,
         cursor: UnixSeconds,
     },
-    /// The Sui event scan covered `event` but never returned it, so other events the
-    /// scan should have returned may be missing too.
-    SuiScanMissedEvent {
-        event: MonitorEvent,
-        cursor: UnixSeconds,
-    },
     /// The Hashi approval's txid is not the txid of the transaction that its
     /// inputs and outputs build.
     WithdrawalTxidMismatch {
@@ -234,7 +228,6 @@ impl MonitorFinding {
                 EventRelation::Predecessor => FindingCategory::Safety,
                 EventRelation::Successor => FindingCategory::Liveness,
             },
-            Self::SuiScanMissedEvent { .. } => FindingCategory::Safety,
             Self::WithdrawalTxidMismatch { .. } => FindingCategory::Safety,
             Self::WithdrawalTxUnbuildable { .. } => FindingCategory::Safety,
             Self::WithdrawalMismatch { .. } => FindingCategory::Safety,
@@ -285,11 +278,6 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "WithdrawalEventMissing(wid={wid}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
                 utc_timestamp(*deadline),
-                utc_timestamp(*cursor),
-            ),
-            Self::SuiScanMissedEvent { event, cursor } => write!(
-                f,
-                "SuiScanMissedEvent(event={event}, cursor={})",
                 utc_timestamp(*cursor),
             ),
             Self::WithdrawalTxidMismatch {

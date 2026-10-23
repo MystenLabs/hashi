@@ -135,7 +135,6 @@ impl Default for Timing {
 impl Timing {
     /// How far before the guardian audit start to scan Sui for E1. An E1
     /// precedes its E2 by at most the E1 delay; an older one is a late E2.
-    /// An E1 outside the scan is still read from Sui by its withdrawal id.
     pub fn sui_lookback(&self) -> u64 {
         self.successor_delays
             .get(WithdrawalEventType::E1HashiApproved)

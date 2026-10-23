@@ -34,7 +34,6 @@ use crate::domain::WithdrawalTx;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
-use crate::state_machine::BtcFetchOutcome;
 use crate::timing::Timing;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
@@ -109,15 +108,6 @@ impl WithdrawalStateMachine {
         self.expected_events
             .iter()
             .any(|(event, _, _)| *event == event_type)
-    }
-
-    /// Is the Hashi approval still missing after the Sui cursor passed its deadline?
-    pub fn is_missing_hashi_approval(&self, cursors: &Cursors) -> bool {
-        self.expected_events
-            .iter()
-            .any(|(event_type, deadline, _)| {
-                *event_type == WithdrawalEventType::E1HashiApproved && *deadline <= cursors.sui
-            })
     }
 
     /// Whether every expected event was seen, so the pool can take the flow
@@ -249,10 +239,7 @@ impl WithdrawalStateMachine {
     }
 
     /// If expecting BTC confirmation, query BTC RPC and add the event if confirmed.
-    ///     - Returns `Ok(BtcFetchOutcome::NotExpected)` if a BTC event is not expected.
-    ///     - Returns `Ok(BtcFetchOutcome::Unconfirmed)` if checked but block not yet mined.
-    ///     - Returns `Ok(BtcFetchOutcome::Confirmed(findings))` if confirmed; `findings` may be empty.
-    ///     - Returns `Err` for BTC RPC/infrastructure failures.
+    /// Returns the findings from the new event. An error is the RPC's.
     ///
     /// `checked_at` must be no later than the lookup.
     pub fn try_fetch_btc_tx(
@@ -260,9 +247,9 @@ impl WithdrawalStateMachine {
         timing: &Timing,
         btc_rpc_client: &BtcRpcClient,
         checked_at: UnixSeconds,
-    ) -> anyhow::Result<BtcFetchOutcome> {
+    ) -> anyhow::Result<Vec<MonitorFinding>> {
         if !self.expects(WithdrawalEventType::E3BtcConfirmed) {
-            return Ok(BtcFetchOutcome::NotExpected);
+            return Ok(Vec::new());
         }
 
         let confirmation = btc_rpc_client.lookup_confirmation(self.btc_txid)?;
@@ -281,9 +268,9 @@ impl WithdrawalStateMachine {
                     .get(WithdrawalEventType::E2GuardianApproved)
                     .expect("E3 is expected only after E2");
                 self.confirmed = Some(ConfirmedWithdrawal::from_confirmation(e2, confirmation));
-                BtcFetchOutcome::Confirmed(self.add_event(e_btc, timing))
+                self.add_event(e_btc, timing)
             }
-            None => BtcFetchOutcome::Unconfirmed,
+            None => Vec::new(),
         })
     }
 
@@ -641,32 +628,29 @@ mod tests {
                 cursor: 200,
             }
         );
-    }
 
-    #[test]
-    fn hashi_approval_is_missing_once_the_sui_cursor_passes_its_deadline() {
-        let timing = Timing::for_tests();
-        let mut sm = WithdrawalStateMachine::new(
+        // A missing E1 is judged by the Sui cursor, and is a safety finding.
+        let sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E2GuardianApproved, 7, 100, 7),
             &timing,
         );
-        let cursors = |sui| Cursors {
+        let sui = |sui| Cursors {
             sui,
             guardian: 1_000,
         };
-
-        assert!(!sm.is_missing_hashi_approval(&cursors(109)));
-        assert!(sm.is_missing_hashi_approval(&cursors(110)));
-
-        assert!(
-            sm.add_event(
-                event(WithdrawalEventType::E1HashiApproved, 7, 10, 7),
-                &timing
-            )
-            .is_empty()
+        assert!(sm.timing_violations(&sui(109)).is_empty());
+        let violations = sm.timing_violations(&sui(110));
+        assert_eq!(
+            violations,
+            vec![MonitorFinding::WithdrawalEventMissing {
+                wid: WithdrawalID::new([7; 32]),
+                event_type: WithdrawalEventType::E1HashiApproved,
+                relation: EventRelation::Predecessor,
+                deadline: 110,
+                cursor: 110,
+            }]
         );
-        assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
-        assert!(sm.timing_violations(&cursors(1_000)).is_empty());
+        assert_eq!(violations[0].category(), FindingCategory::Safety);
     }
 
     #[test]
@@ -700,10 +684,7 @@ mod tests {
             )]
         );
         assert_eq!(findings[0].category(), FindingCategory::Safety);
-        assert!(mismatched.is_missing_hashi_approval(&Cursors {
-            sui: 110,
-            guardian: 1_000,
-        }));
+        assert!(mismatched.expects(WithdrawalEventType::E1HashiApproved));
     }
 
     #[test]
