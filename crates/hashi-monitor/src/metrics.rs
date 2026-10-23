@@ -28,6 +28,10 @@ pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
     oldest_utxo_timestamp_seconds: IntGauge,
+    /// The sum of the held UTXO amounts, in satoshis.
+    pool_value_sats: IntGauge,
+    /// Sui's hBTC supply, in satoshis. 0 until the first read.
+    hbtc_supply_sats: IntGauge,
     /// Unix time of the latest finding of each kind. A kind has no series
     /// until its first finding.
     last_finding_timestamp_seconds: IntGaugeVec,
@@ -76,6 +80,22 @@ impl MonitorMetrics {
             "Earliest held UTXO block timestamp in Unix seconds; 0 for an empty pool",
         )
         .expect("valid metric");
+        let pool_value_sats = IntGauge::new(
+            "hashi_monitor_pool_value_sats",
+            "Sum of the UTXO amounts held in the monitor pool, in satoshis",
+        )
+        .expect("valid metric");
+        let hbtc_supply_sats = IntGauge::new(
+            "hashi_monitor_hbtc_supply_sats",
+            "Total supply of hBTC on Sui, in satoshis",
+        )
+        .expect("valid metric");
+        registry
+            .register(Box::new(pool_value_sats.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(hbtc_supply_sats.clone()))
+            .expect("register");
         registry
             .register(Box::new(pool_utxo_count.clone()))
             .expect("register");
@@ -106,6 +126,8 @@ impl MonitorMetrics {
             registry,
             pool_utxo_count,
             oldest_utxo_timestamp_seconds,
+            pool_value_sats,
+            hbtc_supply_sats,
             last_finding_timestamp_seconds,
             checked_through_timestamp_seconds,
         }
@@ -117,6 +139,13 @@ impl MonitorMetrics {
                 .with_label_values(&[finding.kind()])
                 .set(gauge_value(now));
         }
+    }
+
+    pub fn set_hbtc_backing(&self, hbtc_supply: u64, pool_value: u64) {
+        self.hbtc_supply_sats
+            .set(i64::try_from(hbtc_supply).unwrap_or(i64::MAX));
+        self.pool_value_sats
+            .set(i64::try_from(pool_value).unwrap_or(i64::MAX));
     }
 
     pub fn set_checked_through(&self, source: &str, timestamp: UnixSeconds) {

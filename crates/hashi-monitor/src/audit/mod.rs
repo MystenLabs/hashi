@@ -19,6 +19,7 @@
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //! 10. Log a failed source tick. The next tick of that source retries it.
 //! 11. At each state tick, report a source or a snapshot save that is behind its limit.
+//! 12. After each pool maintenance tick, check that the UTXO pool backs the hBTC supply.
 //!
 //! Assumptions:
 //! - Every tick runs on one task. The first catch-up blocks the state tick,
@@ -46,6 +47,7 @@ use crate::store::AuditState;
 use crate::store::Snapshot;
 use crate::store::SnapshotStore;
 use crate::time::utc_timestamp;
+use anyhow::Context;
 use bitcoin::OutPoint;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::s3::S3HourDirectory;
@@ -58,6 +60,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
+mod hbtc_supply;
 mod pool_checks;
 mod pool_maintenance;
 mod rpc_pollers;
@@ -117,6 +120,8 @@ pub struct Auditor {
     last_successful_pool_check: Option<UnixSeconds>,
     /// When the last snapshot save succeeded.
     last_snapshot_save: UnixSeconds,
+    /// Since when the hBTC supply has exceeded the pool value, if it does.
+    hbtc_supply_above_pool_since: Option<UnixSeconds>,
 }
 
 impl Auditor {
@@ -170,12 +175,19 @@ impl Auditor {
             store,
             last_successful_pool_check: None,
             last_snapshot_save: 0,
+            hbtc_supply_above_pool_since: None,
         };
         if let Some(state) = state {
             auditor.restore(state);
         }
         // A pruned start leaves the pool incomplete.
         auditor.rpc_pollers.ensure_sui_serves_start().await?;
+        // A setup that cannot read the supply fails here, not silently later.
+        let supply = auditor
+            .read_hbtc_supply()
+            .await
+            .context("failed to read the hBTC supply")?;
+        tracing::info!(hbtc_supply = supply, "read the hBTC supply");
         auditor
             .metrics
             .set_checked_through(SOURCE_SUI, auditor.rpc_pollers.sui_read_until());
@@ -205,6 +217,7 @@ impl Auditor {
             withdrawals: self.pending_withdrawals.values().cloned().collect(),
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
+            hbtc_supply_above_pool_since: self.hbtc_supply_above_pool_since,
         }
     }
 
@@ -217,6 +230,7 @@ impl Auditor {
             self.pending_deposits.insert(sm.request_id(), sm);
         }
         self.suspect_spends.extend(state.suspect_spends);
+        self.hbtc_supply_above_pool_since = state.hbtc_supply_above_pool_since;
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
@@ -462,6 +476,7 @@ impl Auditor {
                     if let Err(error) = self.tick_pool_maintenance() {
                         tracing::warn!(source = SOURCE_UTXO, ?error, "pool maintenance failed; retrying at the next tick");
                     }
+                    self.check_hbtc_supply().await;
                 }
                 _ = state_checks_ticker.tick() => {
                     self.tick_state_checks().await;
@@ -571,6 +586,7 @@ mod tests {
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
             last_snapshot_save: approved_at,
+            hbtc_supply_above_pool_since: None,
         }
     }
 
@@ -727,6 +743,7 @@ mod tests {
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
             last_snapshot_save: cursor,
+            hbtc_supply_above_pool_since: None,
         }
     }
 

@@ -36,7 +36,11 @@ The monitor reports a finding for:
   by more than 30 seconds (`MAX_EXPECTED_LOG_CLOCK_SKEW` in `hashi-guardian`);
 - a source the monitor last checked longer ago than its limit
   (`SourceStale`: three hours for each source),
-  or no successful snapshot save for 12 hours (`SnapshotStale`).
+  or no successful snapshot save for 12 hours (`SnapshotStale`);
+- an hBTC supply on Sui that has exceeded the value of the UTXO pool for
+  three hours (`HbtcSupplyExceedsPool`). In an honest bridge the supply never
+  exceeds the pool: the pool takes a deposit before Move mints it, and Move
+  burns a withdrawal before Bitcoin spends its inputs.
 
 Move does not validate a Hashi approval's txid or change outputs. The monitor
 rebuilds the Bitcoin transaction from the approval and checks that the txid
@@ -303,6 +307,17 @@ Every five minutes, pool maintenance updates these gauges:
 - `hashi_monitor_pool_utxo_count`: the number of held UTXOs.
 - `hashi_monitor_oldest_utxo_timestamp_seconds`: the earliest held UTXO block timestamp.
   An empty pool gives zero.
+- `hashi_monitor_pool_value_sats`: the sum of the held UTXO amounts.
+- `hashi_monitor_hbtc_supply_sats`: the hBTC supply on Sui, the
+  `total_supply` of Hashi's `TreasuryCap<BTC>`.
+
+Use this query to graph how far the hBTC supply is from the pool value. It
+is zero or below in an honest bridge. Below zero are coins in flight and
+deposits that Move never minted:
+
+```promql
+hashi_monitor_hbtc_supply_sats - hashi_monitor_pool_value_sats
+```
 
 Use this query to graph the oldest held UTXO age in days:
 

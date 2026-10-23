@@ -1,10 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The Sui poller: the Hashi events read from Sui, in checkpoint order.
+//! The Sui poller: the Hashi events read from Sui, in checkpoint order, and
+//! the hBTC supply.
 //!
 //! Why it exists: the withdrawal E1 and the deposit E2 are Sui events. The
-//! poller scans the checkpoints for them and gives each one its time.
+//! poller scans the checkpoints for them and gives each one its time. It
+//! also reads the hBTC supply; see `hbtc_supply`.
 //!
 //! How it works:
 //! 1. The poller starts at a checkpoint: on a first run, the one that holds
@@ -62,6 +64,7 @@ use crate::keys::HashiBTCKeys;
 use crate::time::utc_timestamp;
 
 pub mod approval;
+pub mod hbtc_supply;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
@@ -204,7 +207,7 @@ pub async fn read_confirmation_threshold(
     Ok(hashi.config.get_u64("bitcoin_confirmation_threshold", 6))
 }
 
-pub struct SuiEventsPoller {
+pub struct SuiPoller {
     /// Sui v2 gRPC client used for checkpoint, transaction and object requests.
     client: sui_rpc::Client,
     /// Deployed package versions used to identify Hashi event and object types.
@@ -218,9 +221,11 @@ pub struct SuiEventsPoller {
     last_read_checkpoint_timestamp: UnixSeconds,
     /// The first checkpoint not yet scanned.
     next_checkpoint: u64,
+    /// Hashi's `TreasuryCap<BTC>`. `find_hbtc_treasury_cap` sets it.
+    hbtc_treasury_cap_id: Address,
 }
 
-impl PollCursor for SuiEventsPoller {
+impl PollCursor for SuiPoller {
     type Position = u64;
 
     fn read_until(&self) -> UnixSeconds {
@@ -232,7 +237,7 @@ impl PollCursor for SuiEventsPoller {
     }
 }
 
-impl SuiEventsPoller {
+impl SuiPoller {
     /// A poller whose scan starts at checkpoint `start`.
     pub fn new(
         config: &SuiConfig,
@@ -251,6 +256,7 @@ impl SuiEventsPoller {
             package_id: config.package_id.clone(),
             last_read_checkpoint_timestamp: 0,
             next_checkpoint: start,
+            hbtc_treasury_cap_id: Address::ZERO,
         })
     }
 
@@ -667,9 +673,9 @@ pub mod tests {
         }
     }
 
-    async fn poller_for(ledger: impl LedgerService) -> SuiEventsPoller {
+    async fn poller_for(ledger: impl LedgerService) -> SuiPoller {
         let config = serve(ledger).await;
-        SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap()
+        SuiPoller::new(&config, test_hashi_btc_keys(), 0).unwrap()
     }
 
     #[tokio::test]
@@ -720,12 +726,12 @@ pub mod tests {
     }
 
     /// A poller checked through `last_read_checkpoint_timestamp`. No Sui node serves it.
-    pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiEventsPoller {
+    pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
             package_id: PACKAGE_ID.to_string(),
         };
-        let mut poller = SuiEventsPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
+        let mut poller = SuiPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
         poller.last_read_checkpoint_timestamp = last_read_checkpoint_timestamp;
         poller
     }
@@ -763,13 +769,13 @@ pub mod tests {
     }
 
     /// A poller over `PrunedLedger` whose scan starts at checkpoint `start`.
-    async fn pruned_poller_starting_at(start: u64) -> SuiEventsPoller {
+    async fn pruned_poller_starting_at(start: u64) -> SuiPoller {
         let config = serve(PrunedLedger {
             lowest: 100_000,
             head: 200_000,
         })
         .await;
-        SuiEventsPoller::new(&config, test_hashi_btc_keys(), start).unwrap()
+        SuiPoller::new(&config, test_hashi_btc_keys(), start).unwrap()
     }
 
     #[tokio::test]
