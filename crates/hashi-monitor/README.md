@@ -292,10 +292,6 @@ The monitor decides what is wrong. An alerting system needs only these rules:
    in the last hour. Its details are in the `monitor finding` ERROR lines.
 2. `up < 1`: the monitor cannot be scraped.
 3. `absent(up)`: no monitor runs.
-4. `time() - hashi_monitor_heartbeat_timestamp_seconds > 1800`: the audit task
-   is stuck. A hung task cannot report itself, so this rule watches from
-   outside. The task sets the heartbeat after each unit of work, also during
-   the first catch-up from genesis.
 
 ### Pool metrics
 

@@ -30,9 +30,6 @@ pub struct MonitorMetrics {
     oldest_utxo_timestamp_seconds: IntGauge,
     /// Unix time of the latest finding; 0 until one is reported.
     last_finding_timestamp_seconds: IntGauge,
-    /// Unix time the audit task last finished a unit of work. A watchdog
-    /// outside the monitor reads it, since a hung task cannot report itself.
-    heartbeat_timestamp_seconds: IntGauge,
     /// Unix time each source has been checked through: the Sui and guardian
     /// cursors, and for Bitcoin, which is looked up rather than scanned, the
     /// start of the last pass over every pending confirmation. For the
@@ -53,11 +50,6 @@ impl MonitorMetrics {
         let last_finding_timestamp_seconds = IntGauge::new(
             "hashi_monitor_last_finding_timestamp_seconds",
             "Unix time of the latest monitor finding",
-        )
-        .expect("valid metric");
-        let heartbeat_timestamp_seconds = IntGauge::new(
-            "hashi_monitor_heartbeat_timestamp_seconds",
-            "Unix time the audit task last finished a unit of work",
         )
         .expect("valid metric");
         let checked_through_timestamp_seconds = IntGaugeVec::new(
@@ -90,9 +82,6 @@ impl MonitorMetrics {
             .register(Box::new(last_finding_timestamp_seconds.clone()))
             .expect("register");
         registry
-            .register(Box::new(heartbeat_timestamp_seconds.clone()))
-            .expect("register");
-        registry
             .register(Box::new(checked_through_timestamp_seconds.clone()))
             .expect("register");
 
@@ -113,7 +102,6 @@ impl MonitorMetrics {
             pool_utxo_count,
             oldest_utxo_timestamp_seconds,
             last_finding_timestamp_seconds,
-            heartbeat_timestamp_seconds,
             checked_through_timestamp_seconds,
         }
     }
@@ -134,10 +122,6 @@ impl MonitorMetrics {
     pub fn restore_last_finding(&self, timestamp: UnixSeconds) {
         self.last_finding_timestamp_seconds
             .set(gauge_value(timestamp));
-    }
-
-    pub fn set_heartbeat(&self, timestamp: UnixSeconds) {
-        self.heartbeat_timestamp_seconds.set(gauge_value(timestamp));
     }
 
     pub fn set_checked_through(&self, source: &str, timestamp: UnixSeconds) {
@@ -217,7 +201,6 @@ mod tests {
 
         for line in [
             "hashi_monitor_last_finding_timestamp_seconds 0",
-            "hashi_monitor_heartbeat_timestamp_seconds 0",
             r#"hashi_monitor_checked_through_timestamp_seconds{source="sui"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="btc"} 0"#,

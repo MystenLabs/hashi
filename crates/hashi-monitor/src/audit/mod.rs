@@ -19,13 +19,10 @@
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //! 10. Log a failed source tick. The next tick of that source retries it.
 //! 11. At each state tick, report a source or a snapshot save that is behind its limit.
-//! 12. Set the heartbeat gauge after each unit of work.
 //!
 //! Assumptions:
 //! - Every tick runs on one task. The first catch-up blocks the state tick,
 //!   so a first run reports no stale source while it catches up.
-//! - A hung task cannot report itself. A watchdog outside the monitor reads
-//!   the heartbeat.
 
 use crate::config::Config;
 use crate::domain::MonitorEvent;
@@ -207,7 +204,6 @@ impl Auditor {
         let now = now_timestamp_secs();
         auditor.last_snapshot_save = now;
         auditor.metrics.set_checked_through(SOURCE_SNAPSHOT, now);
-        auditor.metrics.set_heartbeat(now);
         Ok(auditor)
     }
 
@@ -511,7 +507,6 @@ impl Auditor {
                     self.tick_state_checks().await;
                 }
             }
-            self.metrics.set_heartbeat(now_timestamp_secs());
         }
     }
 }
