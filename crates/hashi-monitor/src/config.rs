@@ -174,10 +174,6 @@ mod tests {
         assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
         assert!(config.s3_credentials.is_none());
         assert_eq!(config.btc.rpc_url, env!("CARGO_PKG_NAME"));
-        assert_eq!(
-            config.timing.sui_lookback(),
-            Timing::default().sui_lookback()
-        );
     }
 
     #[test]

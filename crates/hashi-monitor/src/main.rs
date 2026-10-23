@@ -29,7 +29,7 @@ struct Cli {
     #[arg(long)]
     config: PathBuf,
 
-    /// GCS bucket that keeps the monitor's snapshot: the restart start and the
+    /// GCS bucket that keeps the monitor's snapshot: the audit state and the
     /// UTXO pool. A restart resumes from it. Without a snapshot, the monitor
     /// starts from the bridge's genesis on Sui with an empty pool, which needs
     /// a Sui node that keeps the history from there.

@@ -1,38 +1,43 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The continuous auditor's snapshot: what survives a restart.
+//! The continuous auditor's snapshot: the whole audit state, so a restart
+//! continues where the last run stopped.
 //!
 //! Why it exists: without it, every restart would re-audit from the bridge's
 //! genesis to rebuild the UTXO pool, and report every old finding again.
 //!
 //! How it works:
-//! 1. After each state check, the auditor saves a `Snapshot`: the previous
-//!    check's restart start, the UTXO pool as it is now, and the deployment
-//!    it audits. The pool is ahead of the restart start. That is safe: the
-//!    pool skips every operation it already applied, so the replay changes
-//!    nothing in it.
-//! 2. The bucket holds the snapshot as several objects. `SNAPSHOT_KEY` is
-//!    a small manifest with the restart start, the held UTXOs and the number
-//!    of spent entries. The spent record only grows, so it is kept apart in
+//! 1. After each state check, the auditor saves a `Snapshot`: the deployment
+//!    it audits, its `AuditState`, and the UTXO pool. The audit state is the
+//!    position of each poller, every open state machine, the suspect spends
+//!    of the last pool check, and the time of the last finding of each
+//!    category. All of it is taken at one instant.
+//! 2. A restart loads the machines, restores the finding times, and resumes
+//!    each poller at its saved position. It reads no event twice and skips
+//!    none, so no flow is cut in two.
+//! 3. The bucket holds the snapshot as several objects. `SNAPSHOT_KEY` is a
+//!    manifest with the audit state, the held UTXOs and the number of spent
+//!    entries. The spent record only grows, so it is kept apart in
 //!    `spent/NNNNN.json` files of `SPENT_SEGMENT_ENTRIES` entries each, in
 //!    the order the pool spent them. A full file never changes again.
-//! 3. A save writes the files that hold new entries and then the manifest.
+//! 4. A save writes the files that hold new entries and then the manifest.
 //!    The manifest is last, so a crash leaves a file that is ahead of it.
 //!    A load reads only as many entries as the manifest counts.
-//! 4. At startup it loads the snapshot, resumes from the restart start with
-//!    the pool unless another deployment saved it, and saves its own start.
 //!
 //! Assumptions:
-//! - Only the monitor writes the bucket. A later restart start skips the
-//!   audit of everything before it.
+//! - Only the monitor writes the bucket.
+//! - A snapshot of another `SNAPSHOT_VERSION` fails the load. The operator
+//!   deletes it, and the next start is a first run from genesis.
 //! - The snapshot is durable. Without it, the next start is a first run from
 //!   genesis, which needs a Sui node that keeps the history.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::Context;
+use bitcoin::OutPoint;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use hashi_types::guardian::time::UnixSeconds;
@@ -44,12 +49,18 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::audit::pool::SpentUtxoWire;
+use crate::audit::pool::SuspectSpend;
 use crate::audit::pool::UtxoPool;
 use crate::audit::pool::UtxoWire;
 use crate::config::Config;
+use crate::state_machine::DepositStateMachine;
+use crate::state_machine::WithdrawalStateMachine;
 
 /// The object that holds the manifest.
 const SNAPSHOT_KEY: &str = "snapshot.json";
+
+/// The format of the snapshot. Change it when a saved type changes.
+const SNAPSHOT_VERSION: u32 = 1;
 
 /// How many spent entries one file holds. A full file is about 4 MB, and a
 /// save writes at most the one file that is not full.
@@ -59,23 +70,39 @@ const SPENT_SEGMENT_ENTRIES: usize = 10_000;
 const LOAD_PARALLELISM: usize = 8;
 
 /// What the continuous auditor keeps between runs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     /// The guardian bucket and Hashi package audited. Progress through one
     /// deployment says nothing about another, such as a redeployed devnet.
     pub guardian_bucket: String,
     pub package_id: String,
-    /// Where a restart resumes: at or before every flow not yet verified.
-    pub restart_start: UnixSeconds,
+    pub state: AuditState,
     pub pool: UtxoPool,
 }
 
+/// The auditor's state apart from the UTXO pool.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AuditState {
+    /// The first Sui checkpoint not yet scanned.
+    pub sui_next_checkpoint: u64,
+    /// The first guardian hourly directory not yet read. Kept as a UTC
+    /// timestamp string, so an operator can read it.
+    #[serde(with = "crate::time::utc_timestamp_serde")]
+    pub guardian_cursor: UnixSeconds,
+    pub withdrawals: Vec<WithdrawalStateMachine>,
+    pub deposits: Vec<DepositStateMachine>,
+    /// The spends the last pool check saw, still waiting for the Sui cursor.
+    pub suspect_spends: Vec<(OutPoint, SuspectSpend)>,
+    /// The time of the last finding, by category label.
+    pub last_findings: BTreeMap<String, UnixSeconds>,
+}
+
 impl Snapshot {
-    pub fn new(cfg: &Config, restart_start: UnixSeconds, pool: UtxoPool) -> Self {
+    pub fn new(cfg: &Config, state: AuditState, pool: UtxoPool) -> Self {
         Self {
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
             package_id: cfg.sui.package_id.clone(),
-            restart_start,
+            state,
             pool,
         }
     }
@@ -87,16 +114,14 @@ impl Snapshot {
     }
 }
 
-/// The object at `SNAPSHOT_KEY`. Unknown fields are ignored, so an older
-/// monitor still resumes from a newer one's snapshot, and its next save drops
-/// them.
+/// The object at `SNAPSHOT_KEY`.
 #[derive(Deserialize, Serialize)]
 struct Manifest {
+    version: u32,
     guardian_bucket: String,
     package_id: String,
-    /// Kept as a UTC timestamp string, so an operator can read and edit it.
-    #[serde(with = "crate::time::utc_timestamp_serde")]
-    restart_start: UnixSeconds,
+    #[serde(flatten)]
+    state: AuditState,
     utxos: Vec<UtxoWire>,
     /// How many spent entries the snapshot has, from the first file on.
     spent_count: usize,
@@ -142,6 +167,16 @@ impl SnapshotStore {
             Err(error) => Err(error),
         }
         .context("failed to read the snapshot")?;
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let Version { version } =
+            serde_json::from_slice(&bytes).context("failed to parse the snapshot")?;
+        anyhow::ensure!(
+            version == SNAPSHOT_VERSION,
+            "the snapshot has version {version}, but this monitor needs version {SNAPSHOT_VERSION}. Delete the snapshot to run again from genesis",
+        );
         let manifest: Manifest =
             serde_json::from_slice(&bytes).context("failed to parse the snapshot")?;
 
@@ -170,7 +205,7 @@ impl SnapshotStore {
         Ok(Some(Snapshot {
             guardian_bucket: manifest.guardian_bucket,
             package_id: manifest.package_id,
-            restart_start: manifest.restart_start,
+            state: manifest.state,
             pool: UtxoPool::from_wire(manifest.utxos, spent),
         }))
     }
@@ -194,7 +229,7 @@ impl SnapshotStore {
     pub async fn save(
         &self,
         cfg: &Config,
-        restart_start: UnixSeconds,
+        state: AuditState,
         pool: &UtxoPool,
     ) -> anyhow::Result<()> {
         let started = Instant::now();
@@ -221,9 +256,10 @@ impl SnapshotStore {
         }
 
         let manifest = Manifest {
+            version: SNAPSHOT_VERSION,
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
             package_id: cfg.sui.package_id.clone(),
-            restart_start,
+            state,
             utxos: pool.held_to_wire(),
             spent_count,
         };
@@ -268,9 +304,45 @@ mod tests {
     use crate::domain::ConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::UtxoOrigin;
+    use crate::domain::WithdrawalEventType;
+    use crate::rpc::sui::tests::hashi_approval;
+    use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
-    use bitcoin::OutPoint;
+    use crate::timing::Timing;
     use bitcoin::ScriptBuf;
+
+    /// A state with one open withdrawal, one open deposit and a finding time.
+    fn state() -> AuditState {
+        let approval = hashi_approval();
+        let mut withdrawal = WithdrawalStateMachine::new(approval.clone(), &Timing::for_tests());
+        let signature = crate::domain::MonitorWithdrawalEvent {
+            event_type: WithdrawalEventType::E2GuardianApproved,
+            timestamp_secs: approval.timestamp_secs + 60,
+            ..approval
+        };
+        assert!(
+            withdrawal
+                .add_event(signature, &Timing::for_tests())
+                .is_empty()
+        );
+        AuditState {
+            sui_next_checkpoint: 1_234,
+            guardian_cursor: 1_700_000_000,
+            withdrawals: vec![withdrawal],
+            deposits: vec![DepositStateMachine::new(deposit_request())],
+            suspect_spends: vec![(
+                OutPoint {
+                    txid: txid(4),
+                    vout: 0,
+                },
+                SuspectSpend {
+                    asked_at: 1_700_000_100,
+                    amount: 2_000,
+                },
+            )],
+            last_findings: BTreeMap::from([("safety".to_string(), 1_700_000_500)]),
+        }
+    }
 
     /// A pool that holds one UTXO.
     fn pool_with_a_utxo() -> UtxoPool {
@@ -314,42 +386,30 @@ mod tests {
         store.store.put(key, PutPayload::from(bytes)).await.unwrap();
     }
 
-    async fn store_holding(json: serde_json::Value) -> SnapshotStore {
-        let store = SnapshotStore::in_memory();
-        put(
-            &store,
-            &Path::from(SNAPSHOT_KEY),
-            json.to_string().into_bytes(),
-        )
-        .await;
+    async fn save(store: &SnapshotStore, snapshot: &Snapshot) {
         store
+            .save(&Config::for_tests(), snapshot.state.clone(), &snapshot.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn a_snapshot_round_trips_through_the_store() {
-        let cfg = Config::for_tests();
         let store = SnapshotStore::in_memory();
         assert_eq!(store.load().await.unwrap(), None);
 
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000, pool_with_a_utxo());
-        store
-            .save(&cfg, snapshot.restart_start, &snapshot.pool)
-            .await
-            .unwrap();
+        let snapshot = Snapshot::new(&Config::for_tests(), state(), pool_with_a_utxo());
+        save(&store, &snapshot).await;
 
         assert_eq!(store.load().await.unwrap(), Some(snapshot));
     }
 
     #[tokio::test]
     async fn a_spent_record_over_several_files_round_trips() {
-        let cfg = Config::for_tests();
         let store = SnapshotStore::in_memory_with_segments(3);
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000, pool_with_spent(7));
+        let snapshot = Snapshot::new(&Config::for_tests(), state(), pool_with_spent(7));
 
-        store
-            .save(&cfg, snapshot.restart_start, &snapshot.pool)
-            .await
-            .unwrap();
+        save(&store, &snapshot).await;
 
         assert_eq!(store.load().await.unwrap(), Some(snapshot));
         for index in 0..3 {
@@ -362,12 +422,18 @@ mod tests {
     async fn a_save_leaves_the_full_files_alone() {
         let cfg = Config::for_tests();
         let store = SnapshotStore::in_memory_with_segments(3);
-        store.save(&cfg, 1, &pool_with_spent(7)).await.unwrap();
+        store
+            .save(&cfg, state(), &pool_with_spent(7))
+            .await
+            .unwrap();
         // A mark in the first file shows whether a later save writes it again.
         let first = SnapshotStore::segment_key(0);
         put(&store, &first, b"[]".to_vec()).await;
 
-        store.save(&cfg, 2, &pool_with_spent(8)).await.unwrap();
+        store
+            .save(&cfg, state(), &pool_with_spent(8))
+            .await
+            .unwrap();
 
         let after = store
             .store
@@ -392,13 +458,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_load_ignores_entries_a_crashed_save_wrote_after_the_manifest() {
-        let cfg = Config::for_tests();
         let store = SnapshotStore::in_memory_with_segments(3);
-        let saved = Snapshot::new(&cfg, 1_700_000_000, pool_with_spent(5));
-        store
-            .save(&cfg, saved.restart_start, &saved.pool)
-            .await
-            .unwrap();
+        let saved = Snapshot::new(&Config::for_tests(), state(), pool_with_spent(5));
+        save(&store, &saved).await;
         // The next save wrote its last file and crashed before the manifest.
         let ahead = pool_with_spent(7).spent_to_wire(3..7);
         put(
@@ -415,9 +477,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_spent_file_is_an_error() {
-        let cfg = Config::for_tests();
         let store = SnapshotStore::in_memory_with_segments(3);
-        store.save(&cfg, 1, &pool_with_spent(7)).await.unwrap();
+        save(
+            &store,
+            &Snapshot::new(&Config::for_tests(), state(), pool_with_spent(7)),
+        )
+        .await;
         store
             .store
             .delete(&SnapshotStore::segment_key(1))
@@ -430,50 +495,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snapshot_with_fields_this_monitor_does_not_know_still_loads() {
-        let store = store_holding(serde_json::json!({
-            "guardian_bucket": "bucket",
-            "package_id": "0x1",
-            "restart_start": "2023-11-14T22:13:20Z",
-            "utxos": [],
-            "spent_count": 0,
-            "guardian_cursor": 1_700_000_000,
-        }))
-        .await;
-
-        let loaded = store.load().await.unwrap().unwrap();
-
-        assert_eq!(loaded.restart_start, 1_700_000_000);
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_without_a_pool_is_an_error() {
-        let store = store_holding(serde_json::json!({
-            "guardian_bucket": "bucket",
-            "package_id": "0x1",
-            "restart_start": "2023-11-14T22:13:20Z",
-        }))
-        .await;
-
-        let error = format!("{:#}", store.load().await.unwrap_err());
-
-        assert!(error.contains("failed to parse the snapshot"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_snapshot_is_an_error() {
+    async fn a_snapshot_of_another_version_or_none_is_an_error() {
         let store = SnapshotStore::in_memory();
-        put(&store, &Path::from(SNAPSHOT_KEY), b"{".to_vec()).await;
+        let key = Path::from(SNAPSHOT_KEY);
 
+        put(&store, &key, br#"{"version": 0}"#.to_vec()).await;
         let error = format!("{:#}", store.load().await.unwrap_err());
+        assert!(error.contains("Delete the snapshot"), "{error}");
 
+        put(&store, &key, b"{".to_vec()).await;
+        let error = format!("{:#}", store.load().await.unwrap_err());
         assert!(error.contains("failed to parse the snapshot"), "{error}");
     }
 
     #[test]
     fn a_snapshot_is_only_for_the_deployment_that_saved_it() {
         let cfg = Config::for_tests();
-        let snapshot = Snapshot::new(&cfg, 1_700_000_000, UtxoPool::default());
+        let snapshot = Snapshot::new(&cfg, state(), UtxoPool::default());
         assert!(snapshot.is_for(&cfg));
 
         let mut redeployed = cfg.clone();

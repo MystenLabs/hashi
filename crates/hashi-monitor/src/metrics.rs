@@ -3,6 +3,7 @@
 
 //! Prometheus metrics for continuous audits, served at `/metrics`.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hashi_types::guardian::time::UnixSeconds;
@@ -21,6 +22,8 @@ pub const SOURCE_GUARDIAN: &str = "guardian";
 pub const SOURCE_BTC: &str = "btc";
 /// The daily check of every UTXO in the UTXO pool against Bitcoin.
 pub const SOURCE_UTXO: &str = "utxo";
+/// The snapshot. Its time is the last successful save.
+pub const SOURCE_SNAPSHOT: &str = "snapshot";
 
 pub struct MonitorMetrics {
     registry: Registry,
@@ -28,7 +31,8 @@ pub struct MonitorMetrics {
     last_finding_timestamp_seconds: IntGaugeVec,
     /// Unix time each source has been checked through: the Sui and guardian
     /// cursors, and for Bitcoin, which is looked up rather than scanned, the
-    /// start of the last pass over every pending confirmation.
+    /// start of the last pass over every pending confirmation. For the
+    /// snapshot, the time of the last successful save.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
 }
@@ -71,7 +75,13 @@ impl MonitorMetrics {
                 .with_label_values(&[category.to_string().as_str()])
                 .set(0);
         }
-        for source in [SOURCE_SUI, SOURCE_GUARDIAN, SOURCE_BTC, SOURCE_UTXO] {
+        for source in [
+            SOURCE_SUI,
+            SOURCE_GUARDIAN,
+            SOURCE_BTC,
+            SOURCE_UTXO,
+            SOURCE_SNAPSHOT,
+        ] {
             checked_through_timestamp_seconds
                 .with_label_values(&[source])
                 .set(0);
@@ -89,6 +99,31 @@ impl MonitorMetrics {
             self.last_finding_timestamp_seconds
                 .with_label_values(&[finding.category().to_string().as_str()])
                 .set(gauge_value(now));
+        }
+    }
+
+    /// The time of the last finding, by category label. The snapshot keeps
+    /// it, so a restart does not lose a finding alerting has not read yet.
+    pub fn last_findings(&self) -> BTreeMap<String, UnixSeconds> {
+        [FindingCategory::Safety, FindingCategory::Liveness]
+            .into_iter()
+            .map(|category| {
+                let label = category.to_string();
+                let value = self
+                    .last_finding_timestamp_seconds
+                    .with_label_values(&[label.as_str()])
+                    .get();
+                (label, UnixSeconds::try_from(value).unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// Set the last finding times that a snapshot saved.
+    pub fn restore_last_findings(&self, last_findings: &BTreeMap<String, UnixSeconds>) {
+        for (label, timestamp) in last_findings {
+            self.last_finding_timestamp_seconds
+                .with_label_values(&[label.as_str()])
+                .set(gauge_value(*timestamp));
         }
     }
 
@@ -170,6 +205,7 @@ mod tests {
             r#"hashi_monitor_checked_through_timestamp_seconds{source="sui"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="btc"} 0"#,
+            r#"hashi_monitor_checked_through_timestamp_seconds{source="snapshot"} 0"#,
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
         }

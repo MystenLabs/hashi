@@ -35,9 +35,11 @@ use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time::UnixMillis;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
+use serde::Deserialize;
+use serde::Serialize;
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum EventRelation {
     Predecessor,
     Successor,

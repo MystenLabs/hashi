@@ -22,11 +22,13 @@ use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalPickedForProcessing;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct MonitorWithdrawalEvent {
     /// The source that produced the event.
     pub event_type: WithdrawalEventType,
@@ -149,7 +151,7 @@ impl MonitorWithdrawalEvent {
 
 /// A withdrawal Bitcoin confirmed, with the guardian's word on which of its
 /// outputs are change. The UTXO pool applies it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ConfirmedWithdrawal {
     pub txid: Txid,
     pub confirmation: BtcConfirmation,
@@ -176,7 +178,7 @@ impl ConfirmedWithdrawal {
 /// A withdrawal transaction in Move's shape: the inputs, the user payouts, then
 /// the change back to the bridge. Sui records it so, and the guardian's log is
 /// converted into it, so the two can be compared as a whole.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WithdrawalTx {
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -291,7 +293,7 @@ impl fmt::Display for WithdrawalTx {
 
 /// Event source or type.
 /// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 pub enum WithdrawalEventType {
     /// E_hashi (WithdrawalPickedForProcessing on sui)
     E1HashiApproved,
