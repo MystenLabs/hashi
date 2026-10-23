@@ -58,7 +58,6 @@ use sui_sdk_types::Digest;
 
 use crate::config::SuiConfig;
 use crate::domain::MonitorEvent;
-use crate::domain::PollOutcome;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 use crate::time::utc_timestamp;
@@ -207,6 +206,13 @@ pub async fn read_confirmation_threshold(
     Ok(hashi.config.get_u64("bitcoin_confirmation_threshold", 6))
 }
 
+/// What one Sui poll read: the events of the new range, and the findings of
+/// events that failed a check.
+pub struct SuiPoll {
+    pub events: Vec<MonitorEvent>,
+    pub findings: Vec<MonitorFinding>,
+}
+
 pub struct SuiPoller {
     /// Sui v2 gRPC client used for checkpoint, transaction and object requests.
     client: sui_rpc::Client,
@@ -273,11 +279,12 @@ impl SuiPoller {
     /// covered. Each transaction's nested events provide the Hashi payloads.
     /// The Sui SDK handles item and scan limits, resumable scans,
     /// and retryable partial streams. A terminal failure discards the partial
-    /// range; that range is retried and may be split.
-    pub async fn poll(&mut self, up_to: u64) -> anyhow::Result<PollOutcome> {
+    /// range; that range is retried and may be split. Return `None` when the
+    /// cursor does not move.
+    pub async fn poll(&mut self, up_to: u64) -> anyhow::Result<Option<SuiPoll>> {
         let start_checkpoint = self.next_checkpoint;
         if start_checkpoint > up_to {
-            return Ok(PollOutcome::CursorUnmoved);
+            return Ok(None);
         }
         // A backlog is scanned in bounded ranges. The caller polls again while
         // the cursor advances, so the rest follows in the next polls.
@@ -333,7 +340,7 @@ impl SuiPoller {
             scan.completed_checkpoint,
         )?
         else {
-            return Ok(PollOutcome::CursorUnmoved);
+            return Ok(None);
         };
 
         let mut events = Vec::with_capacity(scan.transactions.len());
@@ -367,7 +374,7 @@ impl SuiPoller {
             findings = findings.len(),
             "completed Sui event range"
         );
-        Ok(PollOutcome::CursorAdvanced { events, findings })
+        Ok(Some(SuiPoll { events, findings }))
     }
 
     /// Verify that the node retains the required history.
@@ -863,10 +870,13 @@ pub mod tests {
         let mut poller = poller_for(ledger.clone()).await;
 
         for expected_cursor_checkpoint in [MAX_CHECKPOINTS_PER_POLL, 2 * MAX_CHECKPOINTS_PER_POLL] {
-            assert!(matches!(
-                poller.poll(3 * MAX_CHECKPOINTS_PER_POLL).await.unwrap(),
-                PollOutcome::CursorAdvanced { .. }
-            ));
+            assert!(
+                poller
+                    .poll(3 * MAX_CHECKPOINTS_PER_POLL)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(poller.next_item_to_poll(), expected_cursor_checkpoint);
             assert_eq!(
                 poller.read_until(),

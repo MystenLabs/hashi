@@ -16,7 +16,6 @@
 use super::Auditor;
 use crate::config::Config;
 use crate::domain::Cursors;
-use crate::domain::PollOutcome;
 use crate::findings::MonitorFinding;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
@@ -128,11 +127,9 @@ impl Auditor {
     pub async fn tick_sui(&mut self) -> anyhow::Result<()> {
         // The head at the tick's start bounds the tick, so it ends.
         let up_to = self.rpc_pollers.latest_sui_checkpoint().await?;
-        while let PollOutcome::CursorAdvanced { events, findings } =
-            self.rpc_pollers.sui_poller.poll(up_to).await?
-        {
-            self.report_findings("sui", &findings);
-            self.ingest_batch(events);
+        while let Some(poll) = self.rpc_pollers.sui_poller.poll(up_to).await? {
+            self.report_findings("sui", &poll.findings);
+            self.ingest_batch(poll.events);
             self.metrics
                 .set_checked_through(SOURCE_SUI, self.rpc_pollers.sui_read_until());
         }
