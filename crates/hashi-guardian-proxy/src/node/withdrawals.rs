@@ -374,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn admits_only_the_committed_utxos() {
         let committed = txn(wid(1));
-        let (gate, metrics) = gate_over(stored(&[committed.clone()]));
+        let (gate, metrics) = gate_over(stored(std::slice::from_ref(&committed)));
         gate.admit(&request(&committed, 0)).await.unwrap();
 
         // A quorum certifies a larger payout than Move committed.
