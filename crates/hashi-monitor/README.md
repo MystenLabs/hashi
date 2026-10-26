@@ -74,7 +74,7 @@ cargo run -p hashi-monitor -- \
 
 ### The snapshot
 
-- After each state check, the monitor saves `snapshot.json` in the bucket:
+- About once an hour, the monitor saves `snapshot.json` in the bucket:
   the position of each source, every open flow, and the UTXO pool.
 - A restart continues from the snapshot. It reads no event twice and skips
   none.
@@ -97,7 +97,7 @@ complete example.
 - `deployment` gives the expected Bitcoin network, the guardian's S3 bucket and
   region, the retention environment, and the PCR allowlist. Every guardian
   session that writes a log must match it. Keep a replaced build in
-  `prev_builds` until the guardian cursor, logged at each state check, passes
+  `prev_builds` until the guardian cursor, logged at each guardian poll, passes
   its last log. A first run from genesis needs every build.
 - `sui.rpc_url` and `sui.package_id` name the Sui node and the Hashi package.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for

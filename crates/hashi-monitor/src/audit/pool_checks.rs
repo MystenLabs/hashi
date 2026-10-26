@@ -33,7 +33,7 @@ use std::collections::HashSet;
 const UTXO_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
 impl Auditor {
-    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `judge_suspect_spends`.
+    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `check_suspect_spends`.
     /// Report findings and record the check time after success.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<()> {
         let tip_height = self.rpc_pollers.btc_client.synced_height()?;
@@ -99,15 +99,17 @@ impl Auditor {
 
     /// Wait until Sui polling passes the lookup completion time.
     /// Clear spends that a pending withdrawal names or that the pool already took.
-    /// Report the remaining spends as unexpected.
-    pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
+    /// Report the remaining spends as unexpected. Return the findings for tests.
+    pub fn check_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let wsm_inputs = self.pending_withdrawal_inputs();
         let sui_cursor = self.rpc_pollers.sui_read_until();
         let mut findings = Vec::new();
+        let mut judged = 0;
         for (outpoint, suspect) in self
             .suspect_spends
             .extract_if(|_, suspect| sui_cursor > suspect.checked_at)
         {
+            judged += 1;
             if wsm_inputs.contains(&outpoint) || !self.utxo_pool.holds(&outpoint) {
                 tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
             } else {
@@ -117,6 +119,16 @@ impl Auditor {
                 });
             }
         }
+        // Only when there is work, so a quiet pool adds no line.
+        if judged > 0 || !self.suspect_spends.is_empty() {
+            tracing::info!(
+                judged,
+                unexpected = findings.len(),
+                waiting_for_sui = self.suspect_spends.len(),
+                "checked the suspect spends"
+            );
+        }
+        self.report_findings(SOURCE_UTXO, &findings);
         findings
     }
 }
@@ -153,7 +165,7 @@ mod tests {
             },
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.contains_key(&outpoint));
     }
 
@@ -184,7 +196,7 @@ mod tests {
                 .is_none()
         );
 
-        let findings = auditor.judge_suspect_spends();
+        let findings = auditor.check_suspect_spends();
 
         assert_eq!(
             findings,
@@ -218,7 +230,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![outpoint], &timing),
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.is_empty());
     }
 
@@ -257,7 +269,7 @@ mod tests {
                 .is_empty()
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.is_empty());
     }
 

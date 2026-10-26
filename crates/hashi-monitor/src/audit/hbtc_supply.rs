@@ -9,14 +9,14 @@
 //! them.
 //!
 //! How it works:
-//! 1. After each pool maintenance tick, read the hBTC supply and sum the
+//! 1. After the pool update in each maintenance tick, read the hBTC supply and sum the
 //!    held UTXO amounts. Export both as gauges.
 //! 2. While the supply exceeds the pool value, keep the time it started.
 //! 3. Report `HbtcSupplyExceedsPool` at each tick once that lasts
 //!    `HBTC_SUPPLY_GRACE`.
 //! 4. A failed read skips the check. When no read has succeeded for
 //!    `SOURCE_STALE_LIMIT`, counted from the start of the audit loop at the
-//!    earliest, the state check reports `SourceStale` for `hbtc_supply`.
+//!    earliest, the maintenance tick reports `SourceStale` for `hbtc_supply`.
 //!
 //! Assumptions:
 //! - In an honest bridge, the supply never exceeds the pool value. The pool
@@ -59,6 +59,21 @@ impl Auditor {
             pool_value,
             now_timestamp_secs(),
         );
+        // Log only a change, so a steady state adds no line.
+        match (self.hbtc_supply_above_pool_since, since) {
+            (None, Some(_)) => tracing::info!(
+                hbtc_supply = supply,
+                pool_value,
+                grace_secs = HBTC_SUPPLY_GRACE,
+                "the hBTC supply exceeds the pool value; waiting for the grace period"
+            ),
+            (Some(_), None) => tracing::info!(
+                hbtc_supply = supply,
+                pool_value,
+                "the pool value backs the hBTC supply again"
+            ),
+            _ => {}
+        }
         self.hbtc_supply_above_pool_since = since;
         self.report_findings("hbtc_supply", finding.as_slice());
     }

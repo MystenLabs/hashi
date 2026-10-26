@@ -247,6 +247,20 @@ impl Auditor {
     pub fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
         let findings = self.fetch_btc_info(started_at)?;
+        // The machines Bitcoin answered stay until pool maintenance removes them.
+        tracing::info!(
+            withdrawals_waiting = self
+                .pending_withdrawals
+                .values()
+                .filter(|sm| sm.expects_btc())
+                .count(),
+            deposits_waiting = self
+                .pending_deposits
+                .values()
+                .filter(|sm| sm.expects_btc())
+                .count(),
+            "finished bitcoin confirmation lookups"
+        );
         self.report_findings("btc", &findings);
         self.rpc_pollers.btc_checked_through = started_at;
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
