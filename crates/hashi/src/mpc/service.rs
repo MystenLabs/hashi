@@ -124,9 +124,7 @@ pub struct MpcService {
     refill_rx: watch::Receiver<RefillRequest>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     next_batch_repair: Mutex<Option<(u64, u32, tokio::time::Instant)>>,
-    /// Earliest next attempt to restore the current epoch's `MpcManager`
-    /// after a failed one, keyed by epoch; see `restore_current_manager`.
-    next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
+    next_recovery: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     /// Last epoch whose recovery material was submitted, independently of signing recovery.
     recovery_backup_epoch: Mutex<Option<u64>>,
@@ -151,12 +149,25 @@ fn repair_rate_limited(
     matches!(gate, Some((e, b, not_before)) if e == epoch && b == batch_index && now < not_before)
 }
 
-fn restore_rate_limited(
+fn recovery_rate_limited(
     gate: Option<(u64, tokio::time::Instant)>,
     epoch: u64,
     now: tokio::time::Instant,
 ) -> bool {
     matches!(gate, Some((e, not_before)) if e == epoch && now < not_before)
+}
+
+async fn paced_recovery(
+    gate: &Mutex<Option<(u64, tokio::time::Instant)>>,
+    epoch: u64,
+    recovery: impl Future<Output = bool>,
+) {
+    let now = tokio::time::Instant::now;
+    if recovery_rate_limited(*gate.lock().unwrap(), epoch, now()) {
+        return;
+    }
+    let recovered = recovery.await;
+    *gate.lock().unwrap() = (!recovered).then(|| (epoch, now() + RETRY_INTERVAL));
 }
 
 fn walk_step(size: Option<usize>, batch_start: u64, num_consumed: u64) -> WalkStep {
@@ -194,7 +205,7 @@ impl MpcService {
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             next_batch_repair: Mutex::new(None),
-            next_manager_restore: Mutex::new(None),
+            next_recovery: Mutex::new(None),
             backup_handle,
             recovery_backup_epoch: Mutex::new(None),
             replacement_keys_target_epoch: Mutex::new(None),
@@ -1269,33 +1280,6 @@ impl MpcService {
         )))
     }
 
-    /// Put the `MpcManager` back on the current epoch once the
-    /// reconfiguration that displaced it is dead. `handle_reconfig` installs
-    /// a manager for its target before running the protocol, and every
-    /// give-up exit leaves it there; after an abort that manager is for an
-    /// epoch that will never exist. The current epoch's `SigningManager`
-    /// survived the whole time, which is exactly why `sync_if_stale` rebuilds
-    /// nothing, yet presignature refill and batch repair both run through
-    /// `ensure_manager_epoch` and fail against the dead manager, so the pool
-    /// could not refill until the next `end_reconfig` landed.
-    ///
-    /// The rebuild is the startup recovery path, not a bare setup: a fresh
-    /// manager carries no MPC outputs, and peers ask this node for the
-    /// epoch's public output (a new member does, during the replacement
-    /// rotation), which only the reconstruction from local certificates puts
-    /// back.
-    ///
-    /// "Restored" therefore means the manager is for this epoch *and* carries
-    /// its output, not merely that the epoch matches. The recovery path
-    /// installs the manager before it reconstructs, so a failure after that
-    /// point leaves a manager on the right epoch with no output: judging by
-    /// the epoch alone would call that done and never retry, stranding the
-    /// node in exactly the state this is meant to repair. A node that joined
-    /// this epoch hits that often, since reconstructing its previous output
-    /// needs peers that may themselves still be restoring. A failed attempt
-    /// is not retried before `RETRY_INTERVAL` has passed, the same pacing
-    /// `handle_reconfig` gives the setup it retries, since this runs on every
-    /// checkpoint. Runs under the reconcile guard.
     async fn restore_current_manager(&self, epoch: u64) {
         let installed = self.inner.mpc_manager().map(|manager| {
             let manager = manager.read().unwrap();
@@ -1304,29 +1288,28 @@ impl MpcService {
         if !manager_needs_restore(installed, epoch, self.get_pending_epoch_change()) {
             return;
         }
-        let now = tokio::time::Instant::now;
-        if restore_rate_limited(*self.next_manager_restore.lock().unwrap(), epoch, now()) {
-            return;
-        }
-        match self.recover_mpc_state().await {
-            Ok((epoch, _)) => {
-                *self.next_manager_restore.lock().unwrap() = None;
-                self.backup_recovered_epoch(epoch);
-                info!(
-                    "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
-                     reconfiguration that did not complete had left it on {installed:?} \
-                     (epoch, has_output)"
-                );
+        paced_recovery(&self.next_recovery, epoch, async {
+            match self.recover_mpc_state().await {
+                Ok((epoch, _)) => {
+                    self.backup_recovered_epoch(epoch);
+                    info!(
+                        "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
+                         reconfiguration that did not complete had left it on {installed:?} \
+                         (epoch, has_output)"
+                    );
+                    true
+                }
+                Err(e) => {
+                    error!(
+                        "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left \
+                         on {installed:?} as (epoch, has_output) by a reconfiguration that did \
+                         not complete), next attempt in {RETRY_INTERVAL:?}: {e}"
+                    );
+                    false
+                }
             }
-            Err(e) => {
-                *self.next_manager_restore.lock().unwrap() = Some((epoch, now() + RETRY_INTERVAL));
-                error!(
-                    "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left \
-                     on {installed:?} as (epoch, has_output) by a reconfiguration that did not \
-                     complete), next attempt in {RETRY_INTERVAL:?}: {e}"
-                );
-            }
-        }
+        })
+        .await;
     }
 
     async fn sync_if_stale(&self) {
@@ -1342,6 +1325,18 @@ impl MpcService {
             self.restore_current_manager(epoch).await;
             return;
         }
+        if self.get_pending_epoch_change().is_some() {
+            return;
+        }
+        paced_recovery(
+            &self.next_recovery,
+            epoch,
+            self.rebuild_signing_manager(epoch),
+        )
+        .await;
+    }
+
+    async fn rebuild_signing_manager(&self, epoch: u64) -> bool {
         info!("sync_if_stale: rebuilding SigningManager for epoch {epoch}");
         let (epoch, output) = match self.recover_mpc_state().await {
             Ok(output) => output,
@@ -1351,11 +1346,14 @@ impl MpcService {
                         "sync_if_stale: recover_mpc_state for epoch {epoch} superseded by \
                          pending reconfig to {p} ({e})"
                     );
-                    return;
+                    return false;
                 }
-                error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                error!(
+                    "sync_if_stale: recover_mpc_state failed for epoch {epoch}, next attempt in \
+                     {RETRY_INTERVAL:?}: {e}"
+                );
                 self.re_register_keys_if_lost().await;
-                return;
+                return false;
             }
         };
         // Private key recovery is sufficient: unavailable presignatures must
@@ -1372,7 +1370,7 @@ impl MpcService {
             }) => {
                 self.repair_missing_batch(walk_epoch, batch_index, batch_start)
                     .await;
-                return;
+                return false;
             }
             Err(certs_err) => {
                 if let Some(p) = self.get_pending_epoch_change() {
@@ -1380,7 +1378,7 @@ impl MpcService {
                         "sync_if_stale: recovery for epoch {epoch} superseded by pending \
                          reconfig to {p} ({certs_err})"
                     );
-                    return;
+                    return false;
                 }
                 let num_consumed = self
                     .inner
@@ -1391,22 +1389,27 @@ impl MpcService {
                 if num_consumed > 0 {
                     error!(
                         "sync_if_stale: recovery failed for epoch {epoch} at cursor \
-                         {num_consumed} ({certs_err}); retrying on the next tick (no genesis fallback)"
+                         {num_consumed} ({certs_err}); next attempt in {RETRY_INTERVAL:?} \
+                         (no genesis fallback)"
                     );
-                    return;
+                    return false;
                 }
                 info!(
                     "sync_if_stale: certs path failed for epoch {epoch} ({certs_err}), \
                      falling back to protocol"
                 );
                 if let Err(e) = self.prepare_signing(epoch, &output).await {
-                    error!("sync_if_stale: protocol fallback failed for epoch {epoch}: {e}");
-                    return;
+                    error!(
+                        "sync_if_stale: protocol fallback failed for epoch {epoch}, next attempt \
+                         in {RETRY_INTERVAL:?}: {e}"
+                    );
+                    return false;
                 }
                 info!("sync_if_stale: recovered epoch {epoch} via protocol path");
             }
         }
         let _ = self.key_ready_tx.send(Some(output.public_key));
+        true
     }
 
     async fn repair_missing_batch(&self, epoch: u64, batch_index: u32, batch_start: u64) {
@@ -1606,7 +1609,7 @@ impl MpcService {
                 {
                     warn!(
                         "mirror did not reach the key-registration checkpoint {landed_at} within \
-                         {VISIBILITY_TIMEOUT:?}; re-verifying next tick"
+                         {VISIBILITY_TIMEOUT:?}; re-verifying on the next rebuild"
                     );
                     return;
                 }
@@ -1654,7 +1657,7 @@ impl MpcService {
         }
         warn!(
             "replacement keys still excluded after {MAX_KEY_REREGISTRATION_BUMPS} registration \
-             attempts; will retry next tick"
+             attempts; will retry on the next rebuild"
         );
     }
 
@@ -2890,8 +2893,12 @@ mod repair_gate_tests {
 }
 
 #[cfg(test)]
-mod restore_gate_tests {
-    use super::restore_rate_limited;
+mod recovery_gate_tests {
+    use super::RETRY_INTERVAL;
+    use super::paced_recovery;
+    use super::recovery_rate_limited;
+    use std::cell::Cell;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -2899,12 +2906,32 @@ mod restore_gate_tests {
     fn only_the_same_epoch_before_the_deadline_is_limited() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(10);
-        assert!(restore_rate_limited(Some((6, deadline)), 6, now));
+        assert!(recovery_rate_limited(Some((6, deadline)), 6, now));
         // The deadline itself is open.
-        assert!(!restore_rate_limited(Some((6, now)), 6, now));
+        assert!(!recovery_rate_limited(Some((6, now)), 6, now));
         // A gate left by another epoch never holds this one back.
-        assert!(!restore_rate_limited(Some((5, deadline)), 6, now));
-        assert!(!restore_rate_limited(None, 6, now));
+        assert!(!recovery_rate_limited(Some((5, deadline)), 6, now));
+        assert!(!recovery_rate_limited(None, 6, now));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_failed_recovery_holds_the_next_attempt_back() {
+        let gate = Mutex::new(None);
+        let runs = Cell::new(0);
+        let attempt = |recovered: bool| {
+            let runs = &runs;
+            async move {
+                runs.set(runs.get() + 1);
+                recovered
+            }
+        };
+        paced_recovery(&gate, 6, attempt(false)).await;
+        paced_recovery(&gate, 6, attempt(true)).await;
+        assert_eq!(runs.get(), 1);
+        tokio::time::advance(RETRY_INTERVAL).await;
+        paced_recovery(&gate, 6, attempt(true)).await;
+        paced_recovery(&gate, 6, attempt(false)).await;
+        assert_eq!(runs.get(), 3);
     }
 }
 
