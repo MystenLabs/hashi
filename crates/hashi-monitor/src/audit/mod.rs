@@ -17,6 +17,7 @@
 //! 7. Check Bitcoin at the first maintenance tick. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
+//!    Closed machines go to the pool first, so a snapshot holds only open flows.
 //! 10. Log a failed source tick. The next tick of that source retries it.
 //! 11. At each state tick, report a source or a snapshot save that is behind its limit.
 //! 12. After each pool maintenance tick, check that the UTXO pool backs the hBTC supply.
@@ -400,6 +401,9 @@ impl Auditor {
     }
 
     async fn tick_state_checks(&mut self) {
+        // Machines that closed since the last pool maintenance would be saved too.
+        let pool_findings = self.add_to_pool_and_gc();
+        self.report_findings("pool", &pool_findings);
         let violations = self.detect_timing_violations();
         self.report_findings("timing", &violations);
         let spends = self.judge_suspect_spends();
@@ -777,6 +781,31 @@ mod tests {
         resumed.restore(snapshot.state);
 
         assert_eq!(resumed.detect_timing_violations(), missing);
+    }
+
+    #[tokio::test]
+    async fn a_state_check_saves_a_closed_machine_as_its_utxo() {
+        let cfg = Config::for_tests();
+        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
+        let request = deposit_request();
+        let request_id = request.request_id;
+        auditor.ingest_batch(vec![MonitorEvent::DepositRequested(request.clone())]);
+        // Bitcoin pays the request after the last pool maintenance.
+        auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                &cfg.timing,
+                500,
+                Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x54))),
+            );
+
+        auditor.tick_state_checks().await;
+
+        let snapshot = auditor.store.load().await.unwrap().unwrap();
+        assert!(snapshot.state.deposits.is_empty());
+        assert!(snapshot.pool.holds(&request.deposit_id.into()));
     }
 
     #[tokio::test]

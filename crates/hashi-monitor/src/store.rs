@@ -166,7 +166,7 @@ impl SnapshotStore {
             state,
             utxos: pool.held_to_wire(),
         };
-        let bytes = serde_json::to_vec_pretty(&stored)?;
+        let bytes = serde_json::to_vec(&stored)?;
         let bytes_written = bytes.len();
         self.store
             .put(&Path::from(SNAPSHOT_KEY), PutPayload::from(bytes))
