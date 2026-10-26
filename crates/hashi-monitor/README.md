@@ -109,6 +109,11 @@ complete example.
 The timing bounds of the flows are protocol constants in `src/timing.rs`, not
 configuration.
 
+The monitor reads Hashi's Bitcoin confirmation threshold and deposit time
+delay once, at startup. Restart the monitor after a governance change of
+either value. Until the restart, the monitor uses the old values and can
+report false findings.
+
 ## Alerting
 
 The monitor decides what is wrong. An alerting system needs only these rules:
