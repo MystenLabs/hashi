@@ -21,6 +21,13 @@
 //!    committee. On mainnet, a threshold below `MAINNET_MIN_CONFIRMATIONS`
 //!    stops the monitor.
 //! 2. Before a pass, `synced_height` checks the node and returns its height.
+//!    The node must follow `deployment.bitcoin_network`, be out of initial
+//!    block download, and have a tip no older than `max_tip_age`, which the
+//!    auditor sets to its `SOURCE_STALE_LIMIT`. At the first check, a node
+//!    that reports its indexes must have a synced `txindex`. A failed check
+//!    fails the pass, so a wrong node, or one with an older tip, becomes a
+//!    `SourceStale` finding. Until its tip passes that age, a frozen node
+//!    still gives lookup findings.
 //!    All batches use this height to calculate confirmation depth.
 //!    Blocks that arrive during the pass count on the next pass.
 //! 3. `prefetch_confirmations` looks all pending txids up in batches of
@@ -46,10 +53,12 @@
 //!   can stamp every answer with the pass's start time: the real lookup
 //!   is no earlier. A cached confirmed answer does not need a time.
 //! - The endpoint serves `getrawtransaction` with verbose output, which
-//!   needs `txindex` or a hosted provider.
+//!   needs `txindex` or a hosted provider. A hosted provider that does not
+//!   serve `getindexinfo` is not checked for an index.
 //! - A request that still fails after the retries fails the pass, which
 //!   is retried on the next tick.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -70,6 +79,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::consensus::encode::deserialize_hex;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;
@@ -78,6 +88,7 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::domain::BtcConfirmation;
+use crate::time::utc_timestamp;
 
 /// Calls per JSON-RPC batch request.
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 100;
@@ -125,6 +136,12 @@ pub enum OutpointState {
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
     confirmation_cache: RefCell<HashMap<Txid, Option<BtcConfirmation>>>,
+    /// The chain the node must follow.
+    network: Network,
+    /// The oldest tip, in seconds, that counts as synced.
+    max_tip_age: u64,
+    /// Whether the node's `txindex` passed its check. It is checked once.
+    txindex_checked: Cell<bool>,
 }
 
 struct HttpJsonRpcTransport {
@@ -164,13 +181,32 @@ struct RawBlockHeader {
 
 #[derive(Deserialize)]
 struct BlockchainInfo {
+    /// The chain name, as in `bitcoind -chain`.
+    chain: String,
     blocks: u64,
     headers: u64,
+    /// The time of the tip block.
+    time: UnixSeconds,
     initialblockdownload: bool,
 }
 
 impl BlockchainInfo {
-    fn ensure_synced(&self) -> anyhow::Result<()> {
+    /// Fail unless the node follows `network` and is synced at `now`, with
+    /// a tip at most `max_tip_age` old. Core clears `initialblockdownload`
+    /// once and never sets it again, so the tip time also catches a node
+    /// that stopped getting blocks.
+    fn ensure_synced(
+        &self,
+        network: Network,
+        max_tip_age: u64,
+        now: UnixSeconds,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.chain == network.to_core_arg(),
+            "bitcoind follows chain {}, not {}",
+            self.chain,
+            network.to_core_arg()
+        );
         anyhow::ensure!(
             !self.initialblockdownload && self.blocks >= self.headers,
             "bitcoind is not synced: initialblockdownload={}, blocks={}, headers={}",
@@ -178,8 +214,26 @@ impl BlockchainInfo {
             self.blocks,
             self.headers
         );
+        anyhow::ensure!(
+            now.saturating_sub(self.time) <= max_tip_age,
+            "bitcoind tip at height {} is from {}, more than {max_tip_age} s ago",
+            self.blocks,
+            utc_timestamp(self.time)
+        );
         Ok(())
     }
+}
+
+/// Fail unless a `getindexinfo` result shows a synced `txindex`.
+fn ensure_txindex(index_info: &Value) -> anyhow::Result<()> {
+    let synced = index_info
+        .get("txindex")
+        .context("bitcoind has no txindex; getrawtransaction needs one")?
+        .get("synced")
+        .and_then(Value::as_bool)
+        .context("bitcoind getindexinfo has no txindex.synced")?;
+    anyhow::ensure!(synced, "bitcoind txindex is still building");
+    Ok(())
 }
 
 /// The answers of a confirmation lookup, and the first error if a batch
@@ -225,8 +279,14 @@ impl RawTransactionInfo {
 }
 
 impl BtcRpcClient {
-    /// A client that counts a transaction as confirmed at `required_confirmations`.
-    pub fn new(cfg: &Config, required_confirmations: u64) -> anyhow::Result<Self> {
+    /// A client that counts a transaction as confirmed at
+    /// `required_confirmations`, and a node as synced with a tip at most
+    /// `max_tip_age` seconds old.
+    pub fn new(
+        cfg: &Config,
+        required_confirmations: u64,
+        max_tip_age: u64,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             transport: HttpJsonRpcTransport {
                 rpc_url: cfg.btc.rpc_url.clone(),
@@ -234,10 +294,14 @@ impl BtcRpcClient {
                 required_confirmations,
             },
             confirmation_cache: RefCell::new(HashMap::new()),
+            network: cfg.deployment.bitcoin_network,
+            max_tip_age,
+            txindex_checked: Cell::new(false),
         })
     }
 
     /// Return the node height after the synchronization check succeeds.
+    /// See the module doc for the checks.
     pub fn synced_height(&self) -> anyhow::Result<u64> {
         let response = self
             .transport
@@ -255,8 +319,35 @@ impl BtcRpcClient {
                 .context("bitcoin getblockchaininfo response is missing its result")?,
         )
         .context("failed to parse bitcoin blockchain info")?;
-        info.ensure_synced()?;
+        info.ensure_synced(self.network, self.max_tip_age, now_timestamp_secs())?;
+        if !self.txindex_checked.get() {
+            self.check_txindex()?;
+            self.txindex_checked.set(true);
+        }
         Ok(info.blocks)
+    }
+
+    /// Fail unless the node has a synced `txindex`. A node that does not
+    /// serve `getindexinfo`, such as a hosted provider, passes.
+    fn check_txindex(&self) -> anyhow::Result<()> {
+        let response = self.transport.call("getindexinfo", serde_json::json!([]))?;
+        if let Some(error) = response.error {
+            // Method not found.
+            if error.code == -32601 {
+                info!("bitcoin endpoint does not serve getindexinfo; txindex not checked");
+                return Ok(());
+            }
+            anyhow::bail!(
+                "bitcoin getindexinfo failed: {} ({})",
+                error.message,
+                error.code
+            );
+        }
+        ensure_txindex(
+            &response
+                .result
+                .context("bitcoin getindexinfo response is missing its result")?,
+        )
     }
 
     /// Drop the unconfirmed answers, so the next lookup asks again. The
@@ -828,6 +919,7 @@ mod tests {
     use base64ct::Base64;
     use base64ct::Encoding as _;
     use bitcoin::Amount;
+    use bitcoin::Network;
     use bitcoin::OutPoint;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash as _;
@@ -841,6 +933,7 @@ mod tests {
     use super::HttpJsonRpcTransport;
     use super::MAINNET_MIN_CONFIRMATIONS;
     use super::OutpointState;
+    use super::ensure_txindex;
     use crate::config::BtcConfig;
     use crate::config::Config;
     use crate::test_utils::txid;
@@ -883,7 +976,7 @@ mod tests {
             .build()
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
-        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
+        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS, MAX_TIP_AGE)?;
         btc_rpc_client.synced_height()?;
 
         let unknown_txid = txid(7);
@@ -988,7 +1081,7 @@ mod tests {
             .build()
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
-        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS)?;
+        let btc_rpc_client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS, MAX_TIP_AGE)?;
         btc_rpc_client.synced_height()?;
 
         // Pay the wallet's own address so the test can spend the output later.
@@ -1165,10 +1258,17 @@ mod tests {
         serde_json::from_str(json).expect("valid getblockchaininfo result")
     }
 
+    /// The oldest tip the tests accept, in seconds.
+    const MAX_TIP_AGE: u64 = 3 * 60 * 60;
+
+    /// Check `info` on regtest at its own tip time.
+    fn ensure_synced_at_tip(info: &BlockchainInfo) -> anyhow::Result<()> {
+        info.ensure_synced(Network::Regtest, MAX_TIP_AGE, info.time)
+    }
+
     #[test]
     fn node_in_initial_block_download_is_not_synced() {
-        let error = blockchain_info(BLOCKCHAIN_INFO_IN_IBD)
-            .ensure_synced()
+        let error = ensure_synced_at_tip(&blockchain_info(BLOCKCHAIN_INFO_IN_IBD))
             .expect_err("a node in initial block download is not synced");
         assert!(
             error.to_string().contains("initialblockdownload=true"),
@@ -1178,22 +1278,83 @@ mod tests {
 
     #[test]
     fn caught_up_node_is_synced() {
-        blockchain_info(BLOCKCHAIN_INFO_SYNCED)
-            .ensure_synced()
-            .unwrap();
+        ensure_synced_at_tip(&blockchain_info(BLOCKCHAIN_INFO_SYNCED)).unwrap();
     }
 
     #[test]
     fn node_behind_its_best_header_is_not_synced() {
         let mut info = blockchain_info(BLOCKCHAIN_INFO_SYNCED);
         info.headers = info.blocks + 1;
-        assert!(info.ensure_synced().is_err());
+        assert!(ensure_synced_at_tip(&info).is_err());
+    }
+
+    #[test]
+    fn node_on_another_chain_is_refused() {
+        let info = blockchain_info(BLOCKCHAIN_INFO_SYNCED);
+        let error = info
+            .ensure_synced(Network::Signet, MAX_TIP_AGE, info.time)
+            .expect_err("a regtest node does not serve signet");
+        assert!(error.to_string().contains("chain regtest"), "{error}");
+    }
+
+    #[test]
+    fn node_with_an_old_tip_is_not_synced() {
+        let info = blockchain_info(BLOCKCHAIN_INFO_SYNCED);
+        info.ensure_synced(Network::Regtest, MAX_TIP_AGE, info.time + MAX_TIP_AGE)
+            .unwrap();
+        assert!(
+            info.ensure_synced(Network::Regtest, MAX_TIP_AGE, info.time + MAX_TIP_AGE + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn only_a_synced_txindex_passes() {
+        use serde_json::json;
+
+        ensure_txindex(&json!({"txindex": {"synced": true, "best_block_height": 7}})).unwrap();
+        let building =
+            ensure_txindex(&json!({"txindex": {"synced": false, "best_block_height": 3}}));
+        assert!(building.unwrap_err().to_string().contains("still building"));
+        let none = ensure_txindex(&json!({}));
+        assert!(none.unwrap_err().to_string().contains("no txindex"));
+    }
+
+    /// A client of a one-request server that answers `response`.
+    fn client_answered_by(response: &'static str) -> (BtcRpcClient, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = Config::for_tests();
+        cfg.btc.rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || respond(&listener, response));
+        let client = BtcRpcClient::new(&cfg, MAINNET_MIN_CONFIRMATIONS, MAX_TIP_AGE).unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn an_endpoint_without_getindexinfo_passes_the_txindex_check() {
+        // Core answers an unknown method with HTTP 404 and code -32601.
+        let (client, server) = client_answered_by(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 75\r\n\r\n\
+             {\"result\":null,\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}",
+        );
+        client.check_txindex().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_getindexinfo_error_fails_the_txindex_check() {
+        let (client, server) = client_answered_by(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 62\r\n\r\n\
+             {\"result\":null,\"error\":{\"code\":-1,\"message\":\"failure\"},\"id\":1}",
+        );
+        let error = client.check_txindex().unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("getindexinfo failed"), "{error}");
     }
 
     #[test]
     fn mainnet_refuses_a_confirmation_threshold_below_six() {
         use super::checked_confirmation_threshold;
-        use bitcoin::Network;
 
         assert!(checked_confirmation_threshold(5, Network::Bitcoin).is_err());
         assert_eq!(

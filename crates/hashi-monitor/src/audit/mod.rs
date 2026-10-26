@@ -10,21 +10,33 @@
 //! How it works:
 //! 1. Restore the source positions, flow machines, and UTXO pool from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
+//!    Fail at startup on the snapshot of another deployment.
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
+//!    At startup, catch up Sui, then the guardian, then Bitcoin. Retry a failed source
+//!    until it is current. Then remove the closed machines and save the snapshot.
+//!    Only then start the loop, so the loop does not start with a large unanswered backlog.
 //! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
 //!    Check that each fresh deposit approval names an unspent outpoint.
-//! 6. Update the pool every `POOL_MAINTENANCE_INTERVAL` and check Bitcoin when the daily check is due.
+//! 6. Every `MAINTENANCE_INTERVAL`, run one maintenance tick in this order:
+//!    1. Remove the closed machines and add their flows to the pool. Log the open flows.
+//!       This step is first, so each later step sees only open machines and a current pool.
+//!    2. Check Bitcoin when the daily pool check is due.
+//!    3. Check that the UTXO pool backs the hBTC supply.
+//!    4. Report timing violations and judge suspect spends. These two have no order rule.
+//!    5. Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
+//!       This step comes after steps 2 and 3, so a check that succeeds in this tick is not stale.
+//!    6. Save the snapshot once `SNAPSHOT_SAVE_INTERVAL` seconds have passed since the last save.
+//!       Then report a save that is behind its limit. This step is last.
 //! 7. Check Bitcoin at the first maintenance tick. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
-//! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
-//! 10. Log a failed source tick. The next tick of that source retries it.
-//! 11. At each state tick, report a source or a snapshot save that is behind its limit.
-//! 12. After each pool maintenance tick, check that the UTXO pool backs the hBTC supply.
+//! 9. In the loop, log a failed source tick. The next tick of that source retries it.
 //!
 //! Assumptions:
-//! - Every tick runs on one task. The first catch-up blocks the state tick,
+//! - Every tick runs on one task. The first catch-up blocks the maintenance tick,
 //!   so a first run reports no stale source while it catches up.
+//! - A source that stays down at startup blocks the loop. The Sui `checked_through`
+//!   gauge then stops too, and its lag alert pages. Only the Sui gauge has a lag alert.
 
 use crate::config::Config;
 use crate::domain::MonitorEvent;
@@ -39,7 +51,6 @@ use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SNAPSHOT;
 use crate::metrics::SOURCE_SUI;
-use crate::metrics::SOURCE_UTXO;
 use crate::rpc::PollCursor;
 use crate::rpc::guardian::GuardianCursor;
 use crate::rpc::sui::package_genesis;
@@ -81,11 +92,12 @@ const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// directory and reads only its new logs. The withdrawal bounds are hours.
 const GUARDIAN_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often pool maintenance runs.
-const POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often the maintenance tick runs.
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often the state checks run.
-const STATE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often the snapshot is saved, in seconds. A restart replays the
+/// history since the last save and reports its findings again.
+const SNAPSHOT_SAVE_INTERVAL: u64 = 60 * 60;
 
 /// How long snapshot saves may fail before a `SnapshotStale` finding, in
 /// seconds. A failed save costs only a longer replay at the next restart.
@@ -125,10 +137,15 @@ pub struct Auditor {
     /// When the last successful pool check finished. `None` until one
     /// succeeds in this run.
     last_successful_pool_check: Option<UnixSeconds>,
+    /// When the audit loop started, after the first catch-up. Staleness of a
+    /// check that has not succeeded yet counts from here.
+    started_at: UnixSeconds,
     /// When the last snapshot save succeeded.
     last_snapshot_save: UnixSeconds,
     /// Since when the hBTC supply has exceeded the pool value, if it does.
     hbtc_supply_above_pool_since: Option<UnixSeconds>,
+    /// When the hBTC supply was last read. Startup reads it.
+    last_hbtc_supply_read: UnixSeconds,
 }
 
 impl Auditor {
@@ -139,7 +156,7 @@ impl Auditor {
         metrics: Arc<MonitorMetrics>,
         store: SnapshotStore,
     ) -> anyhow::Result<Self> {
-        let (state, pool) = match this_deployments(cfg, store.load().await?) {
+        let (state, pool) = match this_deployments(cfg, store.load().await?)? {
             Some(snapshot) => {
                 tracing::info!(
                     sui_next_checkpoint = snapshot.state.sui_next_checkpoint,
@@ -181,8 +198,10 @@ impl Auditor {
             metrics,
             store,
             last_successful_pool_check: None,
+            started_at: now_timestamp_secs(),
             last_snapshot_save: 0,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: 0,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -300,7 +319,7 @@ impl Auditor {
     }
 
     /// The open withdrawals whose first event is the earliest, for the
-    /// progress log. An operator sees what the audit still waits for.
+    /// GC log. An operator sees what the audit still waits for.
     fn oldest_open_withdrawals(&self) -> String {
         let earliest = self
             .pending_withdrawals
@@ -328,7 +347,7 @@ impl Auditor {
         }
     }
 
-    /// Return the deposits with the earliest request timestamp for the progress log.
+    /// Return the deposits with the earliest request timestamp for the GC log.
     fn oldest_open_deposits(&self) -> String {
         let earliest = self
             .pending_deposits
@@ -365,8 +384,8 @@ impl Auditor {
     }
 
     /// Save the snapshot. A failed save is logged and does not stop the
-    /// audit; the next state check saves again. Alerting watches the time
-    /// of the last good save.
+    /// audit; the next maintenance tick saves again. Alerting watches the
+    /// time of the last good save.
     async fn save_snapshot(&mut self) {
         let saved = self
             .store
@@ -397,38 +416,44 @@ impl Auditor {
         self.metrics.record_findings(findings, now_timestamp_secs());
     }
 
-    /// Log the outcome of one source's initial catch-up. A failure does not
-    /// stop the audit: the source's next tick retries it.
-    fn log_initial_catch_up(source: &'static str, result: anyhow::Result<()>) {
-        match result {
-            Ok(()) => tracing::info!(source, "finished initial catch-up"),
-            Err(error) => tracing::warn!(source, ?error, "initial catch-up failed; continuing"),
-        }
-    }
-
-    async fn tick_state_checks(&mut self) {
+    /// Report the open withdrawals that missed a timing bound.
+    fn check_timing(&self) {
         let violations = self.detect_timing_violations();
         self.report_findings("timing", &violations);
-        let spends = self.judge_suspect_spends();
-        self.report_findings(SOURCE_UTXO, &spends);
+    }
 
-        let (withdrawals, deposits) = self.open_flows();
-        tracing::info!(
-            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  open_withdrawals={}\n  open_deposits={}\n  oldest_withdrawals={}\n  oldest_deposits={}",
-            utc_timestamp(self.rpc_pollers.guardian_read_until()),
-            utc_timestamp(self.rpc_pollers.sui_read_until()),
-            withdrawals,
-            deposits,
-            self.oldest_open_withdrawals(),
-            self.oldest_open_deposits(),
-        );
-        let stale = self.rpc_pollers.stale_sources(now_timestamp_secs());
+    /// Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
+    fn check_staleness(&self) {
+        let now = now_timestamp_secs();
+        let mut stale = self.rpc_pollers.stale_sources(now);
+        stale.extend(self.stale_pool_check(now));
+        stale.extend(self.stale_hbtc_supply(now));
         self.report_findings("progress", &stale);
+    }
 
-        self.save_snapshot().await;
+    /// Save once `SNAPSHOT_SAVE_INTERVAL` has passed, then report a stale save.
+    async fn save_snapshot_if_due(&mut self) {
+        if now_timestamp_secs().saturating_sub(self.last_snapshot_save) >= SNAPSHOT_SAVE_INTERVAL {
+            self.save_snapshot().await;
+        }
         // After the save, so a save that succeeds now is not reported.
         let stale = self.stale_snapshot(now_timestamp_secs());
         self.report_findings("progress", stale.as_slice());
+    }
+
+    /// Run the maintenance steps in order.
+    async fn tick_maintenance(&mut self) {
+        // First, so every later step sees only open machines and a current pool.
+        self.gc_and_update_pool();
+        self.check_utxo_pool_if_due();
+        self.check_hbtc_supply().await;
+        // These two have no order rule.
+        self.check_timing();
+        self.check_suspect_spends();
+        // After the checks, so a check that succeeds in this tick is not stale.
+        self.check_staleness();
+        // Last, so the snapshot holds the result of every step.
+        self.save_snapshot_if_due().await;
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -437,31 +462,33 @@ impl Auditor {
             utc_timestamp(self.rpc_pollers.sui_read_until()),
             utc_timestamp(self.rpc_pollers.guardian_read_until()),
         );
-        let sui = self.tick_sui().await;
-        Self::log_initial_catch_up(SOURCE_SUI, sui);
-        let guardian = self.tick_guardian().await;
-        Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
-        let btc = self.tick_btc();
-        Self::log_initial_catch_up(SOURCE_BTC, btc);
+        self.catch_up_sources().await;
+        // After the catch-up, so the snapshot holds only the open machines.
+        self.gc_and_update_pool();
+        self.save_snapshot().await;
+        // A first run can catch up for hours. That time is not a stale check.
+        self.started_at = now_timestamp_secs();
+        tracing::info!(
+            sui_cursor = %utc_timestamp(self.rpc_pollers.sui_read_until()),
+            guardian_cursor = %utc_timestamp(self.rpc_pollers.guardian_read_until()),
+            "finished the initial catch-up; starting the audit loop"
+        );
 
         let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(BTC_POLL_INTERVAL);
-        let mut pool_maintenance_ticker = tokio::time::interval(POOL_MAINTENANCE_INTERVAL);
-        let mut state_checks_ticker = tokio::time::interval(STATE_TICK_INTERVAL);
+        let mut maintenance_ticker = tokio::time::interval(MAINTENANCE_INTERVAL);
 
         sui_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         guardian_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        pool_maintenance_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        maintenance_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Consume each immediate tick so scheduled work starts after its interval.
         sui_ticker.tick().await;
         guardian_ticker.tick().await;
         btc_ticker.tick().await;
-        pool_maintenance_ticker.tick().await;
-        state_checks_ticker.tick().await;
+        maintenance_ticker.tick().await;
 
         loop {
             tokio::select! {
@@ -480,36 +507,29 @@ impl Auditor {
                         tracing::warn!(source = "btc", ?error, "btc tick failed; continuing");
                     }
                 }
-                _ = pool_maintenance_ticker.tick() => {
-                    if let Err(error) = self.tick_pool_maintenance() {
-                        tracing::warn!(source = SOURCE_UTXO, ?error, "pool maintenance failed; retrying at the next tick");
-                    }
-                    self.check_hbtc_supply().await;
-                }
-                _ = state_checks_ticker.tick() => {
-                    self.tick_state_checks().await;
+                _ = maintenance_ticker.tick() => {
+                    self.tick_maintenance().await;
                 }
             }
         }
     }
 }
 
-/// The snapshot, if this deployment saved it. Otherwise `None`: the audit
-/// is a first run.
-fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> Option<Snapshot> {
+/// The snapshot, if this deployment saved it, or `None` for a first run.
+/// Fail on the snapshot of another deployment, so a config mistake does not
+/// overwrite it.
+fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> anyhow::Result<Option<Snapshot>> {
     match snapshot {
-        Some(snapshot) if snapshot.is_for(cfg) => Some(snapshot),
-        Some(snapshot) => {
-            tracing::warn!(
-                guardian_bucket = snapshot.guardian_bucket,
-                package_id = snapshot.package_id,
-                "ignoring the snapshot of another deployment"
-            );
-            None
-        }
+        Some(snapshot) if snapshot.is_for(cfg) => Ok(Some(snapshot)),
+        Some(snapshot) => anyhow::bail!(
+            "the snapshot is for another deployment (guardian bucket {}, package {}); \
+             check the config, or delete snapshot.json to start again from genesis",
+            snapshot.guardian_bucket,
+            snapshot.package_id,
+        ),
         None => {
             tracing::info!("no snapshot");
-            None
+            Ok(None)
         }
     }
 }
@@ -594,8 +614,10 @@ mod tests {
             metrics: Arc::new(MonitorMetrics::new()),
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            started_at: approved_at,
             last_snapshot_save: approved_at,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: approved_at,
         }
     }
 
@@ -654,7 +676,7 @@ mod tests {
                 ])
                 .is_empty()
         );
-        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.gc_and_update_pool().is_empty());
 
         // Bitcoin answers: the machine judges the held approval.
         let findings = auditor
@@ -670,7 +692,7 @@ mod tests {
             matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, btc }] if *claimed == sui && btc.amount == 50_000)
         );
 
-        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.pending_deposits.is_empty());
         assert_eq!(auditor.utxo_pool.len(), 1);
     }
@@ -700,7 +722,7 @@ mod tests {
             &findings[..],
             [MonitorFinding::DepositUnbacked { sui: unbacked }] if *unbacked == sui
         ));
-        assert!(auditor.add_to_pool_and_gc().is_empty());
+        assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.utxo_pool.is_empty());
     }
 
@@ -752,8 +774,10 @@ mod tests {
             metrics,
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            started_at: cursor,
             last_snapshot_save: cursor,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: cursor,
         }
     }
 
@@ -770,7 +794,7 @@ mod tests {
         assert!(auditor.utxo_pool.add_deposit(&deposit).is_none());
         // An approval the guardian never signed: its E2 is overdue.
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(hashi_approval())]);
-        auditor.tick_state_checks().await;
+        auditor.save_snapshot().await;
         let missing = auditor.detect_timing_violations();
         assert!(matches!(
             missing[..],
@@ -804,17 +828,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_snapshot_is_saved_only_after_the_save_interval() {
+        let mut auditor = auditor_with(&Config::for_tests(), Arc::new(MonitorMetrics::new()));
+        auditor.last_snapshot_save = now_timestamp_secs();
+        auditor.save_snapshot_if_due().await;
+        assert!(auditor.store.load().await.unwrap().is_none());
+
+        auditor.last_snapshot_save = now_timestamp_secs() - SNAPSHOT_SAVE_INTERVAL;
+        auditor.save_snapshot_if_due().await;
+        assert!(auditor.store.load().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn only_this_deployments_snapshot_is_resumed() {
         let cfg = Config::for_tests();
         let auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         let ours = Snapshot::new(&cfg, auditor.state(), UtxoPool::default());
 
-        assert_eq!(this_deployments(&cfg, None), None);
+        assert_eq!(this_deployments(&cfg, None).unwrap(), None);
 
         let mut other = ours.clone();
         other.package_id = format!("0x{}", "22".repeat(32));
-        assert_eq!(this_deployments(&cfg, Some(other)), None);
+        let error = this_deployments(&cfg, Some(other)).unwrap_err();
+        assert!(error.to_string().contains("another deployment"), "{error}");
 
-        assert_eq!(this_deployments(&cfg, Some(ours.clone())), Some(ours));
+        assert_eq!(
+            this_deployments(&cfg, Some(ours.clone())).unwrap(),
+            Some(ours)
+        );
     }
 }

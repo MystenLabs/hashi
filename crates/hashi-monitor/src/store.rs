@@ -8,7 +8,7 @@
 //! genesis to rebuild the UTXO pool, and report every old finding again.
 //!
 //! How it works:
-//! 1. After each state check, the auditor saves a `Snapshot`: the deployment
+//! 1. About once an hour, the auditor saves a `Snapshot`: the deployment
 //!    it audits, its `AuditState`, and the UTXO pool. The audit state is the
 //!    position of each poller, every open state machine, the suspect spends
 //!    of the last pool check. All of it is taken at one instant.
@@ -159,6 +159,14 @@ impl SnapshotStore {
         pool: &UtxoPool,
     ) -> anyhow::Result<()> {
         let started = Instant::now();
+        // Before the save, so a save that runs out of memory still leaves its size.
+        tracing::info!(
+            withdrawals = state.withdrawals.len(),
+            deposits = state.deposits.len(),
+            suspect_spends = state.suspect_spends.len(),
+            utxos = pool.len(),
+            "saving the snapshot"
+        );
         let stored = StoredSnapshot {
             version: SNAPSHOT_VERSION,
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
@@ -166,7 +174,7 @@ impl SnapshotStore {
             state,
             utxos: pool.held_to_wire(),
         };
-        let bytes = serde_json::to_vec_pretty(&stored)?;
+        let bytes = serde_json::to_vec(&stored)?;
         let bytes_written = bytes.len();
         self.store
             .put(&Path::from(SNAPSHOT_KEY), PutPayload::from(bytes))

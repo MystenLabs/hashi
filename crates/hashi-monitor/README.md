@@ -46,7 +46,7 @@ finding is an ERROR log line `monitor finding`, and it sets the metric
 | `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
 | `GuardianClockSkew` | A guardian log's signed time differs from S3's time by more than 30 s. |
 | `BtcRpcInconsistency` | A Bitcoin answer contradicts an earlier one: a lying node or a reorg. |
-| `SourceStale` | Sui, the guardian, or Bitcoin is checked more than 3 hours behind. |
+| `SourceStale` | Sui, the guardian, or Bitcoin is checked more than 3 hours behind, no daily pool check succeeded for 27 hours, or no hBTC supply read succeeded for 3 hours. |
 | `SnapshotStale` | No snapshot save has succeeded for 12 hours. |
 
 ## Running the monitor
@@ -74,7 +74,8 @@ cargo run -p hashi-monitor -- \
 
 ### The snapshot
 
-- After each state check, the monitor saves `snapshot.json` in the bucket:
+- About once an hour, and after the initial catch-up, the monitor saves
+  `snapshot.json` in the bucket:
   the position of each source, every open flow, and the UTXO pool.
 - A restart continues from the snapshot. It reads no event twice and skips
   none.
@@ -84,8 +85,8 @@ cargo run -p hashi-monitor -- \
 - The monitor does not start on a Sui node that has pruned its start
   checkpoint, because the pool would then be incomplete.
 - The monitor must be the bucket's only writer. A snapshot of another
-  deployment is ignored. A snapshot that does not parse stops the monitor;
-  delete `snapshot.json` to start again from genesis.
+  deployment or one that does not parse stops the monitor. Check the config,
+  or delete `snapshot.json` to start again from genesis.
 - The snapshot is durable state, not a cache. Without it, the next start is a
   first run from genesis.
 
@@ -97,7 +98,7 @@ complete example.
 - `deployment` gives the expected Bitcoin network, the guardian's S3 bucket and
   region, the retention environment, and the PCR allowlist. Every guardian
   session that writes a log must match it. Keep a replaced build in
-  `prev_builds` until the guardian cursor, logged at each state check, passes
+  `prev_builds` until the guardian cursor, logged at each guardian poll, passes
   its last log. A first run from genesis needs every build.
 - `sui.rpc_url` and `sui.package_id` name the Sui node and the Hashi package.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
@@ -108,6 +109,11 @@ complete example.
 
 The timing bounds of the flows are protocol constants in `src/timing.rs`, not
 configuration.
+
+The monitor reads Hashi's Bitcoin confirmation threshold and deposit time
+delay once, at startup. Restart the monitor after a governance change of
+either value. Until the restart, the monitor uses the old values and can
+report false findings.
 
 ## Alerting
 

@@ -23,7 +23,7 @@ deployment:
       pcr0: "<PCR0_HEX_FROM_VERIFIED_BUILD>"
 
     # Older still-trusted builds accepted only for historical S3 logs. Keep a
-    # replaced build until the guardian cursor, logged at every state check,
+    # replaced build until the guardian cursor, logged at every guardian poll,
     # passes its last record. A first run from genesis reads every record, so
     # it needs every build.
     prev_builds: []

@@ -12,8 +12,13 @@
 //! 2. Keep suspect spends until Sui polling passes their lookup completion timestamps.
 //! 3. Clear spends that pending or completed withdrawals explain.
 //! 4. Report the remaining spends as findings.
+//! 5. Report `SourceStale` for the pool check when none has succeeded for
+//!    `UTXO_CHECK_INTERVAL` plus `SOURCE_STALE_LIMIT`. Before the first
+//!    success, count from the start of the audit loop, after the first
+//!    catch-up.
 
 use super::Auditor;
+use super::rpc_pollers::SOURCE_STALE_LIMIT;
 use crate::findings::MonitorFinding;
 use crate::metrics::SOURCE_UTXO;
 use bitcoin::OutPoint;
@@ -28,7 +33,7 @@ use std::collections::HashSet;
 const UTXO_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 
 impl Auditor {
-    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `judge_suspect_spends`.
+    /// Check each pool UTXO on Bitcoin and keep unexplained spends for `check_suspect_spends`.
     /// Report findings and record the check time after success.
     pub fn check_utxo_pool(&mut self) -> anyhow::Result<()> {
         let tip_height = self.rpc_pollers.btc_client.synced_height()?;
@@ -67,6 +72,18 @@ impl Auditor {
             .is_none_or(|last| now.saturating_sub(last) >= UTXO_CHECK_INTERVAL)
     }
 
+    /// A `SourceStale` finding when no pool check has succeeded for
+    /// `UTXO_CHECK_INTERVAL` plus `SOURCE_STALE_LIMIT` at `now`.
+    pub fn stale_pool_check(&self, now: UnixSeconds) -> Option<MonitorFinding> {
+        let checked_through = self.last_successful_pool_check.unwrap_or(self.started_at);
+        let limit_secs = UTXO_CHECK_INTERVAL + SOURCE_STALE_LIMIT;
+        (now.saturating_sub(checked_through) > limit_secs).then_some(MonitorFinding::SourceStale {
+            source: SOURCE_UTXO,
+            checked_through,
+            limit_secs,
+        })
+    }
+
     /// The inputs of every withdrawal the monitor follows. It spends them
     /// on Bitcoin before its flow completes, so a spend of one is explained.
     fn pending_withdrawal_inputs(&self) -> HashSet<OutPoint> {
@@ -82,15 +99,17 @@ impl Auditor {
 
     /// Wait until Sui polling passes the lookup completion time.
     /// Clear spends that a pending withdrawal names or that the pool already took.
-    /// Report the remaining spends as unexpected.
-    pub fn judge_suspect_spends(&mut self) -> Vec<MonitorFinding> {
+    /// Report the remaining spends as unexpected. Return the findings for tests.
+    pub fn check_suspect_spends(&mut self) -> Vec<MonitorFinding> {
         let wsm_inputs = self.pending_withdrawal_inputs();
         let sui_cursor = self.rpc_pollers.sui_read_until();
         let mut findings = Vec::new();
+        let mut judged = 0;
         for (outpoint, suspect) in self
             .suspect_spends
             .extract_if(|_, suspect| sui_cursor > suspect.checked_at)
         {
+            judged += 1;
             if wsm_inputs.contains(&outpoint) || !self.utxo_pool.holds(&outpoint) {
                 tracing::info!(%outpoint, "a withdrawal explains the spend the pool check saw");
             } else {
@@ -100,6 +119,16 @@ impl Auditor {
                 });
             }
         }
+        // Only when there is work, so a quiet pool adds no line.
+        if judged > 0 || !self.suspect_spends.is_empty() {
+            tracing::info!(
+                judged,
+                unexpected = findings.len(),
+                waiting_for_sui = self.suspect_spends.len(),
+                "checked the suspect spends"
+            );
+        }
+        self.report_findings(SOURCE_UTXO, &findings);
         findings
     }
 }
@@ -136,7 +165,7 @@ mod tests {
             },
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.contains_key(&outpoint));
     }
 
@@ -167,7 +196,7 @@ mod tests {
                 .is_none()
         );
 
-        let findings = auditor.judge_suspect_spends();
+        let findings = auditor.check_suspect_spends();
 
         assert_eq!(
             findings,
@@ -201,7 +230,7 @@ mod tests {
             complete_withdrawal(7, 7, vec![outpoint], &timing),
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.is_empty());
     }
 
@@ -240,8 +269,37 @@ mod tests {
                 .is_empty()
         );
 
-        assert!(auditor.judge_suspect_spends().is_empty());
+        assert!(auditor.check_suspect_spends().is_empty());
         assert!(auditor.suspect_spends.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pool_check_that_does_not_succeed_is_stale() {
+        let cfg = Config::for_tests();
+        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
+        let limit_secs = UTXO_CHECK_INTERVAL + SOURCE_STALE_LIMIT;
+        let stale = |checked_through| {
+            Some(MonitorFinding::SourceStale {
+                source: SOURCE_UTXO,
+                checked_through,
+                limit_secs,
+            })
+        };
+
+        // Before the first success, the run's start counts.
+        let start = auditor.started_at;
+        assert_eq!(auditor.stale_pool_check(start + limit_secs), None);
+        assert_eq!(
+            auditor.stale_pool_check(start + limit_secs + 1),
+            stale(start)
+        );
+
+        auditor.last_successful_pool_check = Some(start + 10);
+        assert_eq!(auditor.stale_pool_check(start + 10 + limit_secs), None);
+        assert_eq!(
+            auditor.stale_pool_check(start + 10 + limit_secs + 1),
+            stale(start + 10)
+        );
     }
 
     #[tokio::test]

@@ -34,6 +34,7 @@ use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// How far behind a source may fall before a `SourceStale` finding, in
 /// seconds. The guardian cursor is the start of the current hour directory,
@@ -79,7 +80,7 @@ impl RpcPollers {
         Ok(Self {
             guardian_poller,
             sui_poller,
-            btc_client: BtcRpcClient::new(cfg, confirmations)?,
+            btc_client: BtcRpcClient::new(cfg, confirmations, SOURCE_STALE_LIMIT)?,
             btc_checked_through: now_timestamp_secs(),
             deposit_delay_secs: settings.deposit_delay_secs,
         })
@@ -132,7 +133,59 @@ impl RpcPollers {
     }
 }
 
+/// The wait after the first failed try of an initial catch-up.
+const CATCH_UP_FIRST_BACKOFF: Duration = Duration::from_secs(1);
+/// The longest wait between two tries of a failed initial catch-up.
+const CATCH_UP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// The wait before the next try of a failed initial catch-up. It doubles at
+/// each failure, up to `CATCH_UP_MAX_BACKOFF`.
+struct CatchUpBackoff {
+    delay: Duration,
+}
+
+impl CatchUpBackoff {
+    fn new() -> Self {
+        Self {
+            delay: CATCH_UP_FIRST_BACKOFF,
+        }
+    }
+
+    /// Log the failure, then wait before the next try.
+    async fn wait(&mut self, source: &'static str, error: anyhow::Error) {
+        tracing::warn!(
+            source,
+            ?error,
+            retry_in = ?self.delay,
+            "initial catch-up failed; retrying"
+        );
+        tokio::time::sleep(self.delay).await;
+        self.delay = (self.delay * 2).min(CATCH_UP_MAX_BACKOFF);
+    }
+}
+
 impl Auditor {
+    /// Catch up Sui, then the guardian, then Bitcoin. Retry a failed source
+    /// with a backoff until it is current. Sui and the guardian add the
+    /// machines, so Bitcoin comes last and looks up all of them.
+    pub async fn catch_up_sources(&mut self) {
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_sui().await {
+            backoff.wait(SOURCE_SUI, error).await;
+        }
+        tracing::info!(source = SOURCE_SUI, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_guardian().await {
+            backoff.wait(SOURCE_GUARDIAN, error).await;
+        }
+        tracing::info!(source = SOURCE_GUARDIAN, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_btc() {
+            backoff.wait(SOURCE_BTC, error).await;
+        }
+        tracing::info!(source = SOURCE_BTC, "finished initial catch-up");
+    }
+
     pub async fn tick_sui(&mut self) -> anyhow::Result<()> {
         // The head at the tick's start bounds the tick, so it ends.
         let up_to = self.rpc_pollers.latest_sui_checkpoint().await?;
@@ -247,6 +300,20 @@ impl Auditor {
     pub fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
         let findings = self.fetch_btc_info(started_at)?;
+        // The machines Bitcoin answered stay until pool maintenance removes them.
+        tracing::info!(
+            withdrawals_waiting = self
+                .pending_withdrawals
+                .values()
+                .filter(|sm| sm.expects_btc())
+                .count(),
+            deposits_waiting = self
+                .pending_deposits
+                .values()
+                .filter(|sm| sm.expects_btc())
+                .count(),
+            "finished bitcoin confirmation lookups"
+        );
         self.report_findings("btc", &findings);
         self.rpc_pollers.btc_checked_through = started_at;
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
@@ -264,7 +331,8 @@ impl RpcPollers {
         Self {
             guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, timestamp),
             sui_poller: poller_scanned(timestamp),
-            btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
+            btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS, SOURCE_STALE_LIMIT)
+                .unwrap(),
             btc_checked_through: timestamp,
             deposit_delay_secs: 600,
         }

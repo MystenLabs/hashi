@@ -55,6 +55,8 @@ use sui_rpc::proto::sui::rpc::v2::TransactionFilter;
 use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
+use sui_sdk_types::Identifier;
+use sui_sdk_types::StructTag;
 
 use crate::config::SuiConfig;
 use crate::domain::MonitorEvent;
@@ -191,16 +193,19 @@ pub struct HashiSettings {
     pub deposit_delay_secs: u64,
 }
 
-/// Read `HashiSettings` from the Hashi object.
+/// Read `HashiSettings` from the Hashi object. Fail unless the object's
+/// type is from `config.package_id`: the event filter uses that id, so a
+/// wrong one reads no events.
 pub async fn read_hashi_settings(
     config: &SuiConfig,
     hashi_object_id: Address,
 ) -> anyhow::Result<HashiSettings> {
     let mut client = connect(config)?;
     let request = GetObjectRequest::new(&hashi_object_id).with_read_mask(FieldMask::from_paths([
+        Object::path_builder().object_type(),
         Object::path_builder().contents().finish(),
     ]));
-    let hashi: Hashi = client
+    let object = client
         .ledger_client()
         .get_object(request)
         .await
@@ -209,7 +214,23 @@ pub async fn read_hashi_settings(
         .object
         .with_context(|| {
             format!("Sui GetObject response is missing the Hashi object {hashi_object_id}")
-        })?
+        })?;
+    let package_id = Address::from_str(&config.package_id)
+        .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
+    let expected_type = StructTag::new(
+        package_id,
+        Identifier::from_static("hashi"),
+        Identifier::from_static("Hashi"),
+        vec![],
+    )
+    .to_string();
+    anyhow::ensure!(
+        object.object_type() == expected_type,
+        "the Hashi object {hashi_object_id} has type {}, not {expected_type}; \
+         sui.package_id must be the package that defines it",
+        object.object_type(),
+    );
+    let hashi: Hashi = object
         .contents()
         .deserialize()
         .with_context(|| format!("failed to decode the Hashi object {hashi_object_id}"))?;
@@ -678,6 +699,23 @@ pub mod tests {
         }
     }
 
+    /// A ledger whose every object has the type `object_type` and no contents.
+    struct TypedObjectLedger {
+        object_type: String,
+    }
+
+    #[tonic::async_trait]
+    impl LedgerService for TypedObjectLedger {
+        async fn get_object(
+            &self,
+            _request: tonic::Request<GetObjectRequest>,
+        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
+            let mut object = Object::default();
+            object.object_type = Some(self.object_type.clone());
+            Ok(tonic::Response::new(GetObjectResponse::new(object)))
+        }
+    }
+
     /// Serve `ledger` on a local port and return the config that reaches it.
     async fn serve(ledger: impl LedgerService) -> SuiConfig {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -716,6 +754,25 @@ pub mod tests {
                 checkpoint: PUBLISH_CHECKPOINT,
                 timestamp: PUBLISH_SECS,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hashi_object_from_another_package_is_refused() {
+        let other_package = format!("0x{}", "22".repeat(32));
+        let config = serve(TypedObjectLedger {
+            object_type: format!("{other_package}::hashi::Hashi"),
+        })
+        .await;
+
+        let error = read_hashi_settings(&config, Address::ZERO)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("sui.package_id must be the package that defines it"),
+            "{error}"
         );
     }
 
