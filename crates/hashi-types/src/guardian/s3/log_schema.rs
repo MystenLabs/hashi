@@ -85,10 +85,12 @@ pub enum LogType {
 impl LogType {
     pub(super) const fn object_lock_duration(self, policy: S3ObjectLockPolicy) -> Duration {
         match self {
-            Self::Heartbeat | Self::CeremonyProposal | Self::KpShareState => policy.short_lived,
+            Self::Heartbeat | Self::CeremonyProposal => policy.short_lived,
+            // KP-share state is the only copy of the shares provisioning reads.
             Self::Init
             | Self::Withdrawal
             | Self::CeremonyCompleted
+            | Self::KpShareState
             | Self::CommitteeUpdate
             | Self::Genesis => policy.long_lived,
         }

@@ -1024,7 +1024,7 @@ mod tests {
             log.object_lock_expiry(TESTNET_S3_OBJECT_LOCK_POLICY),
             SystemTime::UNIX_EPOCH
                 + Duration::from_millis(1_700_000_000_000)
-                + TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
+                + TESTNET_S3_OBJECT_LOCK_POLICY.long_lived
         );
     }
 
