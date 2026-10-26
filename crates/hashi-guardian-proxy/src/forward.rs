@@ -8,7 +8,9 @@
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
 //! ceremony guardian, which is the relay's backend. A committee handoff is
 //! forwarded only once the chain stores one between the same two epochs
-//! ([`crate::node::handoffs`]). Wrapped by
+//! ([`crate::node::handoffs`]). A withdrawal is forwarded only when its UTXOs
+//! equal those of its committed Sui transaction ([`crate::node::withdrawals`]).
+//! Wrapped by
 //! [`crate::node::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`
 //! and `GetGuardianInfo`.
 
@@ -28,6 +30,7 @@ use crate::kp;
 use crate::kp::roster::RosterCache;
 use crate::log_store::LogStore;
 use crate::node::handoffs::HandoffGate;
+use crate::node::withdrawals::WithdrawalGate;
 
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
@@ -41,6 +44,7 @@ pub struct Forwarding<L> {
     /// rotation drops the cached roster for both.
     roster: Arc<RosterCache<L>>,
     handoffs: Arc<HandoffGate>,
+    withdrawals: Arc<WithdrawalGate>,
 }
 
 impl<L: LogStore> Forwarding<L> {
@@ -49,12 +53,14 @@ impl<L: LogStore> Forwarding<L> {
         ceremony_channel: Channel,
         roster: Arc<RosterCache<L>>,
         handoffs: Arc<HandoffGate>,
+        withdrawals: Arc<WithdrawalGate>,
     ) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             ceremony_client: GuardianServiceClient::new(ceremony_channel),
             roster,
             handoffs,
+            withdrawals,
         }
     }
 }
@@ -91,6 +97,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
+        self.withdrawals.admit(request.get_ref()).await?;
         self.client.clone().standard_withdrawal(request).await
     }
 
@@ -178,6 +185,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
+    use crate::node::withdrawals::test_utils as withdrawal;
+    use hashi_types::guardian::WithdrawalID;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -329,15 +338,10 @@ pub(crate) mod test_utils {
         wid: [u8; 32],
         seq: u64,
     ) -> Request<proto::SignedStandardWithdrawalRequest> {
-        Request::new(proto::SignedStandardWithdrawalRequest {
-            data: Some(proto::StandardWithdrawalRequestData {
-                wid: Some(wid.to_vec().into()),
-                utxos: None,
-                timestamp_secs: Some(100),
-                seq: Some(seq),
-            }),
-            committee_signature: None,
-        })
+        Request::new(withdrawal::request(
+            &withdrawal::txn(WithdrawalID::new(wid)),
+            seq,
+        ))
     }
 }
 
@@ -350,6 +354,7 @@ mod tests {
     use crate::node::handoffs::test_utils::transition;
     use crate::node::widlog::test_utils::withdrawal_log_json;
     use crate::node::widlog::WidLogIndex;
+    use crate::node::withdrawals::test_utils::all_committed;
     use hashi_types::guardian::now_timestamp_ms;
     use hashi_types::guardian::StandardWithdrawalResponse;
     use hashi_types::guardian::WithdrawalID;
@@ -372,6 +377,7 @@ mod tests {
                 ceremony,
                 Arc::new(RosterCache::new(store)),
                 gate_over(handoffs),
+                all_committed(),
             ),
             WidLogIndex::ready_for_tests(StubStore::default(), metrics.clone()).await,
             metrics,

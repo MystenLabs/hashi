@@ -153,7 +153,7 @@ where
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
         let Some((wid, seq)) = extract_wid_and_seq(request.get_ref()) else {
-            // No wid to key on. Let the enclave produce the precise rejection.
+            // No wid to key on. The withdrawal gate refuses it.
             return self.inner.standard_withdrawal(request).await;
         };
 

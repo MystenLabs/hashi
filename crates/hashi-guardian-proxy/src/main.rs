@@ -15,6 +15,7 @@ use hashi_guardian_proxy::node::member_auth::MemberGate;
 use hashi_guardian_proxy::node::members::ChainSource;
 use hashi_guardian_proxy::node::members::MemberAllowlist;
 use hashi_guardian_proxy::node::widlog::WidLogIndex;
+use hashi_guardian_proxy::node::withdrawals::WithdrawalGate;
 use hashi_guardian_proxy::public::info;
 use hashi_guardian_proxy::remote_write;
 use hashi_guardian_proxy::tls;
@@ -98,6 +99,11 @@ async fn main() -> Result<()> {
         ChainSource::new(channel.clone(), &config.sui_rpc_url)?,
         metrics.clone(),
     ));
+    let withdrawals = Arc::new(WithdrawalGate::new(
+        ChainSource::new(channel.clone(), &config.sui_rpc_url)?,
+        config.btc_network,
+        metrics.clone(),
+    ));
 
     // One roster cache, shared: the relay authorizes submissions against it and
     // a cert rotation through the forwarder invalidates it.
@@ -123,7 +129,7 @@ async fn main() -> Result<()> {
     // KPs confirm a ceremony to the guardian they are provisioning, so that
     // RPC follows the relay's backend.
     let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel, relay_channel, roster, handoffs),
+        Forwarding::new(channel, relay_channel, roster, handoffs, withdrawals),
         widlog,
         metrics.clone(),
     );

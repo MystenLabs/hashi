@@ -2190,6 +2190,7 @@ mod tests {
         use hashi_guardian_proxy::metrics::ProxyMetrics;
         use hashi_guardian_proxy::node::handoffs::HandoffGate;
         use hashi_guardian_proxy::node::members::ChainSource;
+        use hashi_guardian_proxy::node::withdrawals::WithdrawalGate;
         use hashi_types::committee::RuntimeCommittee;
         use hashi_types::committee::certificate_threshold;
         use hashi_types::guardian::CommitteeTransitionRequest;
@@ -2268,11 +2269,17 @@ mod tests {
             ChainSource::new(channel.clone(), &networks.sui_network.rpc_url)?,
             metrics.clone(),
         ));
+        let withdrawals = Arc::new(WithdrawalGate::new(
+            ChainSource::new(channel.clone(), &networks.sui_network.rpc_url)?,
+            bitcoin::Network::Regtest,
+            metrics.clone(),
+        ));
         let proxy = Forwarding::new(
             channel.clone(),
             channel,
             Arc::new(RosterCache::new(NoLogs)),
             handoffs,
+            withdrawals,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("http://{}", listener.local_addr()?);

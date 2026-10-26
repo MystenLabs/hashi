@@ -14,7 +14,8 @@
 //!   current or pending committee members ([`node::members`]), who present
 //!   their registered TLS key as a client certificate. [`node::handoffs`]
 //!   forwards a committee handoff only once the chain stores one between the
-//!   same two epochs.
+//!   same two epochs. [`node::withdrawals`] forwards a withdrawal only when
+//!   its UTXOs equal those of its committed Sui transaction.
 //! - [`kp`]: [`kp::relay`] serves `GuardianRelayService`: key provisioners
 //!   submit one share each — authenticated against the ceremony's committed
 //!   roster read from the S3 share log ([`kp::roster`]) — and the relay batches
@@ -127,6 +128,7 @@ mod tests {
     use crate::node::members::test_utils::snapshot;
     use crate::node::members::MemberAllowlist;
     use crate::node::widlog::WidLogIndex;
+    use crate::node::withdrawals::test_utils::all_committed;
     use crate::tls::test_utils::node_identity;
     use crate::tls::test_utils::test_cert;
     use crate::tls::test_utils::TestCert;
@@ -209,6 +211,7 @@ mod tests {
                 backend.clone(),
                 roster.clone(),
                 gate_over(&[]),
+                all_committed(),
             ),
             WidLogIndex::ready_for_tests(MemStore::default(), metrics.clone()).await,
             metrics.clone(),
