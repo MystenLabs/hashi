@@ -3036,8 +3036,7 @@ mod pruning_reference_tests {
             .unwrap();
         assert!(
             db.get_encryption_key(500).unwrap().is_some(),
-            "the real predecessor must stay pinned even when `previous_committee_for_target` \
-             names the target itself"
+            "the real predecessor must stay pinned while a change is pending"
         );
     }
 
