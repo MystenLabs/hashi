@@ -34,6 +34,7 @@ use bitcoin::Txid;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// How far behind a source may fall before a `SourceStale` finding, in
 /// seconds. The guardian cursor is the start of the current hour directory,
@@ -132,7 +133,59 @@ impl RpcPollers {
     }
 }
 
+/// The wait after the first failed try of an initial catch-up.
+const CATCH_UP_FIRST_BACKOFF: Duration = Duration::from_secs(1);
+/// The longest wait between two tries of a failed initial catch-up.
+const CATCH_UP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// The wait before the next try of a failed initial catch-up. It doubles at
+/// each failure, up to `CATCH_UP_MAX_BACKOFF`.
+struct CatchUpBackoff {
+    delay: Duration,
+}
+
+impl CatchUpBackoff {
+    fn new() -> Self {
+        Self {
+            delay: CATCH_UP_FIRST_BACKOFF,
+        }
+    }
+
+    /// Log the failure, then wait before the next try.
+    async fn wait(&mut self, source: &'static str, error: anyhow::Error) {
+        tracing::warn!(
+            source,
+            ?error,
+            retry_in = ?self.delay,
+            "initial catch-up failed; retrying"
+        );
+        tokio::time::sleep(self.delay).await;
+        self.delay = (self.delay * 2).min(CATCH_UP_MAX_BACKOFF);
+    }
+}
+
 impl Auditor {
+    /// Catch up Sui, then the guardian, then Bitcoin. Retry a failed source
+    /// with a backoff until it is current. Sui and the guardian add the
+    /// machines, so Bitcoin comes last and looks up all of them.
+    pub async fn catch_up_sources(&mut self) {
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_sui().await {
+            backoff.wait(SOURCE_SUI, error).await;
+        }
+        tracing::info!(source = SOURCE_SUI, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_guardian().await {
+            backoff.wait(SOURCE_GUARDIAN, error).await;
+        }
+        tracing::info!(source = SOURCE_GUARDIAN, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_btc() {
+            backoff.wait(SOURCE_BTC, error).await;
+        }
+        tracing::info!(source = SOURCE_BTC, "finished initial catch-up");
+    }
+
     pub async fn tick_sui(&mut self) -> anyhow::Result<()> {
         // The head at the tick's start bounds the tick, so it ends.
         let up_to = self.rpc_pollers.latest_sui_checkpoint().await?;

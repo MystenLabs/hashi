@@ -74,7 +74,8 @@ cargo run -p hashi-monitor -- \
 
 ### The snapshot
 
-- About once an hour, the monitor saves `snapshot.json` in the bucket:
+- About once an hour, and after the initial catch-up, the monitor saves
+  `snapshot.json` in the bucket:
   the position of each source, every open flow, and the UTXO pool.
 - A restart continues from the snapshot. It reads no event twice and skips
   none.

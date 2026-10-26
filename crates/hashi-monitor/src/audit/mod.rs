@@ -13,6 +13,9 @@
 //!    Fail at startup on the snapshot of another deployment.
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
+//!    At startup, catch up Sui, then the guardian, then Bitcoin. Retry a failed source
+//!    until it is current. Then remove the closed machines and save the snapshot.
+//!    Only then start the loop, so the loop does not start with a large unanswered backlog.
 //! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
 //!    Check that each fresh deposit approval names an unspent outpoint.
 //! 6. Every `MAINTENANCE_INTERVAL`, run one maintenance tick in this order:
@@ -27,11 +30,13 @@
 //!       Then report a save that is behind its limit. This step is last.
 //! 7. Check Bitcoin at the first maintenance tick. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
-//! 9. Log a failed source tick. The next tick of that source retries it.
+//! 9. In the loop, log a failed source tick. The next tick of that source retries it.
 //!
 //! Assumptions:
 //! - Every tick runs on one task. The first catch-up blocks the maintenance tick,
 //!   so a first run reports no stale source while it catches up.
+//! - A source that stays down at startup blocks the loop. The Sui `checked_through`
+//!   gauge then stops too, and its lag alert pages. Only the Sui gauge has a lag alert.
 
 use crate::config::Config;
 use crate::domain::MonitorEvent;
@@ -411,15 +416,6 @@ impl Auditor {
         self.metrics.record_findings(findings, now_timestamp_secs());
     }
 
-    /// Log the outcome of one source's initial catch-up. A failure does not
-    /// stop the audit: the source's next tick retries it.
-    fn log_initial_catch_up(source: &'static str, result: anyhow::Result<()>) {
-        match result {
-            Ok(()) => tracing::info!(source, "finished initial catch-up"),
-            Err(error) => tracing::warn!(source, ?error, "initial catch-up failed; continuing"),
-        }
-    }
-
     /// Report the open withdrawals that missed a timing bound.
     fn check_timing(&self) {
         let violations = self.detect_timing_violations();
@@ -466,12 +462,10 @@ impl Auditor {
             utc_timestamp(self.rpc_pollers.sui_read_until()),
             utc_timestamp(self.rpc_pollers.guardian_read_until()),
         );
-        let sui = self.tick_sui().await;
-        Self::log_initial_catch_up(SOURCE_SUI, sui);
-        let guardian = self.tick_guardian().await;
-        Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
-        let btc = self.tick_btc();
-        Self::log_initial_catch_up(SOURCE_BTC, btc);
+        self.catch_up_sources().await;
+        // After the catch-up, so the snapshot holds only the open machines.
+        self.gc_and_update_pool();
+        self.save_snapshot().await;
         // A first run can catch up for hours. That time is not a stale check.
         self.started_at = now_timestamp_secs();
         tracing::info!(
