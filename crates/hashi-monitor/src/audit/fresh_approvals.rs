@@ -19,7 +19,8 @@
 //! 1. On ingest, keep each fresh approval.
 //! 2. At each Bitcoin tick, drop the approvals that are no longer fresh.
 //! 3. Look up the outpoints of the remaining approvals. A spend in the
-//!    mempool counts.
+//!    mempool counts. When the lookup returns, drop the approvals that are
+//!    no longer fresh, because a slow lookup can see a spend after the mint.
 //! 4. Report a spent outpoint as `DepositUnbacked`, and drop its approval.
 //! 5. Drop an approval whose outpoint is unspent. One lookup is sufficient:
 //!    an attacker gains nothing from a spend before the mint over a spend
@@ -48,6 +49,7 @@ use crate::findings::MonitorFinding;
 use crate::rpc::btc::OutpointState;
 use bitcoin::OutPoint;
 use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 use std::collections::HashMap;
 
 /// How long before the delay ends the lookups stop, in seconds.
@@ -91,12 +93,15 @@ impl Auditor {
         }
     }
 
-    /// Report each fresh approval whose outpoint is spent. Keep only the
-    /// approvals whose outpoint Bitcoin does not show yet.
+    /// Report each approval that is still fresh at `finished`, when the
+    /// lookup returned, and whose outpoint is spent. Keep only the approvals
+    /// whose outpoint Bitcoin does not show yet.
     fn judge_fresh_approvals(
         &mut self,
         states: &HashMap<OutPoint, OutpointState>,
+        finished: UnixSeconds,
     ) -> Vec<MonitorFinding> {
+        self.drop_stale_approvals(finished);
         let mut findings = Vec::new();
         self.fresh_approvals
             .retain(|outpoint, event| match states.get(outpoint) {
@@ -130,7 +135,7 @@ impl Auditor {
             .rpc_pollers
             .btc_client
             .lookup_outpoint_states(&outpoints, tip_height, true)?;
-        Ok(self.judge_fresh_approvals(&states))
+        Ok(self.judge_fresh_approvals(&states, now_timestamp_secs()))
     }
 }
 
@@ -141,7 +146,6 @@ mod tests {
     use crate::domain::MonitorEvent;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
-    use hashi_types::guardian::time::now_timestamp_secs;
 
     /// An approval of `txid(9):1` at `approved_at`.
     fn approval(approved_at: UnixSeconds) -> SuiDepositApprovedEvent {
@@ -185,7 +189,7 @@ mod tests {
         let fresh = approval(1_000);
         auditor.note_fresh_approval(&fresh, 1_000);
 
-        let findings = auditor.judge_fresh_approvals(&states(&fresh, OutpointState::Spent));
+        let findings = auditor.judge_fresh_approvals(&states(&fresh, OutpointState::Spent), 1_000);
 
         assert_eq!(
             findings,
@@ -201,13 +205,13 @@ mod tests {
         auditor.note_fresh_approval(&fresh, 1_000);
 
         let missing = states(&fresh, OutpointState::Missing);
-        assert!(auditor.judge_fresh_approvals(&missing).is_empty());
+        assert!(auditor.judge_fresh_approvals(&missing, 1_000).is_empty());
         assert_eq!(auditor.fresh_approvals.len(), 1);
 
         let unspent = OutpointState::Unspent { block_time: 900 };
         assert!(
             auditor
-                .judge_fresh_approvals(&states(&fresh, unspent))
+                .judge_fresh_approvals(&states(&fresh, unspent), 1_000)
                 .is_empty()
         );
         assert!(auditor.fresh_approvals.is_empty());
@@ -226,6 +230,19 @@ mod tests {
         // No lookup: the test client has no Bitcoin node to answer it.
         let findings = auditor.check_fresh_approvals(0, end).unwrap();
         assert!(findings.is_empty());
+        assert!(auditor.fresh_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_spend_seen_by_a_lookup_that_returns_too_late_is_not_reported() {
+        let mut auditor = auditor_with_pool().await;
+        let end = 1_000 + auditor.rpc_pollers.deposit_delay_secs - DELAY_END_MARGIN;
+        let fresh = approval(1_000);
+        auditor.note_fresh_approval(&fresh, 1_000);
+
+        // The lookup started while the approval was fresh, but returned after.
+        let spent = states(&fresh, OutpointState::Spent);
+        assert!(auditor.judge_fresh_approvals(&spent, end).is_empty());
         assert!(auditor.fresh_approvals.is_empty());
     }
 }
