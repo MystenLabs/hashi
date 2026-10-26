@@ -5,6 +5,7 @@ pub mod count_check;
 pub mod message_cache;
 mod mpc_except_signing;
 mod presig_seal;
+pub(crate) mod public_outputs;
 pub mod rpc;
 pub mod service;
 pub(crate) mod shape_params;
