@@ -299,3 +299,142 @@ pub(crate) mod test_utils {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::test_utils::request;
+    use super::test_utils::txn;
+    use super::test_utils::NETWORK;
+    use super::*;
+    use std::collections::HashMap;
+    use tonic::Code;
+
+    /// A chain that stores these transactions.
+    struct Stored(HashMap<WithdrawalID, move_types::WithdrawalTransaction>);
+
+    #[tonic::async_trait]
+    impl WithdrawalSource for Stored {
+        async fn withdrawal_txn(
+            &self,
+            wid: WithdrawalID,
+        ) -> anyhow::Result<Option<move_types::WithdrawalTransaction>> {
+            Ok(self.0.get(&wid).cloned())
+        }
+    }
+
+    /// Every read fails.
+    struct Unreadable;
+
+    #[tonic::async_trait]
+    impl WithdrawalSource for Unreadable {
+        async fn withdrawal_txn(
+            &self,
+            _: WithdrawalID,
+        ) -> anyhow::Result<Option<move_types::WithdrawalTransaction>> {
+            Err(anyhow::anyhow!("sui unavailable"))
+        }
+    }
+
+    /// Never answers.
+    struct Stuck;
+
+    #[tonic::async_trait]
+    impl WithdrawalSource for Stuck {
+        async fn withdrawal_txn(
+            &self,
+            _: WithdrawalID,
+        ) -> anyhow::Result<Option<move_types::WithdrawalTransaction>> {
+            std::future::pending().await
+        }
+    }
+
+    fn gate_over(source: impl WithdrawalSource) -> (WithdrawalGate, Arc<ProxyMetrics>) {
+        let metrics = Arc::new(ProxyMetrics::new());
+        (
+            WithdrawalGate::new(source, NETWORK, metrics.clone()),
+            metrics,
+        )
+    }
+
+    fn stored(txns: &[move_types::WithdrawalTransaction]) -> Stored {
+        Stored(txns.iter().map(|txn| (txn.id, txn.clone())).collect())
+    }
+
+    fn refused(metrics: &ProxyMetrics, reason: &str) -> u64 {
+        metrics
+            .withdrawal_refused
+            .with_label_values(&[reason])
+            .get()
+    }
+
+    fn wid(byte: u8) -> WithdrawalID {
+        WithdrawalID::new([byte; 32])
+    }
+
+    #[tokio::test]
+    async fn admits_only_the_committed_utxos() {
+        let committed = txn(wid(1));
+        let (gate, metrics) = gate_over(stored(std::slice::from_ref(&committed)));
+        gate.admit(&request(&committed, 0)).await.unwrap();
+
+        // A quorum certifies a larger payout than Move committed.
+        let mut altered = committed.clone();
+        altered.withdrawal_outputs[0].amount += 1_000;
+        altered.change_outputs[0].amount -= 1_000;
+        let err = gate.admit(&request(&altered, 0)).await.unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+
+        // The same payout to another address.
+        let mut altered = committed.clone();
+        altered.withdrawal_outputs[0].bitcoin_address = vec![6; 20];
+        let err = gate.admit(&request(&altered, 0)).await.unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(refused(&metrics, "utxo_mismatch"), 2);
+
+        // The UTXOs of one committed transaction under the wid of another.
+        let mut other = committed.clone();
+        other.id = wid(2);
+        other.withdrawal_outputs[0].amount -= 1_000;
+        other.change_outputs[0].amount += 500;
+        let (gate, metrics) = gate_over(stored(&[committed.clone(), other]));
+        let mut swapped = request(&committed, 0);
+        swapped.data.as_mut().unwrap().wid = Some(Vec::from(wid(2)).into());
+        let err = gate.admit(&swapped).await.unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(refused(&metrics, "utxo_mismatch"), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_uncommitted_wid_as_retriable() {
+        let (gate, metrics) = gate_over(stored(&[]));
+        let err = gate.admit(&request(&txn(wid(1)), 0)).await.unwrap_err();
+        assert_eq!(err.code(), Code::Unavailable);
+        assert_eq!(refused(&metrics, "not_on_chain"), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_malformed_request() {
+        let (gate, metrics) = gate_over(stored(&[]));
+        let mut no_utxos = request(&txn(wid(1)), 0);
+        no_utxos.data.as_mut().unwrap().utxos = None;
+        let err = gate.admit(&no_utxos).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(refused(&metrics, "malformed"), 1);
+    }
+
+    #[tokio::test]
+    async fn fails_closed_when_sui_cannot_answer() {
+        let (gate, metrics) = gate_over(Unreadable);
+        let err = gate.admit(&request(&txn(wid(1)), 0)).await.unwrap_err();
+        assert_eq!(err.code(), Code::Unavailable);
+        assert_eq!(refused(&metrics, "chain_unavailable"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn times_out_a_stuck_read() {
+        let (gate, metrics) = gate_over(Stuck);
+        let err = gate.admit(&request(&txn(wid(1)), 0)).await.unwrap_err();
+        assert_eq!(err.code(), Code::Unavailable);
+        assert_eq!(refused(&metrics, "chain_unavailable"), 1);
+    }
+}
