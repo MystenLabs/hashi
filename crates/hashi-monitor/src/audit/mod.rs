@@ -20,7 +20,7 @@
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //! 10. Log a failed source tick. The next tick of that source retries it.
-//! 11. At each state tick, report a source, the daily pool check, or a snapshot save that is behind its limit.
+//! 11. At each state tick, report a source, the daily pool check, the hBTC supply read, or a snapshot save that is behind its limit.
 //! 12. After each pool maintenance tick, check that the UTXO pool backs the hBTC supply.
 //!
 //! Assumptions:
@@ -133,6 +133,8 @@ pub struct Auditor {
     last_snapshot_save: UnixSeconds,
     /// Since when the hBTC supply has exceeded the pool value, if it does.
     hbtc_supply_above_pool_since: Option<UnixSeconds>,
+    /// When the hBTC supply was last read. Startup reads it.
+    last_hbtc_supply_read: UnixSeconds,
 }
 
 impl Auditor {
@@ -188,6 +190,7 @@ impl Auditor {
             started_at: now_timestamp_secs(),
             last_snapshot_save: 0,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: 0,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -430,6 +433,7 @@ impl Auditor {
         let now = now_timestamp_secs();
         let mut stale = self.rpc_pollers.stale_sources(now);
         stale.extend(self.stale_pool_check(now));
+        stale.extend(self.stale_hbtc_supply(now));
         self.report_findings("progress", &stale);
 
         self.save_snapshot().await;
@@ -605,6 +609,7 @@ mod tests {
             started_at: approved_at,
             last_snapshot_save: approved_at,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: approved_at,
         }
     }
 
@@ -764,6 +769,7 @@ mod tests {
             started_at: cursor,
             last_snapshot_save: cursor,
             hbtc_supply_above_pool_since: None,
+            last_hbtc_supply_read: cursor,
         }
     }
 

@@ -14,6 +14,9 @@
 //! 2. While the supply exceeds the pool value, keep the time it started.
 //! 3. Report `HbtcSupplyExceedsPool` at each tick once that lasts
 //!    `HBTC_SUPPLY_GRACE`.
+//! 4. A failed read skips the check. When no read has succeeded for
+//!    `SOURCE_STALE_LIMIT`, counted from the start of the audit loop at the
+//!    earliest, the state check reports `SourceStale` for `hbtc_supply`.
 //!
 //! Assumptions:
 //! - In an honest bridge, the supply never exceeds the pool value. The pool
@@ -35,9 +38,12 @@ use hashi_types::guardian::time::now_timestamp_secs;
 /// seconds.
 const HBTC_SUPPLY_GRACE: u64 = SOURCE_STALE_LIMIT;
 
+/// The `SourceStale` source name of the hBTC supply read.
+const SOURCE_HBTC_SUPPLY: &str = "hbtc_supply";
+
 impl Auditor {
     /// Read the hBTC supply and compare it with the pool value. A failed read
-    /// skips the check; a lasting Sui failure is a `SourceStale` finding.
+    /// skips the check; see `stale_hbtc_supply`.
     pub async fn check_hbtc_supply(&mut self) {
         let supply = match self.read_hbtc_supply().await {
             Ok(supply) => supply,
@@ -60,9 +66,27 @@ impl Auditor {
     /// Read the hBTC supply and export it with the pool value.
     pub async fn read_hbtc_supply(&mut self) -> anyhow::Result<u64> {
         let supply = self.rpc_pollers.sui_poller.hbtc_supply().await?;
+        self.last_hbtc_supply_read = now_timestamp_secs();
         self.metrics
             .set_hbtc_backing(supply, self.utxo_pool.value());
         Ok(supply)
+    }
+}
+
+impl Auditor {
+    /// A `SourceStale` finding when no hBTC supply read has succeeded for
+    /// `SOURCE_STALE_LIMIT` at `now`. The time counts from the later of the
+    /// last read and the start of the audit loop, because the first catch-up
+    /// does not read the supply.
+    pub fn stale_hbtc_supply(&self, now: UnixSeconds) -> Option<MonitorFinding> {
+        let checked_through = self.last_hbtc_supply_read.max(self.started_at);
+        (now.saturating_sub(checked_through) > SOURCE_STALE_LIMIT).then_some(
+            MonitorFinding::SourceStale {
+                source: SOURCE_HBTC_SUPPLY,
+                checked_through,
+                limit_secs: SOURCE_STALE_LIMIT,
+            },
+        )
     }
 }
 
@@ -92,6 +116,37 @@ fn judge_hbtc_supply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::tests::auditor_with;
+    use crate::config::Config;
+    use crate::metrics::MonitorMetrics;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_supply_read_that_does_not_succeed_is_stale() {
+        let cfg = Config::for_tests();
+        let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
+        let read_at = auditor.last_hbtc_supply_read;
+
+        assert_eq!(
+            auditor.stale_hbtc_supply(read_at + SOURCE_STALE_LIMIT),
+            None
+        );
+        assert_eq!(
+            auditor.stale_hbtc_supply(read_at + SOURCE_STALE_LIMIT + 1),
+            Some(MonitorFinding::SourceStale {
+                source: SOURCE_HBTC_SUPPLY,
+                checked_through: read_at,
+                limit_secs: SOURCE_STALE_LIMIT,
+            })
+        );
+
+        // A loop that starts after a long catch-up counts from its start.
+        auditor.started_at = read_at + 10 * SOURCE_STALE_LIMIT;
+        assert_eq!(
+            auditor.stale_hbtc_supply(auditor.started_at + SOURCE_STALE_LIMIT),
+            None
+        );
+    }
 
     #[test]
     fn a_supply_above_the_pool_is_reported_after_the_grace() {
