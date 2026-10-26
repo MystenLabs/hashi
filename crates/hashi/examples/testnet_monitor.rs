@@ -116,16 +116,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (monitor_client, _service) = Monitor::run(config, metrics)?;
 
     info!("Monitor is running.");
-    info!("Enter Bitcoin OutPoints in the format 'txid:vout' to confirm deposits.");
+    info!("Enter deposits as 'txid:vout amount_sat address' to confirm them.");
     info!("Press Ctrl-C to exit.");
     println!();
 
-    // Interactive loop to accept OutPoint inputs
+    // Interactive loop to accept deposit inputs
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
     loop {
-        print!("Enter OutPoint (txid:vout): ");
+        print!("Enter deposit (txid:vout amount_sat address): ");
         stdout.flush()?;
 
         let mut input = String::new();
@@ -140,16 +140,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                // Parse the OutPoint
-                match bitcoin::OutPoint::from_str(input) {
-                    Ok(outpoint) => {
+                match parse_deposit(input) {
+                    Ok((outpoint, expected_txout)) => {
                         info!("Checking deposit for OutPoint: {}", outpoint);
 
                         // Spawn a task to check the deposit at the current Bitcoin tip.
                         let client = monitor_client.clone();
                         let confirmations = args.confirmations;
                         tokio::spawn(async move {
-                            match client.confirm_deposit(outpoint, confirmations).await {
+                            match client
+                                .confirm_deposit(outpoint, expected_txout, confirmations)
+                                .await
+                            {
                                 Ok(hashi::btc_monitor::monitor::DepositConfirmation::Confirmed(
                                     txout,
                                 )) => {
@@ -180,8 +182,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                     }
                     Err(e) => {
-                        eprintln!("Error: Invalid OutPoint format: {}", e);
-                        eprintln!("Expected format: txid:vout (e.g., abcd1234...:0)");
+                        eprintln!("Error: {e}");
+                        eprintln!(
+                            "Expected format: txid:vout amount_sat address (e.g., abcd1234...:0 100000 tb1p...)"
+                        );
                     }
                 }
             }
@@ -194,4 +198,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Exiting...");
     Ok(())
+}
+
+fn parse_deposit(input: &str) -> Result<(bitcoin::OutPoint, bitcoin::TxOut), String> {
+    let mut fields = input.split_whitespace();
+    let (Some(outpoint), Some(amount), Some(address), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err("expected three fields".to_owned());
+    };
+    let outpoint =
+        bitcoin::OutPoint::from_str(outpoint).map_err(|e| format!("invalid OutPoint: {e}"))?;
+    let amount = amount.parse().map_err(|e| format!("invalid amount: {e}"))?;
+    let address = bitcoin::Address::from_str(address)
+        .map_err(|e| format!("invalid address: {e}"))?
+        .require_network(Network::Testnet4)
+        .map_err(|e| format!("not a testnet4 address: {e}"))?;
+    Ok((
+        outpoint,
+        bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(amount),
+            script_pubkey: address.script_pubkey(),
+        },
+    ))
 }

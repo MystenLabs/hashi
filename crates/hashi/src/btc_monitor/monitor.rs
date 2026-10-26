@@ -126,15 +126,39 @@ pub enum DepositConfirmError {
     UtxoSpent { txid: bitcoin::Txid, vout: u32 },
     #[error("transaction {txid} has no output at vout {vout}")]
     InvalidVout { txid: bitcoin::Txid, vout: u32 },
+    #[error(
+        "output {txid}:{vout} pays {}, not the expected {}",
+        txout_summary(.actual),
+        txout_summary(.expected)
+    )]
+    OutputMismatch {
+        txid: bitcoin::Txid,
+        vout: u32,
+        expected: bitcoin::TxOut,
+        actual: bitcoin::TxOut,
+    },
     #[error("Bitcoin deposit check timed out")]
     TimedOut,
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
 
+fn txout_summary(txout: &bitcoin::TxOut) -> String {
+    const SHOWN: usize = 34;
+    let script = txout.script_pubkey.as_bytes();
+    format!(
+        "{} sat to script 0x{}{} ({} bytes)",
+        txout.value.to_sat(),
+        hex::encode(&script[..script.len().min(SHOWN)]),
+        if script.len() > SHOWN { "..." } else { "" },
+        script.len()
+    )
+}
+
 #[derive(Debug)]
 struct DepositCheckRequest {
     outpoint: bitcoin::OutPoint,
+    expected_txout: bitcoin::TxOut,
     confirmation_threshold: u32,
     result_tx: oneshot::Sender<Result<DepositConfirmation, DepositConfirmError>>,
 }
@@ -1464,12 +1488,20 @@ async fn process_deposit_check(
 ) -> DepositCheckWorkerResult {
     let DepositCheckRequest {
         outpoint,
+        expected_txout,
         confirmation_threshold,
         result_tx,
     } = request;
     let result = tokio::time::timeout(
         DEPOSIT_CHECK_TIMEOUT,
-        check_result_from_status(status, tip, confirmation_threshold, bitcoind_rpc, outpoint),
+        check_result_from_status(
+            status,
+            tip,
+            confirmation_threshold,
+            bitcoind_rpc,
+            outpoint,
+            expected_txout,
+        ),
     )
     .await
     .unwrap_or(Err(DepositConfirmError::TimedOut));
@@ -1486,6 +1518,7 @@ async fn check_result_from_status(
     confirmation_threshold: u32,
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     outpoint: bitcoin::OutPoint,
+    expected_txout: bitcoin::TxOut,
 ) -> Result<DepositConfirmation, DepositConfirmError> {
     match status {
         DepositStatus::Unchecked => unreachable!("discovery returned Unchecked"),
@@ -1500,6 +1533,14 @@ async fn check_result_from_status(
             is_coinbase,
             txout,
         } => {
+            if txout != expected_txout {
+                return Err(DepositConfirmError::OutputMismatch {
+                    txid: outpoint.txid,
+                    vout: outpoint.vout,
+                    expected: expected_txout,
+                    actual: txout,
+                });
+            }
             let confirmations = tip
                 .height
                 .saturating_add(1)
@@ -1902,11 +1943,13 @@ impl MonitorClient {
     pub async fn confirm_deposit(
         &self,
         outpoint: bitcoin::OutPoint,
+        expected_txout: bitcoin::TxOut,
         confirmation_threshold: u32,
     ) -> Result<DepositConfirmation, DepositConfirmError> {
         let (tx, rx) = oneshot::channel();
         let request = DepositCheckRequest {
             outpoint,
+            expected_txout,
             confirmation_threshold,
             result_tx: tx,
         };
@@ -2045,6 +2088,13 @@ mod tests {
         bitcoin::BlockHash::from_byte_array(bytes)
     }
 
+    fn deposit_txout() -> bitcoin::TxOut {
+        bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }
+    }
+
     fn deposit_check_request_for(
         outpoint: bitcoin::OutPoint,
     ) -> (
@@ -2055,6 +2105,7 @@ mod tests {
         (
             DepositCheckRequest {
                 outpoint,
+                expected_txout: deposit_txout(),
                 confirmation_threshold: 100,
                 result_tx,
             },
@@ -2601,10 +2652,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: block_info,
                 is_coinbase: false,
-                txout: bitcoin::TxOut {
-                    value: bitcoin::Amount::from_sat(1),
-                    script_pubkey: bitcoin::ScriptBuf::new(),
-                },
+                txout: deposit_txout(),
             },
         );
         let mut result_rxs = Vec::new();
@@ -2654,10 +2702,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: true,
-                txout: bitcoin::TxOut {
-                    value: bitcoin::Amount::from_sat(1),
-                    script_pubkey: bitcoin::ScriptBuf::new(),
-                },
+                txout: deposit_txout(),
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
@@ -2665,6 +2710,7 @@ mod tests {
                 "http://127.0.0.1:1",
             )),
             outpoint,
+            deposit_txout(),
         )
         .await
         .unwrap();
@@ -2676,6 +2722,41 @@ mod tests {
                 required_confirmations: 100,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn deposit_check_refuses_a_mismatched_output_without_rpc() {
+        let outpoint = make_outpoint(1);
+        let recorded = bitcoin::TxOut {
+            value: deposit_txout().value,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x60; 100_000]),
+        };
+        let result = check_result_from_status(
+            DepositStatus::InBlock {
+                checkpoint: HashCheckpoint::new(42, block_hash(2)),
+                is_coinbase: false,
+                txout: recorded.clone(),
+            },
+            HashCheckpoint::new(140, block_hash(3)),
+            6,
+            Arc::new(corepc_client::client_sync::v29::Client::new(
+                "http://127.0.0.1:1",
+            )),
+            outpoint,
+            deposit_txout(),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(DepositConfirmError::OutputMismatch { expected, actual, .. })
+                    if *expected == deposit_txout() && *actual == recorded
+            ),
+            "{:?}",
+            result.as_ref().map_err(ToString::to_string)
+        );
+        assert!(result.unwrap_err().to_string().len() < 300);
     }
 
     #[tokio::test]

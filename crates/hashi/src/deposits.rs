@@ -167,12 +167,19 @@ impl Hashi {
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
         let outpoint = deposit_request.utxo.id.into();
+        let expected_address = self
+            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
+            .map_err(UnapprovedDepositError::DepositAddressUnavailable)?;
+        let expected_txout = bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(deposit_request.utxo.amount),
+            script_pubkey: expected_address.script_pubkey(),
+        };
         // Read the threshold live from on-chain state so governance
         // updates take effect for new deposits without a restart.
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
         let check_result = self
             .btc_monitor()
-            .confirm_deposit(outpoint, confirmation_threshold)
+            .confirm_deposit(outpoint, expected_txout, confirmation_threshold)
             .await;
         let txout = match check_result {
             Ok(DepositConfirmation::Confirmed(txout)) => txout,
@@ -201,7 +208,10 @@ impl Hashi {
                 self.metrics.deposits_rejected_utxo_spent.inc();
                 return Err(UnapprovedDepositError::BitcoinUtxoSpent(anyhow!(e)));
             }
-            Err(e @ DepositConfirmError::InvalidVout { .. }) => {
+            Err(
+                e @ (DepositConfirmError::InvalidVout { .. }
+                | DepositConfirmError::OutputMismatch { .. }),
+            ) => {
                 return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(e)));
             }
             Err(e @ DepositConfirmError::TimedOut) => {
@@ -219,15 +229,14 @@ impl Hashi {
             )));
         }
 
-        self.validate_deposit_request_derivation_path(&txout.script_pubkey, deposit_request)
-            .await?;
+        self.validate_deposit_address(&txout.script_pubkey, &expected_address)?;
         Ok(())
     }
 
-    async fn validate_deposit_request_derivation_path(
+    fn validate_deposit_address(
         &self,
         script_pubkey: &ScriptBuf,
-        deposit_request: &DepositRequest,
+        expected_address: &hashi_bitcoin::BitcoinAddress,
     ) -> Result<(), UnapprovedDepositError> {
         let deposit_address = hashi_bitcoin::BitcoinAddress::from_script(
             script_pubkey,
@@ -238,11 +247,8 @@ impl Hashi {
                 "Failed to extract address from script_pubkey: {e}"
             ))
         })?;
-        let expected_address = self
-            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
-            .map_err(UnapprovedDepositError::DepositAddressUnavailable)?;
 
-        if deposit_address != expected_address {
+        if deposit_address != *expected_address {
             return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(
                 "Expected address {expected_address}, got address {deposit_address}",
             )));
@@ -651,6 +657,9 @@ mod tests {
         let network = hashi.config.bitcoin_network();
         let mpc_g = hashi.signing_verifying_key().unwrap();
         let request = deposit_request(Address::new([3; 32]));
+        let expected_address = hashi
+            .get_deposit_address(request.utxo.derivation_path.as_ref())
+            .unwrap();
         let expected_script = derive_deposit_address(
             &mpc_g,
             &guardian,
@@ -665,12 +674,10 @@ mod tests {
                 .script_pubkey();
 
         hashi
-            .validate_deposit_request_derivation_path(&expected_script, &request)
-            .await
+            .validate_deposit_address(&expected_script, &expected_address)
             .unwrap();
         let err = hashi
-            .validate_deposit_request_derivation_path(&other_script, &request)
-            .await
+            .validate_deposit_address(&other_script, &expected_address)
             .unwrap_err();
         assert!(
             matches!(err, UnapprovedDepositError::DepositDataMismatch(_)),
