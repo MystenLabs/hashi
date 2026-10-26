@@ -82,6 +82,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignDepositConfirmationResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        self.admit_committee_member(caller)?;
         let deposit_request = parse_deposit_request(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record("deposit_id", tracing::field::display(&deposit_request.id));
@@ -113,6 +114,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalRequestApprovalResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        self.admit_committee_member(caller)?;
         let approval = parse_withdrawal_request_approval(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current()
@@ -417,6 +419,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalConfirmationResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        self.admit_committee_member(caller)?;
         let withdrawal_txn_id = Address::from_bytes(&request.get_ref().withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
         tracing::Span::current().record(
@@ -679,6 +682,6 @@ fn parse_mpc_input_signatures(
     })
 }
 
-fn parse_address(bytes: &[u8]) -> anyhow::Result<sui_sdk_types::Address> {
-    sui_sdk_types::Address::from_bytes(bytes).context("invalid address")
+fn parse_address(bytes: &[u8]) -> anyhow::Result<Address> {
+    Address::from_bytes(bytes).context("invalid address")
 }
