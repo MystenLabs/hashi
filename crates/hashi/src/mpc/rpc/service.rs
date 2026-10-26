@@ -301,7 +301,7 @@ impl MpcService for HttpService {
                     refusal,
                 ));
             }
-            Ok(GetPublicMpcOutputResponse::from(&output))
+            Ok(Arc::unwrap_or_clone(output))
         })
         .await?;
         Ok(tonic::Response::new(response))

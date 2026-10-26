@@ -114,6 +114,14 @@ impl<T> VerifiedNonceCerts<T> {
 }
 
 impl MpcManager {
+    fn decoded_public_output(
+        &self,
+        request: &GetPublicMpcOutputRequest,
+    ) -> MpcResult<GetPublicMpcOutputResponse> {
+        self.handle_get_public_mpc_output_request(request)
+            .map(|response| GetPublicMpcOutputResponse::try_from(&*response).unwrap())
+    }
+
     fn avid_certified_nonce_dealers_from_certs(
         &self,
         certs: &VerifiedNonceCerts<CertificateV1>,
@@ -453,7 +461,7 @@ fn rotation_peer_signatures(
         let Some(signer) = managers.get_mut(&signer_addr) else {
             continue;
         };
-        let signer_prev = signer.previous_output.clone().unwrap();
+        let signer_prev = signer.previous_output().cloned().unwrap();
         // Empty rotation messages are deliberately left unregistered: some
         // tests assert on the filter that excludes such dealers.
         if let Messages::Rotation(msgs) = messages
@@ -605,7 +613,7 @@ impl P2PChannel for MockP2PChannel {
             .map_err(|e| {
                 crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
             })?;
-        let response = proto::GetPublicMpcOutputResponse::from(&response);
+        let response = Arc::unwrap_or_clone(response);
         if prost::Message::encoded_len(&response) > response_limit {
             return Err(crate::communication::ChannelError::ResponseTooLarge(
                 format!(
@@ -6835,7 +6843,7 @@ impl RotationTestSetup {
             &test_metrics(),
         )
         .unwrap();
-        manager.previous_output = Some(dkg_output);
+        manager.set_previous_output(dkg_output);
         manager
     }
 
@@ -7032,7 +7040,7 @@ fn test_send_messages_does_not_persist_a_batch_with_a_foreign_share_index() {
 
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(1);
-    receiver_manager.previous_output = Some(receiver_dkg_output);
+    receiver_manager.set_previous_output(receiver_dkg_output);
 
     let attacker_addr = rotation_setup.setup.address(3);
     assert_ne!(attacker_addr, dealer_addr);
@@ -7439,7 +7447,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
                 .try_write()
                 .expect("callback must run outside the lock");
             assert_eq!(epoch, manager.previous_epoch);
-            assert!(manager.previous_output.is_some());
+            assert!(manager.previous_output().is_some());
             assert!(!output.key_shares.shares.is_empty());
             captured_previous = true;
         },
@@ -7458,7 +7466,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
         "dealing means a published rotation certificate, not just a clean return"
     );
     assert!(
-        departing.read().unwrap().current_output.is_none(),
+        departing.read().unwrap().current_output().is_none(),
         "a dealer-only run holds no share of the new key"
     );
 }
@@ -7583,14 +7591,14 @@ async fn test_run_key_rotation() {
     // reconstruction needs the epoch at which DKG messages were actually
     // created (100), so override.
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     // Create other managers for MockP2PChannel (validators 1-4)
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
+        manager.set_previous_output(output);
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
@@ -7607,7 +7615,7 @@ async fn test_run_key_rotation() {
         // First, get the data we need from manager 3
         let (rotation_messages, own_sig, epoch, _prev_output_3) = {
             let manager = other_managers.get_mut(&addr).unwrap();
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
             manager.current_rotation_messages.insert(addr, msgs);
@@ -7626,7 +7634,7 @@ async fn test_run_key_rotation() {
         for other_validator_idx in [1, 3, 4] {
             let other_addr = rotation_setup.setup.address(other_validator_idx);
             let other_manager = other_managers.get_mut(&other_addr).unwrap();
-            let other_prev_output = other_manager.previous_output.clone().unwrap();
+            let other_prev_output = other_manager.previous_output().cloned().unwrap();
             if let Messages::Rotation(ref msgs) = rotation_messages {
                 other_manager
                     .current_rotation_messages
@@ -7730,14 +7738,14 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     // Create other managers for MockP2PChannel (validators 1-4)
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
+        manager.set_previous_output(output);
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
@@ -7752,7 +7760,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
 
             let (rotation_messages, own_sig, epoch) = {
                 let manager = other_managers.get_mut(&addr).unwrap();
-                let prev_output = manager.previous_output.clone().unwrap();
+                let prev_output = manager.previous_output().cloned().unwrap();
                 let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
                 let rotation_messages = Messages::Rotation(msgs.clone());
                 manager.current_rotation_messages.insert(addr, msgs.clone());
@@ -7778,7 +7786,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                     continue;
                 }
                 let signer = other_managers.get_mut(&signer_addr).unwrap();
-                let signer_prev = signer.previous_output.clone().unwrap();
+                let signer_prev = signer.previous_output().cloned().unwrap();
                 if let Messages::Rotation(ref msgs) = rotation_messages {
                     signer.current_rotation_messages.insert(addr, msgs.clone());
                 }
@@ -7840,12 +7848,12 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
 
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
+        manager.set_previous_output(output);
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
@@ -7863,7 +7871,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
             manager
                 .current_rotation_messages
                 .insert(validator_2_addr, empty_msgs);
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, validator_2_addr, &rotation_messages)
                 .unwrap();
@@ -7898,7 +7906,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         // Validator 1: valid rotation messages (weight=20).
         let (v1_rotation_messages, v1_own_sig, epoch) = {
             let manager = other_managers.get_mut(&validator_1_addr).unwrap();
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
             manager
@@ -7992,13 +8000,13 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
 
     // Create other managers for MockP2PChannel (validators 1-4)
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
+        manager.set_previous_output(output);
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
 
@@ -8018,7 +8026,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         // Validator 2 creates two different rotation messages
         let (correct_messages, wrong_messages) = {
             let manager = other_managers.get_mut(&addr_2).unwrap();
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             let correct_msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let wrong_msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             (
@@ -8029,7 +8037,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
 
         // test_manager processes the WRONG message (simulates RPC handler)
         {
-            let prev_output = test_manager.previous_output.clone().unwrap();
+            let prev_output = test_manager.previous_output().cloned().unwrap();
             if let Messages::Rotation(ref msgs) = wrong_messages {
                 test_manager
                     .current_rotation_messages
@@ -8045,7 +8053,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         let own_sig;
         {
             let manager = other_managers.get_mut(&addr_2).unwrap();
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             if let Messages::Rotation(ref msgs) = correct_messages {
                 manager
                     .current_rotation_messages
@@ -8064,7 +8072,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
                 continue;
             }
             let signer = other_managers.get_mut(&signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
+            let signer_prev = signer.previous_output().cloned().unwrap();
             if let Messages::Rotation(msgs) = &correct_messages {
                 signer
                     .current_rotation_messages
@@ -8104,7 +8112,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
 
         let (rotation_messages, own_sig, epoch) = {
             let manager = other_managers.get_mut(&addr_3).unwrap();
-            let prev_output = manager.previous_output.clone().unwrap();
+            let prev_output = manager.previous_output().cloned().unwrap();
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
             manager.current_rotation_messages.insert(addr_3, msgs);
@@ -8121,7 +8129,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
                 continue;
             }
             let signer = other_managers.get_mut(&signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
+            let signer_prev = signer.previous_output().cloned().unwrap();
             if let Messages::Rotation(msgs) = &rotation_messages {
                 signer
                     .current_rotation_messages
@@ -8147,7 +8155,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
     // Build expected key_shares from a reference validator 0 that processes correct messages.
     let expected_key_shares = {
         let (mut ref_manager, ref_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
-        ref_manager.previous_output = Some(ref_dkg_output.clone());
+        ref_manager.set_previous_output(ref_dkg_output.clone());
         for (dealer, msgs) in &correct_rotation_msgs {
             if let Messages::Rotation(rot_msgs) = msgs {
                 ref_manager
@@ -8225,7 +8233,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         rotation_setup.create_rotation_dealer_with_memory_store(test_party_idx);
     let test_addr = rotation_setup.setup.address(test_party_idx);
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
 
     // Create cheating dealer (validator 3) to get DKG output and share values
     let (cheating_dealer_mgr, cheating_dkg_output, honest_rotation_messages) =
@@ -8265,7 +8273,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let cheating_dealer_sig = {
         let (mut mgr, output) =
             rotation_setup.create_receiver_with_memory_store(cheating_dealer_idx);
-        mgr.previous_output = Some(output.clone());
+        mgr.set_previous_output(output.clone());
         if let Messages::Rotation(ref msgs) = cheating_rotation_messages {
             mgr.current_rotation_messages
                 .insert(cheating_dealer_addr, msgs.clone());
@@ -8280,7 +8288,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let mut signer_sigs = Vec::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output.clone());
+        manager.set_previous_output(output.clone());
         // Store and process cheating messages (their shares are fine)
         if let Messages::Rotation(ref msgs) = cheating_rotation_messages {
             manager
@@ -8373,7 +8381,7 @@ async fn test_prepare_previous_output_for_new_member() {
     let mut existing_managers_map = HashMap::new();
     for i in 0..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
+        manager.set_previous_output(output);
         existing_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
 
@@ -8382,8 +8390,7 @@ async fn test_prepare_previous_output_for_new_member() {
         .values()
         .next()
         .unwrap()
-        .previous_output
-        .as_ref()
+        .previous_output()
         .unwrap();
     let expected_public_key = expected_output.public_key;
     let expected_threshold = expected_output.threshold;
@@ -8540,8 +8547,8 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
         manager.previous_epoch = epoch;
+        manager.set_previous_output(output);
         for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
             let dealer_addr = rotation_setup
                 .setup
@@ -8618,8 +8625,8 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output);
         manager.previous_epoch = epoch;
+        manager.set_previous_output(output);
         for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
             let dealer_addr = rotation_setup
                 .setup
@@ -8695,7 +8702,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
-            mgr.previous_output = Some(output.clone());
+            mgr.set_previous_output(output.clone());
             (i, mgr, output)
         })
         .collect();
@@ -8752,7 +8759,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     // Peers have rotation messages in their in-memory map.
@@ -8763,7 +8770,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     }
     // Add remaining validators (3) that don't have rotation messages.
     let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
-    mgr3.previous_output = Some(out3);
+    mgr3.set_previous_output(out3);
     other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
 
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
@@ -8801,7 +8808,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
-            mgr.previous_output = Some(output.clone());
+            mgr.set_previous_output(output.clone());
             (i, mgr, output)
         })
         .collect();
@@ -8854,7 +8861,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     for (dealer, msgs) in &dealer_rotation_messages {
         if *dealer != past_prefix {
             test_manager
@@ -8869,7 +8876,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
         other_managers_map.insert(rotation_setup.setup.address(i), mgr);
     }
     let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
-    mgr3.previous_output = Some(out3);
+    mgr3.set_previous_output(out3);
     other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
@@ -8903,7 +8910,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
-            mgr.previous_output = Some(output.clone());
+            mgr.set_previous_output(output.clone());
             (i, mgr, output)
         })
         .collect();
@@ -8968,7 +8975,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     test_manager
         .persist_and_cache_rotation_messages(epoch, diverged_dealer, &diverged)
         .unwrap();
@@ -8990,7 +8997,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         other_managers_map.insert(rotation_setup.setup.address(i), mgr);
     }
     let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
-    mgr3.previous_output = Some(out3);
+    mgr3.set_previous_output(out3);
     other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
@@ -9040,7 +9047,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
-            mgr.previous_output = Some(output.clone());
+            mgr.set_previous_output(output.clone());
             (i, mgr, output)
         })
         .collect();
@@ -9093,7 +9100,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     for (dealer_addr, msgs) in &certified {
         test_manager
             .persist_and_cache_rotation_messages(epoch, *dealer_addr, msgs)
@@ -9106,7 +9113,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         other_managers_map.insert(rotation_setup.setup.address(i), mgr);
     }
     let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
-    mgr3.previous_output = Some(out3);
+    mgr3.set_previous_output(out3);
     other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
@@ -9309,7 +9316,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
         .iter()
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
-            mgr.previous_output = Some(output.clone());
+            mgr.set_previous_output(output.clone());
             (i, mgr, output)
         })
         .collect();
@@ -9381,7 +9388,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
-    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager.set_previous_output(test_dkg_output.clone());
     test_manager
         .persist_and_cache_rotation_messages(epoch, unrepairable, &diverged_first)
         .unwrap();
@@ -9395,7 +9402,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
         other_managers_map.insert(rotation_setup.setup.address(i), mgr);
     }
     let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
-    mgr3.previous_output = Some(out3);
+    mgr3.set_previous_output(out3);
     other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
@@ -9633,7 +9640,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     let (mut dealer_manager, dealer_dkg_output, valid_rotation_messages) =
         rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
     let dealer_addr = rotation_setup.setup.address(dealer_idx);
-    dealer_manager.previous_output = Some(dealer_dkg_output.clone());
+    dealer_manager.set_previous_output(dealer_dkg_output.clone());
 
     // Get the rotation messages map
     let valid_rotation_map = match &valid_rotation_messages {
@@ -9718,7 +9725,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     let mut other_managers_map = HashMap::new();
     for i in [1usize, 3, 4] {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
-        manager.previous_output = Some(output.clone());
+        manager.set_previous_output(output.clone());
         // Store the cheating messages - other parties can still process them
         manager
             .current_rotation_messages
@@ -10013,7 +10020,7 @@ fn test_handle_complain_request_success() {
     let responder_idx = 1;
     let (mut responder_manager, responder_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(responder_idx);
-    responder_manager.previous_output = Some(responder_dkg_output.clone());
+    responder_manager.set_previous_output(responder_dkg_output.clone());
 
     // Responder stores the cheating messages
     if let Messages::Rotation(ref msgs) = cheating_messages {
@@ -10165,7 +10172,7 @@ fn test_handle_complain_request_rejects_dealer_that_does_not_own_the_share_index
     let responder_idx = 1;
     let (mut responder_manager, responder_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(responder_idx);
-    responder_manager.previous_output = Some(responder_dkg_output.clone());
+    responder_manager.set_previous_output(responder_dkg_output.clone());
 
     if let Messages::Rotation(ref msgs) = cheating_messages {
         responder_manager
@@ -10229,7 +10236,7 @@ fn test_rotation_output_lookup_is_not_shared_across_dealers() {
     let responder_idx = 1;
     let (mut responder_manager, responder_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(responder_idx);
-    responder_manager.previous_output = Some(responder_dkg_output.clone());
+    responder_manager.set_previous_output(responder_dkg_output.clone());
     responder_manager
         .current_rotation_messages
         .insert(dealer_addr, rotation_map.clone());
@@ -11299,10 +11306,7 @@ fn test_recover_current_dkg() {
     };
     assert_eq!(output.public_key, expected_public_key);
     assert!(
-        mgr.read()
-            .unwrap()
-            .handle_get_public_mpc_output_request(&req)
-            .is_ok(),
+        mgr.read().unwrap().decoded_public_output(&req).is_ok(),
         "Recovered must commit current_output (served for the current epoch)"
     );
 
@@ -11315,10 +11319,7 @@ fn test_recover_current_dkg() {
         MpcOutputRecoveryOutcome::Suspicious(_)
     ));
     assert!(
-        mgr.read()
-            .unwrap()
-            .handle_get_public_mpc_output_request(&req)
-            .is_err(),
+        mgr.read().unwrap().decoded_public_output(&req).is_err(),
         "Suspicious must not commit current_output"
     );
 
@@ -11473,7 +11474,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     assert!(
         mgr.read()
             .unwrap()
-            .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch })
+            .decoded_public_output(&GetPublicMpcOutputRequest { epoch })
             .is_err(),
         "declining recovery must not commit current_output"
     );
@@ -11549,7 +11550,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             &test_metrics(),
         )
         .unwrap();
-        dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
+        dealer_manager.set_previous_output(dkg_outputs[dealer_idx].clone());
 
         // Create rotation messages (encrypted for epoch 101's nodes)
         let msgs = dealer_manager.create_rotation_messages(&dkg_outputs[dealer_idx], &mut rng);
@@ -11584,7 +11585,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             &test_metrics(),
         )
         .unwrap();
-        other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
+        other_manager.set_previous_output(dkg_outputs[other_idx].clone());
         let other_sig = other_manager
             .try_sign_rotation_messages(&dkg_outputs[other_idx], dealer_addr, &rotation_messages)
             .unwrap();
@@ -11783,7 +11784,7 @@ fn test_recover_current_rotation() {
             &test_metrics(),
         )
         .unwrap();
-        m.previous_output = Some(dkg_outputs[idx].clone());
+        m.set_previous_output(dkg_outputs[idx].clone());
         m
     };
     for &dealer_idx in &rotation_dealer_indices {
@@ -11891,14 +11892,14 @@ fn test_recover_current_rotation() {
     assert!(
         mgr.read()
             .unwrap()
-            .handle_get_public_mpc_output_request(&current_req)
+            .decoded_public_output(&current_req)
             .is_ok(),
         "current_output must be committed for the rotation epoch"
     );
     assert!(
         mgr.read()
             .unwrap()
-            .handle_get_public_mpc_output_request(&previous_req)
+            .decoded_public_output(&previous_req)
             .is_ok(),
         "previous_output must be committed (epoch N-1 key for new-member bootstrap)"
     );
@@ -11919,7 +11920,7 @@ fn test_recover_current_rotation() {
     assert!(
         mgr.read()
             .unwrap()
-            .handle_get_public_mpc_output_request(&current_req)
+            .decoded_public_output(&current_req)
             .is_err(),
         "Suspicious must not commit current_output"
     );
@@ -12051,7 +12052,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             &test_metrics(),
         )
         .unwrap();
-        m.previous_output = Some(dkg_outputs[idx].clone());
+        m.set_previous_output(dkg_outputs[idx].clone());
         m
     };
 
@@ -12269,7 +12270,7 @@ fn test_handle_send_messages_request_rotation() {
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output);
+    receiver.set_previous_output(receiver_dkg_output);
 
     let _ = dealer_dkg_output;
     let response = send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
@@ -12287,7 +12288,7 @@ fn test_handle_send_messages_request_rotation_idempotent() {
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output);
+    receiver.set_previous_output(receiver_dkg_output);
 
     let response1 = send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
     // Second call with identical request → cached response
@@ -12314,7 +12315,7 @@ fn test_handle_send_messages_request_rotation_equivocation() {
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output);
+    receiver.set_previous_output(receiver_dkg_output);
 
     // First succeeds
     send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages1);
@@ -12333,7 +12334,7 @@ fn test_handle_retrieve_messages_request_rotation_success() {
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output);
+    receiver.set_previous_output(receiver_dkg_output);
 
     send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
     retrieve_and_verify_hash(&receiver, dealer_addr, &rotation_messages);
@@ -12345,7 +12346,7 @@ fn test_handle_retrieve_messages_request_rotation_serves_cached_bytes() {
     let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let dealer_addr = rotation_setup.setup.address(0);
     let (mut receiver, receiver_dkg_output) = rotation_setup.create_receiver_with_completed_dkg(2);
-    receiver.previous_output = Some(receiver_dkg_output);
+    receiver.set_previous_output(receiver_dkg_output);
     send_and_assert_ok(&mut receiver, dealer_addr, &rotation_messages);
 
     let request = RetrieveMessagesRequest {
@@ -12417,7 +12418,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output.clone());
+    receiver.set_previous_output(receiver_dkg_output.clone());
 
     // Build a complaint using wrong key
     let session_id = receiver
@@ -12476,7 +12477,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
     let receiver_idx = 2;
     let (mut receiver, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(receiver_idx);
-    receiver.previous_output = Some(receiver_dkg_output.clone());
+    receiver.set_previous_output(receiver_dkg_output.clone());
 
     // Insert rotation messages but do NOT process them (no dealer_outputs)
     if let Messages::Rotation(ref msgs) = rotation_messages {
@@ -12607,7 +12608,7 @@ fn test_handle_complain_request_rotation_caches_response() {
     let responder_idx = 1;
     let (mut responder, responder_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(responder_idx);
-    responder.previous_output = Some(responder_dkg_output.clone());
+    responder.set_previous_output(responder_dkg_output.clone());
     if let Messages::Rotation(ref msgs) = cheating_messages {
         responder
             .current_rotation_messages
@@ -17460,7 +17461,7 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
     // Both slots empty: queries for N and N-1 get "not yet available".
     for epoch in [current_epoch, previous_epoch] {
         let err = manager
-            .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch })
+            .decoded_public_output(&GetPublicMpcOutputRequest { epoch })
             .unwrap_err();
         assert!(
             matches!(err, MpcError::NotFound(ref msg) if msg.contains("not yet available")),
@@ -17470,7 +17471,7 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
 
     // Query for an out-of-range epoch with both slots empty.
     let err = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: current_epoch + 1,
         })
         .unwrap_err();
@@ -17479,7 +17480,7 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
         "expected out-of-range NotFound, got {err:?}",
     );
     let err = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: previous_epoch - 1,
         })
         .unwrap_err();
@@ -17489,15 +17490,15 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
     );
 
     // Set only previous_output: N-1 served, N still unavailable.
-    manager.previous_output = Some(output.clone());
+    manager.set_previous_output(output.clone());
     let response = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: previous_epoch,
         })
         .unwrap();
     assert_eq!(response.output, expected_public);
     let err = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: current_epoch,
         })
         .unwrap_err();
@@ -17507,15 +17508,15 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
     );
 
     // Set current_output: N now served alongside N-1.
-    manager.current_output = Some(output.clone());
+    manager.set_current_output(output.clone());
     let response = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: current_epoch,
         })
         .unwrap();
     assert_eq!(response.output, expected_public);
     let response = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: previous_epoch,
         })
         .unwrap();
@@ -17523,7 +17524,7 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
 
     // Out-of-range requests still rejected.
     let err = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+        .decoded_public_output(&GetPublicMpcOutputRequest {
             epoch: current_epoch + 1,
         })
         .unwrap_err();
@@ -17617,18 +17618,18 @@ fn test_handle_get_public_mpc_output_jumped_state_uses_previous_epoch() {
 
     let rotation_setup = RotationTestSetup::new();
     let (_, output) = rotation_setup.create_receiver_with_completed_dkg(0);
-    manager.previous_output = Some(output.clone());
+    manager.set_previous_output(output.clone());
     let expected_public = PublicMpcOutput::from_mpc_output(&output);
 
     let response = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch: prev_epoch })
+        .decoded_public_output(&GetPublicMpcOutputRequest { epoch: prev_epoch })
         .expect("request for actual source epoch should succeed");
     assert_eq!(response.output, expected_public);
 
     let stale_epoch = current_epoch - 1;
     assert!(stale_epoch != prev_epoch, "test setup mistake");
     let err = manager
-        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch: stale_epoch })
+        .decoded_public_output(&GetPublicMpcOutputRequest { epoch: stale_epoch })
         .unwrap_err();
     assert!(
         matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
@@ -19623,7 +19624,7 @@ fn a_rotation_map_is_checked_before_the_manager_lock() {
     let dealer = rotation_setup.setup.address(0);
     let (_, _, messages) = rotation_setup.create_rotation_dealer(0);
     let (mut receiver, dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
-    receiver.previous_output = Some(dkg_output);
+    receiver.set_previous_output(dkg_output);
     let epoch = receiver.mpc_config.epoch;
     let Some(proto::send_messages_request::Messages::RotationMessages(honest)) =
         SendMessagesRequest { messages }.to_proto(epoch).messages

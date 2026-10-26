@@ -20,6 +20,7 @@ use crate::metrics::STORED_ROW_LOAD;
 use crate::metrics::STORED_ROW_READ;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
+use crate::mpc::public_outputs::MpcOutputs;
 use crate::mpc::rpc::public_output_response_limit;
 use crate::mpc::rpc::response_checks;
 use crate::mpc::shape_params::CommitteeShape;
@@ -217,8 +218,7 @@ pub struct MpcManager {
     /// manager produces or verifies.
     pub hashi_object_id: Address,
     pub previous_epoch: u64,
-    previous_output: Option<MpcOutput>,
-    current_output: Option<MpcOutput>,
+    outputs: MpcOutputs,
     pub batch_size_per_weight: u16,
 
     // Mutable during the epoch
@@ -571,8 +571,7 @@ impl MpcManager {
             chain_id: chain_id.to_string(),
             hashi_object_id,
             previous_epoch,
-            previous_output: None,
-            current_output: None,
+            outputs: MpcOutputs::default(),
             batch_size_per_weight,
             dealer_avid_nonce_outputs: BTreeMap::new(),
             avid_party_phases: HashMap::new(),
@@ -658,8 +657,8 @@ impl MpcManager {
             }
             PreparedMessages::Rotation(entry) => {
                 let previous = self
-                    .previous_output
-                    .clone()
+                    .previous_output()
+                    .cloned()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
                 self.reject_unowned_rotation_indices(sender, &entry)?;
                 self.persist_and_cache_rotation_entry(sender, Arc::clone(&entry))?;
@@ -997,27 +996,10 @@ impl MpcManager {
     pub fn handle_get_public_mpc_output_request(
         &self,
         request: &GetPublicMpcOutputRequest,
-    ) -> MpcResult<GetPublicMpcOutputResponse> {
-        let output = if request.epoch == self.mpc_config.epoch {
-            // Reduce availability lag
-            self.current_output.as_ref()
-        } else if request.epoch == self.previous_epoch {
-            self.previous_output.as_ref()
-        } else {
-            return Err(MpcError::NotFound(format!(
-                "no DKG output for epoch {} (current epoch is {})",
-                request.epoch, self.mpc_config.epoch
-            )));
-        };
-        let output = output.ok_or_else(|| {
-            MpcError::NotFound(format!(
-                "DKG output for epoch {} not yet available",
-                request.epoch
-            ))
-        })?;
-        Ok(GetPublicMpcOutputResponse {
-            output: PublicMpcOutput::from_mpc_output(output),
-        })
+    ) -> MpcResult<Arc<proto::GetPublicMpcOutputResponse>> {
+        self.outputs
+            .public()
+            .lookup(request.epoch, self.mpc_config.epoch, self.previous_epoch)
     }
 
     // TODO: Consider making dealer and party flows concurrent
@@ -3279,20 +3261,12 @@ impl MpcManager {
             .is_some_and(|weight| weight == 0)
     }
 
-    /// Whether this manager carries the MPC output for its own epoch, which
-    /// is what `handle_get_public_mpc_output_request` serves to peers. Set by
-    /// the protocol runs and by the reconstruction in the recovery path, so a
-    /// manager that is missing it was installed but never finished recovering
-    /// (the rotation path sets the previous epoch's output alongside it).
     pub(crate) fn has_current_output(&self) -> bool {
-        self.current_output.is_some()
+        self.current_output().is_some()
     }
 
-    /// Borrow only this epoch's completed private output, never a previous or
-    /// public-only output reconstructed for a node without shares.
     pub(crate) fn recovery_output_for_epoch(&self, epoch: u64) -> Option<&MpcOutput> {
-        self.current_output
-            .as_ref()
+        self.current_output()
             .filter(|output| self.mpc_config.epoch == epoch && !output.key_shares.shares.is_empty())
     }
 
@@ -6784,12 +6758,21 @@ impl MpcManager {
         nodes.clone()
     }
 
+    fn current_output(&self) -> Option<&MpcOutput> {
+        self.outputs.current()
+    }
+
+    fn previous_output(&self) -> Option<&MpcOutput> {
+        self.outputs.previous()
+    }
+
     fn set_current_output(&mut self, output: MpcOutput) {
-        self.current_output = Some(output);
+        self.outputs.set_current(self.mpc_config.epoch, output);
     }
 
     fn set_previous_output(&mut self, output: MpcOutput) {
-        self.previous_output = Some(output);
+        self.outputs
+            .set_previous(self.previous_epoch, self.mpc_config.epoch, output);
     }
 }
 
