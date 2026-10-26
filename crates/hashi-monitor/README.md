@@ -46,7 +46,7 @@ finding is an ERROR log line `monitor finding`, and it sets the metric
 | `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
 | `GuardianClockSkew` | A guardian log's signed time differs from S3's time by more than 30 s. |
 | `BtcRpcInconsistency` | A Bitcoin answer contradicts an earlier one: a lying node or a reorg. |
-| `SourceStale` | Sui, the guardian, or Bitcoin is checked more than 3 hours behind. |
+| `SourceStale` | Sui, the guardian, or Bitcoin is checked more than 3 hours behind, or no daily pool check succeeded for 27 hours. |
 | `SnapshotStale` | No snapshot save has succeeded for 12 hours. |
 
 ## Running the monitor

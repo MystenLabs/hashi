@@ -20,7 +20,7 @@
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
 //! 9. Report timing violations and save snapshots every `STATE_TICK_INTERVAL`.
 //! 10. Log a failed source tick. The next tick of that source retries it.
-//! 11. At each state tick, report a source or a snapshot save that is behind its limit.
+//! 11. At each state tick, report a source, the daily pool check, or a snapshot save that is behind its limit.
 //! 12. After each pool maintenance tick, check that the UTXO pool backs the hBTC supply.
 //!
 //! Assumptions:
@@ -126,6 +126,9 @@ pub struct Auditor {
     /// When the last successful pool check finished. `None` until one
     /// succeeds in this run.
     last_successful_pool_check: Option<UnixSeconds>,
+    /// When the audit loop started, after the first catch-up. Staleness of a
+    /// check that has not succeeded yet counts from here.
+    started_at: UnixSeconds,
     /// When the last snapshot save succeeded.
     last_snapshot_save: UnixSeconds,
     /// Since when the hBTC supply has exceeded the pool value, if it does.
@@ -182,6 +185,7 @@ impl Auditor {
             metrics,
             store,
             last_successful_pool_check: None,
+            started_at: now_timestamp_secs(),
             last_snapshot_save: 0,
             hbtc_supply_above_pool_since: None,
         };
@@ -423,7 +427,9 @@ impl Auditor {
             self.oldest_open_withdrawals(),
             self.oldest_open_deposits(),
         );
-        let stale = self.rpc_pollers.stale_sources(now_timestamp_secs());
+        let now = now_timestamp_secs();
+        let mut stale = self.rpc_pollers.stale_sources(now);
+        stale.extend(self.stale_pool_check(now));
         self.report_findings("progress", &stale);
 
         self.save_snapshot().await;
@@ -444,6 +450,8 @@ impl Auditor {
         Self::log_initial_catch_up(SOURCE_GUARDIAN, guardian);
         let btc = self.tick_btc();
         Self::log_initial_catch_up(SOURCE_BTC, btc);
+        // A first run can catch up for hours. That time is not a stale check.
+        self.started_at = now_timestamp_secs();
 
         let mut sui_ticker = tokio::time::interval(SUI_POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(GUARDIAN_POLL_INTERVAL);
@@ -594,6 +602,7 @@ mod tests {
             metrics: Arc::new(MonitorMetrics::new()),
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            started_at: approved_at,
             last_snapshot_save: approved_at,
             hbtc_supply_above_pool_since: None,
         }
@@ -752,6 +761,7 @@ mod tests {
             metrics,
             store: SnapshotStore::in_memory(),
             last_successful_pool_check: None,
+            started_at: cursor,
             last_snapshot_save: cursor,
             hbtc_supply_above_pool_since: None,
         }
