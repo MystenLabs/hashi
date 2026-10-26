@@ -9,9 +9,10 @@
 //!
 //! How it works:
 //! 1. Read Sui events and guardian logs into the flow machines.
-//! 2. Check Bitcoin confirmations after each withdrawal has both Sui and guardian approvals.
-//! 3. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
-//! 4. Leave pool updates and checks to the auditor scheduler.
+//! 2. Before the mint, check that each fresh deposit approval names an unspent outpoint.
+//! 3. Check Bitcoin confirmations after each withdrawal has both Sui and guardian approvals.
+//! 4. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
+//! 5. Leave pool updates and checks to the auditor scheduler.
 
 use super::Auditor;
 use crate::config::Config;
@@ -26,7 +27,7 @@ use crate::rpc::btc::checked_confirmation_threshold;
 use crate::rpc::guardian::GuardianCursor;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::rpc::sui::SuiPoller;
-use crate::rpc::sui::read_confirmation_threshold;
+use crate::rpc::sui::read_hashi_settings;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 use bitcoin::Txid;
@@ -48,6 +49,8 @@ pub struct RpcPollers {
     /// time. Thus a Bitcoin node that is down at startup becomes stale only
     /// after `SOURCE_STALE_LIMIT`.
     btc_checked_through: UnixSeconds,
+    /// Move's minimum time from a deposit approval to its mint, in seconds.
+    pub deposit_delay_secs: u64,
 }
 
 impl RpcPollers {
@@ -61,11 +64,16 @@ impl RpcPollers {
         let (hashi_btc_keys, hashi_object_id) = guardian_poller
             .read_hashi_identity(cfg.deployment.bitcoin_network)
             .await?;
+        let settings = read_hashi_settings(&cfg.sui, hashi_object_id).await?;
         let confirmations = checked_confirmation_threshold(
-            read_confirmation_threshold(&cfg.sui, hashi_object_id).await?,
+            settings.confirmation_threshold,
             cfg.deployment.bitcoin_network,
         )?;
-        tracing::info!(confirmations, "read Hashi's Bitcoin confirmation threshold");
+        tracing::info!(
+            confirmations,
+            deposit_delay_secs = settings.deposit_delay_secs,
+            "read Hashi's Bitcoin confirmation threshold and deposit delay"
+        );
         let mut sui_poller = SuiPoller::new(&cfg.sui, hashi_btc_keys, sui_start)?;
         sui_poller.find_hbtc_treasury_cap(hashi_object_id).await?;
         Ok(Self {
@@ -73,6 +81,7 @@ impl RpcPollers {
             sui_poller,
             btc_client: BtcRpcClient::new(cfg, confirmations)?,
             btc_checked_through: now_timestamp_secs(),
+            deposit_delay_secs: settings.deposit_delay_secs,
         })
     }
 
@@ -203,6 +212,9 @@ impl Auditor {
     /// taken before the lookups, so the machines record it as their check time.
     fn fetch_btc_info(&mut self, started_at: UnixSeconds) -> anyhow::Result<Vec<MonitorFinding>> {
         let tip_height = self.rpc_pollers.btc_client.synced_height()?;
+        // Report now, so that a later error in this tick does not lose them.
+        let fresh = self.check_fresh_approvals(tip_height, started_at)?;
+        self.report_findings("btc", &fresh);
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
         self.rpc_pollers.btc_client.forget_unconfirmed();
@@ -254,6 +266,7 @@ impl RpcPollers {
             sui_poller: poller_scanned(timestamp),
             btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
             btc_checked_through: timestamp,
+            deposit_delay_secs: 600,
         }
     }
 }

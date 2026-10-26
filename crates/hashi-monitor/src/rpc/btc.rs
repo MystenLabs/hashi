@@ -111,10 +111,11 @@ pub enum OutpointState {
     /// The transaction is unknown or not confirmed deep enough, or it has no
     /// output at that vout.
     Missing,
-    /// The output exists, and a confirmed transaction has spent it.
+    /// The output exists, and a confirmed transaction has spent it. With
+    /// `include_mempool`, a mempool transaction also counts.
     Spent,
-    /// The output exists and is in the UTXO set. A mempool spend does not
-    /// change this.
+    /// The output exists and is in the UTXO set. Without `include_mempool`,
+    /// a mempool spend does not change this.
     Unspent {
         /// The time of the block that holds the output.
         block_time: UnixSeconds,
@@ -309,11 +310,13 @@ impl BtcRpcClient {
     }
 
     /// The state of each outpoint on Bitcoin. The transactions are fetched
-    /// fresh, and the confirmation cache is not touched.
+    /// fresh, and the confirmation cache is not touched. `include_mempool`
+    /// also counts a spend in the mempool.
     pub fn lookup_outpoint_states(
         &self,
         outpoints: &[OutPoint],
         tip_height: u64,
+        include_mempool: bool,
     ) -> anyhow::Result<HashMap<OutPoint, OutpointState>> {
         let txids = outpoints
             .iter()
@@ -348,7 +351,9 @@ impl BtcRpcClient {
             .iter()
             .map(|(outpoint, _)| *outpoint)
             .collect::<Vec<_>>();
-        let unspent = self.transport.lookup_unspent(&existing_outpoints)?;
+        let unspent = self
+            .transport
+            .lookup_unspent(&existing_outpoints, include_mempool)?;
         for (outpoint, block_time) in existing {
             let state = match unspent.get(&outpoint) {
                 Some(true) => OutpointState::Unspent { block_time },
@@ -727,10 +732,15 @@ impl HttpJsonRpcTransport {
 }
 
 impl HttpJsonRpcTransport {
-    /// Whether each outpoint is in the UTXO set, with the mempool excluded.
-    /// Callers pass outpoints that exist: `gettxout` answers null for a spent
-    /// output and for one that never existed alike.
-    fn lookup_unspent(&self, outpoints: &[OutPoint]) -> anyhow::Result<HashMap<OutPoint, bool>> {
+    /// Whether each outpoint is in the UTXO set. `include_mempool` also
+    /// counts a spend in the mempool. Callers pass outpoints that exist:
+    /// `gettxout` answers null for a spent output and for one that never
+    /// existed alike.
+    fn lookup_unspent(
+        &self,
+        outpoints: &[OutPoint],
+        include_mempool: bool,
+    ) -> anyhow::Result<HashMap<OutPoint, bool>> {
         let mut unspent = HashMap::with_capacity(outpoints.len());
         for chunk in outpoints.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
             let requests = chunk
@@ -741,7 +751,7 @@ impl HttpJsonRpcTransport {
                         "jsonrpc": "2.0",
                         "id": id,
                         "method": "gettxout",
-                        "params": [outpoint.txid.to_string(), outpoint.vout, false],
+                        "params": [outpoint.txid.to_string(), outpoint.vout, include_mempool],
                     })
                 })
                 .collect::<Vec<_>>();
@@ -964,7 +974,6 @@ mod tests {
         let signed: serde_json::Value = rpc.call("signrawtransactionwithwallet", &[unsigned])?;
         let signed_hex = signed["hex"].clone();
         let _txid: serde_json::Value = rpc.call("sendrawtransaction", &[signed_hex])?;
-        node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
         Ok(())
     }
 
@@ -1004,8 +1013,11 @@ mod tests {
             vout: 0,
         };
 
-        let states = btc_rpc_client
-            .lookup_outpoint_states(&[outpoint, out_of_range, unknown], node.get_block_count()?)?;
+        let states = btc_rpc_client.lookup_outpoint_states(
+            &[outpoint, out_of_range, unknown],
+            node.get_block_count()?,
+            false,
+        )?;
         assert_eq!(
             states[&outpoint],
             OutpointState::Unspent {
@@ -1016,9 +1028,19 @@ mod tests {
         assert_eq!(states[&unknown], OutpointState::Missing);
 
         spend_outpoint(&node, outpoint)?;
+        let lookup = |include_mempool| -> Result<OutpointState> {
+            let tip_height = node.get_block_count()?;
+            let mut states =
+                btc_rpc_client.lookup_outpoint_states(&[outpoint], tip_height, include_mempool)?;
+            Ok(states.remove(&outpoint).unwrap())
+        };
 
-        let states = btc_rpc_client.lookup_outpoint_states(&[outpoint], node.get_block_count()?)?;
-        assert_eq!(states[&outpoint], OutpointState::Spent);
+        // The spend is only in the mempool.
+        assert!(matches!(lookup(false)?, OutpointState::Unspent { .. }));
+        assert_eq!(lookup(true)?, OutpointState::Spent);
+
+        node.generate_blocks(MAINNET_MIN_CONFIRMATIONS)?;
+        assert_eq!(lookup(false)?, OutpointState::Spent);
 
         Ok(())
     }
