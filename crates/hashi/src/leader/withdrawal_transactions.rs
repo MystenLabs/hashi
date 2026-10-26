@@ -1359,7 +1359,7 @@ impl LeaderService {
         let txid: bitcoin::Txid = txn.txid.into();
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&txid));
 
-        match inner.btc_monitor().get_transaction_status(txid).await {
+        match inner.btc_monitor().get_transaction_status(txid, None).await {
             Ok(TxStatus::Confirmed { confirmations })
                 if confirmations >= confirmation_threshold =>
             {

@@ -181,6 +181,26 @@ tests:
                 guardian (busy), however slow this node is. Look the peer up with
                 `hashi committee -c hashi-cli.toml view A`.
 
+  - name: bitcoind-shed-in-its-first-sample-fires
+    interval: 1m
+    input_series:
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '_x131 7830x120'
+      - series: 'hashi_peer_bitcoind_requests_shed_total{peer="A",instance="n1",job="hashi"}'
+        values: '_x131 1x120'
+    alert_rule_test:
+      - eval_time: 135m
+        alertname: HashiPeerShed
+        exp_alerts:
+          - exp_labels: {peer: A, instance: n1, job: hashi, limit: bitcoind, severity: warning}
+            exp_annotations:
+              summary: shed or refused traffic from peer A (bitcoind)
+              description: >-
+                The peer kept this node's Bitcoin monitor work queued for longer than a
+                request lives. An honest leader gives up after 40 s, before the 45 s
+                window, so it never does this, however slow this node is. Look the peer
+                up with `hashi committee -c hashi-cli.toml view A`.
+
   - name: single-failed-scrape-does-not-refire-an-old-shed
     interval: 1m
     input_series:

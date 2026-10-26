@@ -24,8 +24,10 @@ use kyoto::FeeRate;
 use kyoto::HashCheckpoint;
 use kyoto::Warning;
 use lru::LruCache;
+use prometheus::Histogram;
 use rand::Rng;
 use sui_futures::service::Service;
+use sui_sdk_types::Address;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tracing::debug;
@@ -34,6 +36,8 @@ use tracing::info;
 use tracing::warn;
 
 use super::config::MonitorConfig;
+use super::limits::BitcoindCharge;
+use super::limits::Held;
 use crate::deposit_tracker::DepositDiscovery;
 use crate::deposit_tracker::DepositStatus;
 use crate::deposit_tracker::DepositTracker;
@@ -61,9 +65,8 @@ const DEPOSIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 // times out per call (60s), so an unbounded worker could hold RPC slots for
 // minutes after every caller's own `DEPOSIT_CHECK_TIMEOUT` budget expired.
 const DEPOSIT_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
-// At most 16 concurrent txid lookups: bitcoind's default rpcworkqueue is 16,
-// and overflowing it fails calls outright ("Work queue depth exceeded").
+const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT_AND_CALLER: usize = 100;
+// bitcoind's default rpcthreads (v29+); a full work queue fails calls.
 const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
 
 /// Budget for one bitcoind RPC: corepc's fixed 60s transport timeout, which
@@ -137,6 +140,8 @@ pub enum DepositConfirmError {
         expected: bitcoin::TxOut,
         actual: bitcoin::TxOut,
     },
+    #[error("per-caller deposit discovery limit reached")]
+    DiscoveriesFull,
     #[error("Bitcoin deposit check timed out")]
     TimedOut,
     #[error("{0}")]
@@ -160,8 +165,17 @@ struct DepositCheckRequest {
     outpoint: bitcoin::OutPoint,
     expected_txout: bitcoin::TxOut,
     confirmation_threshold: u32,
+    charge: BitcoindCharge,
     result_tx: oneshot::Sender<Result<DepositConfirmation, DepositConfirmError>>,
 }
+
+impl DepositCheckRequest {
+    fn owner(&self) -> Option<Address> {
+        self.charge.as_ref().map(|charge| charge.caller())
+    }
+}
+
+type DiscoveryGroup = (bitcoin::OutPoint, Option<Address>);
 
 struct DepositLookupCache {
     tx_blocks: LruCache<bitcoin::Txid, HashCheckpoint>,
@@ -273,16 +287,17 @@ struct DepositCheckWorkerResult {
 struct DepositDiscoveryWorkerResult {
     token: Option<crate::deposit_tracker::ObservationToken>,
     generation: u64,
-    outpoint: bitcoin::OutPoint,
+    group: DiscoveryGroup,
     result: Result<DepositStatus, DepositConfirmError>,
 }
 
 struct DepositDiscoveryContext {
     tip: HashCheckpoint,
-    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: BitcoindRpc,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
     generation: u64,
+    fetch_seconds: Histogram,
 }
 
 struct UtxoHeightResolutionContext {
@@ -318,7 +333,7 @@ pub struct Monitor {
     requester: kyoto::Requester,
     deposit_check_workers: JoinSet<DepositCheckWorkerResult>,
     deposit_discovery_workers: JoinSet<DepositDiscoveryWorkerResult>,
-    pending_deposit_checks: HashMap<bitcoin::OutPoint, Vec<DepositCheckRequest>>,
+    pending_deposit_checks: HashMap<DiscoveryGroup, Vec<DepositCheckRequest>>,
     block_scan_workers: JoinSet<BlockScanResult>,
     /// Pending block scans. The front entry is the one running in
     /// `block_scan_workers` (if any); it is only popped when its result
@@ -359,21 +374,70 @@ fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
     }
 }
 
-/// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
-async fn btc_rpc_call<F, T>(client: &Arc<corepc_client::client_sync::v29::Client>, f: F) -> T
-where
-    F: FnOnce(&corepc_client::client_sync::v29::Client) -> T + Send + 'static,
-    T: Send + 'static,
-{
-    let client = Arc::clone(client);
-    tokio::task::spawn_blocking(move || f(&client))
+#[derive(Clone)]
+struct BitcoindRpc {
+    client: Arc<corepc_client::client_sync::v29::Client>,
+    charge: BitcoindCharge,
+}
+
+impl BitcoindRpc {
+    fn new(client: Arc<corepc_client::client_sync::v29::Client>, charge: BitcoindCharge) -> Self {
+        Self { client, charge }
+    }
+
+    async fn call<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&corepc_client::client_sync::v29::Client) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let call = match &self.charge {
+            Some(charge) => Some(charge.call().await),
+            None => None,
+        };
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_blocking(move || {
+            let _call = call;
+            f(&client)
+        })
         .await
-        .expect("btc_rpc_call: spawn_blocking task panicked")
+        .expect("BitcoindRpc::call: spawn_blocking task panicked")
+    }
+}
+
+fn release_discovery_token(
+    tracker: &DepositTracker,
+    token: Option<crate::deposit_tracker::ObservationToken>,
+) {
+    if let Some(token) = token {
+        let _ = tracker.resolve_discovery(token, Err::<DepositStatus, ()>(()));
+    }
+}
+
+struct BlockFetchTimer {
+    fetch_seconds: Histogram,
+    started: Instant,
+}
+
+impl BlockFetchTimer {
+    fn start(fetch_seconds: &Histogram) -> Self {
+        Self {
+            fetch_seconds: fetch_seconds.clone(),
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for BlockFetchTimer {
+    fn drop(&mut self) {
+        self.fetch_seconds
+            .observe(self.started.elapsed().as_secs_f64());
+    }
 }
 
 /// A `MonitorClient` caller's reply channel and the instant it stops waiting.
 struct Caller<T> {
     deadline: Instant,
+    charge: BitcoindCharge,
     result_tx: oneshot::Sender<Result<T>>,
 }
 
@@ -381,7 +445,7 @@ impl<T> Caller<T> {
     /// Run `f` on the blocking pool only if the caller is still waiting and
     /// `BITCOIND_RPC_BUDGET` fits before its deadline; `None` means skipped.
     async fn rpc<F, R>(
-        &self,
+        &mut self,
         client: &Arc<corepc_client::client_sync::v29::Client>,
         f: F,
     ) -> Option<R>
@@ -393,10 +457,23 @@ impl<T> Caller<T> {
             return None;
         }
         let deadline = self.deadline;
+        let call = match &self.charge {
+            Some(charge) => {
+                let latest =
+                    tokio::time::Instant::from_std(deadline.checked_sub(BITCOIND_RPC_BUDGET)?);
+                tokio::select! {
+                    biased;
+                    () = self.result_tx.closed() => return None,
+                    call = tokio::time::timeout_at(latest, charge.call()) => Some(call.ok()?),
+                }
+            }
+            None => None,
+        };
         let client = Arc::clone(client);
         // Checked on the blocking thread: a busy pool can hold the closure
         // back, and the caller's deadline does not wait for it.
         tokio::task::spawn_blocking(move || {
+            let _call = call;
             (Instant::now() + BITCOIND_RPC_BUDGET <= deadline).then(|| f(&client))
         })
         .await
@@ -430,62 +507,77 @@ impl Monitor {
             return;
         };
 
-        let discovery = self.deposit_tracker.discovery(&request.outpoint);
-        match discovery {
-            DepositDiscovery::Discover(token) => {
-                let outpoint = request.outpoint;
-                if self.queue_deposit_check(request) {
-                    let context = self.deposit_discovery_context(tip);
-                    self.deposit_discovery_workers
-                        .spawn(process_deposit_discovery(context, outpoint, Some(token)));
-                } else {
-                    let _ = self
-                        .deposit_tracker
-                        .resolve_discovery(token, Err::<DepositStatus, ()>(()));
-                }
-            }
-            DepositDiscovery::Pending => {
-                self.queue_deposit_check(request);
-            }
-            DepositDiscovery::Untracked => {
-                let outpoint = request.outpoint;
-                let already_pending = self.pending_deposit_checks.contains_key(&outpoint);
-                if self.queue_deposit_check(request) && !already_pending {
-                    let context = self.deposit_discovery_context(tip);
-                    self.deposit_discovery_workers
-                        .spawn(process_deposit_discovery(context, outpoint, None));
-                }
-            }
+        match self.deposit_tracker.discovery(&request.outpoint) {
             DepositDiscovery::Known(status) => self.start_deposit_check(tip, request, status),
+            DepositDiscovery::Discover(token) => self.join_or_discover(tip, request, Some(token)),
+            DepositDiscovery::Pending | DepositDiscovery::Untracked => {
+                self.join_or_discover(tip, request, None)
+            }
         }
     }
 
-    fn queue_deposit_check(&mut self, request: DepositCheckRequest) -> bool {
-        let requests = self
-            .pending_deposit_checks
-            .entry(request.outpoint)
-            .or_default();
-        requests.retain(|request| !request.result_tx.is_closed());
-        if requests.len() >= MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT {
-            let _ = request.result_tx.send(Err(anyhow::anyhow!(
-                "Too many pending checks for Bitcoin deposit {}",
-                request.outpoint
-            )
-            .into()));
-            false
-        } else {
-            requests.push(request);
-            true
+    fn join_or_discover(
+        &mut self,
+        tip: HashCheckpoint,
+        request: DepositCheckRequest,
+        token: Option<crate::deposit_tracker::ObservationToken>,
+    ) {
+        let outpoint = request.outpoint;
+        let owner = request.owner();
+        let joined = [owner, None]
+            .into_iter()
+            .map(|starter| (outpoint, starter))
+            .find(|group| self.pending_deposit_checks.contains_key(group));
+        if let Some(group) = joined {
+            release_discovery_token(&self.deposit_tracker, token);
+            let Some(requests) = self.pending_deposit_checks.get_mut(&group) else {
+                return;
+            };
+            requests.retain(|queued| !queued.result_tx.is_closed());
+            let queued = requests
+                .iter()
+                .filter(|queued| queued.owner() == owner)
+                .count();
+            if queued >= MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT_AND_CALLER {
+                let _ = request.result_tx.send(Err(anyhow::anyhow!(
+                    "Too many pending checks from this caller for Bitcoin deposit {outpoint}"
+                )
+                .into()));
+            } else {
+                requests.push(request);
+            }
+            return;
         }
+        let discovery = match request.charge.as_ref().map(|charge| charge.try_discovery()) {
+            Some(None) => {
+                release_discovery_token(&self.deposit_tracker, token);
+                let _ = request
+                    .result_tx
+                    .send(Err(DepositConfirmError::DiscoveriesFull));
+                return;
+            }
+            Some(discovery) => discovery,
+            None => None,
+        };
+        let group = (outpoint, owner);
+        let context = self.deposit_discovery_context(tip, request.charge.clone());
+        self.pending_deposit_checks.insert(group, vec![request]);
+        self.deposit_discovery_workers
+            .spawn(process_deposit_discovery(context, group, token, discovery));
     }
 
-    fn deposit_discovery_context(&self, tip: HashCheckpoint) -> DepositDiscoveryContext {
+    fn deposit_discovery_context(
+        &self,
+        tip: HashCheckpoint,
+        charge: BitcoindCharge,
+    ) -> DepositDiscoveryContext {
         DepositDiscoveryContext {
             tip,
-            bitcoind_rpc: self.bitcoind_rpc.clone(),
+            bitcoind_rpc: BitcoindRpc::new(self.bitcoind_rpc.clone(), charge),
             requester: self.requester.clone(),
             deposit_lookup_cache: self.deposit_lookup_cache.clone(),
             generation: self.deposit_tracker.bitcoin_generation(),
+            fetch_seconds: self.metrics.kyoto_block_fetch_seconds.clone(),
         }
     }
 
@@ -575,20 +667,29 @@ impl Monitor {
             return;
         }
 
+        let (outpoint, _) = result.group;
         let status = match result.token {
-            Some(token) => match self.deposit_tracker.resolve_discovery(token, result.result) {
-                DiscoveryResolution::Complete(result) => result,
-                DiscoveryResolution::Pending => return,
-                DiscoveryResolution::Untracked => Err(anyhow::anyhow!(
-                    "Bitcoin deposit request left the tracker during discovery"
-                )
-                .into()),
-            },
-            None => result.result,
+            Some(token) => {
+                let own = result.result.as_ref().cloned().map_err(|_| ());
+                match self.deposit_tracker.resolve_discovery(token, own) {
+                    DiscoveryResolution::Complete(Ok(status)) => Ok(status),
+                    DiscoveryResolution::Complete(Err(())) | DiscoveryResolution::Pending => {
+                        result.result
+                    }
+                    DiscoveryResolution::Untracked => Err(anyhow::anyhow!(
+                        "Bitcoin deposit request left the tracker during discovery"
+                    )
+                    .into()),
+                }
+            }
+            None => self
+                .deposit_tracker
+                .recorded_status(&outpoint)
+                .map_or(result.result, Ok),
         };
         let requests = self
             .pending_deposit_checks
-            .remove(&result.outpoint)
+            .remove(&result.group)
             .unwrap_or_default();
         let Some(tip) = self.tip else {
             for request in requests {
@@ -643,13 +744,14 @@ impl Monitor {
 
         let requester = self.requester.clone();
         let generation = self.deposit_tracker.bitcoin_generation();
+        let fetch_seconds = self.metrics.kyoto_block_fetch_seconds.clone();
         self.block_scan_workers.spawn(async move {
             let scan = AssertUnwindSafe(async {
                 if retry_round > 0 {
                     tokio::time::sleep(BLOCK_SCAN_RETRY_BASE_DELAY * 2u32.pow(retry_round.min(5)))
                         .await;
                 }
-                fetch_block_for_scan(&requester, checkpoint).await
+                fetch_block_for_scan(&requester, checkpoint, &fetch_seconds).await
             })
             .catch_unwind()
             .await;
@@ -751,9 +853,10 @@ impl Monitor {
         const RETRY_DELAY: Duration = Duration::from_secs(2);
         const LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+        let rpc = BitcoindRpc::new(bitcoind_rpc.clone(), None);
         let mut next_log = Instant::now();
         loop {
-            match btc_rpc_call(bitcoind_rpc, move |rpc| rpc.get_block_hash(height as u64)).await {
+            match rpc.call(move |rpc| rpc.get_block_hash(height as u64)).await {
                 Ok(raw) => {
                     let model = raw.into_model().map_err(|e| {
                         anyhow::anyhow!("Failed to parse getblockhash({height}) response: {e}")
@@ -785,7 +888,8 @@ impl Monitor {
     async fn bitcoind_height(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
     ) -> Option<u32> {
-        btc_rpc_call(bitcoind_rpc, |rpc| rpc.get_blockchain_info())
+        BitcoindRpc::new(bitcoind_rpc.clone(), None)
+            .call(|rpc| rpc.get_blockchain_info())
             .await
             .ok()
             .and_then(|info| info.into_model().ok())
@@ -1266,7 +1370,7 @@ impl Monitor {
             txids,
             move |txid| {
                 lookup_tx_block(
-                    bitcoind_rpc.clone(),
+                    BitcoindRpc::new(bitcoind_rpc.clone(), None),
                     requester.clone(),
                     deposit_lookup_cache.clone(),
                     txid,
@@ -1283,7 +1387,7 @@ impl Monitor {
         metrics: Arc<Metrics>,
         network: bitcoin::Network,
         conf_target: u16,
-        caller: Caller<FeeRate>,
+        mut caller: Caller<FeeRate>,
     ) {
         // ECONOMICAL tracks spot fees more closely than the default
         // CONSERVATIVE, which blends in a long-horizon max.
@@ -1318,7 +1422,7 @@ impl Monitor {
     async fn test_mempool_accept(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         tx: bitcoin::Transaction,
-        caller: Caller<Vec<MempoolAcceptance>>,
+        mut caller: Caller<Vec<MempoolAcceptance>>,
     ) {
         let txid = tx.compute_txid();
         let Some(result) = caller
@@ -1340,7 +1444,7 @@ impl Monitor {
     async fn broadcast_transaction(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         tx: bitcoin::Transaction,
-        caller: Caller<()>,
+        mut caller: Caller<()>,
     ) {
         // Broadcast via the bitcoind RPC, not kyoto's P2P submit_package, which
         // dropped its response or hung under load.
@@ -1377,7 +1481,7 @@ impl Monitor {
     async fn get_transaction_status(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         txid: bitcoin::Txid,
-        caller: Caller<TxStatus>,
+        mut caller: Caller<TxStatus>,
     ) {
         let rpc_result = caller
             .rpc(&bitcoind_rpc, move |rpc| {
@@ -1426,17 +1530,19 @@ impl Monitor {
 async fn fetch_block_for_scan(
     requester: &kyoto::Requester,
     checkpoint: HashCheckpoint,
+    fetch_seconds: &Histogram,
 ) -> Result<bitcoin::Block> {
-    let indexed_block =
-        tokio::time::timeout(BLOCK_SCAN_TIMEOUT, requester.get_block(checkpoint.hash))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Timed out fetching block {} at height {}",
-                    checkpoint.hash,
-                    checkpoint.height,
-                )
-            })??;
+    let fetched = {
+        let _timer = BlockFetchTimer::start(fetch_seconds);
+        tokio::time::timeout(BLOCK_SCAN_TIMEOUT, requester.get_block(checkpoint.hash)).await
+    };
+    let indexed_block = fetched.map_err(|_| {
+        anyhow::anyhow!(
+            "Timed out fetching block {} at height {}",
+            checkpoint.hash,
+            checkpoint.height,
+        )
+    })??;
     let fetched_hash = indexed_block.block.block_hash();
     if indexed_block.height != checkpoint.height || fetched_hash != checkpoint.hash {
         anyhow::bail!(
@@ -1451,19 +1557,23 @@ async fn fetch_block_for_scan(
 
 async fn process_deposit_discovery(
     context: DepositDiscoveryContext,
-    outpoint: bitcoin::OutPoint,
+    group: DiscoveryGroup,
     token: Option<crate::deposit_tracker::ObservationToken>,
+    discovery: Option<Held>,
 ) -> DepositDiscoveryWorkerResult {
+    let _discovery = discovery;
+    let _starters_place = context.bitcoind_rpc.charge.clone();
+    let (outpoint, _) = group;
     let generation = context.generation;
-    let discovery = AssertUnwindSafe(discover_deposit(
+    let lookup = AssertUnwindSafe(discover_deposit(
         context.bitcoind_rpc,
         context.requester,
         context.deposit_lookup_cache,
         outpoint,
         context.tip,
+        context.fetch_seconds,
     ));
-    let result = match tokio::time::timeout(DEPOSIT_DISCOVERY_TIMEOUT, discovery.catch_unwind())
-        .await
+    let result = match tokio::time::timeout(DEPOSIT_DISCOVERY_TIMEOUT, lookup.catch_unwind()).await
     {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => {
@@ -1474,7 +1584,7 @@ async fn process_deposit_discovery(
     DepositDiscoveryWorkerResult {
         token,
         generation,
-        outpoint,
+        group,
         result,
     }
 }
@@ -1490,21 +1600,28 @@ async fn process_deposit_check(
         outpoint,
         expected_txout,
         confirmation_threshold,
-        result_tx,
+        charge,
+        mut result_tx,
     } = request;
-    let result = tokio::time::timeout(
+    let check = tokio::time::timeout(
         DEPOSIT_CHECK_TIMEOUT,
         check_result_from_status(
             status,
             tip,
             confirmation_threshold,
-            bitcoind_rpc,
+            BitcoindRpc::new(bitcoind_rpc, charge),
             outpoint,
             expected_txout,
         ),
-    )
-    .await
-    .unwrap_or(Err(DepositConfirmError::TimedOut));
+    );
+    let result = tokio::select! {
+        biased;
+        () = result_tx.closed() => Err(anyhow::anyhow!(
+            "Bitcoin deposit check for {outpoint} was abandoned by its caller"
+        )
+        .into()),
+        result = check => result.unwrap_or(Err(DepositConfirmError::TimedOut)),
+    };
     DepositCheckWorkerResult {
         generation,
         result_tx,
@@ -1516,7 +1633,7 @@ async fn check_result_from_status(
     status: DepositStatus,
     tip: HashCheckpoint,
     confirmation_threshold: u32,
-    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: BitcoindRpc,
     outpoint: bitcoin::OutPoint,
     expected_txout: bitcoin::TxOut,
 ) -> Result<DepositConfirmation, DepositConfirmError> {
@@ -1567,7 +1684,7 @@ async fn check_result_from_status(
 }
 
 async fn lookup_tx_block(
-    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: BitcoindRpc,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
     txid: bitcoin::Txid,
@@ -1579,16 +1696,17 @@ async fn lookup_tx_block(
 
     debug!("Looking up block for transaction {txid}");
     require_core_checkpoint(&bitcoind_rpc, tip, "before transaction lookup").await?;
-    let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
-        rpc.call::<RawTransactionLocation>(
-            "getrawtransaction",
-            &[
-                serde_json::Value::String(txid.to_string()),
-                serde_json::Value::Bool(true),
-            ],
-        )
-    })
-    .await
+    let tx_info = match bitcoind_rpc
+        .call(move |rpc| {
+            rpc.call::<RawTransactionLocation>(
+                "getrawtransaction",
+                &[
+                    serde_json::Value::String(txid.to_string()),
+                    serde_json::Value::Bool(true),
+                ],
+            )
+        })
+        .await
     {
         Ok(tx_info) => tx_info,
         // -5 also covers "-txindex off" and "txindex still indexing";
@@ -1674,11 +1792,12 @@ where
 }
 
 async fn discover_deposit(
-    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: BitcoindRpc,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
     outpoint: bitcoin::OutPoint,
     tip: HashCheckpoint,
+    fetch_seconds: Histogram,
 ) -> Result<DepositStatus, DepositConfirmError> {
     let txid = outpoint.txid;
     let block_info = match lookup_tx_block(
@@ -1698,9 +1817,11 @@ async fn discover_deposit(
     let transaction = if let Some(transaction) = deposit_lookup_cache.get_transaction(&txid) {
         transaction
     } else {
-        let indexed_block = requester
-            .get_block(block_info.hash)
-            .await
+        let fetched = {
+            let _timer = BlockFetchTimer::start(&fetch_seconds);
+            requester.get_block(block_info.hash).await
+        };
+        let indexed_block = fetched
             .map_err(|e| anyhow::anyhow!("Failed to look up block {}: {e}", block_info.hash))?;
         let fetched_hash = indexed_block.block.block_hash();
         if indexed_block.height != block_info.height || fetched_hash != block_info.hash {
@@ -1744,29 +1865,24 @@ async fn discover_deposit(
     })
 }
 
-async fn get_best_block(
-    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
-) -> Result<bitcoin::BlockHash> {
-    btc_rpc_call(bitcoind_rpc, move |rpc| {
-        rpc.call::<bitcoin::BlockHash>("getbestblockhash", &[])
-    })
-    .await
-    .map_err(anyhow::Error::from)
+async fn get_best_block(bitcoind_rpc: &BitcoindRpc) -> Result<bitcoin::BlockHash> {
+    bitcoind_rpc
+        .call(move |rpc| rpc.call::<bitcoin::BlockHash>("getbestblockhash", &[]))
+        .await
+        .map_err(anyhow::Error::from)
 }
 
-async fn get_block_hash(
-    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
-    height: u32,
-) -> Result<bitcoin::BlockHash> {
-    btc_rpc_call(bitcoind_rpc, move |rpc| {
-        rpc.call::<bitcoin::BlockHash>("getblockhash", &[serde_json::json!(height)])
-    })
-    .await
-    .map_err(anyhow::Error::from)
+async fn get_block_hash(bitcoind_rpc: &BitcoindRpc, height: u32) -> Result<bitcoin::BlockHash> {
+    bitcoind_rpc
+        .call(move |rpc| {
+            rpc.call::<bitcoin::BlockHash>("getblockhash", &[serde_json::json!(height)])
+        })
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn require_core_checkpoint(
-    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: &BitcoindRpc,
     tip: HashCheckpoint,
     context: &str,
 ) -> Result<(), DepositConfirmError> {
@@ -1790,21 +1906,22 @@ async fn require_core_checkpoint(
 }
 
 async fn get_tx_out(
-    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: &BitcoindRpc,
     outpoint: bitcoin::OutPoint,
     include_mempool: bool,
 ) -> Result<Option<serde_json::Value>, corepc_client::client_sync::Error> {
-    btc_rpc_call(bitcoind_rpc, move |rpc| {
-        rpc.call::<Option<serde_json::Value>>(
-            "gettxout",
-            &[
-                serde_json::json!(outpoint.txid),
-                serde_json::json!(outpoint.vout),
-                serde_json::json!(include_mempool),
-            ],
-        )
-    })
-    .await
+    bitcoind_rpc
+        .call(move |rpc| {
+            rpc.call::<Option<serde_json::Value>>(
+                "gettxout",
+                &[
+                    serde_json::json!(outpoint.txid),
+                    serde_json::json!(outpoint.vout),
+                    serde_json::json!(include_mempool),
+                ],
+            )
+        })
+        .await
 }
 
 fn get_tx_out_best_block(response: &serde_json::Value) -> Result<bitcoin::BlockHash> {
@@ -1843,7 +1960,7 @@ fn fee_rate_from_estimate(
 }
 
 async fn check_unspent_at_tip(
-    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    bitcoind_rpc: BitcoindRpc,
     tip: HashCheckpoint,
     outpoint: bitcoin::OutPoint,
     txout: bitcoin::TxOut,
@@ -1945,12 +2062,14 @@ impl MonitorClient {
         outpoint: bitcoin::OutPoint,
         expected_txout: bitcoin::TxOut,
         confirmation_threshold: u32,
+        charge: BitcoindCharge,
     ) -> Result<DepositConfirmation, DepositConfirmError> {
         let (tx, rx) = oneshot::channel();
         let request = DepositCheckRequest {
             outpoint,
             expected_txout,
             confirmation_threshold,
+            charge,
             result_tx: tx,
         };
         tokio::time::timeout(DEPOSIT_CHECK_TIMEOUT, async {
@@ -1982,6 +2101,7 @@ impl MonitorClient {
         &self,
         message: impl FnOnce(Caller<T>) -> MonitorMessage,
         what: &str,
+        charge: BitcoindCharge,
     ) -> Result<T> {
         let (result_tx, rx) = oneshot::channel();
         let deadline = Instant::now() + MONITOR_REQUEST_TIMEOUT;
@@ -1989,6 +2109,7 @@ impl MonitorClient {
             self.tx
                 .send(message(Caller {
                     deadline,
+                    charge,
                     result_tx,
                 }))
                 .await
@@ -1999,10 +2120,15 @@ impl MonitorClient {
         .map_err(|_| anyhow::anyhow!("{what} timed out waiting for the Bitcoin monitor"))?
     }
 
-    pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
+    pub async fn get_recent_fee_rate(
+        &self,
+        conf_target: u16,
+        charge: BitcoindCharge,
+    ) -> Result<FeeRate> {
         self.request(
             |caller| MonitorMessage::GetRecentFeeRate(conf_target, caller),
             "get_recent_fee_rate",
+            charge,
         )
         .await
     }
@@ -2011,6 +2137,7 @@ impl MonitorClient {
         self.request(
             |caller| MonitorMessage::BroadcastTransaction(transaction, caller),
             "broadcast_transaction",
+            None,
         )
         .await
     }
@@ -2022,14 +2149,20 @@ impl MonitorClient {
         self.request(
             |caller| MonitorMessage::TestMempoolAccept(transaction, caller),
             "test_mempool_accept",
+            None,
         )
         .await
     }
 
-    pub async fn get_transaction_status(&self, txid: bitcoin::Txid) -> Result<TxStatus> {
+    pub async fn get_transaction_status(
+        &self,
+        txid: bitcoin::Txid,
+        charge: BitcoindCharge,
+    ) -> Result<TxStatus> {
         self.request(
             |caller| MonitorMessage::GetTransactionStatus(txid, caller),
             "get_transaction_status",
+            charge,
         )
         .await
     }
@@ -2107,6 +2240,7 @@ mod tests {
                 outpoint,
                 expected_txout: deposit_txout(),
                 confirmation_threshold: 100,
+                charge: None,
                 result_tx,
             },
             result_rx,
@@ -2168,7 +2302,7 @@ mod tests {
         monitor.deposit_lookup_cache.put_tx_block(txid, cached);
 
         let result = lookup_tx_block(
-            monitor.bitcoind_rpc.clone(),
+            BitcoindRpc::new(monitor.bitcoind_rpc.clone(), None),
             monitor.requester.clone(),
             monitor.deposit_lookup_cache.clone(),
             txid,
@@ -2414,7 +2548,7 @@ mod tests {
         let tracker = DepositTracker::new(metrics.clone());
         let mut monitor = test_monitor(metrics, tracker.clone());
         let outpoint = make_outpoint(1);
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
         let DepositDiscovery::Discover(stale_token) = tracker.discovery(&outpoint) else {
             panic!("expected initial discovery token");
         };
@@ -2426,49 +2560,50 @@ mod tests {
         let (request, _result_rx) = deposit_check_request_for(outpoint);
         monitor
             .pending_deposit_checks
-            .insert(outpoint, vec![request]);
+            .insert((outpoint, None), vec![request]);
 
         monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
             token: Some(stale_token),
             generation: stale_generation,
-            outpoint,
+            group: (outpoint, None),
             result: Ok(DepositStatus::NotFound),
         }));
 
-        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 1);
+        assert_eq!(monitor.pending_deposit_checks[&(outpoint, None)].len(), 1);
         assert_eq!(tracker.discovery(&outpoint), DepositDiscovery::Pending);
     }
 
-    #[test]
-    fn replaced_tracker_lease_keeps_waiters_for_the_new_discovery() {
+    #[tokio::test]
+    async fn superseded_discovery_answers_its_own_group() {
         let metrics = Arc::new(fresh_metrics());
         let tracker = DepositTracker::new(metrics.clone());
         let mut monitor = test_monitor(metrics, tracker.clone());
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
         let outpoint = make_outpoint(1);
-        let old_request_id = sui_sdk_types::Address::new([1; 32]);
+        let old_request_id = Address::new([1; 32]);
         tracker.upsert_request(old_request_id, outpoint);
         let DepositDiscovery::Discover(old_token) = tracker.discovery(&outpoint) else {
             panic!("expected old discovery token");
         };
         tracker.remove_request(&old_request_id);
-        tracker.upsert_request(sui_sdk_types::Address::new([2; 32]), outpoint);
+        tracker.upsert_request(Address::new([2; 32]), outpoint);
         let DepositDiscovery::Discover(_new_token) = tracker.discovery(&outpoint) else {
             panic!("expected new discovery token");
         };
-        let (old_request, _old_result_rx) = deposit_check_request_for(outpoint);
-        let (new_request, _new_result_rx) = deposit_check_request_for(outpoint);
+        let (request, _result_rx) = deposit_check_request_for(outpoint);
         monitor
             .pending_deposit_checks
-            .insert(outpoint, vec![old_request, new_request]);
+            .insert((outpoint, None), vec![request]);
 
         monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
             token: Some(old_token),
             generation: tracker.bitcoin_generation(),
-            outpoint,
+            group: (outpoint, None),
             result: Ok(DepositStatus::NotFound),
         }));
 
-        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 2);
+        assert!(monitor.pending_deposit_checks.is_empty());
+        assert_eq!(monitor.deposit_check_workers.len(), 1);
         assert_eq!(tracker.discovery(&outpoint), DepositDiscovery::Pending);
     }
 
@@ -2479,7 +2614,7 @@ mod tests {
         let mut monitor = test_monitor(metrics, tracker.clone());
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
         let outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
         let DepositDiscovery::Discover(token) = tracker.discovery(&outpoint) else {
             panic!("expected discovery token");
         };
@@ -2490,16 +2625,16 @@ mod tests {
         let (request, _result_rx) = deposit_check_request_for(outpoint);
         monitor
             .pending_deposit_checks
-            .insert(outpoint, vec![request]);
+            .insert((outpoint, None), vec![request]);
 
         monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
             token: Some(token),
             generation,
-            outpoint,
+            group: (outpoint, None),
             result: Err(anyhow::anyhow!("stale discovery failure").into()),
         }));
 
-        assert!(!monitor.pending_deposit_checks.contains_key(&outpoint));
+        assert!(monitor.pending_deposit_checks.is_empty());
         assert_eq!(monitor.deposit_check_workers.len(), 1);
     }
 
@@ -2507,7 +2642,7 @@ mod tests {
     fn failed_block_scan_is_requeued_without_restarting_kyoto() {
         let metrics = Arc::new(fresh_metrics());
         let tracker = DepositTracker::new(metrics.clone());
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), make_outpoint(1));
+        tracker.upsert_request(Address::new([1; 32]), make_outpoint(1));
         let generation = tracker.bitcoin_generation();
         let mut monitor = test_monitor(metrics, tracker);
         let checkpoint = HashCheckpoint::new(42, block_hash(2));
@@ -2577,7 +2712,208 @@ mod tests {
         monitor.confirm_deposit(second);
 
         assert_eq!(monitor.deposit_discovery_workers.len(), 1);
-        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 2);
+        assert_eq!(monitor.pending_deposit_checks[&(outpoint, None)].len(), 2);
+    }
+
+    async fn charge_for(
+        limiter: &crate::btc_monitor::limits::BitcoindLimiter,
+        caller: Address,
+    ) -> Arc<crate::btc_monitor::limits::CallerCharge> {
+        limiter
+            .gate(
+                caller,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .take_place()
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn in_use(gauge: &prometheus::IntGaugeVec, caller: Address) -> i64 {
+        gauge.with_label_values(&[&caller.to_string()]).get()
+    }
+
+    async fn wait_for(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_rpc_keeps_its_call_until_it_returns() {
+        let metrics = Arc::new(fresh_metrics());
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics.clone());
+        let caller = Address::new([7; 32]);
+        let rpc = BitcoindRpc::new(
+            Arc::new(corepc_client::client_sync::v29::Client::new(
+                "http://127.0.0.1:1",
+            )),
+            Some(charge_for(&limiter, caller).await),
+        );
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let worker = tokio::spawn(async move { rpc.call(move |_| held.recv()).await });
+        wait_for(|| in_use(&metrics.peer_bitcoind_calls_in_use, caller) == 1).await;
+
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        assert_eq!(in_use(&metrics.peer_bitcoind_calls_in_use, caller), 1);
+
+        release.send(()).unwrap();
+        wait_for(|| in_use(&metrics.peer_bitcoind_calls_in_use, caller) == 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_check_whose_caller_leaves_frees_its_place_and_makes_no_rpc() {
+        let metrics = Arc::new(fresh_metrics());
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics.clone());
+        let caller = Address::new([7; 32]);
+        let charge = charge_for(&limiter, caller).await;
+        let mut calls = Vec::new();
+        for _ in 0..16 {
+            calls.push(charge.call().await);
+        }
+        let rpcs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let client = stub_bitcoind({
+            let rpcs = rpcs.clone();
+            move |req| {
+                rpcs.fetch_add(1, Ordering::SeqCst);
+                rpc_error(req, -1, "unexpected RPC")
+            }
+        })
+        .await;
+        let (mut request, result_rx) = deposit_check_request_for(make_outpoint(1));
+        request.charge = Some(charge);
+        let check = tokio::spawn(process_deposit_check(
+            0,
+            HashCheckpoint::new(200, block_hash(3)),
+            client,
+            request,
+            DepositStatus::InBlock {
+                checkpoint: HashCheckpoint::new(42, block_hash(2)),
+                is_coinbase: false,
+                txout: deposit_txout(),
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        drop(result_rx);
+        wait_for(|| in_use(&metrics.peer_bitcoind_places_in_use, caller) == 0).await;
+        calls.pop();
+        check.await.unwrap();
+
+        assert_eq!(rpcs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_discovery_keeps_its_starters_place_until_it_ends() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker);
+        let (_kyoto_node, kyoto_client) = kyoto::Builder::new(bitcoin::Network::Bitcoin)
+            .chain_state(kyoto::ChainState::Checkpoint(HashCheckpoint::from_genesis(
+                bitcoin::Network::Bitcoin,
+            )))
+            .build();
+        monitor.requester = kyoto_client.requester;
+        monitor.synced = true;
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let outpoint = make_outpoint(1);
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(outpoint.txid, HashCheckpoint::new(42, block_hash(2)));
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics.clone());
+        let caller = Address::new([7; 32]);
+        let (mut request, result_rx) = deposit_check_request_for(outpoint);
+        request.charge = Some(charge_for(&limiter, caller).await);
+
+        monitor.confirm_deposit(request);
+        assert_eq!(monitor.deposit_discovery_workers.len(), 1);
+        monitor.pending_deposit_checks.clear();
+        drop(result_rx);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        assert_eq!(cache_requests(&metrics, "transaction", "miss"), 1);
+        assert_eq!(in_use(&metrics.peer_bitcoind_places_in_use, caller), 1);
+        assert_eq!(in_use(&metrics.peer_bitcoind_discoveries_in_use, caller), 1);
+        monitor.deposit_discovery_workers.join_next().await;
+        assert_eq!(in_use(&metrics.peer_bitcoind_places_in_use, caller), 0);
+    }
+
+    #[tokio::test]
+    async fn a_callers_discovery_past_the_cap_is_refused_at_once() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker.clone());
+        monitor.synced = true;
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics.clone());
+        let caller = Address::new([7; 32]);
+        let mut requests = Vec::new();
+        let mut receivers = Vec::new();
+        for seed in 0..65u8 {
+            tracker.upsert_request(Address::new([seed; 32]), make_outpoint(seed));
+            let (mut request, result_rx) = deposit_check_request_for(make_outpoint(seed));
+            request.charge = Some(charge_for(&limiter, caller).await);
+            requests.push(request);
+            receivers.push(result_rx);
+        }
+
+        for request in requests {
+            monitor.confirm_deposit(request);
+        }
+
+        assert_eq!(monitor.deposit_discovery_workers.len(), 64);
+        assert!(matches!(
+            receivers.pop().unwrap().await.unwrap(),
+            Err(DepositConfirmError::DiscoveriesFull)
+        ));
+        assert!(matches!(
+            tracker.discovery(&make_outpoint(64)),
+            DepositDiscovery::Discover(_)
+        ));
+        assert_eq!(
+            metrics
+                .peer_bitcoind_requests_shed_total
+                .with_label_values(&[&caller.to_string()])
+                .get(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_joins_only_its_own_discovery() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker);
+        monitor.synced = true;
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics);
+        let outpoint = make_outpoint(1);
+        let first = Address::new([7; 32]);
+        let second = Address::new([8; 32]);
+        let mut receivers = Vec::new();
+
+        for caller in [first, second, first] {
+            let (mut request, result_rx) = deposit_check_request_for(outpoint);
+            request.charge = Some(charge_for(&limiter, caller).await);
+            monitor.confirm_deposit(request);
+            receivers.push(result_rx);
+        }
+
+        assert_eq!(monitor.deposit_discovery_workers.len(), 2);
+        assert_eq!(
+            monitor.pending_deposit_checks[&(outpoint, Some(first))].len(),
+            2
+        );
+        assert_eq!(
+            monitor.pending_deposit_checks[&(outpoint, Some(second))].len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2590,7 +2926,7 @@ mod tests {
         // never correct.
         monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
         let outpoint = make_outpoint(1);
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
         let (request, result_rx) = deposit_check_request_for(outpoint);
 
         monitor.confirm_deposit(request);
@@ -2611,7 +2947,7 @@ mod tests {
     async fn failing_block_scan_does_not_delay_fresh_blocks() {
         let metrics = Arc::new(fresh_metrics());
         let tracker = DepositTracker::new(metrics.clone());
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), make_outpoint(1));
+        tracker.upsert_request(Address::new([1; 32]), make_outpoint(1));
         let mut monitor = test_monitor(metrics, tracker);
         let failing = HashCheckpoint::new(41, block_hash(1));
         let fresh = HashCheckpoint::new(42, block_hash(2));
@@ -2645,7 +2981,7 @@ mod tests {
         let txid = outpoint.txid;
         let block_info = HashCheckpoint::new(42, block_hash(2));
         let tracker = DepositTracker::new(metrics.clone());
-        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
         record_status(
             &tracker,
             &outpoint,
@@ -2659,7 +2995,7 @@ mod tests {
         for vout in [0, 1] {
             let current = bitcoin::OutPoint { txid, vout };
             if vout == 1 {
-                tracker.upsert_request(sui_sdk_types::Address::new([2; 32]), current);
+                tracker.upsert_request(Address::new([2; 32]), current);
                 record_status(&tracker, &current, DepositStatus::NotFound);
             }
             let DepositDiscovery::Known(status) = tracker.discovery(&current) else {
@@ -2706,9 +3042,12 @@ mod tests {
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
-            Arc::new(corepc_client::client_sync::v29::Client::new(
-                "http://127.0.0.1:1",
-            )),
+            BitcoindRpc::new(
+                Arc::new(corepc_client::client_sync::v29::Client::new(
+                    "http://127.0.0.1:1",
+                )),
+                None,
+            ),
             outpoint,
             deposit_txout(),
         )
@@ -2739,9 +3078,12 @@ mod tests {
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
-            Arc::new(corepc_client::client_sync::v29::Client::new(
-                "http://127.0.0.1:1",
-            )),
+            BitcoindRpc::new(
+                Arc::new(corepc_client::client_sync::v29::Client::new(
+                    "http://127.0.0.1:1",
+                )),
+                None,
+            ),
             outpoint,
             deposit_txout(),
         )
@@ -2971,6 +3313,7 @@ mod tests {
         let (result_tx, result_rx) = oneshot::channel();
         let caller = Caller {
             deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            charge: None,
             result_tx,
         };
 
@@ -2986,23 +3329,26 @@ mod tests {
         ));
 
         let (result_tx, _rx) = oneshot::channel::<Result<()>>();
-        let fits = Caller {
+        let mut fits = Caller {
             deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            charge: None,
             result_tx,
         };
         assert_eq!(fits.rpc(&rpc, |_| 1).await, Some(1));
 
         let (result_tx, _rx) = oneshot::channel::<Result<()>>();
-        let too_late = Caller {
+        let mut too_late = Caller {
             deadline: Instant::now() + BITCOIND_RPC_BUDGET / 2,
+            charge: None,
             result_tx,
         };
         assert_eq!(too_late.rpc(&rpc, |_| 1).await, None);
 
         let (result_tx, rx) = oneshot::channel::<Result<()>>();
         drop(rx);
-        let gone = Caller {
+        let mut gone = Caller {
             deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            charge: None,
             result_tx,
         };
         assert_eq!(gone.rpc(&rpc, |_| 1).await, None);

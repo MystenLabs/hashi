@@ -9,6 +9,7 @@ use tonic::Response;
 use tonic::Status;
 use tracing::Instrument;
 
+use crate::btc_monitor::limits::BitcoindBusy;
 use crate::deposits::UnapprovedDepositError;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
@@ -80,6 +81,7 @@ impl BridgeService for HttpService {
         &self,
         request: Request<SignDepositConfirmationRequest>,
     ) -> Result<Response<SignDepositConfirmationResponse>, Status> {
+        let admit_deadline = tokio::time::Instant::now() + ADMIT_WINDOW;
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         self.admit_committee_member(caller)?;
@@ -88,7 +90,10 @@ impl BridgeService for HttpService {
         tracing::Span::current().record("deposit_id", tracing::field::display(&deposit_request.id));
         let member_signature = self
             .inner
-            .validate_and_sign_deposit_confirmation(&deposit_request)
+            .validate_and_sign_deposit_confirmation(
+                &deposit_request,
+                &self.bitcoind.gate(caller, admit_deadline),
+            )
             .await
             .map_err(deposit_refusal_status)?;
         tracing::info!(
@@ -140,7 +145,7 @@ impl BridgeService for HttpService {
         &self,
         request: Request<SignWithdrawalTxConstructionRequest>,
     ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
-        let admit_deadline = tokio::time::Instant::now() + CONSTRUCTION_ADMIT_WINDOW;
+        let admit_deadline = tokio::time::Instant::now() + ADMIT_WINDOW;
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         let member = self.admit_committee_member(caller)?;
@@ -162,9 +167,15 @@ impl BridgeService for HttpService {
             })
             .await;
         let prepared = prepared.map_err(|e| Status::failed_precondition(e.to_string()))?;
+        let charge = self
+            .bitcoind
+            .gate(caller, admit_deadline)
+            .take_place()
+            .await
+            .map_err(|e| Status::unavailable(e.to_string()))?;
         let fee_rate = self
             .inner
-            .withdrawal_commitment_fee_rate()
+            .withdrawal_commitment_fee_rate(charge)
             .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         let Some(run) = gate.admit(admit_deadline).await else {
@@ -417,6 +428,7 @@ impl BridgeService for HttpService {
         &self,
         request: Request<SignWithdrawalConfirmationRequest>,
     ) -> Result<Response<SignWithdrawalConfirmationResponse>, Status> {
+        let admit_deadline = tokio::time::Instant::now() + ADMIT_WINDOW;
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         self.admit_committee_member(caller)?;
@@ -428,9 +440,18 @@ impl BridgeService for HttpService {
         );
         let member_signature = self
             .inner
-            .sign_withdrawal_confirmation(&withdrawal_txn_id)
+            .sign_withdrawal_confirmation(
+                &withdrawal_txn_id,
+                &self.bitcoind.gate(caller, admit_deadline),
+            )
             .await
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(|e| {
+                if e.is::<BitcoindBusy>() {
+                    Status::unavailable(e.to_string())
+                } else {
+                    Status::failed_precondition(e.to_string())
+                }
+            })?;
         tracing::info!("Signed withdrawal confirmation");
         Ok(Response::new(SignWithdrawalConfirmationResponse {
             member_signature: Some(member_signature),
@@ -441,8 +462,7 @@ impl BridgeService for HttpService {
 const SIGNING_TASK_LIMIT_MSG: &str = "per-caller withdrawal signing limit reached";
 const SIGNING_BUSY_MSG: &str = "per-caller withdrawal signing queue is full";
 
-const CONSTRUCTION_ADMIT_WINDOW: Duration =
-    Duration::from_secs(super::client::REQUEST_TIMEOUT.as_secs() + 5);
+const ADMIT_WINDOW: Duration = Duration::from_secs(super::client::REQUEST_TIMEOUT.as_secs() + 5);
 
 struct Member(Address);
 
@@ -519,6 +539,7 @@ pub(crate) const SANCTIONS_CHECK_REFUSAL_MSG: &str =
 pub(crate) fn deposit_refusal_status(err: UnapprovedDepositError) -> Status {
     match err {
         UnapprovedDepositError::AlreadyApprovedThisEpoch => Status::already_exists(err.to_string()),
+        UnapprovedDepositError::BitcoindBusy(_) => Status::unavailable(err.to_string()),
         UnapprovedDepositError::AmlRejected(_) | UnapprovedDepositError::AmlServiceError(_) => {
             Status::failed_precondition(SANCTIONS_CHECK_REFUSAL_MSG)
         }

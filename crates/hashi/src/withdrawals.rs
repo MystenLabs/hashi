@@ -27,6 +27,8 @@ use sui_sdk_types::Address;
 use tracing::Instrument;
 
 use crate::Hashi;
+use crate::btc_monitor::limits::BitcoindCharge;
+use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::grpc::RunGate;
@@ -753,7 +755,7 @@ impl Hashi {
         approval: &WithdrawalTxCommitment,
     ) -> anyhow::Result<()> {
         let prepared = self.prepare_withdrawal_tx_commitment(approval)?;
-        let fee_rate = self.withdrawal_commitment_fee_rate().await?;
+        let fee_rate = self.withdrawal_commitment_fee_rate(None).await?;
         self.finish_withdrawal_tx_commitment(approval, &prepared, fee_rate)
     }
 
@@ -908,10 +910,13 @@ impl Hashi {
         })
     }
 
-    pub(crate) async fn withdrawal_commitment_fee_rate(&self) -> anyhow::Result<FeeRate> {
+    pub(crate) async fn withdrawal_commitment_fee_rate(
+        &self,
+        charge: BitcoindCharge,
+    ) -> anyhow::Result<FeeRate> {
         let kyoto_fee_rate = self
             .btc_monitor()
-            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
+            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target(), charge)
             .await
             .map_err(FeeEstimateUnavailable)?;
         Ok(withdrawal_fee_rate(&self.config, kyoto_fee_rate))
@@ -999,6 +1004,7 @@ impl Hashi {
     pub async fn sign_withdrawal_confirmation(
         &self,
         withdrawal_txn_id: &Address,
+        gate: &BitcoindGate,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let txn = self
             .onchain_state()
@@ -1026,9 +1032,14 @@ impl Hashi {
         // (2) That Bitcoin transaction must itself be confirmed to the
         // configured threshold. This observational check is what a malicious
         // leader cannot forge.
+        let charge = gate.take_place().await?;
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
         let txid: bitcoin::Txid = txn.txid.into();
-        match self.btc_monitor().get_transaction_status(txid).await? {
+        match self
+            .btc_monitor()
+            .get_transaction_status(txid, charge)
+            .await?
+        {
             TxStatus::Confirmed { confirmations } if confirmations >= confirmation_threshold => {}
             status => anyhow::bail!(
                 "Refusing to sign confirmation for withdrawal {withdrawal_txn_id}: \
@@ -1716,7 +1727,7 @@ impl Hashi {
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
         let kyoto_fee_rate = self
             .btc_monitor()
-            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
+            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target(), None)
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         let min_fee_rate = self.config.withdrawal_min_fee_rate();
@@ -2288,7 +2299,11 @@ async fn fetch_withdrawal_tx_confirmations(
         .iter()
         .map(|(id, txn)| async {
             let btc_txid = txn.txid.into();
-            let confs = match hashi.btc_monitor().get_transaction_status(btc_txid).await {
+            let confs = match hashi
+                .btc_monitor()
+                .get_transaction_status(btc_txid, None)
+                .await
+            {
                 Ok(TxStatus::Confirmed { confirmations }) => confirmations,
                 // Mempool, not found, or RPC error — treat as unconfirmed.
                 _ => 0,

@@ -237,6 +237,19 @@ impl PeerInflightLimiter {
                 metrics
                     .peer_store_reads_shed_total
                     .with_label_values(&[&label]);
+                for in_use in [
+                    &metrics.peer_bitcoind_places_in_use,
+                    &metrics.peer_bitcoind_calls_in_use,
+                    &metrics.peer_bitcoind_discoveries_in_use,
+                ] {
+                    in_use.with_label_values(&[&label]);
+                }
+                for refused in [
+                    &metrics.peer_bitcoind_requests_shed_total,
+                    &metrics.peer_bitcoind_discoveries_refused_total,
+                ] {
+                    refused.with_label_values(&[&label]);
+                }
                 Arc::new(Peer {
                     inflight: AtomicU32::new(0),
                     high_water: AtomicU32::new(0),
