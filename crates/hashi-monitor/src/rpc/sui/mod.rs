@@ -180,12 +180,22 @@ async fn publish_genesis(
     })
 }
 
-/// Hashi's on-chain `bitcoin_confirmation_threshold`: the confirmations the
-/// committee waits for. It is 6 when unset, as in the Hashi node.
-pub async fn read_confirmation_threshold(
+/// The Hashi settings the monitor reads once at startup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HashiSettings {
+    /// `bitcoin_confirmation_threshold`: the confirmations the committee
+    /// waits for. It is 6 when unset, as in the Hashi node.
+    pub confirmation_threshold: u64,
+    /// `bitcoin_deposit_time_delay_ms` in seconds: the minimum time from a
+    /// deposit approval to its mint. Move's `init` sets 10 minutes.
+    pub deposit_delay_secs: u64,
+}
+
+/// Read `HashiSettings` from the Hashi object.
+pub async fn read_hashi_settings(
     config: &SuiConfig,
     hashi_object_id: Address,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<HashiSettings> {
     let mut client = connect(config)?;
     let request = GetObjectRequest::new(&hashi_object_id).with_read_mask(FieldMask::from_paths([
         Object::path_builder().contents().finish(),
@@ -203,7 +213,14 @@ pub async fn read_confirmation_threshold(
         .contents()
         .deserialize()
         .with_context(|| format!("failed to decode the Hashi object {hashi_object_id}"))?;
-    Ok(hashi.config.get_u64("bitcoin_confirmation_threshold", 6))
+    Ok(HashiSettings {
+        confirmation_threshold: hashi.config.get_u64("bitcoin_confirmation_threshold", 6),
+        deposit_delay_secs: unix_millis_to_seconds(
+            hashi
+                .config
+                .get_u64("bitcoin_deposit_time_delay_ms", 10 * 60 * 1_000),
+        ),
+    })
 }
 
 /// What one Sui poll read: the events of the new range, and the findings of

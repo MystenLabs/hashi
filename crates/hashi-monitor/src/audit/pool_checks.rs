@@ -38,7 +38,7 @@ impl Auditor {
         let states = self
             .rpc_pollers
             .btc_client
-            .lookup_outpoint_states(&outpoints, tip_height)?;
+            .lookup_outpoint_states(&outpoints, tip_height, false)?;
         // Unlike `tick_btc` confirmation checks, `gettxout` reads live state.
         // The pool check does not use one Bitcoin snapshot and can see spends from newer blocks.
         // Record completion time so Sui polling must cover the whole lookup period.

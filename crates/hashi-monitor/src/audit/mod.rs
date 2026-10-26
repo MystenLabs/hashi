@@ -13,6 +13,7 @@
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
 //! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
+//!    Check that each fresh deposit approval names an unspent outpoint.
 //! 6. Update the pool every `POOL_MAINTENANCE_INTERVAL` and check Bitcoin when the daily check is due.
 //! 7. Check Bitcoin at the first maintenance tick. Repeat successful pool checks after `UTXO_CHECK_INTERVAL` seconds.
 //! 8. Judge suspect spends after the Sui cursor passes the Bitcoin lookup time.
@@ -61,6 +62,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
+mod fresh_approvals;
 mod hbtc_supply;
 mod pool_checks;
 mod pool_maintenance;
@@ -113,6 +115,9 @@ pub struct Auditor {
     utxo_pool: UtxoPool,
     /// Spends waiting for the Sui cursor, by outpoint.
     suspect_spends: HashMap<OutPoint, SuspectSpend>,
+    /// Deposit approvals whose mint delay has not ended, by outpoint. See
+    /// `fresh_approvals`.
+    fresh_approvals: HashMap<OutPoint, SuiDepositApprovedEvent>,
     rpc_pollers: RpcPollers,
     metrics: Arc<MonitorMetrics>,
     /// Where the snapshot is kept between runs.
@@ -171,6 +176,7 @@ impl Auditor {
             pending_deposits: HashMap::new(),
             utxo_pool: pool,
             suspect_spends: HashMap::new(),
+            fresh_approvals: HashMap::new(),
             rpc_pollers,
             metrics,
             store,
@@ -267,6 +273,7 @@ impl Auditor {
     /// the request came first. While its machine is open, the machine keeps
     /// the approval. Once it closed, the pool has its answer.
     fn ingest_deposit_approved(&mut self, event: SuiDepositApprovedEvent) -> Vec<MonitorFinding> {
+        self.note_fresh_approval(&event, now_timestamp_secs());
         match self.pending_deposits.get_mut(&event.request_id) {
             Some(sm) => sm.add_sui_approval(event, &self.cfg.timing),
             None => self
@@ -581,6 +588,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
+            fresh_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(&cfg, approved_at),
             cfg,
             metrics: Arc::new(MonitorMetrics::new()),
@@ -739,6 +747,7 @@ mod tests {
             pending_deposits: HashMap::new(),
             utxo_pool: UtxoPool::default(),
             suspect_spends: HashMap::new(),
+            fresh_approvals: HashMap::new(),
             rpc_pollers: RpcPollers::for_tests(cfg, cursor),
             metrics,
             store: SnapshotStore::in_memory(),
