@@ -33,11 +33,33 @@ impl PublicOutputs {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn epochs(&self) -> Vec<u64> {
+        self.0.read().unwrap().keys().copied().collect()
+    }
+
     fn publish(&self, epoch: u64, output: &MpcOutput) {
-        let response = proto::GetPublicMpcOutputResponse::from(&GetPublicMpcOutputResponse {
-            output: PublicMpcOutput::from_mpc_output(output),
-        });
-        let _replaced = self.0.write().unwrap().insert(epoch, Arc::new(response));
+        let response = Arc::new(proto::GetPublicMpcOutputResponse::from(
+            &GetPublicMpcOutputResponse {
+                output: PublicMpcOutput::from_mpc_output(output),
+            },
+        ));
+        let replaced = self.0.write().unwrap().insert(epoch, Arc::clone(&response));
+        if replaced.is_some_and(|replaced| replaced != response) {
+            tracing::warn!("Public MPC output for epoch {epoch} replaced by a different one");
+        }
+    }
+
+    fn retain(&self, epoch: u64, previous_epoch: Option<u64>) {
+        let _dropped = {
+            let mut published = self.0.write().unwrap();
+            let kept = [Some(epoch), previous_epoch]
+                .into_iter()
+                .flatten()
+                .filter_map(|wanted| published.remove_entry(&wanted))
+                .collect();
+            std::mem::replace(&mut *published, kept)
+        };
     }
 }
 
@@ -45,7 +67,7 @@ impl PublicOutputs {
 pub(crate) struct MpcOutputs {
     current: Option<MpcOutput>,
     previous: Option<MpcOutput>,
-    public: PublicOutputs,
+    public: Arc<PublicOutputs>,
 }
 
 impl MpcOutputs {
@@ -66,48 +88,26 @@ impl MpcOutputs {
         self.current = Some(output);
     }
 
-    pub(crate) fn set_previous(
-        &mut self,
-        previous_epoch: u64,
-        current_epoch: u64,
-        output: MpcOutput,
-    ) {
-        if previous_epoch != current_epoch {
-            self.public.publish(previous_epoch, &output);
+    pub(crate) fn set_previous(&mut self, epoch: Option<u64>, output: MpcOutput) {
+        if let Some(epoch) = epoch {
+            self.public.publish(epoch, &output);
         }
         self.previous = Some(output);
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::threshold_schnorr::G;
-    use fastcrypto_tbls::threshold_schnorr::avss;
-
-    use super::MpcOutputs;
-    use crate::mpc::types::GetPublicMpcOutputResponse;
-    use crate::mpc::types::MpcOutput;
-
-    fn output(public_key: G) -> MpcOutput {
-        MpcOutput {
-            public_key,
-            key_shares: avss::SharesForNode { shares: vec![] },
-            commitments: BTreeMap::new(),
-            threshold: 1,
+    pub(crate) fn adopt(
+        &mut self,
+        public: &Arc<PublicOutputs>,
+        epoch: u64,
+        previous_epoch: Option<u64>,
+    ) {
+        public.retain(epoch, previous_epoch);
+        self.public = Arc::clone(public);
+        if let Some(output) = &self.current {
+            self.public.publish(epoch, output);
         }
-    }
-
-    #[test]
-    fn the_current_output_is_served_when_both_epochs_are_equal() {
-        let current = G::generator();
-        let mut outputs = MpcOutputs::default();
-        outputs.set_current(5, output(current));
-        outputs.set_previous(5, 5, output(current + current));
-        let served = outputs.public().lookup(5, 5, 5).unwrap();
-        let served = GetPublicMpcOutputResponse::try_from(&*served).unwrap();
-        assert_eq!(served.output.public_key, current);
+        if let Some((previous_epoch, output)) = previous_epoch.zip(self.previous.as_ref()) {
+            self.public.publish(previous_epoch, output);
+        }
     }
 }
