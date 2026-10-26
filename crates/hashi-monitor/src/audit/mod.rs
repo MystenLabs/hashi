@@ -10,6 +10,7 @@
 //! How it works:
 //! 1. Restore the source positions, flow machines, and UTXO pool from a snapshot.
 //! 2. Without a snapshot, start at the bridge genesis with an empty pool.
+//!    Fail at startup on the snapshot of another deployment.
 //! 3. Fail at startup if the Sui node has pruned the start checkpoint.
 //! 4. Read Sui events and guardian logs into the flow machines.
 //! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
@@ -139,7 +140,7 @@ impl Auditor {
         metrics: Arc<MonitorMetrics>,
         store: SnapshotStore,
     ) -> anyhow::Result<Self> {
-        let (state, pool) = match this_deployments(cfg, store.load().await?) {
+        let (state, pool) = match this_deployments(cfg, store.load().await?)? {
             Some(snapshot) => {
                 tracing::info!(
                     sui_next_checkpoint = snapshot.state.sui_next_checkpoint,
@@ -494,22 +495,21 @@ impl Auditor {
     }
 }
 
-/// The snapshot, if this deployment saved it. Otherwise `None`: the audit
-/// is a first run.
-fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> Option<Snapshot> {
+/// The snapshot, if this deployment saved it, or `None` for a first run.
+/// Fail on the snapshot of another deployment, so a config mistake does not
+/// overwrite it.
+fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> anyhow::Result<Option<Snapshot>> {
     match snapshot {
-        Some(snapshot) if snapshot.is_for(cfg) => Some(snapshot),
-        Some(snapshot) => {
-            tracing::warn!(
-                guardian_bucket = snapshot.guardian_bucket,
-                package_id = snapshot.package_id,
-                "ignoring the snapshot of another deployment"
-            );
-            None
-        }
+        Some(snapshot) if snapshot.is_for(cfg) => Ok(Some(snapshot)),
+        Some(snapshot) => anyhow::bail!(
+            "the snapshot is for another deployment (guardian bucket {}, package {}); \
+             check the config, or delete snapshot.json to start again from genesis",
+            snapshot.guardian_bucket,
+            snapshot.package_id,
+        ),
         None => {
             tracing::info!("no snapshot");
-            None
+            Ok(None)
         }
     }
 }
@@ -809,12 +809,16 @@ mod tests {
         let auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
         let ours = Snapshot::new(&cfg, auditor.state(), UtxoPool::default());
 
-        assert_eq!(this_deployments(&cfg, None), None);
+        assert_eq!(this_deployments(&cfg, None).unwrap(), None);
 
         let mut other = ours.clone();
         other.package_id = format!("0x{}", "22".repeat(32));
-        assert_eq!(this_deployments(&cfg, Some(other)), None);
+        let error = this_deployments(&cfg, Some(other)).unwrap_err();
+        assert!(error.to_string().contains("another deployment"), "{error}");
 
-        assert_eq!(this_deployments(&cfg, Some(ours.clone())), Some(ours));
+        assert_eq!(
+            this_deployments(&cfg, Some(ours.clone())).unwrap(),
+            Some(ours)
+        );
     }
 }

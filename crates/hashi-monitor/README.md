@@ -84,8 +84,8 @@ cargo run -p hashi-monitor -- \
 - The monitor does not start on a Sui node that has pruned its start
   checkpoint, because the pool would then be incomplete.
 - The monitor must be the bucket's only writer. A snapshot of another
-  deployment is ignored. A snapshot that does not parse stops the monitor;
-  delete `snapshot.json` to start again from genesis.
+  deployment or one that does not parse stops the monitor. Check the config,
+  or delete `snapshot.json` to start again from genesis.
 - The snapshot is durable state, not a cache. Without it, the next start is a
   first run from genesis.
 
