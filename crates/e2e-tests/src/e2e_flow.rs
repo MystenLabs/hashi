@@ -998,6 +998,91 @@ mod tests {
         Ok(())
     }
 
+    /// A compromised quorum certifies UTXOs that Move never committed. The
+    /// guardian proxy refuses them and forwards only the committed UTXOs.
+    #[tokio::test]
+    async fn test_guardian_proxy_rejects_uncommitted_withdrawal_utxos() -> Result<()> {
+        use crate::proxied_guardian::certify;
+        use crate::proxied_guardian::spawn_proxied_guardian;
+        use hashi_guardian_proxy::node::members::ChainSource;
+        use hashi_guardian_proxy::node::withdrawals::WithdrawalSource;
+        use hashi_types::bitcoin::TxUTXOs;
+        use hashi_types::guardian::StandardWithdrawalRequest;
+        use hashi_types::guardian::now_timestamp_secs;
+        use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
+        use tonic::Request;
+
+        init_test_logging();
+        let builder = TestNetworksBuilder::new().with_nodes(4);
+        let mut networks = setup_test_networks(builder).await?;
+        create_deposit_and_wait(&mut networks, 100_000).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let destination = extract_witness_program(&networks.bitcoin_node.get_new_address()?)?;
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+        let request_id = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.into())
+            .execute_create_withdrawal_request(30_000, destination)
+            .await?;
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        let confirmed = confirmations
+            .wait_for(request_id, Duration::from_secs(60))
+            .await?;
+        drop(miner);
+
+        // The nodes signed through their own guardian. This one starts at seq 0.
+        let mut proxied = spawn_proxied_guardian(&networks).await?;
+        let channel =
+            tonic::transport::Endpoint::from_shared(proxied.guardian.endpoint().to_owned())?
+                .connect_lazy();
+        let wid = confirmed.withdrawal_txn_id;
+        let committed = ChainSource::new(channel, &networks.sui_network.rpc_url)?
+            .withdrawal_txn(wid)
+            .await?
+            .context("the confirmed withdrawal transaction is not on Sui")?;
+        let committee = hashi.onchain_state().current_committee().unwrap();
+        let certified = |txn: &hashi_types::move_types::WithdrawalTransaction| {
+            let utxos = TxUTXOs::from_withdrawal_txn(txn, bitcoin::Network::Regtest)?;
+            let message = StandardWithdrawalRequest::new(wid, utxos, now_timestamp_secs(), 0);
+            let signed = certify(&networks, &committee, message)?;
+            anyhow::Ok(Request::new(signed_standard_withdrawal_request_to_pb(
+                &signed,
+            )))
+        };
+
+        // Pay the committed amount to another address.
+        let mut redirected = committed.clone();
+        redirected.withdrawal_outputs[0].bitcoin_address =
+            extract_witness_program(&networks.bitcoin_node.get_new_address()?)?;
+        let status = proxied
+            .client
+            .standard_withdrawal(certified(&redirected)?)
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            proxied
+                .metrics
+                .withdrawal_refused
+                .with_label_values(&["utxo_mismatch"])
+                .get(),
+            1
+        );
+        let limiter = proxied.guardian.enclave().await.state.limiter_state();
+        assert_eq!(limiter.map(|state| state.next_seq), Some(0));
+
+        proxied
+            .client
+            .standard_withdrawal(certified(&committed)?)
+            .await?;
+        let limiter = proxied.guardian.enclave().await.state.limiter_state();
+        assert_eq!(limiter.map(|state| state.next_seq), Some(1));
+        assert_no_member_refusals(&networks);
+        Ok(())
+    }
+
     /// Cancel a withdrawal through the same PTB the CLI builds. Pins that the
     /// chain accepts `cancel_withdrawal` as a private `entry` returning a
     /// `Balance<BTC>` (no `drop`) that a later `balance::send_funds` command

@@ -23,6 +23,8 @@ pub mod bitcoin_node;
 pub mod e2e_flow;
 pub mod guardian_harness;
 pub mod hashi_network;
+#[cfg(test)]
+mod proxied_guardian;
 mod publish;
 pub mod sui_network;
 pub mod tcp_proxy;
@@ -2182,41 +2184,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_guardian_proxy_rejects_certified_committee_divergence() -> Result<()> {
-        use crate::guardian_harness::GuardianHarness;
-        use crate::guardian_harness::default_test_limiter_config;
-        use hashi_guardian_proxy::Forwarding;
-        use hashi_guardian_proxy::kp::roster::RosterCache;
-        use hashi_guardian_proxy::log_store::LogStore;
-        use hashi_guardian_proxy::metrics::ProxyMetrics;
-        use hashi_guardian_proxy::node::handoffs::HandoffGate;
-        use hashi_guardian_proxy::node::members::ChainSource;
-        use hashi_guardian_proxy::node::withdrawals::WithdrawalGate;
+        use crate::proxied_guardian::spawn_proxied_guardian;
         use hashi_types::committee::RuntimeCommittee;
         use hashi_types::committee::certificate_threshold;
         use hashi_types::guardian::CommitteeTransitionRequest;
-        use hashi_types::guardian::LimiterState;
         use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
         use hashi_types::proto::UpdateCommitteeChainRequest;
-        use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-        use hashi_types::proto::guardian_service_server::GuardianServiceServer;
-        use std::sync::Arc;
-        use tokio_stream::wrappers::TcpListenerStream;
         use tonic::Request;
-
-        struct NoLogs;
-
-        #[tonic::async_trait]
-        impl LogStore for NoLogs {
-            async fn list_dirs(&self, _: &str) -> Result<Vec<String>> {
-                anyhow::bail!("committee updates must not read logs")
-            }
-            async fn list_keys(&self, _: &str) -> Result<Vec<String>> {
-                anyhow::bail!("committee updates must not read logs")
-            }
-            async fn get(&self, _: &str) -> Result<Vec<u8>> {
-                anyhow::bail!("committee updates must not read logs")
-            }
-        }
 
         crate::test_helpers::init_test_logging();
         let mut networks = TestNetworksBuilder::new()
@@ -2228,7 +2202,6 @@ mod tests {
         let committee = node.hashi().onchain_state().current_committee().unwrap();
         let from_epoch = committee.epoch();
         let hashi_object_id = networks.hashi_network().ids().hashi_object_id;
-        let master_pubkey = node.hashi().onchain_state().onchain_verifying_key_g()?;
         let signers = networks
             .hashi_network()
             .nodes()
@@ -2250,47 +2223,7 @@ mod tests {
             .collect::<Result<Vec<_>>>()?;
 
         // Nodes update their own guardian during rotation. Keep this guardian at the source epoch.
-        let guardian = GuardianHarness::start(bitcoin::Network::Regtest).await?;
-        let limiter_config = default_test_limiter_config();
-        guardian
-            .finalize(
-                committee.clone(),
-                master_pubkey,
-                limiter_config,
-                LimiterState::genesis(&limiter_config),
-                hashi_object_id,
-            )
-            .await?;
-        let channel = tonic::transport::Endpoint::from_shared(guardian.endpoint().to_owned())?
-            .connect()
-            .await?;
-        let metrics = Arc::new(ProxyMetrics::new());
-        let handoffs = Arc::new(HandoffGate::new(
-            ChainSource::new(channel.clone(), &networks.sui_network.rpc_url)?,
-            metrics.clone(),
-        ));
-        let withdrawals = Arc::new(WithdrawalGate::new(
-            ChainSource::new(channel.clone(), &networks.sui_network.rpc_url)?,
-            bitcoin::Network::Regtest,
-            metrics.clone(),
-        ));
-        let proxy = Forwarding::new(
-            channel.clone(),
-            channel,
-            Arc::new(RosterCache::new(NoLogs)),
-            handoffs,
-            withdrawals,
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let mut servers = tokio::task::JoinSet::new();
-        servers.spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(GuardianServiceServer::new(proxy))
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-        });
-        let mut client = GuardianServiceClient::connect(endpoint).await?;
+        let mut proxied = spawn_proxied_guardian(&networks).await?;
         force_rotate_and_assert_key_agreement(&mut networks, from_epoch + 1).await;
         let signed = networks.hashi_network().nodes()[0]
             .hashi()
@@ -2321,12 +2254,14 @@ mod tests {
             certificate_threshold(committee.total_weight()),
         )?;
         let forged = signed_committee_transition_to_pb(&forged);
-        let status = client
+        let status = proxied
+            .client
             .update_committee(Request::new(forged.clone()))
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        let status = client
+        let status = proxied
+            .client
             .update_committee_chain(Request::new(UpdateCommitteeChainRequest {
                 transitions: vec![forged],
             }))
@@ -2334,20 +2269,31 @@ mod tests {
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
-            metrics
+            proxied
+                .metrics
                 .handoff_refused
                 .with_label_values(&["committee_mismatch"])
                 .get(),
             2
         );
         assert_eq!(
-            guardian.enclave().await.state.get_committee().unwrap(),
+            proxied
+                .guardian
+                .enclave()
+                .await
+                .state
+                .get_committee()
+                .unwrap(),
             &committee
         );
 
         let valid = signed_committee_transition_to_pb(&signed);
-        client.update_committee(Request::new(valid.clone())).await?;
-        client
+        proxied
+            .client
+            .update_committee(Request::new(valid.clone()))
+            .await?;
+        proxied
+            .client
             .update_committee_chain(Request::new(UpdateCommitteeChainRequest {
                 transitions: vec![valid],
             }))
@@ -2355,7 +2301,13 @@ mod tests {
         let expected = RuntimeCommittee::from_move_with_encryption_key_fallback(target)
             .map_err(|e| anyhow::anyhow!("invalid destination committee: {e}"))?;
         assert_eq!(
-            guardian.enclave().await.state.get_committee().unwrap(),
+            proxied
+                .guardian
+                .enclave()
+                .await
+                .state
+                .get_committee()
+                .unwrap(),
             &expected
         );
         crate::test_helpers::assert_no_member_refusals(&networks);
