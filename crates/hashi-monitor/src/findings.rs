@@ -202,8 +202,8 @@ pub enum BtcRpcInconsistency {
         held_script: ScriptBuf,
         seen_script: ScriptBuf,
     },
-    /// A UTXO the monitor's UTXO pool holds does not exist on Bitcoin, and
-    /// its grace period has passed. Bitcoin confirmed it once.
+    /// A UTXO the monitor's UTXO pool holds does not exist on Bitcoin at the
+    /// daily pool check. Bitcoin confirmed it once.
     UtxoVanished {
         outpoint: OutPoint,
         first_seen: UnixSeconds,

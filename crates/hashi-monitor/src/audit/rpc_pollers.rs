@@ -79,7 +79,7 @@ impl RpcPollers {
         Ok(Self {
             guardian_poller,
             sui_poller,
-            btc_client: BtcRpcClient::new(cfg, confirmations)?,
+            btc_client: BtcRpcClient::new(cfg, confirmations, SOURCE_STALE_LIMIT)?,
             btc_checked_through: now_timestamp_secs(),
             deposit_delay_secs: settings.deposit_delay_secs,
         })
@@ -264,7 +264,8 @@ impl RpcPollers {
         Self {
             guardian_poller: GuardianWithdrawalsPoller::for_tests(cfg, timestamp),
             sui_poller: poller_scanned(timestamp),
-            btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS).unwrap(),
+            btc_client: BtcRpcClient::new(cfg, MAINNET_MIN_CONFIRMATIONS, SOURCE_STALE_LIMIT)
+                .unwrap(),
             btc_checked_through: timestamp,
             deposit_delay_secs: 600,
         }

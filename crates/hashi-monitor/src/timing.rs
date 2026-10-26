@@ -24,7 +24,7 @@
 //!   the watch period. The monitor assumes an honest deposit confirms on
 //!   Bitcoin within it.
 //! - The UTXO pool: a UTXO the bridge holds is reported by its age on
-//!   Bitcoin, and by its absence from Bitcoin after a grace period.
+//!   Bitcoin, and at once by its absence from Bitcoin.
 //!
 //! A Bitcoin event is timed by the block that gave the transaction Hashi's
 //! confirmation threshold (see `rpc::btc`), not by the block that holds it.
