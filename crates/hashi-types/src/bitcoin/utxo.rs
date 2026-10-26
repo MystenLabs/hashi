@@ -189,6 +189,45 @@ impl From<&crate::move_types::Utxo> for InputUTXO {
     }
 }
 
+impl TxUTXOs {
+    /// Build the UTXOs that the guardian signs for a committed withdrawal.
+    /// Nodes and the guardian proxy both use this function, so they agree.
+    pub fn from_withdrawal_txn(
+        txn: &crate::move_types::WithdrawalTransaction,
+        network: Network,
+    ) -> anyhow::Result<Self> {
+        let inputs: Vec<_> = txn.inputs.iter().map(InputUTXO::from).collect();
+
+        // First N outputs are external payouts; any trailing output is internal change.
+        let num_requests = txn.request_ids.len();
+        let outputs = txn
+            .all_outputs()
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                if i < num_requests {
+                    let script_pubkey =
+                        super::script_pubkey_from_witness_program(&output.bitcoin_address)?;
+                    let address = BitcoinAddress::from_script(&script_pubkey, network)
+                        .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
+                    Ok(OutputUTXOWire::external(
+                        address.into_unchecked(),
+                        Amount::from_sat(output.amount),
+                    ))
+                } else {
+                    Ok(OutputUTXOWire::internal(
+                        DerivationPath::ZERO,
+                        Amount::from_sat(output.amount),
+                    ))
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Self::new(inputs, outputs, network)
+            .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))
+    }
+}
+
 impl InternalOutputUTXO {
     pub fn new(derivation_path: DerivationPath, amount: Amount) -> Self {
         Self {

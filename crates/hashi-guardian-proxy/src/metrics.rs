@@ -44,6 +44,8 @@ pub struct ProxyMetrics {
     pub member_refresh_failures: IntCounter,
     /// Committee updates the handoff gate refused, by reason.
     pub handoff_refused: IntCounterVec,
+    /// Withdrawals the withdrawal gate refused, by reason.
+    pub withdrawal_refused: IntCounterVec,
 }
 
 impl ProxyMetrics {
@@ -114,6 +116,14 @@ impl ProxyMetrics {
             &["reason"],
         )
         .expect("valid metric");
+        let withdrawal_refused = IntCounterVec::new(
+            Opts::new(
+                "guardian_proxy_withdrawal_refused_total",
+                "Withdrawals refused by the withdrawal gate, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -148,6 +158,9 @@ impl ProxyMetrics {
         registry
             .register(Box::new(handoff_refused.clone()))
             .expect("register");
+        registry
+            .register(Box::new(withdrawal_refused.clone()))
+            .expect("register");
 
         Self {
             registry,
@@ -162,6 +175,7 @@ impl ProxyMetrics {
             member_snapshot_timestamp_seconds,
             member_refresh_failures,
             handoff_refused,
+            withdrawal_refused,
         }
     }
 

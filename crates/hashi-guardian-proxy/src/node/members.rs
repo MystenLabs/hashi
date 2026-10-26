@@ -29,6 +29,7 @@ use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::bcs::ToBcs;
 use sui_sdk_types::Address;
+use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 use tonic::transport::Channel;
 use tracing::info;
@@ -135,14 +136,16 @@ impl MemberAllowlist {
     }
 }
 
-/// Reads the Hashi object id from the active guardian and its committees and
-/// their handoffs from Sui.
+/// Reads the Hashi object id from the active guardian, and its committees,
+/// their handoffs and its withdrawal transactions from Sui.
 pub struct ChainSource {
     guardian: GuardianServiceClient<Channel>,
     pub(super) sui: sui_rpc::Client,
     /// Read once: it can't change under a running proxy, and later reads
     /// then never queue on the enclave's control lock.
     hashi_object_id: OnceLock<Address>,
+    /// Read once: an upgrade does not change the package of a type.
+    hashi_package: OnceLock<Address>,
 }
 
 impl ChainSource {
@@ -151,6 +154,7 @@ impl ChainSource {
             guardian: GuardianServiceClient::new(guardian),
             sui: sui_rpc::Client::new(sui_rpc_url).context("SUI_RPC_URL")?,
             hashi_object_id: OnceLock::new(),
+            hashi_package: OnceLock::new(),
         })
     }
 
@@ -175,6 +179,33 @@ impl ChainSource {
             info!(hashi_object_id = %id, "Following this Hashi object's committees.");
             id
         }))
+    }
+}
+
+impl ChainSource {
+    /// The package that defines the `Hashi` type.
+    pub(super) async fn hashi_package(&self) -> anyhow::Result<Address> {
+        if let Some(package) = self.hashi_package.get() {
+            return Ok(*package);
+        }
+        let hashi_object_id = self.hashi_object_id().await?;
+        let response = self
+            .sui
+            .clone()
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&hashi_object_id).with_read_mask(
+                FieldMask::from_paths([Object::path_builder().object_type()]),
+            ))
+            .await
+            .with_context(|| format!("get Hashi object {hashi_object_id}"))?
+            .into_inner();
+        let hashi_type: StructTag = response
+            .object()
+            .object_type_opt()
+            .context("the Hashi object read has no type")?
+            .parse()
+            .context("parse the Hashi object's type")?;
+        Ok(*self.hashi_package.get_or_init(|| *hashi_type.address()))
     }
 }
 
