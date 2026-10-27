@@ -223,6 +223,16 @@ impl DepositTracker {
         }
     }
 
+    pub(crate) fn recorded_status(&self, outpoint: &bitcoin::OutPoint) -> Option<DepositStatus> {
+        self.inner
+            .lock()
+            .unwrap()
+            .entries
+            .get(outpoint)
+            .map(|entry| entry.status.clone())
+            .filter(|status| !matches!(status, DepositStatus::Unchecked))
+    }
+
     pub(crate) fn resolve_discovery<E>(
         &self,
         token: ObservationToken,

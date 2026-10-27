@@ -33,7 +33,7 @@ Two principles shape this list:
 | Complaint withheld      | `increase(hashi_mpc_complaints_withheld_total[1h]) > 0` | A peer's complaint verified, so some dealer sent it a corrupt share, and the dealer is not in `complaint-response-policy`, so the peer cannot recover its share until operators coordinate a fix. Honest nodes never trigger this. Never add a `complaint-response-policy` entry on your own: one wrong entry can leak your shares. |
 | Withdrawal fails bitcoind | `increase(hashi_withdrawal_bitcoin_check_script_failures_total[1h]) > 0` | Your bitcoind says a signed withdrawal is invalid. If other operators see it too, withdrawals are broken: raise it in the operator channel. If only you see it, check your bitcoind. |
 | Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
-| Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing or construction refusal rose in 1h (see the rules file) | For a shed counter, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). |
+| Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing or construction refusal rose in 1h (see the rules file) | For most shed counters, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `bitcoind` shed or a `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes none of them unless it runs without a guardian (`busy`). |
 | Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
 | MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
 | MPC peer refused        | A peer's MPC requests or responses were refused in 1h (see the rules file) | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch can also come from an honest signer that lost its stored copy. |
@@ -66,6 +66,15 @@ Dashboard-worthy but **not** alerts:
 - `hashi_peer_store_reads_max` — each requester's peak store-reading
   `RetrieveMessages` since start, against the limit of 4. An honest requester
   rarely holds more than two.
+- `hashi_peer_bitcoind_places_in_use`, `hashi_peer_bitcoind_calls_in_use`,
+  `hashi_peer_bitcoind_discoveries_in_use` — each peer's work in your node's
+  Bitcoin monitor now, against limits of 192 requests, 16 Bitcoin Core RPCs
+  and 64 deposit discoveries. A flat 16 calls means the peer keeps every call
+  busy: a member doing it on purpose, or the leader at a node whose bitcoind
+  is slow; compare across nodes.
+- `hashi_kyoto_block_fetch_seconds` — how long Kyoto takes to answer a block
+  request, queue wait included. A fetch abandoned at a timeout, reorg or
+  restart is recorded when it is abandoned.
 - `hashi_mpc_refusals_total` — the MPC refusals behind the refusal alerts, by
   `side`, `handler`, `protocol` and `reason`. A complaint that names no
   protocol counts as `unspecified`.
@@ -96,6 +105,8 @@ Dashboard-worthy but **not** alerts:
 - **`hashi_withdrawal_signing_refused_total{reason="committee"}`.** Moves at
   epoch changes, while the leader and your node briefly disagree about the
   committee.
+- **`hashi_peer_bitcoind_discoveries_refused_total`.** An honest leader reaches
+  the limit in a burst of new deposits when your node's discoveries are slow.
 - **`increase()` alone on a per-peer counter.** It misses a shed in a series'
   first sample, so the rules file also fires on any count from a peer first
   seen within the window (`hashi_peer_first_seen_timestamp_seconds`).

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Hashi;
+use crate::btc_monitor::limits::BitcoindBusy;
+use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::btc_monitor::monitor::DepositConfirmation;
 use crate::leader::RetryPolicy;
@@ -27,8 +29,9 @@ impl Hashi {
     pub async fn validate_and_sign_deposit_confirmation(
         &self,
         deposit_request: &DepositRequest,
+        gate: &BitcoindGate,
     ) -> Result<MemberSignature, UnapprovedDepositError> {
-        self.validate_deposit_request(deposit_request).await?;
+        self.validate_deposit_request(deposit_request, gate).await?;
         self.sign_deposit_confirmation(deposit_request)
             .map_err(UnapprovedDepositError::SignDepositFailed)
     }
@@ -37,11 +40,12 @@ impl Hashi {
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
+        gate: &BitcoindGate,
     ) -> Result<(), UnapprovedDepositError> {
         self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_utxo_unspent_on_sui(deposit_request)
             .await?;
-        self.validate_deposit_request_on_bitcoin(deposit_request)
+        self.validate_deposit_request_on_bitcoin(deposit_request, gate)
             .await?;
         self.screen_deposit(deposit_request).await?;
         Ok(())
@@ -165,7 +169,12 @@ impl Hashi {
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
+        gate: &BitcoindGate,
     ) -> Result<(), UnapprovedDepositError> {
+        let charge = gate
+            .take_place()
+            .await
+            .map_err(UnapprovedDepositError::BitcoindBusy)?;
         let outpoint = deposit_request.utxo.id.into();
         let expected_address = self
             .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
@@ -179,7 +188,7 @@ impl Hashi {
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
         let check_result = self
             .btc_monitor()
-            .confirm_deposit(outpoint, expected_txout, confirmation_threshold)
+            .confirm_deposit(outpoint, expected_txout, confirmation_threshold, charge)
             .await;
         let txout = match check_result {
             Ok(DepositConfirmation::Confirmed(txout)) => txout,
@@ -214,7 +223,7 @@ impl Hashi {
             ) => {
                 return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(e)));
             }
-            Err(e @ DepositConfirmError::TimedOut) => {
+            Err(e @ (DepositConfirmError::TimedOut | DepositConfirmError::DiscoveriesFull)) => {
                 return Err(UnapprovedDepositError::BitcoinConfirmFailed(anyhow!(e)));
             }
             Err(DepositConfirmError::Other(err)) => {
@@ -467,6 +476,9 @@ pub enum UnapprovedDepositError {
     #[error("Failed to confirm Bitcoin deposit: {0}")]
     BitcoinConfirmFailed(#[source] anyhow::Error),
 
+    #[error(transparent)]
+    BitcoindBusy(BitcoindBusy),
+
     #[error("Bitcoin deposit is not yet confirmed: {0}")]
     BitcoinNotConfirmed(#[source] anyhow::Error),
 
@@ -523,6 +535,7 @@ impl UnapprovedDepositError {
     pub(crate) fn kind(&self) -> UnapprovedDepositErrorKind {
         match self {
             Self::BitcoinConfirmFailed(_)
+            | Self::BitcoindBusy(_)
             | Self::BitcoinNotConfirmed(_)
             | Self::AmlServiceError(_)
             | Self::DepositAddressUnavailable(_)

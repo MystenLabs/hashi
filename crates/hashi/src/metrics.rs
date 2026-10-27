@@ -52,6 +52,12 @@ pub struct Metrics {
     pub(crate) peer_store_reads_max: IntGaugeVec,
     pub peer_store_reads_shed_total: IntCounterVec,
     pub(crate) peer_bridge_work_seconds_total: CounterVec,
+    pub(crate) peer_bitcoind_places_in_use: IntGaugeVec,
+    pub(crate) peer_bitcoind_calls_in_use: IntGaugeVec,
+    pub(crate) peer_bitcoind_discoveries_in_use: IntGaugeVec,
+    pub(crate) peer_bitcoind_requests_shed_total: IntCounterVec,
+    pub(crate) peer_bitcoind_discoveries_refused_total: IntCounterVec,
+    pub(crate) kyoto_block_fetch_seconds: Histogram,
 
     // Per-MPC-protocol body-size metrics.
     pub(crate) mpc_request_size_bytes: HistogramVec,
@@ -582,6 +588,48 @@ impl Metrics {
                 "hashi_peer_bridge_work_seconds_total",
                 "Seconds withdrawal signing and construction jobs ran on the blocking pool, by caller",
                 &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_bitcoind_places_in_use: register_int_gauge_vec_with_registry!(
+                "hashi_peer_bitcoind_places_in_use",
+                "Places in this node's Bitcoin monitor held by each caller's deposit confirmation, construction and withdrawal confirmation requests; a deposit discovery keeps its starter's place until it ends",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_bitcoind_calls_in_use: register_int_gauge_vec_with_registry!(
+                "hashi_peer_bitcoind_calls_in_use",
+                "Bitcoin Core RPCs running for each caller's requests",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_bitcoind_discoveries_in_use: register_int_gauge_vec_with_registry!(
+                "hashi_peer_bitcoind_discoveries_in_use",
+                "Deposit discoveries running for each caller's requests",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_bitcoind_requests_shed_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_bitcoind_requests_shed_total",
+                "Requests refused after waiting out the admit window for a place in this node's Bitcoin monitor, by caller",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_bitcoind_discoveries_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_bitcoind_discoveries_refused_total",
+                "Deposit confirmation requests refused because their caller already had as many deposit discoveries running as it may",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            kyoto_block_fetch_seconds: register_histogram_with_registry!(
+                "hashi_kyoto_block_fetch_seconds",
+                "Time from asking Kyoto for a block to its answer, queue wait included; a fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned",
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),

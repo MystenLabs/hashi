@@ -7,6 +7,7 @@
 //! and verifying specific transactions.
 
 pub mod config;
+pub mod limits;
 pub mod monitor;
 
 pub use kyoto::TrustedPeer;
