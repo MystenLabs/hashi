@@ -482,3 +482,272 @@ html.plugin-pages #copy-page-button-container,
 #copy-page-button-container[style*='position: fixed'] {
   display: none !important;
 }
+
+/* Tabs styling ported from the Sui docs site (docs/site/src/css/custom.css in
+   MystenLabs/sui). The first block restyles every <Tabs> container; the
+   tabsHeadingCentered--small block turns a single-tab <Tabs> into the
+   Prerequisites callout the Sui style guide prescribes. */
+.theme-doc-markdown .tabs-container [role="tabpanel"] {
+  padding: clamp(0.5rem, 1vw, 0.75rem);
+}
+
+.theme-doc-markdown .tabs-container [role="tabpanel"] > :first-child { 
+  margin-top: 0; 
+}
+
+.theme-doc-markdown .tabs-container [role="tabpanel"] > :last-child { 
+  margin-bottom: 0; 
+}
+
+/* Styles for ALL tabs containers - box with border */
+.theme-doc-markdown .tabs-container {
+  border: 1px solid #E0E2E6 !important;
+  border-radius: 0.5rem !important;
+  background: linear-gradient(135deg, 
+    #ffffff 0%, 
+    #F4F5F7 100%
+  ) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06) !important;
+  padding: 0.75rem 1rem !important;
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+
+.theme-doc-markdown .tabs-container:hover {
+  border-color: #8FCBFF !important;
+  box-shadow: 0 4px 12px rgba(41, 141, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04) !important;
+}
+
+/* Style the tabs list */
+.theme-doc-markdown .tabs-container .tabs {
+  border-bottom: none !important;
+  margin-bottom: 0.5rem !important;
+  padding-bottom: 0.5rem !important;
+  position: relative;
+}
+
+.theme-doc-markdown .tabs-container .tabs::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, 
+    #298DFF 0%, 
+    #8FCBFF 50%,
+    rgba(41, 141, 255, 0) 100%
+  );
+  border-radius: 2px;
+  z-index: 0;
+}
+
+/* Style individual tab items */
+.theme-doc-markdown .tabs-container .tabs__item {
+  font-size: 0.938rem !important;
+  font-weight: 600;
+  padding: 0.375rem 0.75rem !important;
+  margin: 0 0.25rem !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0.375rem !important;
+  color: #343940 !important;
+  transition: all 0.2s ease !important;
+  position: relative;
+  z-index: 1;
+}
+
+.theme-doc-markdown .tabs-container .tabs__item:hover {
+  background: rgba(41, 141, 255, 0.08) !important;
+  color: #1759C4 !important;
+}
+
+.theme-doc-markdown .tabs-container .tabs__item--active {
+  background: rgba(41, 141, 255, 0.12) !important;
+  color: #1759C4 !important;
+  font-weight: 700;
+}
+
+/* Dark mode */
+[data-theme='dark'] .theme-doc-markdown .tabs-container {
+  border-color: #343940 !important;
+  background: linear-gradient(135deg, 
+    #222529 0%, 
+    #131518 100%
+  ) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container:hover {
+  border-color: #5CA9FF !important;
+  box-shadow: 0 4px 12px rgba(41, 141, 255, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container .tabs::before {
+  background: linear-gradient(90deg, 
+    #298DFF 0%, 
+    #5CA9FF 50%,
+    rgba(41, 141, 255, 0) 100%
+  );
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container .tabs__item {
+  color: #E0E2E6 !important;
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container .tabs__item:hover {
+  background: rgba(41, 141, 255, 0.15) !important;
+  color: #5CA9FF !important;
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container .tabs__item--active {
+  background: rgba(41, 141, 255, 0.2) !important;
+  color: #5CA9FF !important;
+}
+
+/* Target the container when it has the small tabs class inside */
+.theme-doc-markdown .tabs-container:has(.tabsHeadingCentered--small) {
+  border: 1px solid #E0E2E6 !important;
+  border-radius: 0.5rem !important;
+  background: linear-gradient(135deg, 
+    #ffffff 0%, 
+    #F4F5F7 100%
+  ) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06) !important;
+  padding: 0.75rem 1rem !important;
+  backdrop-filter: blur(10px);
+  transition: all 0.3s ease;
+}
+
+.theme-doc-markdown .tabs-container:has(.tabsHeadingCentered--small):hover {
+  border-color: #8FCBFF !important;
+  box-shadow: 0 4px 12px rgba(41, 141, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04) !important;
+}
+
+/* Remove underline from the tabs list itself */
+.tabsHeadingCentered--small {
+  border-bottom: none !important;
+  margin-top: 0.25rem !important;
+  margin-bottom: 0.5rem !important;
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.5rem !important;
+  position: relative;
+}
+
+.tabsHeadingCentered--small::before {
+  content: '' !important;
+  display: block !important;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, 
+    #298DFF 0%, 
+    #8FCBFF 50%,
+    rgba(41, 141, 255, 0) 100%
+  );
+  border-radius: 2px;
+}
+
+.tabsHeadingCentered--small::after {
+  display: none !important;
+  content: none !important;
+}
+
+/* Style the individual tab items - make them non-clickable */
+.tabsHeadingCentered--small .tabs__item {
+  font-size: 1rem !important; 
+  font-weight: 700;
+  padding-top: 0.25rem !important;
+  padding-left: 0.5rem !important;
+  padding-bottom: 0.25rem !important;
+  margin: 0 0.125rem !important;
+  background: transparent !important;
+  border: none !important;
+  color: #343940 !important;
+  cursor: default !important;
+  text-align: left;
+  pointer-events: none !important;
+  text-decoration: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+  position: relative;
+  transition: color 0.2s ease;
+}
+
+/* Remove the dot entirely */
+.tabsHeadingCentered--small .tabs__item::before {
+  display: none !important;
+  content: none !important;
+}
+
+.tabsHeadingCentered--small .tabs__item::after {
+  display: none !important;
+  content: none !important;
+}
+
+/* Ensure no hover effects */
+.tabsHeadingCentered--small .tabs__item:hover {
+  text-decoration: none !important;
+  background: transparent !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+}
+
+/* Make active tab look the same as inactive */
+.tabsHeadingCentered--small .tabs__item--active {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+  color: #1759C4 !important;
+  text-decoration: none !important;
+}
+
+.tabsHeadingCentered--small .tabs__item--active::before {
+  display: none !important;
+  content: none !important;
+}
+
+.tabsHeadingCentered--small .tabs__item--active::after {
+  display: none !important;
+  content: none !important;
+}
+
+/* Smaller panel content */
+.tabs-container:has(.tabsHeadingCentered--small) [role="tabpanel"] {
+  padding: 0.5rem 0 0.5rem 0 !important;
+}
+
+/* Dark mode */
+[data-theme='dark'] .theme-doc-markdown .tabs-container:has(.tabsHeadingCentered--small) {
+  border-color: #343940 !important;
+  background: linear-gradient(135deg, 
+    #222529 0%, 
+    #131518 100%
+  ) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+}
+
+[data-theme='dark'] .theme-doc-markdown .tabs-container:has(.tabsHeadingCentered--small):hover {
+  border-color: #5CA9FF !important;
+  box-shadow: 0 4px 12px rgba(41, 141, 255, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+[data-theme='dark'] .tabsHeadingCentered--small::before {
+  background: linear-gradient(90deg, 
+    #298DFF 0%, 
+    #5CA9FF 50%,
+    rgba(41, 141, 255, 0) 100%
+  );
+}
+
+[data-theme='dark'] .tabsHeadingCentered--small .tabs__item {
+  color: #E0E2E6 !important;
+}
+
+[data-theme='dark'] .tabsHeadingCentered--small .tabs__item--active {
+  color: #5CA9FF !important;
+}
