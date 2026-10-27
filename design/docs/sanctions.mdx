@@ -50,7 +50,7 @@ and [Screening with TRM Labs](#screening-with-trm-labs).
 Each member of the committee might have different risk tolerances or policies
 for which set of addresses they do not want to serve. To accommodate different
 validator preferences, the Hashi node software has a configurable mechanism
-for determining whether servicing a particular address should be denied.
+for determining whether to deny service to a particular address.
 
 ## Screening with TRM Labs
 
@@ -61,8 +61,8 @@ account. To set up screening:
 2. Create an API key in the TRM platform under **Settings > API Tokens**.
 3. Set the key as `trm-api-key` in the node config.
 
-Without a key, the node does not screen. TRM only covers Mainnet, so the key
-is ignored on other networks.
+Without a key, the node does not screen. TRM only covers Mainnet, so the node
+ignores the key on other networks.
 
 The following table lists what the node screens in each flow and which TRM API
 it uses:
@@ -109,7 +109,7 @@ in a queue or waiting room until the validators pick it up for processing.
 Before selecting a request for processing, the validators vote on approving
 the request. One of the required checks as part of voting for approval is
 performing sanctions checking. After a quorum of validators has voted to
-approve a request, it can be picked up for processing. If a quorum decides
+approve a request, a node can pick it up for processing. If a quorum decides
 to approve a request for processing, per protocol all validators must
 assist in driving the request to completion.
 
@@ -119,5 +119,5 @@ The Hashi protocol implements rigorous sanctions enforcement, but enforcement
 is ultimately best-effort. A quorum of validators might accept a deposit that
 one validator preferred to not accept, or a previous committee accepted a
 deposit that the current committee would have rejected. In either case, after
-a UTXO is accepted into Hashi's pool, the protocol treats it as its own, and
+Hashi accepts a UTXO into its pool, the protocol treats it as its own, and
 it must be available during coin selection to process withdraw requests.

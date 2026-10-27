@@ -40,10 +40,10 @@ answer: >-
 ---
 
 Hashi is a native protocol, meaning the members of the Hashi committee are a
-subset of the Sui validators. Membership in the Hashi committee is restricted
-to members of the Sui validator set but is otherwise optional, because it
+subset of the Sui validators. Only members of the Sui validator set can join
+the Hashi committee, but membership is otherwise optional, because it
 requires a separate onchain registration and running extra services. In
-practice, more than 90% of Sui validators are expected to be members of the
+practice, Mysten Labs expects more than 90% of Sui validators to join the
 Hashi committee.
 
 ## Registration information
@@ -80,7 +80,7 @@ struct HashiNodeInfo {
 }
 ```
 
-The voting weight each validator possesses is mirrored from the
+The voting weight each validator possesses mirrors the
 `SuiSystemState`. This is the stake weight behind the `2f+1` participation
 requirement described in [Committee hand-offs](#committee-hand-offs).
 
@@ -98,7 +98,7 @@ same set. There are a few challenges with forcing these sets to be identical:
 - Enforcing tight coupling would require changes to Sui's epoch change and
   reconfiguration process in a few ways:
   - The MPC hand-off protocol takes a non-trivial amount of time to execute,
-    so the new set of validators would need to be locked in some time period
+    so Sui would need to lock in the new set of validators some time period
     before the close of the epoch, giving the MPC committee time to
     reconfigure.
   - Sui's epoch change and reconfiguration would need to block on successful
@@ -118,6 +118,6 @@ first committee runs distributed key generation (DKG) instead. The hand-off
 requires that
 `2f+1` stake-weighted members of the old committee are alive and willing to
 participate in the hand-off protocol. This design makes that assumption,
-because of the challenges of enforcing tight coupling, and an economic
-mechanism can be added later to motivate older committee members to
+because of the challenges of enforcing tight coupling, and a later version
+can add an economic mechanism to motivate older committee members to
 participate in the hand-off process.

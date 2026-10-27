@@ -38,13 +38,13 @@ answer: >-
 Hashi uses two configuration files:
 
 1. **Validator config**, used by `hashi server` and `hashi register`. Contains keys, endpoints, and all node parameters.
-2. **CLI config** (`hashi-cli.toml`), used by governance, query, and deposit/withdraw commands.
+2. **CLI config** (`hashi-cli.toml`), used by governance, query, deposit, and withdraw commands.
 
 ## Validator config
 
 All fields use kebab-case. Optional fields show their defaults in comments.
 
-> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]`, `[bitcoin-rpc-auth]`, and `[metrics-push]` sections (as in the template below). A top-level key placed after a section header is rejected at startup: under `[hashi-ids]` or `[metrics-push]` as an unknown field, under `[bitcoin-rpc-auth]` as `wanted exactly 1 element`.
+> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]`, `[bitcoin-rpc-auth]`, and `[metrics-push]` sections (as in the template below). The node rejects a top-level key placed after a section header at startup: under `[hashi-ids]` or `[metrics-push]` as an unknown field, under `[bitcoin-rpc-auth]` as `wanted exactly 1 element`.
 
 {/* The two templates differ only in their network values. Change both together. */}
 
@@ -321,7 +321,7 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 </TabItem>
 </Tabs>
 
-> **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators are strongly encouraged to set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
+> **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators should set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
 
 > **Already running a Testnet node?** Give the Mainnet node its own `db` directory, starting empty, and its own `backup-dir`. Both hold one deployment's node keys and MPC key shares, so never point a Mainnet node at a Testnet node's database or backups. We also recommend new TLS and operator keys for Mainnet (see [Keys and Security](keys.mdx)) rather than the ones a Testnet host has been using.
 
@@ -333,7 +333,7 @@ For governance commands, queries, and user-facing operations. Generate a templat
 hashi config template -o hashi-cli.toml
 ```
 
-> **Where the package and object IDs come from.** The [Networks](../reference/networks.mdx) table is the canonical source for `package_id` and `hashi_object_id`; copy them from the column for your target network. `hashi config on-chain` shows the **onchain protocol configuration** and requires these IDs to already be set, so it cannot be used to discover them.
+> **Where the package and object IDs come from.** The [Networks](../reference/networks.mdx) table is the canonical source for `package_id` and `hashi_object_id`; copy them from the column for your target network. `hashi config on-chain` shows the **onchain protocol configuration** and requires these IDs to already be set, so you cannot use it to discover them.
 
 <Tabs groupId="network" queryString>
 <TabItem value="mainnet" label="Mainnet" default>
@@ -396,7 +396,7 @@ All environment variables override their corresponding config file values.
 | `SUI_RPC_URL` | `sui_rpc_url`; `sui-rpc` for `hashi register` only | Sui gRPC endpoint. `hashi server` ignores it. `hashi publish` and `hashi launch` also read it and default to Mainnet when it is unset |
 | `HASHI_PACKAGE_ID` | `package_id` | Hashi package ID |
 | `HASHI_OBJECT_ID` | `hashi_object_id` | Hashi shared object ID |
-| `HASHI_KEYPAIR` | `keypair_path` | Path to signing keypair |
+| `HASHI_KEYPAIR` | `keypair_path` | Path to signing key pair |
 | `BTC_RPC_URL` | `bitcoin.rpc_url` | Bitcoin RPC URL |
 | `BTC_RPC_USER` | `bitcoin.rpc_user` | Bitcoin RPC username |
 | `BTC_RPC_PASSWORD` | `bitcoin.rpc_password` | Bitcoin RPC password |
@@ -412,7 +412,7 @@ All environment variables override their corresponding config file values.
 |------|----------|--------|---------|
 | **443** (default) | TLS 1.3 + gRPC | Other committee validators | MPC protocol messages, DKG, signing, deposit/withdrawal coordination |
 
-The port is configurable through `listen-address`. It must be publicly reachable at the URL specified in `endpoint-url`, which is registered onchain.
+The port is configurable through `listen-address`. It must be publicly reachable at the URL in `endpoint-url`, which the node registers onchain.
 
 ### Outbound
 
@@ -427,7 +427,7 @@ The port is configurable through `listen-address`. It must be publicly reachable
 | Metrics push (`push-url`) | per URL | HTTPS | Metrics push, when `[metrics-push]` is set (see [Metrics push](monitoring.mdx#metrics-push)) |
 
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
-> - **Bitcoin RPC:** the RPC user/whitelist must permit `sendrawtransaction` and `testmempoolaccept`, not only read calls.
+> - **Bitcoin RPC:** the RPC user or whitelist must permit `sendrawtransaction` and `testmempoolaccept`, not only read calls.
 
 ### Metrics and liveness (not public)
 
@@ -446,6 +446,6 @@ Point a liveness probe at `/health` on this port rather than on 443, once your n
 ### TLS
 
 - Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
-- The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
+- The node registers the TLS public key onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
 - The node auto-generates certificates from the `tls-private-key` at startup.
 - The node also presents this key's certificate to the guardian's node endpoint (`guardian_node_url`), which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.

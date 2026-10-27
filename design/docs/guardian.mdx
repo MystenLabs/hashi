@@ -40,7 +40,7 @@ answer: >-
 
 To protect against vulnerabilities and against malicious past committees,
 Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
-deposits. Deposits are spent with a 2-of-2 multisig where the guardian is one
+deposits. Spending a deposit requires a 2-of-2 multisig where the guardian is one
 party and the Hashi MPC committee is the other. A recovery script also lets the
 MPC committee alone spend a UTXO 60 days after it confirms (see
 [Bitcoin Address Scheme](address-scheme.mdx)).
@@ -91,7 +91,7 @@ The main components are:
 - **Guardian enclave**: the private signer and policy engine. A standby
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
-  and signs Bitcoin inputs. A standby does not serve withdrawals: it is armed
+  and signs Bitcoin inputs. A standby does not serve withdrawals: the operator arms it
   while the current active guardian is still alive and takes over from it only
   after operator-triggered activation. Every session signs the records it
   writes to S3.
@@ -120,8 +120,8 @@ colocated on every certificate-loading host, including for signers and replaceme
 certificates. The CLI verifies and sends bundles; the guardian independently
 rejects missing or invalid proofs on every certificate-bearing RPC.
 The sole usable signing key must be the SIG-attested primary key, so the KP's
-primary-key fingerprint identifies its attested signing key. Certificates with
-a separate signing subkey under an unattested primary are rejected.
+primary-key fingerprint identifies its attested signing key. The guardian rejects certificates with
+a separate signing subkey under an unattested primary.
 Signature verification pins that signing key; encryption and recipient checks
 pin the attested DEC key. Each share ciphertext must contain exactly one
 OpenPGP recipient matching that DEC key.
@@ -170,7 +170,7 @@ these queries: an access policy must cover both `GetAttestedGuardianInfo` and
 
 Clients that previously set `include_attestation` on `GetGuardianInfo` must switch
 to `GetAttestedGuardianInfo`. Ordinary info no longer returns an attestation or a signature. Upgrade the guardian and proxy before
-switching KP/operator clients to the new RPC.
+switching KP and operator clients to the new RPC.
 
 ## Withdraw-mode provisioning flow
 

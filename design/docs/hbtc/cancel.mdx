@@ -53,15 +53,15 @@ The onchain contract enforces 3 conditions. All of them must hold:
   can cancel it.
 - **Hashi has not committed it yet:** The request must still be in the
   Requested or Approved state. After the committee commits the request to a
-  Bitcoin transaction, the `hBTC` is burned and the withdrawal completes on
-  Bitcoin. It cannot be cancelled.
+  Bitcoin transaction, Hashi burns the `hBTC` and the withdrawal completes on
+  Bitcoin. You cannot cancel it.
 - **The cooldown has passed:** At least
   [`withdrawal_cancellation_cooldown_ms`](../config.mdx#withdrawal_cancellation_cooldown_ms)
   must have elapsed since you submitted the request. The cooldown stops rapid
   submit-and-cancel cycles from interfering with processing.
 
 Common reasons to cancel include a request that is larger than the Guardian
-rate limiter's maximum capacity, which Hashi skips until the limit is raised,
+rate limiter's maximum capacity, which Hashi skips until governance raises the limit,
 and a destination address you entered incorrectly. See
 [Rate Limiting Withdrawals](../limiter.mdx) for how the limiter affects queued
 requests.

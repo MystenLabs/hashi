@@ -38,7 +38,7 @@ answer: >-
 
 The requirements for running a Hashi node are **low** compared with those of a Sui node. To reduce blast radius, avoid **colocating** the Hashi process with a Sui validator. There should be no performance concerns with containerizing the process or running it in Kubernetes.
 
-> **Where the dependencies run.** On **Mainnet**, validators are asked to self-host the Sui fullnode and are strongly encouraged to self-host the Bitcoin node (both from [External service dependencies](#external-service-dependencies)), and we advise running them on hosts separate from the Hashi node, which itself stays apart from your Sui validator. On **Testnet**, colocating these on one host is generally acceptable, because the blast radius is a test deployment rather than custodied funds, and the public Sui fullnode or a Bitcoin RPC provider is fine. This is an operational policy rather than something the software enforces.
+> **Where the dependencies run.** On **Mainnet**, Mysten asks validators to self-host the Sui fullnode and strongly encourages them to self-host the Bitcoin node (both from [External service dependencies](#external-service-dependencies)), and run them on hosts separate from the Hashi node, which itself stays apart from your Sui validator. On **Testnet**, colocating these on one host is generally acceptable, because the blast radius is a test deployment rather than custodied funds, and the public Sui fullnode or a Bitcoin RPC provider is fine. This is an operational policy rather than something the software enforces.
 
 | Resource | Recommendation |
 |----------|---------------|
@@ -51,7 +51,7 @@ The requirements for running a Hashi node are **low** compared with those of a S
 >
 > - **CPU**: 3 cores for headroom, mainly the parallel-signing burst on the leader.
 > - **Memory**: 2 GB is comfortable headroom; steady-state is well under this (a one-off ~3.7 GB spike came from a since-identified bug, not normal load).
-> - **Network**: ~66 Mbps ingress / ~40 Mbps egress with the default MPC `(t, f)` parameters; a higher-throughput ("hybrid") configuration likely needs considerably more, so provision a **1 Gbps** link for headroom. Bandwidth tracks MPC protocol rounds (DKG, key rotation, presigning, signing), not individual deposit/withdrawal transactions; egress can be a meaningful cost, and the team is actively reducing this.
+> - **Network**: ~66 Mbps ingress / ~40 Mbps egress with the default MPC `(t, f)` parameters; a higher-throughput (hybrid) configuration likely needs considerably more, so provision a **1 Gbps** link for headroom. Bandwidth tracks MPC protocol rounds (DKG, key rotation, presigning, signing), not individual deposit or withdrawal transactions; egress can be a meaningful cost, and the team is actively reducing this.
 > - **Storage**: peaks around 1 GB; 10 GB is generous but fine.
 >
 > These figures reflect Testnet observations and might change for Mainnet.
@@ -67,7 +67,7 @@ A Hashi node depends on two external services that you provide:
   - transaction relay left on (no `blocksonly=1`, which disables `estimatesmartfee`); without a fee estimate the node won't build or sign withdrawals
 - **Sui fullnode serving the gRPC v2 API** (`sui.rpc.v2` services, including the `SubscribeCheckpoints` stream). On Mainnet, self-host it; on Testnet the public fullnode also works out of the box. See [Sui RPC](#sui-rpc).
 
-> On **Mainnet**, validators are asked to self-host the Sui fullnode rather than use the public one, and are strongly encouraged to self-host the Bitcoin node rather than rely on a third-party RPC provider. Run what you host on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others. In the configurations shown here the links from the Hashi node to both are unencrypted (plaintext gRPC and HTTP basic auth), so keep them on a private network.
+> On **Mainnet**, Mysten asks validators to self-host the Sui fullnode rather than use the public one, and strongly encourages them to self-host the Bitcoin node rather than rely on a third-party RPC provider. Run what you host on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others. In the configurations shown here the links from the Hashi node to both are unencrypted (plaintext gRPC and HTTP basic auth), so keep them on a private network.
 
 See [Sui RPC](#sui-rpc) and [Bitcoin node](#bitcoin-node) for details.
 
@@ -80,7 +80,7 @@ See [Sui RPC](#sui-rpc) and [Bitcoin node](#bitcoin-node) for details.
 GIT_REVISION=$(git rev-parse HEAD) bash docker/hashi/build.sh --no-cache
 ```
 
-> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Releases are tagged `<network>-<major>.<minor>` (for example `testnet-1.0` and `mainnet-1.0`), and each release's notes give its source commit and binary sha256 (see [Releases](../reference/releases.mdx)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
+> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Release tags follow `<network>-<major>.<minor>` (for example `testnet-1.0` and `mainnet-1.0`), and each release's notes give its source commit and binary sha256 (see [Releases](../reference/releases.mdx)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum. Compute the sha256 of your build and compare it against the published value:
 
@@ -162,7 +162,7 @@ bitcoind --version
 
 If you use a provider instead, it has to cover both channels. The JSON-RPC endpoint must be archival, look up any confirmed transaction by txid (`getrawtransaction`), and permit `sendrawtransaction` and `testmempoolaccept`. The P2P side must be a peer you can list in `bitcoin-trusted-peers` that meets the requirement above, so an RPC-only endpoint is not enough. Confirm with the provider that it offers such a peer before you rely on it. The rest of this tab covers the self-hosted node.
 
-**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [Resources](#resources). A self-hosted node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: the Hashi node cannot follow Bitcoin until this node is fully synced and both indexes are built.
+**Sizing the Mainnet node.** This is separate from, and far larger than, the Hashi process sizing in [Resources](#resources). A self-hosted node must be **archival** (no `prune=`) and additionally builds `txindex` and `blockfilterindex`. A pruned node is not an option: Hashi only reads chain data from `bitcoin-start-height` onward, but it finds each deposit's block with `getrawtransaction` by txid, which needs `txindex`, and Bitcoin Core refuses to start with `txindex` on a pruned node (`Prune mode is incompatible with -txindex`). In October 2026 the Mainnet block data alone is about 775 GB, and undo data, the two indexes and the chainstate add to that, so provision 2 TB of SSD storage to leave room for growth. The initial block download is CPU- and I/O-bound and takes from several hours to a few days depending on hardware, so start it early: the Hashi node cannot follow Bitcoin until this node has fully synced and built both indexes.
 
 **`bitcoin.conf`, run as an archival, non-pruned node:**
 
@@ -199,7 +199,7 @@ bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]       # host:port (port is 
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. Leave `bitcoin-start-height` unset on Mainnet: for the default (`800000`) and any other height above Taproot activation, the light client anchors at a built-in checkpoint just below Taproot activation (block `709631`) and syncs headers and filters from there each time it starts. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
+> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in whitelist-only mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. Leave `bitcoin-start-height` unset on Mainnet: for the default (`800000`) and any other height above Taproot activation, the light client anchors at a built-in checkpoint just below Taproot activation (block `709631`) and syncs headers and filters from there each time it starts. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
 
 **Verify your node:**
 
@@ -253,7 +253,7 @@ bitcoin-trusted-peers = ["127.0.0.1:38333"]       # host:port (port is mandatory
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit); override it only if you need a different anchor.
+> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in whitelist-only mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit); override it only if you need a different anchor.
 
 **Verify your node:**
 

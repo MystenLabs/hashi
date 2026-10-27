@@ -113,32 +113,32 @@ after a restart, the leader doesn't build withdrawal transactions and
 validators don't sign them. Only regtest, which has no fee market, falls
 back to `1 sat/vB`.
 
-The estimated fee rate is then floored at 3 sat/vB (configurable per node
+Hashi then floors the estimated fee rate at 3 sat/vB (configurable per node
 with `withdrawal_min_fee_rate_sat_vb`). The onchain
 `worst_case_network_fee` bounds each user's share of the miner fee: while
 a batch's share would exceed it, the leader waits for fees to fall or for
 more requests to share them, rather than broadcasting a transaction that
 would sit unconfirmed.
 
-On mainnet the estimate is also capped at 100 sat/vB before the floor
+On Mainnet Hashi also caps the estimate at 100 sat/vB before the floor
 applies. That is far above what blocks usually charge, but fee spikes have
-passed it for days at a time, as in December 2023. A signed withdrawal
-can't be replaced by a higher-fee version, so one priced at the cap during
+passed it for days at a time, as in December 2023. Hashi can't replace a signed withdrawal
+with a higher-fee version, so one priced at the cap during
 a spike stays unconfirmed until fees fall back.
 
 Signet's cap is lower. Its blocks rarely fill, but Bitcoin Core's
 estimate there follows the few relayed transactions that pay hundreds of
-sat/vB, so on signet the estimate is capped at 9 sat/vB before the floor
+sat/vB, so on Signet Hashi caps the estimate at 9 sat/vB before the floor
 applies.
 
 Raising that floor on the leader alone only helps so far. Validators
-derive their ceiling from their own floor and estimate, so a fee more than
-3x above what they see is rejected; a larger rescue has to be configured
+derive their ceiling from their own floor and estimate, so they reject a fee more than
+3x above what they see; operators must configure a larger rescue
 across the fleet.
 
 ## Worst-case network fee
 
-Every withdrawal is required to cover not just its own onchain footprint
+Every withdrawal must cover not just its own onchain footprint
 but also a share of UTXO pool maintenance. At minimum, a withdrawal must
 pay for the fixed transaction overhead, its own recipient output, and a
 change output back to the pool. The additional headroom allows the coin
@@ -147,7 +147,7 @@ normal withdrawal traffic. This opportunistic consolidation (UTXO
 smashing) keeps the pool healthy without requiring dedicated consolidation
 transactions.
 
-The worst-case miner fee per withdrawal is derived from the
+Hashi derives the worst-case miner fee per withdrawal from the
 governance-configured `bitcoin_withdrawal_minimum` parameter:
 
 ```

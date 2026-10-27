@@ -49,8 +49,8 @@ answer links to the page that has the full detail.
 
 `hBTC` is a fungible `Coin<BTC>` on Sui. Hashi mints it when you deposit BTC
 and burns it when you withdraw, so every `hBTC` corresponds to BTC held in the
-Hashi UTXO pool. The pool is controlled by the Hashi committee, a subset of Sui
-validators using threshold signing, together with the Guardian. See
+Hashi UTXO pool. The Hashi committee, a subset of Sui validators using threshold
+signing, controls the pool together with the Guardian. See
 [Introduction](../README.mdx) and [Committee](../committee.mdx).
 
 ## Is there a HASHI token?
@@ -65,7 +65,7 @@ airdrop as an imitation. See [User Flows](../user-flows.mdx).
 Every deposit address is a Taproot address that only the Hashi committee and
 the Guardian can spend together. No single party holds the key. If the
 Guardian key is ever lost, a recovery script lets the committee alone spend a
-UTXO 60 days after it confirms, so funds cannot be stranded. See
+UTXO 60 days after it confirms, so funds cannot become stranded. See
 [Bitcoin Address Scheme](../address-scheme.mdx) and
 [Guardian](../guardian.mdx).
 
@@ -130,8 +130,8 @@ minimum. See [Withdrawal fees](../fees.mdx#withdrawal-fees).
 Check these causes in order:
 
 - **Rate limiter capacity:** The Guardian's token bucket is empty, and your
-  request waits for it to refill. A request larger than the bucket's maximum
-  capacity is skipped until governance raises the limit. You can
+  request waits for it to refill. Hashi skips a request larger than the bucket's maximum
+  capacity until governance raises the limit. You can
   [cancel it](cancel.mdx).
 - **Protocol paused:** When the
   [`paused`](../config.mdx#paused) flag is set, queued requests stay queued
@@ -162,11 +162,11 @@ No. The BTC sits at your deposit address until you record it. Hashi mints
 `hBTC` only after you submit the deposit request on Sui, so submit it when you
 are ready. See [Deposit BTC](deposit.mdx).
 
-## Can a deposit be rejected?
+## Can Hashi reject a deposit?
 
 Yes, in 3 cases: the amount is below the minimum, the request expires before
 the committee confirms it, or a quorum of committee members declines to
-approve it after screening. A deposit that is below the minimum is rejected
+approve it after screening. The contract rejects a deposit below the minimum
 when you submit the request. See [Handling Sanctioned Addresses](../sanctions.mdx).
 
 ## Where can I try Hashi without real BTC?
