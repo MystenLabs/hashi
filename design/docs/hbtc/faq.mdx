@@ -1,0 +1,176 @@
+---
+title: hBTC FAQ
+description: >-
+  Answers to common questions about hBTC: backing, timing, minimums, fees,
+  stuck withdrawals, supported addresses, and the HASHI token.
+keywords:
+  - hBTC
+  - FAQ
+  - deposit time
+  - withdrawal time
+  - minimum
+  - fees
+  - HASHI token
+goal:
+  description: >-
+    Reader finds direct answers to the most common hBTC questions, each
+    linking to the page with the full detail
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 500
+      label: Needs enough answers
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How long does a Hashi deposit take?
+  - How long does a Hashi withdrawal take?
+  - What is the minimum hBTC deposit or withdrawal?
+  - Is hBTC backed 1:1 by BTC?
+  - Is there a HASHI token?
+answer: >-
+  hBTC is minted 1:1 against BTC that the Hashi committee and Guardian hold. A
+  deposit mints after the Bitcoin confirmation threshold, committee approval,
+  and the deposit time delay, which with defaults is about 6 Bitcoin blocks
+  plus 10 minutes. A withdrawal waits for approval, batching, and Guardian
+  rate limiter capacity before Hashi broadcasts the Bitcoin transaction. There
+  is no protocol fee and no HASHI token.
+---
+
+This page answers the questions people ask most often about `hBTC`. Each
+answer links to the page that has the full detail.
+
+## What is hBTC, and is it backed 1:1?
+
+`hBTC` is a fungible `Coin<BTC>` on Sui. Hashi mints it when you deposit BTC
+and burns it when you withdraw, so every `hBTC` corresponds to BTC held in the
+Hashi UTXO pool. The pool is controlled by the Hashi committee, a subset of Sui
+validators using threshold signing, together with the Guardian. See
+[Introduction](../README.mdx) and [Committee](../committee.mdx).
+
+## Is there a HASHI token?
+
+No. `hBTC` is the only coin Hashi creates. There is no governance, utility, or
+airdrop token. Committee members govern the protocol by voting onchain with
+their validator stake weight. Treat any HASHI token offering, presale, or
+airdrop as an imitation. See [User Flows](../user-flows.mdx).
+
+## Who controls the BTC I deposit?
+
+Every deposit address is a Taproot address that only the Hashi committee and
+the Guardian can spend together. No single party holds the key. If the
+Guardian key is ever lost, a recovery script lets the committee alone spend a
+UTXO 60 days after it confirms, so funds cannot be stranded. See
+[Bitcoin Address Scheme](../address-scheme.mdx) and
+[Guardian](../guardian.mdx).
+
+## How long does a deposit take?
+
+A deposit passes through 3 waits before Hashi mints `hBTC`:
+
+1. The funding transaction must reach
+   [`bitcoin_confirmation_threshold`](../config.mdx#bitcoin_confirmation_threshold)
+   Bitcoin blocks, 6 by default, which is about an hour.
+2. The committee approves the deposit. On Mainnet, members screen the Bitcoin
+   transaction and the Sui recipient first. See
+   [Handling Sanctioned Addresses](../sanctions.mdx).
+3. After approval, the
+   [`bitcoin_deposit_time_delay_ms`](../config.mdx#bitcoin_deposit_time_delay_ms)
+   window must pass, 10 minutes by default, before anyone can confirm the
+   deposit and mint.
+
+A request that is not confirmed within 24 hours expires, and you can submit
+the UTXO again. See the [Deposit](../deposit.mdx) lifecycle.
+
+## How long does a withdrawal take?
+
+There is no fixed time. A request waits for committee approval, then for the
+leader to batch it with other approved requests, then for capacity in the
+Guardian's rate limiter, and finally for the Bitcoin transaction to reach the
+confirmation threshold. Most of the variation comes from the rate limiter and
+from Bitcoin fee conditions. You can read the limiter's current capacity with
+`client.hashi.guardian.canWithdraw` in the SDK before you submit. See
+[Rate Limiting Withdrawals](../limiter.mdx) and the [Withdraw](../withdraw.mdx)
+lifecycle.
+
+## What are the minimum amounts?
+
+Both minimums are governance parameters, 30,000 satoshis by default:
+
+- [`bitcoin_deposit_minimum`](../config.mdx#bitcoin_deposit_minimum) for
+  deposits.
+- [`bitcoin_withdrawal_minimum`](../config.mdx#bitcoin_withdrawal_minimum)
+  for withdrawals. This minimum exists so that every request can pay the
+  worst-case miner fee and still leave an output above Bitcoin's dust
+  threshold.
+
+Read the live values with `hashi config on-chain` in the CLI or
+`client.hashi.view.all()` in the SDK.
+
+## What fees do I pay?
+
+Hashi charges no protocol fee. Deposits are free apart from Sui gas for the
+request transaction. Withdrawals pay the Bitcoin miner fee, which Hashi deducts
+from your output, plus Sui gas. See [Fees](../fees.mdx).
+
+## Why did I receive less BTC than I withdrew?
+
+The difference is the Bitcoin miner fee for your share of the withdrawal
+transaction. Hashi estimates the fee from the connected Bitcoin node, caps it,
+and never charges more than the worst-case fee derived from the withdrawal
+minimum. See [Withdrawal fees](../fees.mdx#withdrawal-fees).
+
+## Why is my withdrawal still waiting?
+
+Check these causes in order:
+
+- **Rate limiter capacity:** The Guardian's token bucket is empty, and your
+  request waits for it to refill. A request larger than the bucket's maximum
+  capacity is skipped until governance raises the limit. You can
+  [cancel it](cancel.mdx).
+- **Protocol paused:** When the
+  [`paused`](../config.mdx#paused) flag is set, queued requests stay queued
+  and resume when the committee unpauses.
+- **Reconfiguration:** Hashi pauses withdrawals while the committee hands the
+  MPC key to the next epoch's committee. See
+  [Reconfiguration](../reconfiguration.mdx).
+- **Slow Bitcoin confirmation:** If the transaction is already broadcast, you
+  can speed it up by spending your output with a higher-fee child. See
+  [Stuck transactions](../fees.mdx#stuck-transactions).
+
+## Which Bitcoin addresses can I withdraw to?
+
+`P2WPKH` (bech32) and `P2TR` (bech32m) addresses on the Bitcoin network that
+matches your Sui network. Hashi does not support `P2WSH` or legacy address
+types. See [Withdraw BTC](withdraw.mdx#before-you-withdraw).
+
+## Can I deposit the same UTXO twice?
+
+No. Hashi records each UTXO it accepts, and a request for a UTXO that is
+already in the pool aborts onchain. In the SDK, check with
+`client.hashi.view.findUsedUtxos` before you submit. See
+[Deposit BTC](deposit.mdx#deposit-with-the-typescript-sdk).
+
+## I sent BTC but did not record the deposit. Is it lost?
+
+No. The BTC sits at your deposit address until you record it. Hashi mints
+`hBTC` only after you submit the deposit request on Sui, so submit it when you
+are ready. See [Deposit BTC](deposit.mdx).
+
+## Can a deposit be rejected?
+
+Yes, in 3 cases: the amount is below the minimum, the request expires before
+the committee confirms it, or a quorum of committee members declines to
+approve it after screening. A deposit that is below the minimum is rejected
+when you submit the request. See [Handling Sanctioned Addresses](../sanctions.mdx).
+
+## Where can I try Hashi without real BTC?
+
+On Testnet, which pairs Sui Testnet with Bitcoin Signet. Signet coins have no
+value and come from public faucets. See
+[Try a deposit on Testnet](deposit.mdx#try-a-deposit-on-testnet).

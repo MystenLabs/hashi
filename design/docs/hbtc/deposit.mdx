@@ -1,0 +1,245 @@
+---
+title: Deposit BTC
+description: >-
+  How to deposit BTC into Hashi and receive hBTC on Sui using the Hashi CLI or
+  the TypeScript SDK, from deriving your deposit address to tracking the mint.
+keywords:
+  - deposit
+  - hBTC
+  - BTC
+  - CLI
+  - TypeScript SDK
+  - deposit address
+  - Signet
+goal:
+  description: >-
+    Reader can deposit BTC into Hashi with the CLI or the TypeScript SDK and
+    knows how to track the deposit until hBTC is minted
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 400
+      label: Needs full procedure
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I deposit BTC into Hashi?
+  - How do I get my Hashi Bitcoin deposit address?
+  - How do I deposit BTC with the Hashi CLI?
+  - How do I deposit BTC with the Hashi TypeScript SDK?
+  - How do I get hBTC?
+answer: >-
+  To deposit BTC into Hashi, derive the Bitcoin deposit address for your Sui
+  address, send BTC to it, then record the funding transaction on Sui with
+  hashi deposit request in the CLI or client.hashi.deposit in the TypeScript
+  SDK. After the committee confirms the transaction and the deposit time delay
+  passes, Hashi mints an equal amount of hBTC to your Sui address.
+---
+
+To use BTC on Sui, you deposit it with Hashi and receive `hBTC`, a fungible
+`Coin<BTC>`, at your Sui address. You can make a deposit with the Hashi CLI or
+with the TypeScript SDK. Both follow the same 3 steps: derive your deposit
+address, send BTC to it, and record the funding transaction on Sui. This page
+covers the steps. For what the committee does with your request, see the
+[Deposit](../deposit.mdx) lifecycle.
+
+<Tabs className="tabsHeadingCentered--small">
+<TabItem value="prereq" label="Prerequisites">
+- [x] A Sui address funded with SUI for gas, and its private key in one of the [accepted key formats](../validators/keys.mdx#operator-key-day-to-day-signing).
+- [x] A Bitcoin wallet holding BTC on the network that matches your Sui network. Hashi pairs Sui Mainnet with Bitcoin Mainnet and Sui Testnet with Bitcoin Signet. See the [Networks](../reference/networks.mdx) table.
+- [x] For the CLI: a `hashi` binary built as described in [Software dependencies](../validators/prerequisites.mdx#software-dependencies) and a CLI config file from [CLI config](../validators/configuration.mdx#cli-config).
+- [x] For the SDK: a Node.js project with `@mysten/hashi` and `@mysten/sui` installed as described in [TypeScript SDK](../ts-sdk.mdx).
+</TabItem>
+</Tabs>
+
+## Before you deposit
+
+Keep the following rules in mind:
+
+- **Minimum amount:** Each deposit must be at least
+  [`bitcoin_deposit_minimum`](../config.mdx#bitcoin_deposit_minimum). Hashi
+  rejects smaller deposits onchain.
+- **Your keys do not control the deposit address:** The address is spendable
+  only by the Hashi committee together with the Guardian. See
+  [Bitcoin Address Scheme](../address-scheme.mdx).
+- **One address per Sui address:** Hashi derives the deposit address from the
+  Sui address that receives the `hBTC`. Sending to the wrong address credits
+  the wrong Sui account.
+- **Record the deposit yourself:** Hashi does not scan Bitcoin for incoming
+  funds. It mints `hBTC` only after you record the funding transaction on
+  Sui.
+
+## Deposit with the CLI
+
+CLI global options such as `-c` belong after the first-level subcommand, so
+`-c` goes after `deposit`. See
+[Global options](../reference/cli.mdx#global-options) for the full
+rule and the environment variables that replace the flags.
+
+##### Step 1: Generate your deposit address
+
+Run the following command with the Sui address that receives the `hBTC`:
+
+```bash
+hashi deposit -c hashi-cli.toml generate-address --recipient 0x<sui-address>
+```
+
+The command derives a Taproot address from the onchain MPC public key and the
+Guardian key. The result is the same every time for the same Sui address.
+
+##### Step 2: Send BTC to the address
+
+Send at least the minimum deposit amount to the address from any Bitcoin
+wallet. Note the Bitcoin transaction ID (txid) and the output index (vout) that
+paid your deposit address.
+
+##### Step 3: Record the deposit on Sui
+
+Tell Hashi about the funding transaction:
+
+```bash
+hashi deposit -c hashi-cli.toml request --txid <btc-txid> --outputs '[[<vout>, <amount-sats>]]' --recipient 0x<sui-address>
+```
+
+If you omit `--outputs`, the CLI looks the transaction up through the Bitcoin
+RPC endpoint in your CLI config and finds the outputs that paid the deposit
+address. If one funding transaction paid the address on several outputs, list
+them all in `--outputs` and the CLI batches them into one Sui transaction.
+
+The command prints a deposit request ID. Keep it for the next step.
+
+##### Step 4: Track the deposit
+
+Check the request and your balance:
+
+```bash
+hashi deposit -c hashi-cli.toml status <request-id>
+hashi balance -c hashi-cli.toml 0x<sui-address>
+```
+
+Expect to wait. The committee waits for
+[`bitcoin_confirmation_threshold`](../config.mdx#bitcoin_confirmation_threshold)
+Bitcoin blocks, then approves the deposit, then waits through the
+[`bitcoin_deposit_time_delay_ms`](../config.mdx#bitcoin_deposit_time_delay_ms)
+window before minting. See
+[How long does a deposit take?](faq.mdx#how-long-does-a-deposit-take) for the
+defaults.
+
+## Deposit with the TypeScript SDK
+
+The SDK attaches to a Sui client and exposes every Hashi method under
+`client.hashi.*`. Install it and create a client as described in
+[TypeScript SDK](../ts-sdk.mdx#setup). The SDK page also lists which Sui
+networks the SDK supports.
+
+##### Step 1: Derive the deposit address and record the deposit
+
+The following example derives the deposit address for the signer's Sui
+address and, after you send BTC to it, records the funding transaction on Sui:
+
+```ts
+const recipient = signer.toSuiAddress();
+
+// 1. Get the deposit address.
+const btcAddress = await client.hashi.generateDepositAddress({
+	suiAddress: recipient,
+});
+
+// 2. Send BTC to `btcAddress` from any wallet, then collect the
+//    funding tx's display-order txid and the vout that paid the
+//    deposit address. (Display-order = the form mempool.space and
+//    `bitcoin-cli` show — the SDK reverses internally.)
+
+// 3. Record the deposit on Sui.
+const result = await client.hashi.deposit({
+	signer,
+	txid: '0x<64-hex display-order txid>',
+	utxos: [{ vout: 0, amountSats: 100_000n }],
+	recipient,
+});
+
+if (result.$kind !== 'Transaction') {
+	throw new Error(`deposit failed: ${JSON.stringify(result.FailedTransaction)}`);
+}
+// `hBTC` lands in `recipient`'s balance once the committee confirms.
+```
+
+Pass every output that paid the deposit address in `utxos`. The SDK batches
+them into one atomic Sui transaction.
+
+:::tip
+
+Before you submit, check that the outputs are not already recorded. Submitting
+a consumed UTXO aborts onchain.
+
+```ts
+const results = await client.hashi.view.findUsedUtxos([
+	{ txid: '0x<64-hex display-order txid>', vout: 0 },
+]);
+// results[0]: { utxoId, inActivePool, inSpentPool, isUsed }
+```
+
+:::
+
+##### Step 2: Track the deposit
+
+Use the transaction digest to check status once or to wait for a terminal
+state:
+
+```ts
+const digest = result.Transaction?.digest;
+
+// One-shot status check — returns null if the digest has no Hashi event.
+const deposit = await client.hashi.view.depositStatus(digest);
+// deposit?.status: "pending" | "confirmed" | "expired" | "unknown"
+// deposit?.approvalTimestampMs — when the committee approved (null until approved)
+// deposit?.confirmableAtMs — earliest mint time = approval + bitcoinDepositTimeDelayMs
+//                            (null until approved)
+```
+
+```ts
+const info = await client.hashi.waitForDeposit(digest, {
+	intervalMs: 15_000, // default
+	signal: AbortSignal.timeout(600_000), // optional cancellation
+});
+```
+
+##### Step 3: Check your hBTC balance
+
+```ts
+const { totalBalance, coinObjectCount } = await client.hashi.view.balance(signer.toSuiAddress());
+// totalBalance — hBTC in satoshis; coinObjectCount — number of coin objects held.
+```
+
+## Try a deposit on Testnet
+
+Hashi's Testnet deployment uses Bitcoin Signet, so a test deposit needs Signet
+BTC. Signet coins have no value, and you cannot buy or mine them in any
+practical sense. You get them from a faucet.
+
+:::caution
+
+The Signet faucets below are third-party services that the Hashi team does not
+operate or verify. Availability, rate limits, and URLs change without notice,
+and this page makes no guarantee that any of them work at the time you read
+it. Never send real BTC to a Signet faucet or a Signet address.
+
+:::
+
+Commonly used public faucets for the default Signet network include
+[signetfaucet.com](https://signetfaucet.com/) and its alternate at
+[alt.signetfaucet.com](https://alt.signetfaucet.com/). Confirm that a faucet
+serves default Signet before using it. Some communities run custom signets
+whose coins are not valid on the network Hashi's Testnet uses. Your own Signet
+node cannot create spendable coins for you, because a central authority signs
+Signet blocks.
+
+For the CLI, set `network = "signet"` under `[bitcoin]` in `hashi-cli.toml`,
+or pass `--btc-network signet`. The CLI otherwise assumes regtest and derives
+a `bcrt1` address. Then follow the CLI steps above. Expect to wait for several
+Signet blocks between recording the deposit and seeing `hBTC` in your balance.
