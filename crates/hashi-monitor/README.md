@@ -139,6 +139,8 @@ last save again, so their findings come again.
   earliest block time among them. An empty pool gives 0.
 - `hashi_monitor_pool_value_sats` and `hashi_monitor_hbtc_supply_sats`: the
   pool value and the hBTC supply.
+- `hashi_monitor_open_flows{kind}`: the open `withdrawal` and `deposit` flows,
+  set at each maintenance tick and after the initial catch-up.
 
 The hBTC supply less the pool value is zero or below in an honest bridge:
 

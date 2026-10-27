@@ -24,6 +24,9 @@ pub const SOURCE_UTXO: &str = "utxo";
 /// The snapshot. Its time is the last successful save.
 pub const SOURCE_SNAPSHOT: &str = "snapshot";
 
+const FLOW_WITHDRAWAL: &str = "withdrawal";
+const FLOW_DEPOSIT: &str = "deposit";
+
 pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
@@ -32,6 +35,9 @@ pub struct MonitorMetrics {
     pool_value_sats: IntGauge,
     /// Sui's hBTC supply, in satoshis. 0 until the first read.
     hbtc_supply_sats: IntGauge,
+    /// The open flows, by kind: `withdrawal` or `deposit`. Set at each
+    /// removal of the closed machines.
+    open_flows: IntGaugeVec,
     /// Unix time of the latest finding of each kind. A kind has no series
     /// until its first finding.
     last_finding_timestamp_seconds: IntGaugeVec,
@@ -67,6 +73,14 @@ impl MonitorMetrics {
                 "Unix time through which each source has been checked; for btc, the start of the last pass that looked up every pending confirmation",
             ),
             &["source"],
+        )
+        .expect("valid metric");
+        let open_flows = IntGaugeVec::new(
+            Opts::new(
+                "hashi_monitor_open_flows",
+                "Number of withdrawal and deposit flows the monitor follows and has not closed",
+            ),
+            &["kind"],
         )
         .expect("valid metric");
 
@@ -109,6 +123,9 @@ impl MonitorMetrics {
         registry
             .register(Box::new(checked_through_timestamp_seconds.clone()))
             .expect("register");
+        registry
+            .register(Box::new(open_flows.clone()))
+            .expect("register");
 
         for source in [
             SOURCE_SUI,
@@ -121,6 +138,9 @@ impl MonitorMetrics {
                 .with_label_values(&[source])
                 .set(0);
         }
+        for kind in [FLOW_WITHDRAWAL, FLOW_DEPOSIT] {
+            open_flows.with_label_values(&[kind]).set(0);
+        }
 
         Self {
             registry,
@@ -128,6 +148,7 @@ impl MonitorMetrics {
             oldest_utxo_timestamp_seconds,
             pool_value_sats,
             hbtc_supply_sats,
+            open_flows,
             last_finding_timestamp_seconds,
             checked_through_timestamp_seconds,
         }
@@ -159,6 +180,14 @@ impl MonitorMetrics {
             .set(i64::try_from(count).unwrap_or(i64::MAX));
         self.oldest_utxo_timestamp_seconds
             .set(gauge_value(oldest_timestamp.unwrap_or_default()));
+    }
+
+    pub fn set_open_flows(&self, withdrawals: usize, deposits: usize) {
+        for (kind, count) in [(FLOW_WITHDRAWAL, withdrawals), (FLOW_DEPOSIT, deposits)] {
+            self.open_flows
+                .with_label_values(&[kind])
+                .set(i64::try_from(count).unwrap_or(i64::MAX));
+        }
     }
 
     fn render(&self) -> String {
@@ -228,6 +257,8 @@ mod tests {
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="btc"} 0"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="snapshot"} 0"#,
+            r#"hashi_monitor_open_flows{kind="withdrawal"} 0"#,
+            r#"hashi_monitor_open_flows{kind="deposit"} 0"#,
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
         }
@@ -249,12 +280,15 @@ mod tests {
         };
         metrics.record_findings(&[stale], 250);
         metrics.set_checked_through(SOURCE_GUARDIAN, 300);
+        metrics.set_open_flows(3, 5);
 
         let rendered = metrics.render();
         for line in [
             r#"hashi_monitor_last_finding_timestamp_seconds{kind="InvalidEventAdded"} 200"#,
             r#"hashi_monitor_last_finding_timestamp_seconds{kind="SnapshotStale"} 250"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 300"#,
+            r#"hashi_monitor_open_flows{kind="withdrawal"} 3"#,
+            r#"hashi_monitor_open_flows{kind="deposit"} 5"#,
         ] {
             assert!(rendered.contains(line), "missing {line} in:\n{rendered}");
         }
