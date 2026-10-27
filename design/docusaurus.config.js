@@ -166,6 +166,8 @@ const config = {
           // landing page occupied the root. Introduction is back at / now, so
           // keep the old path working for anything that linked it in between.
           { from: '/introduction', to: '/' },
+          // The node operator runbook was split into the Validators section.
+          { from: '/node-operator-runbook', to: '/validators/' },
         ],
         createRedirects(existingPath) {
           // Under `trailingSlash: true` route paths arrive as `/foo/`. The
@@ -267,17 +269,6 @@ const config = {
       colorMode: {
         defaultMode: 'dark',
         respectPrefersColorScheme: false,
-      },
-      announcementBar: {
-        // Changing the message later? Bump this id so visitors who dismissed
-        // the old bar see the new one (dismissal is stored per id).
-        id: 'hashi-testnet-live',
-        content:
-          'Hashi is now <strong>LIVE on Testnet</strong>. ' +
-          '<a target="_blank" rel="noopener noreferrer" href="https://testnet.hashi.sui.io">Get started &rarr;</a>',
-        backgroundColor: '#298DFF',
-        textColor: '#FFFFFF',
-        isCloseable: true,
       },
       navbar: {
         title: 'Hashi',

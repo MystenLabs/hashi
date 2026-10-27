@@ -1,12 +1,11 @@
 // @ts-check
 
 // Sections:
-//   Protocol     how Hashi works: flows, architecture, governance, security, fees
+//   Protocol     how Hashi works: architecture, lifecycles, governance, security, fees
+//   hBTC         user flows overview, deposit, withdraw, cancel, FAQ
 //   Integration  SDKs and integration guides
 //   Validators   committee member runbooks
 //   Reference    parameters and API links
-// A planned hBTC section (deposit, withdraw, cancel, minimums and timing, FAQ)
-// is omitted until it has pages.
 
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
@@ -15,9 +14,8 @@ const sidebars = {
     {
       type: 'category',
       label: 'Protocol',
-      collapsed: false,
+      collapsed: true,
       items: [
-        'user-flows',
         {
           type: 'category',
           label: 'Architecture',
@@ -51,22 +49,49 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'hBTC',
+      collapsed: true,
+      items: [
+        'user-flows',
+        'hbtc/deposit',
+        'hbtc/withdraw',
+        'hbtc/cancel',
+        'hbtc/faq',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Integration',
-      collapsed: false,
+      collapsed: true,
       items: ['ts-sdk'],
     },
     {
       type: 'category',
       label: 'Validators',
-      collapsed: false,
-      items: ['node-operator-runbook', 'node-backup'],
+      collapsed: true,
+      link: { type: 'doc', id: 'validators/index' },
+      items: [
+        'validators/prerequisites',
+        'validators/keys',
+        'validators/configuration',
+        'validators/genesis',
+        'validators/governance',
+        'validators/monitoring',
+        'validators/epoch-changes',
+        'validators/backup-restore',
+        'node-backup',
+        'validators/troubleshooting',
+      ],
     },
     {
       type: 'category',
       label: 'Reference',
-      collapsed: false,
+      collapsed: true,
       items: [
+        'reference/networks',
         'config',
+        'reference/cli',
+        'reference/releases',
         {
           type: 'link',
           label: 'Move Package',
