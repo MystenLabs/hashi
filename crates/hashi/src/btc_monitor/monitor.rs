@@ -177,10 +177,33 @@ impl DepositCheckRequest {
 
 type DiscoveryGroup = (bitcoin::OutPoint, Option<Address>);
 
+struct CachedOutputs {
+    is_coinbase: bool,
+    outputs: Vec<bitcoin::TxOut>,
+    bytes: usize,
+}
+
+impl CachedOutputs {
+    fn new(transaction: &bitcoin::Transaction) -> Self {
+        let outputs = transaction.output.clone();
+        let bytes = outputs.capacity() * size_of::<bitcoin::TxOut>()
+            + outputs
+                .iter()
+                .map(|output| output.script_pubkey.len())
+                .sum::<usize>();
+        Self {
+            is_coinbase: transaction.is_coinbase(),
+            outputs,
+            bytes,
+        }
+    }
+}
+
 struct DepositLookupCache {
     tx_blocks: LruCache<bitcoin::Txid, HashCheckpoint>,
     block_heights: LruCache<bitcoin::BlockHash, u32>,
-    transactions: LruCache<bitcoin::Txid, Arc<bitcoin::Transaction>>,
+    outputs: LruCache<bitcoin::Txid, Arc<CachedOutputs>>,
+    output_bytes: usize,
 }
 
 impl DepositLookupCache {
@@ -188,19 +211,38 @@ impl DepositLookupCache {
     /// per-output lookups for large deposit transactions while keeping memory bounded.
     const TX_BLOCK_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
     const BLOCK_HEIGHT_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(128).unwrap();
-    const TRANSACTION_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+    const OUTPUT_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+    const OUTPUT_CACHE_BYTES: usize = 32 << 20;
 
     fn new() -> Self {
         Self {
             tx_blocks: LruCache::new(Self::TX_BLOCK_CACHE_SIZE),
             block_heights: LruCache::new(Self::BLOCK_HEIGHT_CACHE_SIZE),
-            transactions: LruCache::new(Self::TRANSACTION_CACHE_SIZE),
+            outputs: LruCache::new(Self::OUTPUT_CACHE_SIZE),
+            output_bytes: 0,
+        }
+    }
+
+    fn put_outputs(&mut self, txid: bitcoin::Txid, outputs: Arc<CachedOutputs>) {
+        if outputs.bytes > Self::OUTPUT_CACHE_BYTES {
+            return;
+        }
+        self.output_bytes += outputs.bytes;
+        if let Some((_, displaced)) = self.outputs.push(txid, outputs) {
+            self.output_bytes -= displaced.bytes;
+        }
+        while self.output_bytes > Self::OUTPUT_CACHE_BYTES
+            && let Some((_, evicted)) = self.outputs.pop_lru()
+        {
+            self.output_bytes -= evicted.bytes;
         }
     }
 
     fn invalidate_tx(&mut self, txid: &bitcoin::Txid) {
         self.tx_blocks.pop(txid);
-        self.transactions.pop(txid);
+        if let Some(outputs) = self.outputs.pop(txid) {
+            self.output_bytes -= outputs.bytes;
+        }
     }
 }
 
@@ -242,14 +284,14 @@ impl SharedDepositLookupCache {
         self.lock().block_heights.put(block_hash, height);
     }
 
-    fn get_transaction(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
-        let result = self.lock().transactions.get(txid).cloned();
+    fn get_outputs(&self, txid: &bitcoin::Txid) -> Option<Arc<CachedOutputs>> {
+        let result = self.lock().outputs.get(txid).cloned();
         self.record_request("transaction", result.is_some());
         result
     }
 
-    fn put_transaction(&self, txid: bitcoin::Txid, transaction: Arc<bitcoin::Transaction>) {
-        self.lock().transactions.put(txid, transaction);
+    fn put_outputs(&self, txid: bitcoin::Txid, outputs: Arc<CachedOutputs>) {
+        self.lock().put_outputs(txid, outputs);
     }
 
     fn invalidate_tx(&self, txid: &bitcoin::Txid) {
@@ -1814,8 +1856,8 @@ async fn discover_deposit(
         TxBlockLookup::NotFound => return Ok(DepositStatus::NotFound),
     };
 
-    let transaction = if let Some(transaction) = deposit_lookup_cache.get_transaction(&txid) {
-        transaction
+    let cached = if let Some(cached) = deposit_lookup_cache.get_outputs(&txid) {
+        cached
     } else {
         let fetched = {
             let _timer = BlockFetchTimer::start(&fetch_seconds);
@@ -1847,20 +1889,19 @@ async fn discover_deposit(
             )
             .into());
         };
-        let transaction = Arc::new(transaction.clone());
-        deposit_lookup_cache.put_transaction(txid, transaction.clone());
-        transaction
+        let cached = Arc::new(CachedOutputs::new(transaction));
+        deposit_lookup_cache.put_outputs(txid, cached.clone());
+        cached
     };
-    let is_coinbase = transaction.is_coinbase();
 
-    let Some(txout) = transaction.output.get(outpoint.vout as usize) else {
+    let Some(txout) = cached.outputs.get(outpoint.vout as usize) else {
         return Ok(DepositStatus::InvalidVout {
             checkpoint: block_info,
         });
     };
     Ok(DepositStatus::InBlock {
         checkpoint: block_info,
-        is_coinbase,
+        is_coinbase: cached.is_coinbase,
         txout: txout.clone(),
     })
 }
@@ -2518,6 +2559,37 @@ mod tests {
 
         assert!(cache.get_tx_block(&txid).is_none());
         assert_eq!(cache.get_block_height(&block_hash), Some(42));
+    }
+
+    #[test]
+    fn deposit_lookup_cache_keeps_outputs_within_its_byte_budget() {
+        let cache = SharedDepositLookupCache::new(Arc::new(fresh_metrics()));
+        let cached = |script_bytes: usize| {
+            Arc::new(CachedOutputs::new(&bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; script_bytes]),
+                }],
+            }))
+        };
+        let half = DepositLookupCache::OUTPUT_CACHE_BYTES / 2;
+        let [first, second, oversized] = [1, 2, 3].map(|seed| make_outpoint(seed).txid);
+
+        cache.put_outputs(first, cached(half));
+        cache.put_outputs(second, cached(half));
+        cache.put_outputs(oversized, cached(DepositLookupCache::OUTPUT_CACHE_BYTES));
+
+        assert!(cache.get_outputs(&first).is_none());
+        assert_eq!(
+            cache.get_outputs(&second).unwrap().outputs[0]
+                .script_pubkey
+                .len(),
+            half
+        );
+        assert!(cache.get_outputs(&oversized).is_none());
     }
 
     #[tokio::test]
