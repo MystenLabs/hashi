@@ -73,8 +73,10 @@ Dashboard-worthy but **not** alerts:
   busy: a member doing it on purpose, or the leader at a node whose bitcoind
   is slow; compare across nodes.
 - `hashi_kyoto_block_fetch_seconds` — how long Kyoto takes to answer a block
-  request, queue wait included. A fetch abandoned at a timeout, reorg or
-  restart is recorded when it is abandoned.
+  request, queue wait included. A deposit discovery's fetch is recorded when
+  Kyoto answers or drops it, even after the discovery has timed out; a block
+  scan's fetch abandoned at a timeout, reorg or restart is recorded when it is
+  abandoned.
 - `hashi_mpc_refusals_total` — the MPC refusals behind the refusal alerts, by
   `side`, `handler`, `protocol` and `reason`. A complaint that names no
   protocol counts as `unspecified`.

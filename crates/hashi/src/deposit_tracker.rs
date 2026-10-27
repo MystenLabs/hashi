@@ -290,12 +290,22 @@ impl DepositTracker {
             .iter()
             .map(|transaction| transaction.compute_txid())
             .collect();
+        self.apply_block_with_txids_if_current(generation, checkpoint, block, &txids);
+    }
+
+    pub(crate) fn apply_block_with_txids_if_current(
+        &self,
+        generation: u64,
+        checkpoint: kyoto::HashCheckpoint,
+        block: &bitcoin::Block,
+        txids: &[bitcoin::Txid],
+    ) {
         let changed = {
             let mut state = self.inner.lock().unwrap();
             if state.bitcoin_generation != generation {
                 return;
             }
-            state.apply_block(checkpoint, block, &txids)
+            state.apply_block(checkpoint, block, txids)
         };
         if changed {
             self.notify_work();
