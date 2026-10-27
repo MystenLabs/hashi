@@ -51,8 +51,8 @@ const signer = Ed25519Keypair.fromSecretKey(/* … */);
 ```
 
 > **Network support.** Sui **testnet** and **devnet** are wired up (Bitcoin **signet** by default).
-> Prefer testnet — devnet support is temporary and will be deprecated. Mainnet is not yet deployed;
-> `hashi()` will throw until it lands, based on the network of the client it's extending. To target
+> Prefer testnet — devnet support is temporary and will be deprecated. `hashi()` throws
+> on any other network of the client it's extending. To target
 > a custom or local deployment, pass `hashiObjectId`, `packageId`, and `bitcoinNetwork` explicitly.
 
 > **Optional client options.** `hashi({ ... })` also accepts `btcRpcUrl` — a Bitcoin Core JSON-RPC
