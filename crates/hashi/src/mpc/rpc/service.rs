@@ -271,40 +271,29 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::GetPublicMpcOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let mpc_manager = self.mpc_manager()?;
-        let onchain_state = self.onchain_state_opt();
-        let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let epoch = internal_request.epoch;
-            // Resolved before the manager lock is taken, so the two locks never nest.
-            let membership = onchain_state.as_ref().map(|onchain_state| {
-                caller_membership::check_epoch_or_successor(
-                    onchain_state.state().hashi().committees.committees(),
-                    epoch,
-                    &caller,
-                )
-            });
-            let output = {
-                let mgr = mpc_manager.read().unwrap();
-                mgr.handle_get_public_mpc_output_request(&internal_request)
-                    .map_err(|e| {
-                        tracing::warn!("get_public_mpc_output failed: {e}");
-                        mpc_error_to_status(e)
-                    })?
-            };
-            if let Some(Err(refusal)) = membership {
-                return Err(caller_membership::refuse(
-                    &refused,
-                    "get_public_mpc_output",
-                    &caller,
-                    &format!("epoch {epoch} or the committee after it"),
-                    refusal,
-                ));
-            }
-            Ok(Arc::unwrap_or_clone(output))
-        })
-        .await?;
-        Ok(tonic::Response::new(response))
+        let epoch = internal_request.epoch;
+        let shape = self.shape_params()?;
+        let output = self
+            .public_outputs()
+            .lookup(epoch, shape.epoch(), shape.previous_epoch())
+            .map_err(|e| {
+                tracing::warn!("get_public_mpc_output failed: {e}");
+                mpc_error_to_status(e)
+            })?;
+        if let Some(onchain_state) = self.onchain_state_opt() {
+            check_public_output_caller(onchain_state, epoch, caller)
+                .await
+                .map_err(|refusal| {
+                    caller_membership::refuse(
+                        &self.metrics().mpc_rpc_caller_refused_total,
+                        "get_public_mpc_output",
+                        &caller,
+                        &format!("epoch {epoch} or the committee after it"),
+                        refusal,
+                    )
+                })?;
+        }
+        Ok(tonic::Response::new(Arc::unwrap_or_clone(output)))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -427,6 +416,25 @@ fn check_caller_in_epoch(
             refusal,
         )
     })
+}
+
+async fn check_public_output_caller(
+    onchain_state: crate::onchain::OnchainState,
+    epoch: u64,
+    caller: Address,
+) -> Result<(), caller_membership::Refusal> {
+    let check = move |state: &crate::onchain::State| {
+        caller_membership::check_epoch_or_successor(
+            state.hashi().committees.committees(),
+            epoch,
+            &caller,
+        )
+    };
+    let uncontended = onchain_state.try_state().map(|state| check(&state));
+    match uncontended {
+        Some(membership) => membership,
+        None => spawn_blocking(move || check(&onchain_state.state())).await,
+    }
 }
 
 fn send_messages_error(sender: Address, e: MpcError) -> Status {

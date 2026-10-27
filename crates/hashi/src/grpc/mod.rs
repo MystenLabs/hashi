@@ -261,6 +261,10 @@ impl HttpService {
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
+    pub(crate) fn public_outputs(&self) -> &crate::mpc::public_outputs::PublicOutputs {
+        self.inner.public_outputs()
+    }
+
     pub fn signing_manager_for(
         &self,
         epoch: u64,
