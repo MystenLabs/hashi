@@ -197,6 +197,12 @@ groups:
               and timestamp(hashi_peer_store_reads_shed_total) >= hashi_peer_first_seen_timestamp_seconds),
             "limit", "store_reads", "", "")
           or label_replace(
+            (increase(hashi_peer_bitcoind_requests_shed_total[1h]) > 0)
+            or (hashi_peer_bitcoind_requests_shed_total > 0
+              and time() - hashi_peer_first_seen_timestamp_seconds < 3600
+              and timestamp(hashi_peer_bitcoind_requests_shed_total) >= hashi_peer_first_seen_timestamp_seconds),
+            "limit", "bitcoind", "", "")
+          or label_replace(
             (increase(hashi_withdrawal_signing_refused_total{reason=~"busy|shape"}[1h]) > 0)
             or (hashi_withdrawal_signing_refused_total{reason=~"busy|shape"} > 0
               and ignoring (reason) time() - hashi_peer_first_seen_timestamp_seconds < 3600
@@ -212,6 +218,10 @@ groups:
             one caller may (busy), or sent a malformed signing request (shape). An honest
             leader does neither unless it runs without a guardian (busy), however slow
             this node is. Look the peer up with
+            `hashi committee -c hashi-cli.toml view {{ $labels.peer }}`.{{ else if eq $labels.limit "bitcoind" }}The
+            peer kept this node's Bitcoin monitor work queued for longer than a request
+            lives. An honest leader gives up after 40 s, before the 45 s window, so it
+            never does this, however slow this node is. Look the peer up with
             `hashi committee -c hashi-cli.toml view {{ $labels.peer }}`.{{ else }}The
             peer may be misbehaving, or this node may be slow or have its limits
             set too low. Rule this node out first (hashi_request_latency), then

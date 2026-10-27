@@ -351,7 +351,13 @@ mod tests {
                 .into_iter()
                 .find(|request| request.id == request_id)
                 .ok_or_else(|| anyhow!("node {index} has no deposit request {request_id}"))?;
-            match node_hashi.validate_deposit_request(&deposit_request).await {
+            match node_hashi
+                .validate_deposit_request(
+                    &deposit_request,
+                    &hashi::btc_monitor::limits::BitcoindGate::local(),
+                )
+                .await
+            {
                 Err(UnapprovedDepositError::BitcoinNotConfirmed(error)) => assert!(
                     error.to_string().contains(&expected),
                     "node {index} reported an unexpected confirmation error: {error}"

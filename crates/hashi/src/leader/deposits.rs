@@ -10,6 +10,7 @@ use super::is_already_approved_refusal;
 use super::parse_member_signature;
 use super::retry_peer_call;
 use crate::Hashi;
+use crate::btc_monitor::limits::BitcoindGate;
 use crate::deposits::ApprovedDepositError;
 use crate::deposits::UnapprovedDepositError;
 use crate::deposits::UnapprovedDepositErrorKind;
@@ -481,7 +482,7 @@ impl LeaderService {
 
         // Validate deposit_request before asking for signatures
         inner
-            .validate_deposit_request(&deposit_request)
+            .validate_deposit_request(&deposit_request, &BitcoindGate::local())
             .await
             .inspect_err(|err| debug!("Deposit validation failed: {err}"))?;
 

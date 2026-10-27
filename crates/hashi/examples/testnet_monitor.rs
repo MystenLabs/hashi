@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let confirmations = args.confirmations;
                         tokio::spawn(async move {
                             match client
-                                .confirm_deposit(outpoint, expected_txout, confirmations)
+                                .confirm_deposit(outpoint, expected_txout, confirmations, None)
                                 .await
                             {
                                 Ok(hashi::btc_monitor::monitor::DepositConfirmation::Confirmed(

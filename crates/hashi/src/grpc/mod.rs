@@ -55,6 +55,7 @@ pub struct HttpService {
     inner: Arc<Hashi>,
     signing_tasks: peer_limit::CallerTaskLimiter,
     signing_work: peer_limit::SigningWorkLimiter,
+    bitcoind: crate::btc_monitor::limits::BitcoindLimiter,
     store_reads: peer_limit::CallerTaskLimiter,
 }
 
@@ -64,10 +65,12 @@ impl HttpService {
             peer_limit::CallerTaskLimiter::new(hashi.metrics.withdrawal_signing_tasks_max.clone());
         let store_reads =
             peer_limit::CallerTaskLimiter::new(hashi.metrics.peer_store_reads_max.clone());
+        let bitcoind = crate::btc_monitor::limits::BitcoindLimiter::new(hashi.metrics.clone());
         Self {
             inner: hashi,
             signing_tasks,
             signing_work: Default::default(),
+            bitcoind,
             store_reads,
         }
     }
