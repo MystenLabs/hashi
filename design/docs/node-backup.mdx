@@ -385,8 +385,8 @@ Keep a way to decrypt every copy you still hold, even after you replace
 
 `hashi backup restore` decrypts an archive and extracts it into a directory you
 choose. It installs nothing. The full procedure, from choosing a backup to
-restarting the node, is in the
-[operator runbook](node-operator-runbook.mdx#102-restoring-a-node).
+restarting the node, is in
+[Backup and Restore](validators/backup-restore.mdx#restoring-a-node).
 For S3 restore commands and an on-page recovery checklist, see
 [Restore and infrastructure limits](#restore-and-infrastructure-limits) and
 [Machine-loss recovery](#machine-loss-recovery) below.
@@ -526,15 +526,15 @@ For a **single compromised node with sufficient healthy peers**:
 
 1. Fence the old host. From trusted infrastructure, use the validator account
    authority to revoke the old operator delegation and register fresh operator
-   and TLS identities in onchain metadata. Follow the runbook's
-   [key generation and registration](node-operator-runbook.mdx#22-tls-key-dedicated)
-   and [operator revocation](node-operator-runbook.mdx#24-operator-key-day-to-day-signing)
+   and TLS identities in onchain metadata. Follow the
+   [key generation and registration](validators/keys.mdx#tls-key-dedicated)
+   and [operator revocation](validators/keys.mdx#operator-key-day-to-day-signing)
    procedures with the replacement config; do not authorize recovery with the
    compromised operator key.
 2. Provision a fresh machine with an **empty database**, not restored key material.
    Startup generates fresh node encryption/signing keys and registers them;
-   see [server startup](node-operator-runbook.mdx#54-step-3-start-the-server).
-3. Rejoin through [reconfiguration](node-operator-runbook.mdx#9-epoch-changes-reconfiguration)
+   see [server startup](validators/genesis.mdx#step-3-start-the-server).
+3. Rejoin through [reconfiguration](validators/epoch-changes.mdx)
    with the healthy peers, and confirm the replacement identities and participation.
 
 Suspected quorum-wide or global MPC key compromise requires coordinated incident

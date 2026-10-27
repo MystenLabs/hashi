@@ -1,0 +1,451 @@
+---
+title: Configuration
+description: >-
+  The Hashi validator config and CLI config templates for Mainnet and Testnet, the environment variables that override them, and the network ports and TLS the node uses.
+keywords:
+  - operator
+  - configuration
+  - validator config
+  - CLI config
+  - environment variables
+  - firewall
+  - ports
+  - TLS
+goal:
+  description: >-
+    Reader can write a correct validator config and CLI config for their network and open the right ports
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 600
+      label: Needs enough content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I configure a Hashi node?
+  - What is in the Hashi validator config?
+  - What ports does a Hashi node need open?
+  - Which environment variables does the Hashi CLI read?
+answer: >-
+  Hashi uses two config files: the validator config for hashi server and hashi register, and the CLI config for governance and queries. Keep top-level keys above the TOML tables, point sui-rpc and bitcoin-rpc at your own nodes, and open port 443 inbound to other committee members.
+---
+
+Hashi uses two configuration files:
+
+1. **Validator config**, used by `hashi server` and `hashi register`. Contains keys, endpoints, and all node parameters.
+2. **CLI config** (`hashi-cli.toml`), used by governance, query, and deposit/withdraw commands.
+
+## Validator config
+
+All fields use kebab-case. Optional fields show their defaults in comments.
+
+> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]`, `[bitcoin-rpc-auth]`, and `[metrics-push]` sections (as in the template below). A top-level key placed after a section header is rejected at startup: under `[hashi-ids]` or `[metrics-push]` as an unknown field, under `[bitcoin-rpc-auth]` as `wanted exactly 1 element`.
+
+{/* The two templates differ only in their network values. Change both together. */}
+
+<Tabs groupId="network" queryString>
+<TabItem value="mainnet" label="Mainnet" default>
+
+```toml
+# ── Identity ──────────────────────────────────────────────────────────
+
+# Ed25519 TLS private key (PEM file path, DER file path, or inline PEM)
+tls-private-key = "/path/to/tls-private-key.pem"
+
+# Operator private key for signing the node's Sui transactions: a file
+# path or an inline key, in any format listed in Keys and Security (PKCS#8
+# PEM/DER, suiprivkey, or Base64 keystore)
+operator-private-key = "/path/to/operator-key.pem"
+
+# Your Sui validator address
+validator-address = "0x<your-validator-address>"
+
+# ── Network ───────────────────────────────────────────────────────────
+
+# Local bind address for gRPC+TLS server (default: 0.0.0.0:443)
+# listen-address = "0.0.0.0:443"
+
+# Public URL where other validators can reach this node
+endpoint-url = "https://your-hashi-node.example.com:443"
+
+# Prometheus metrics endpoint (default: 127.0.0.1:9180)
+# metrics-http-address = "127.0.0.1:9180"
+
+# ── Sui (gRPC v2) ─────────────────────────────────────────────────────
+
+# Sui chain ID: genesis checkpoint digest (Base58), Sui Mainnet
+sui-chain-id = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S"
+
+# Sui gRPC endpoint: your self-hosted fullnode (plaintext gRPC, default port 9000)
+sui-rpc = "http://<sui-fullnode-host>:9000"
+
+# ── Bitcoin ───────────────────────────────────────────────────────────
+
+# Bitcoin chain ID: genesis block hash, Bitcoin Mainnet
+bitcoin-chain-id = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+
+# Bitcoin Core RPC endpoint on your Bitcoin node (Hashi default is http://localhost:8332)
+bitcoin-rpc = "http://<bitcoin-node-host>:8332"
+
+# Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
+bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]
+
+# Light-client sync start height; leave unset on Mainnet, where the client anchors
+# at a built-in checkpoint just below Taproot activation (block 709631)
+# bitcoin-start-height = 800000
+
+# ── Storage ───────────────────────────────────────────────────────────
+
+# Local database path (required)
+db = "/var/lib/hashi/db"
+
+# ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
+
+# Armored OpenPGP public certificate (file path or inline) for encrypted backups (required)
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+
+# Persistent, node-specific backup output directory (required; restrict write access)
+backup-dir = "/var/lib/hashi/backups"
+
+# ── Optional Integrations ─────────────────────────────────────────────
+
+# TRM Labs API key for AML screening. Optional, but strongly encouraged on Mainnet:
+# when unset, this node does not screen
+# trm-api-key = "<your TRM Labs API key>"
+
+# Guardian node endpoint if onchain guardian_node_url is unset at startup (then used until restart)
+# guardian-endpoint = "https://node.guardian.example.com"
+
+# ── Advanced Tuning (defaults are fine for most operators) ────────────
+
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
+# grpc-max-decoding-message-size = 33554432
+
+# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
+# grpc-per-peer-inflight-limit = 200
+
+# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
+# grpc-per-peer-inflight-bytes = 67108874
+
+# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3)
+# grpc-per-peer-connection-limit = 4
+
+# Withdrawal batching delay in ms (default: 300000 = 5 min)
+# withdrawal-batching-delay-ms = 300000
+
+# Max withdrawals per Bitcoin transaction (default and hard cap: 447)
+# withdrawal-max-batch-size = 447
+
+# Withdrawal fee-rate floor in sat/vB (default: 3); change it fleet-wide
+# withdrawal-min-fee-rate-sat-vb = 3
+
+# Max unconfirmed transaction chain depth (default: 5)
+# max-mempool-chain-depth = 5
+
+# Fee estimation confirmation target in blocks (default: 3, max: 12)
+# withdrawal-fee-conf-target = 3
+
+# Signatures buffered per withdrawal signing stream (default: 25)
+# withdrawal-signing-concurrency = 25
+
+# Withdrawal signing tasks this node runs per calling peer (default: 4)
+# withdrawal-signing-per-caller-limit = 4
+
+# MPC input signatures the leader commits onchain per chunk (default: 64)
+# mpc-signing-chunk-size = 64
+
+# Concurrency for leader job tasks, e.g. deposit processing (default: 32)
+# max-concurrent-leader-job-tasks = 32
+
+# ── Nested tables ─────────────────────────────────────────────────────
+# TOML table headers apply to every following key until the next table,
+# so keep all root-level settings above this section.
+
+# Hashi package and object IDs (Mainnet)
+[hashi-ids]
+package-id = "0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06"
+hashi-object-id = "0x8d110642d9b5133bd661cda4873edf135ab6b91ff6918601015880874b950e5d"
+
+# Bitcoin RPC authentication: None, UserPass, or CookieFile
+[bitcoin-rpc-auth]
+UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
+# CookieFile = "/home/USER/.bitcoin/.cookie"   # only when bitcoind runs on this host
+
+# Push metrics to the Mysten collection endpoint (see Monitoring and Alerts)
+[metrics-push]
+push-url = "https://metrics-proxy.mainnet.sui.io:8443/publish/metrics"
+```
+
+</TabItem>
+<TabItem value="testnet" label="Testnet">
+
+```toml
+# ── Identity ──────────────────────────────────────────────────────────
+
+# Ed25519 TLS private key (PEM file path, DER file path, or inline PEM)
+tls-private-key = "/path/to/tls-private-key.pem"
+
+# Operator private key for signing the node's Sui transactions: a file
+# path or an inline key, in any format listed in Keys and Security (PKCS#8
+# PEM/DER, suiprivkey, or Base64 keystore)
+operator-private-key = "/path/to/operator-key.pem"
+
+# Your Sui validator address
+validator-address = "0x<your-validator-address>"
+
+# ── Network ───────────────────────────────────────────────────────────
+
+# Local bind address for gRPC+TLS server (default: 0.0.0.0:443)
+# listen-address = "0.0.0.0:443"
+
+# Public URL where other validators can reach this node
+endpoint-url = "https://your-hashi-node.example.com:443"
+
+# Prometheus metrics endpoint (default: 127.0.0.1:9180)
+# metrics-http-address = "127.0.0.1:9180"
+
+# ── Sui (gRPC v2) ─────────────────────────────────────────────────────
+
+# Sui chain ID: genesis checkpoint digest (Base58), Sui Testnet
+sui-chain-id = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
+
+# Sui gRPC endpoint. Public fullnode (TLS:443) or self-hosted (plaintext gRPC:9000)
+sui-rpc = "https://fullnode.testnet.sui.io:443"
+# sui-rpc = "http://127.0.0.1:9000"
+
+# ── Bitcoin ───────────────────────────────────────────────────────────
+
+# Bitcoin chain ID: genesis block hash, Bitcoin Signet
+bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+
+# Bitcoin Core RPC endpoint (Hashi default is http://localhost:8332; override for Signet)
+bitcoin-rpc = "http://127.0.0.1:38332"
+
+# Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
+bitcoin-trusted-peers = ["127.0.0.1:38333"]
+
+# Light-client sync start height; defaults to 300000 on Signet (override to change the anchor)
+# bitcoin-start-height = 300000
+
+# ── Storage ───────────────────────────────────────────────────────────
+
+# Local database path (required)
+db = "/var/lib/hashi/db"
+
+# ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
+
+# Armored OpenPGP public certificate (file path or inline) for encrypted backups (required)
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+
+# Persistent, node-specific backup output directory (required; restrict write access)
+backup-dir = "/var/lib/hashi/backups"
+
+# ── Optional Integrations ─────────────────────────────────────────────
+
+# TRM Labs API key for AML screening. TRM screens Mainnet only, so leave it unset on Testnet
+# trm-api-key = "<your TRM Labs API key>"
+
+# Guardian node endpoint if onchain guardian_node_url is unset at startup (then used until restart)
+# guardian-endpoint = "https://node.guardian.example.com"
+
+# ── Advanced Tuning (defaults are fine for most operators) ────────────
+
+# Max gRPC message size in bytes (default: 33554432 = 32 MiB; BridgeService requests: 128 KiB, or this if lower)
+# grpc-max-decoding-message-size = 33554432
+
+# Max in-flight gRPC requests per peer, and separately for its MPC requests that take the MPC lock (default: 200)
+# grpc-per-peer-inflight-limit = 200
+
+# Max in-flight gRPC request and response bytes per peer, and separately for its MPC requests that take the MPC lock (default and minimum: room for two maximum-size requests)
+# grpc-per-peer-inflight-bytes = 67108874
+
+# Max live connections a peer's gRPC requests are served on (default: 4, minimum: 3)
+# grpc-per-peer-connection-limit = 4
+
+# Withdrawal batching delay in ms (default: 300000 = 5 min)
+# withdrawal-batching-delay-ms = 300000
+
+# Max withdrawals per Bitcoin transaction (default and hard cap: 447)
+# withdrawal-max-batch-size = 447
+
+# Withdrawal fee-rate floor in sat/vB (default: 3); change it fleet-wide
+# withdrawal-min-fee-rate-sat-vb = 3
+
+# Max unconfirmed transaction chain depth (default: 5)
+# max-mempool-chain-depth = 5
+
+# Fee estimation confirmation target in blocks (default: 3, max: 12)
+# withdrawal-fee-conf-target = 3
+
+# Signatures buffered per withdrawal signing stream (default: 25)
+# withdrawal-signing-concurrency = 25
+
+# Withdrawal signing tasks this node runs per calling peer (default: 4)
+# withdrawal-signing-per-caller-limit = 4
+
+# MPC input signatures the leader commits onchain per chunk (default: 64)
+# mpc-signing-chunk-size = 64
+
+# Concurrency for leader job tasks, e.g. deposit processing (default: 32)
+# max-concurrent-leader-job-tasks = 32
+
+# ── Nested tables ─────────────────────────────────────────────────────
+# TOML table headers apply to every following key until the next table,
+# so keep all root-level settings above this section.
+
+# Hashi package and object IDs (Testnet)
+[hashi-ids]
+package-id = "0x5e0b99c31f691742acea5de4ca1bf53c398d5639fed6503a51ffe8035dc68485"
+hashi-object-id = "0x342e908043db6090558ed7766df95bfc3609881b2eac7edb5343dd5bb3ddd1bb"
+
+# Bitcoin RPC authentication: None, UserPass, or CookieFile
+[bitcoin-rpc-auth]
+UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
+# CookieFile = "/home/USER/.bitcoin/signet/.cookie"
+
+# Push metrics to the Mysten collection endpoint (see Monitoring and Alerts)
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+
+# Optional S3 backups (uncomment all three lines; both fields required)
+# [backup-s3]
+# bucket = "my-hashi-backups"
+# region = "us-east-1"
+```
+
+</TabItem>
+</Tabs>
+
+> **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators are strongly encouraged to set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
+
+> **Already running a Testnet node?** Give the Mainnet node its own `db` directory, starting empty, and its own `backup-dir`. Both hold one deployment's node keys and MPC key shares, so never point a Mainnet node at a Testnet node's database or backups. We also recommend new TLS and operator keys for Mainnet (see [Keys and Security](keys.mdx)) rather than the ones a Testnet host has been using.
+
+## CLI config
+
+For governance commands, queries, and user-facing operations. Generate a template:
+
+```bash
+hashi config template -o hashi-cli.toml
+```
+
+> **Where the package and object IDs come from.** The [Networks](../reference/networks.mdx) table is the canonical source for `package_id` and `hashi_object_id`; copy them from the column for your target network. `hashi config on-chain` shows the **onchain protocol configuration** and requires these IDs to already be set, so it cannot be used to discover them.
+
+<Tabs groupId="network" queryString>
+<TabItem value="mainnet" label="Mainnet" default>
+
+```toml
+# Sui gRPC endpoint (your self-hosted fullnode)
+sui_rpc_url = "http://<sui-fullnode-host>:9000"
+
+# Hashi package ID (original package address)
+package_id = "0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06"
+
+# Hashi shared object ID
+hashi_object_id = "0x8d110642d9b5133bd661cda4873edf135ab6b91ff6918601015880874b950e5d"
+
+# Path to the keypair for signing CLI transactions, in any format
+# listed in Keys and Security
+keypair_path = "/path/to/operator-key.pem"
+
+[bitcoin]
+rpc_url = "http://<bitcoin-node-host>:8332"
+rpc_user = "YOUR_RPC_USER"
+rpc_password = "YOUR_STRONG_RPC_PASSWORD"
+network = "mainnet"
+```
+
+</TabItem>
+<TabItem value="testnet" label="Testnet">
+
+```toml
+# Sui gRPC endpoint
+sui_rpc_url = "https://fullnode.testnet.sui.io:443"
+
+# Hashi package ID (original package address)
+package_id = "0x5e0b99c31f691742acea5de4ca1bf53c398d5639fed6503a51ffe8035dc68485"
+
+# Hashi shared object ID
+hashi_object_id = "0x342e908043db6090558ed7766df95bfc3609881b2eac7edb5343dd5bb3ddd1bb"
+
+# Path to the keypair for signing CLI transactions, in any format
+# listed in Keys and Security
+keypair_path = "/path/to/operator-key.pem"
+
+[bitcoin]
+rpc_url = "http://127.0.0.1:38332"
+rpc_user = "YOUR_RPC_USER"
+rpc_password = "YOUR_STRONG_RPC_PASSWORD"
+network = "signet"
+```
+
+</TabItem>
+</Tabs>
+
+## Environment variables
+
+All environment variables override their corresponding config file values.
+
+| Variable | Overrides | Purpose |
+|----------|-----------|---------|
+| `HASHI_CLI_CONFIG` | n/a | Path to CLI config file |
+| `SUI_RPC_URL` | `sui_rpc_url`; `sui-rpc` for `hashi register` only | Sui gRPC endpoint. `hashi server` ignores it. `hashi publish` and `hashi launch` also read it and default to Mainnet when it is unset |
+| `HASHI_PACKAGE_ID` | `package_id` | Hashi package ID |
+| `HASHI_OBJECT_ID` | `hashi_object_id` | Hashi shared object ID |
+| `HASHI_KEYPAIR` | `keypair_path` | Path to signing keypair |
+| `BTC_RPC_URL` | `bitcoin.rpc_url` | Bitcoin RPC URL |
+| `BTC_RPC_USER` | `bitcoin.rpc_user` | Bitcoin RPC username |
+| `BTC_RPC_PASSWORD` | `bitcoin.rpc_password` | Bitcoin RPC password |
+| `BTC_NETWORK` | `bitcoin.network` | Bitcoin network (`regtest`, `signet`, `testnet4`, `mainnet`) |
+| `BTC_PRIVATE_KEY` | `bitcoin.private_key_path` | Path to BTC private key (WIF) |
+| `HASHI_GAS_BUDGET` | n/a | Gas budget for transactions (MIST) |
+
+## Network and firewall
+
+### Inbound
+
+| Port | Protocol | Source | Purpose |
+|------|----------|--------|---------|
+| **443** (default) | TLS 1.3 + gRPC | Other committee validators | MPC protocol messages, DKG, signing, deposit/withdrawal coordination |
+
+The port is configurable through `listen-address`. It must be publicly reachable at the URL specified in `endpoint-url`, which is registered onchain.
+
+### Outbound
+
+| Destination | Port | Protocol | Purpose |
+|-------------|------|----------|---------|
+| Sui fullnode | 443 (public) / 9000 (self-hosted) | gRPC over HTTP/2 | Chain state, checkpoint subscription, tx submission |
+| Bitcoin RPC | per network (8332 on Mainnet, 38332 on Signet) | HTTP/JSON-RPC | Tx lookup, fee estimation, UTXO checks, **withdrawal broadcast** |
+| Bitcoin P2P | per network (8333 on Mainnet, 38333 on Signet) | TCP | Kyoto BIP-157 light client (headers, filters, blocks) |
+| Peer validators | 443 | TLS 1.3 + gRPC | Outbound connections to other committee members |
+| Guardian node endpoint (`guardian_node_url`) | per URL | TLS + gRPC | Guardian info, limiter bootstrap, and withdrawal signing; blocking it breaks withdrawals |
+| TRM Labs API (`https://api.trmlabs.com`) | 443 | HTTPS | AML screening, on Mainnet when `trm-api-key` is set |
+| Metrics push (`push-url`) | per URL | HTTPS | Metrics push, when `[metrics-push]` is set (see [Metrics push](monitoring.mdx#metrics-push)) |
+
+> - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
+> - **Bitcoin RPC:** the RPC user/whitelist must permit `sendrawtransaction` and `testmempoolaccept`, not only read calls.
+
+### Metrics and liveness (not public)
+
+| Port | Protocol | Bind | Purpose |
+|------|----------|------|---------|
+| **9180** (default) | HTTP | 127.0.0.1 | Prometheus scrape endpoint at `/metrics`, and `/health` for liveness probes |
+
+Not exposed externally by default. Scrape from localhost or through a reverse proxy with access controls.
+
+Point a liveness probe at `/health` on this port rather than on 443, once your node runs a release that serves it (older releases answer 404, which would restart the node in a loop). Check that `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9180/health` prints `200` before you move the probe:
+
+- It answers from its own thread rather than the node's busy async runtime, and fails only once that runtime has stopped running tasks for two minutes.
+- A probe with `periodSeconds: 10`, `timeoutSeconds: 5` and `failureThreshold: 3` restarts a wedged node within about 2.5 minutes.
+- In Kubernetes, bind `metrics-http-address` to `0.0.0.0:9180` so the kubelet can reach it, but keep the port off public Services and host networking: anyone who can reach it can slow the probe.
+
+### TLS
+
+- Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
+- The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
+- The node auto-generates certificates from the `tls-private-key` at startup.
+- The node also presents this key's certificate to the guardian's node endpoint (`guardian_node_url`), which serves node calls only to current or pending committee members. It refuses a key that isn't registered onchain and picks up a key change within about 30 seconds.

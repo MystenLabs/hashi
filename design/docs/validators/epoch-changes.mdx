@@ -1,0 +1,87 @@
+---
+title: Epoch Changes
+description: >-
+  What happens to a Hashi node at each Sui epoch change, what operators must do, and how to recover a stuck reconfiguration.
+keywords:
+  - operator
+  - epoch change
+  - reconfiguration
+  - key rotation
+  - abort-reconfig
+  - reconfig_hold
+goal:
+  description: >-
+    Reader knows what reconfiguration does automatically, their responsibilities, and how to recover a stall
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs enough content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What happens to Hashi at a Sui epoch change?
+  - What must I do at a Hashi epoch change?
+  - How do I fix a stuck Hashi reconfiguration?
+  - What is reconfig_hold?
+answer: >-
+  At every Sui epoch change the Hashi committee reconfigures: a node submits start_reconfig, processing pauses, key rotation runs, and end_reconfig resumes operations. Keep your node online and its registration current. A reconfiguration that overruns its Sui epoch is aborted and restarted by the nodes, or by hand with hashi committee abort-reconfig.
+---
+
+## What happens automatically
+
+On every Sui epoch change, the Hashi committee reconfigures:
+
+1. A node detects the Sui epoch change and submits `start_reconfig`.
+2. The system pauses deposit and withdrawal processing.
+3. **Key rotation** runs. The old committee redistributes key shares to the new committee (the Bitcoin master public key is unchanged). The genesis epoch runs DKG instead.
+4. Validators exchange BLS signatures; once 2/3 weight signs, `end_reconfig` is submitted.
+5. The new committee generates presignatures.
+6. Normal operations resume.
+
+[Reconfiguration](../reconfiguration.mdx) covers the onchain detail behind each step: [start reconfig](../reconfiguration.mdx#start-reconfig), [DKG or key rotation](../reconfiguration.mdx#dkg-or-key-rotation), [end reconfig](../reconfiguration.mdx#end-reconfig), and [abort reconfig](../reconfiguration.mdx#abort-reconfig).
+
+## Operator responsibilities
+
+- **Keep your node online across epoch boundaries.** It must participate in key rotation.
+- **Keep registration metadata current.** If you change endpoint URL, TLS key, or other registration info, re-run `hashi register` before the next epoch change. Metadata updates accept either the operator or the validator key.
+- **Monitor reconfiguration.** Watch `hashi_reconfig_in_progress` and `hashi_mpc_reconfig_total_duration_seconds`.
+
+## Stuck reconfigurations
+
+A reconfiguration must complete within the Sui epoch it started in. If it stalls (offline validators, misconfigured endpoints, protocol failures), the nodes handle it: at the next Sui epoch boundary they stop working on it, one of them submits `abort_reconfig` (no proposal or vote is involved; the chain settles the race), and they submit a fresh `start_reconfig` as soon as the abort is reflected. `hashi_reconfig_aborted_total` counts these; alert on it and find out why the reconfiguration stalled. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
+
+If no node is running to do this, anyone can abort by hand:
+
+```bash
+hashi committee abort-reconfig
+```
+
+The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and any running node that observes it starts the replacement reconfiguration right away.
+
+The replacement can be started by hand as well, for when no node is running to submit it or `hashi_epoch` stays behind `hashi_sui_epoch` with `hashi_reconfig_in_progress` at `0`:
+
+```bash
+hashi committee start-reconfig
+```
+
+The chain accepts it only while nothing is pending and Hashi's epoch lags Sui's; the command checks both up front and refuses otherwise. Every running node then drives the new reconfiguration as usual.
+
+To stay on the previous committee instead, for example while the cause of the stall is fixed so the replacement does not stall the same way, have governance set the `reconfig_hold` config flag before the abort lands:
+
+```bash
+hashi proposal create update-config reconfig_hold bool:true
+```
+
+Once the proposal executes, `start_reconfig` aborts on chain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes.
+
+Clear the flag with another `update-config` proposal (`bool:false`). Clearing it does not itself start anything: nodes submit `start_reconfig` when they see a Sui epoch change, an abort, or on startup, and nothing watches the config for this. So after clearing, the replacement waits for the next Sui epoch change unless an operator starts it by hand:
+
+```bash
+hashi committee start-reconfig
+```
