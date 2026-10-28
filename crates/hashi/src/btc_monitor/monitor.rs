@@ -46,6 +46,7 @@ use crate::deposit_tracker::DepositDiscovery;
 use crate::deposit_tracker::DepositStatus;
 use crate::deposit_tracker::DepositTracker;
 use crate::deposit_tracker::DiscoveryResolution;
+use crate::deposit_tracker::RecordedOutput;
 use crate::deposit_tracker::effective_deposit_confirmation_threshold;
 use crate::metrics::Metrics;
 
@@ -135,14 +136,14 @@ pub enum DepositConfirmError {
     InvalidVout { txid: bitcoin::Txid, vout: u32 },
     #[error(
         "output {txid}:{vout} pays {}, not the expected {}",
-        txout_summary(.actual),
+        output_summary(.actual),
         txout_summary(.expected)
     )]
     OutputMismatch {
         txid: bitcoin::Txid,
         vout: u32,
         expected: bitcoin::TxOut,
-        actual: bitcoin::TxOut,
+        actual: RecordedOutput,
     },
     #[error("per-caller deposit discovery limit reached")]
     DiscoveriesFull,
@@ -153,14 +154,29 @@ pub enum DepositConfirmError {
 }
 
 fn txout_summary(txout: &bitcoin::TxOut) -> String {
+    output_summary(&RecordedOutput::new(txout))
+}
+
+fn output_summary(output: &RecordedOutput) -> String {
     const SHOWN: usize = 34;
-    let script = txout.script_pubkey.as_bytes();
+    let (value, script, script_len) = match output {
+        RecordedOutput::Kept(txout) => (
+            txout.value,
+            txout.script_pubkey.as_bytes(),
+            txout.script_pubkey.len(),
+        ),
+        RecordedOutput::LongScript {
+            value,
+            script_start,
+            script_len,
+        } => (*value, script_start.as_slice(), *script_len),
+    };
+    let shown = &script[..script.len().min(SHOWN)];
     format!(
-        "{} sat to script 0x{}{} ({} bytes)",
-        txout.value.to_sat(),
-        hex::encode(&script[..script.len().min(SHOWN)]),
-        if script.len() > SHOWN { "..." } else { "" },
-        script.len()
+        "{} sat to script 0x{}{} ({script_len} bytes)",
+        value.to_sat(),
+        hex::encode(shown),
+        if shown.len() < script_len { "..." } else { "" },
     )
 }
 
@@ -1905,16 +1921,19 @@ async fn check_result_from_status(
         DepositStatus::InBlock {
             checkpoint,
             is_coinbase,
-            txout,
+            output,
         } => {
-            if txout != expected_txout {
-                return Err(DepositConfirmError::OutputMismatch {
-                    txid: outpoint.txid,
-                    vout: outpoint.vout,
-                    expected: expected_txout,
-                    actual: txout,
-                });
-            }
+            let txout = match output {
+                RecordedOutput::Kept(txout) if txout == expected_txout => txout,
+                actual => {
+                    return Err(DepositConfirmError::OutputMismatch {
+                        txid: outpoint.txid,
+                        vout: outpoint.vout,
+                        expected: expected_txout,
+                        actual,
+                    });
+                }
+            };
             let confirmations = tip
                 .height
                 .saturating_add(1)
@@ -2132,7 +2151,7 @@ async fn discover_deposit(
     Ok(DepositStatus::InBlock {
         checkpoint: block_info,
         is_coinbase: cached.is_coinbase,
-        txout: txout.clone(),
+        output: RecordedOutput::new(txout),
     })
 }
 
@@ -3100,7 +3119,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: false,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3405,7 +3424,7 @@ mod tests {
             Some(DepositStatus::InBlock {
                 checkpoint: block_info,
                 is_coinbase: true,
-                txout: block.txdata[0].output[0].clone(),
+                output: RecordedOutput::new(&block.txdata[0].output[0]),
             })
         );
     }
@@ -3482,7 +3501,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: block_info,
                 is_coinbase: false,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
         );
         let mut result_rxs = Vec::new();
@@ -3532,7 +3551,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: true,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
@@ -3568,7 +3587,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: false,
-                txout: recorded.clone(),
+                output: RecordedOutput::new(&recorded),
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
@@ -3587,12 +3606,61 @@ mod tests {
             matches!(
                 &result,
                 Err(DepositConfirmError::OutputMismatch { expected, actual, .. })
-                    if *expected == deposit_txout() && *actual == recorded
+                    if *expected == deposit_txout() && *actual == RecordedOutput::new(&recorded)
             ),
             "{:?}",
             result.as_ref().map_err(ToString::to_string)
         );
         assert!(result.unwrap_err().to_string().len() < 300);
+    }
+
+    #[tokio::test]
+    async fn a_long_script_is_recorded_by_its_start_and_never_matches() {
+        let expected = bitcoin::TxOut {
+            value: deposit_txout().value,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; 34]),
+        };
+        assert_eq!(
+            RecordedOutput::new(&expected),
+            RecordedOutput::Kept(expected.clone())
+        );
+        let output = RecordedOutput::new(&bitcoin::TxOut {
+            value: expected.value,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; 35]),
+        });
+        assert_eq!(
+            output,
+            RecordedOutput::LongScript {
+                value: expected.value,
+                script_start: [0x51; 34],
+                script_len: 35,
+            }
+        );
+
+        let result = check_result_from_status(
+            DepositStatus::InBlock {
+                checkpoint: HashCheckpoint::new(42, block_hash(2)),
+                is_coinbase: false,
+                output,
+            },
+            HashCheckpoint::new(140, block_hash(3)),
+            6,
+            BitcoindRpc::new(
+                Arc::new(corepc_client::client_sync::v29::Client::new(
+                    "http://127.0.0.1:1",
+                )),
+                None,
+            ),
+            make_outpoint(1),
+            expected,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(DepositConfirmError::OutputMismatch { .. })),
+            "{:?}",
+            result.map_err(|e| e.to_string())
+        );
     }
 
     #[tokio::test]

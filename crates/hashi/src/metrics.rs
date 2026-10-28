@@ -179,7 +179,7 @@ pub struct Metrics {
     /// metrics still look alive.
     task_last_iteration_timestamp_seconds: IntGaugeVec,
 
-    pub(crate) coinbase_deposit_observations_total: IntCounterVec,
+    pub(crate) coinbase_deposit_observations_total: IntCounter,
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
     pub deposit_lookup_cache_requests_total: IntCounterVec,
@@ -1195,10 +1195,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            coinbase_deposit_observations_total: register_int_counter_vec_with_registry!(
+            coinbase_deposit_observations_total: register_int_counter_with_registry!(
                 "hashi_coinbase_deposit_observations_total",
-                "Total times a tracked deposit outpoint was classified as a coinbase output, labeled by Bitcoin outpoint",
-                &["outpoint"],
+                "Total times a tracked deposit outpoint was classified as a coinbase output",
                 registry,
             )
             .unwrap(),

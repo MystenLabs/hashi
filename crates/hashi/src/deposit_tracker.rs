@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use sui_sdk_types::Address;
 use tokio::sync::watch;
+use tracing::info;
 
 use crate::metrics::CONFIRMATION_STATUS_LABELS;
 use crate::metrics::Metrics;
@@ -20,11 +21,37 @@ pub(crate) enum DepositStatus {
     InBlock {
         checkpoint: kyoto::HashCheckpoint,
         is_coinbase: bool,
-        txout: bitcoin::TxOut,
+        output: RecordedOutput,
     },
     InvalidVout {
         checkpoint: kyoto::HashCheckpoint,
     },
+}
+
+const DEPOSIT_SCRIPT_LEN: usize = 34;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordedOutput {
+    Kept(bitcoin::TxOut),
+    LongScript {
+        value: bitcoin::Amount,
+        script_start: [u8; DEPOSIT_SCRIPT_LEN],
+        script_len: usize,
+    },
+}
+
+impl RecordedOutput {
+    pub(crate) fn new(txout: &bitcoin::TxOut) -> Self {
+        let script = txout.script_pubkey.as_bytes();
+        match script.first_chunk::<DEPOSIT_SCRIPT_LEN>() {
+            Some(script_start) if script.len() > DEPOSIT_SCRIPT_LEN => Self::LongScript {
+                value: txout.value,
+                script_start: *script_start,
+                script_len: script.len(),
+            },
+            _ => Self::Kept(txout.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,7 +478,7 @@ impl TrackerState {
                     |txout| DepositStatus::InBlock {
                         checkpoint,
                         is_coinbase,
-                        txout: txout.clone(),
+                        output: RecordedOutput::new(txout),
                     },
                 );
                 changed |= self.transition(outpoint, status);
@@ -539,12 +566,11 @@ impl TrackerState {
                 is_coinbase: true,
                 ..
             }
-        ) && let Some(metrics) = &self.metrics
-        {
-            metrics
-                .coinbase_deposit_observations_total
-                .with_label_values(&[&outpoint.to_string()])
-                .inc();
+        ) {
+            info!("Tracked deposit outpoint {outpoint} is a coinbase output");
+            if let Some(metrics) = &self.metrics {
+                metrics.coinbase_deposit_observations_total.inc();
+            }
         }
         self.adjust_metric(&old_status, -1);
         self.adjust_metric(&status, 1);
@@ -768,7 +794,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: checkpoint(10, 1),
                 is_coinbase: true,
-                txout: txout(),
+                output: RecordedOutput::Kept(txout()),
             },
         );
 
@@ -791,7 +817,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: checkpoint(10, 1),
                 is_coinbase: false,
-                txout: txout(),
+                output: RecordedOutput::Kept(txout()),
             },
         ];
         for (seed, status) in (1..=3).zip(statuses) {
@@ -813,10 +839,7 @@ mod tests {
         record_discovery(&tracker, token, DepositStatus::NotFound);
         let mut work = tracker.subscribe_work();
         let block_checkpoint = kyoto::HashCheckpoint::new(0, block.block_hash());
-        let outpoint_label = block_outpoint.to_string();
-        let coinbase_observations = metrics
-            .coinbase_deposit_observations_total
-            .with_label_values(&[&outpoint_label]);
+        let coinbase_output = &block.txdata[0].output[0];
 
         tracker.apply_block_if_current(tracker.bitcoin_generation(), block_checkpoint, &block);
         assert!(work.has_changed().unwrap());
@@ -826,13 +849,19 @@ mod tests {
             Some(DepositStatus::InBlock {
                 checkpoint: block_checkpoint,
                 is_coinbase: true,
-                txout: block.txdata[0].output[0].clone(),
+                output: RecordedOutput::LongScript {
+                    value: coinbase_output.value,
+                    script_start: coinbase_output.script_pubkey.as_bytes()[..34]
+                        .try_into()
+                        .unwrap(),
+                    script_len: 67,
+                },
             })
         );
-        assert_eq!(coinbase_observations.get(), 1);
+        assert_eq!(metrics.coinbase_deposit_observations_total.get(), 1);
         tracker.apply_block_if_current(tracker.bitcoin_generation(), block_checkpoint, &block);
         assert!(!work.has_changed().unwrap());
-        assert_eq!(coinbase_observations.get(), 1);
+        assert_eq!(metrics.coinbase_deposit_observations_total.get(), 1);
     }
 
     #[test]
@@ -958,7 +987,7 @@ mod tests {
                 DepositStatus::InBlock {
                     checkpoint: block,
                     is_coinbase: false,
-                    txout: txout(),
+                    output: RecordedOutput::Kept(txout()),
                 },
             );
         }
@@ -984,7 +1013,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: checkpoint(10, 1),
                 is_coinbase: false,
-                txout: txout(),
+                output: RecordedOutput::Kept(txout()),
             },
         );
         tracker.set_tip(checkpoint(10, 2));
