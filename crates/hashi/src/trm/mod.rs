@@ -1219,7 +1219,8 @@ mod tests {
         TrmClient::new(std::env::var("TRM_API_KEY").expect("TRM_API_KEY")).unwrap()
     }
 
-    /// TRM attributes this Sui address to the May 2025 Cetus exploiter.
+    /// TRM attributes this Sui address to the May 2025 Cetus exploiter. Its
+    /// category, Hacked or Exploited Funds, passes on a sanctions-only account.
     const CETUS_EXPLOITER: &str =
         "0xe28b50cef1d633ea43d3296a3f6b67ff0312a5f1a99f0af753c85b8b5de8ff06";
 
@@ -1271,8 +1272,6 @@ mod tests {
     async fn live_withdrawal_screening() {
         let client = live_client();
         let requester = Address::new([1; 32]);
-        // Attributed to mining, with severe counterparty exposure from dust
-        // sent to the genesis block address.
         let genesis = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
         // On OFAC's SDN list.
@@ -1287,7 +1286,7 @@ mod tests {
             .screen_withdrawal(genesis, CETUS_EXPLOITER.parse().unwrap(), Caller::Local)
             .await
             .unwrap();
-        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)));
+        assert_eq!(verdict, Verdict::Approved);
 
         let verdict = client
             .screen_withdrawal(genesis, requester, Caller::Local)
@@ -1304,10 +1303,7 @@ mod tests {
 
         let to_exploiter =
             live_taproot_deposit(Address::new([0x11; 32]), CETUS_EXPLOITER.parse().unwrap());
-        assert!(matches!(
-            screen_live_deposit(&to_exploiter).await,
-            Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)
-        ));
+        assert_eq!(screen_live_deposit(&to_exploiter).await, Verdict::Approved);
 
         // TRM alerts on a transfer only when a Transaction Monitoring rule
         // matches it, so this fails on an account that has no rules.
