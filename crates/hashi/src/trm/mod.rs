@@ -4,7 +4,9 @@
 //! AML screening through the TRM Labs Compliance API, using the node
 //! operator's own API key.
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -62,6 +64,12 @@ pub enum TrmError {
     Transient(anyhow::Error),
     #[error("{0}")]
     Permanent(anyhow::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Caller {
+    Local,
+    Peer(Address),
 }
 
 pub struct DepositScreening {
@@ -131,11 +139,17 @@ impl TrmClient {
     /// Registers the Bitcoin deposit transaction with Transaction Monitoring,
     /// screens the Sui recipient, then waits briefly for the transfer's
     /// screening result.
-    pub async fn screen_deposit(&self, deposit: &DepositScreening) -> Result<Verdict, TrmError> {
+    pub async fn screen_deposit(
+        &self,
+        deposit: &DepositScreening,
+        caller: Caller,
+    ) -> Result<Verdict, TrmError> {
         let started = Instant::now();
         let deadline = started + SCREENING_TIMEOUT;
         with_deadline(deadline, async {
-            let transfer = self.submit_deposit_transfer(deposit, deadline).await?;
+            let transfer = self
+                .submit_deposit_transfer(deposit, caller, deadline)
+                .await?;
             if let Some(recipient) = deposit.recipient {
                 let recipient = recipient.to_string();
                 let verdict = self
@@ -144,6 +158,7 @@ impl TrmClient {
                             address: &recipient,
                             chain: SUI_CHAIN,
                         }],
+                        caller,
                         deadline,
                     )
                     .await?;
@@ -154,7 +169,7 @@ impl TrmClient {
             // The POST reports PROCESSING even for a transfer TRM has already screened.
             let uuid = transfer.uuid.as_str();
             poll_transfer(
-                || async move { self.get_transfer(uuid, deadline).await?.verdict() },
+                || async move { self.get_transfer(uuid, caller, deadline).await?.verdict() },
                 started + TRANSFER_WAIT,
             )
             .await
@@ -168,6 +183,7 @@ impl TrmClient {
         &self,
         bitcoin_address: &str,
         sender: Address,
+        caller: Caller,
     ) -> Result<Verdict, TrmError> {
         let sender = sender.to_string();
         let deadline = Instant::now() + SCREENING_TIMEOUT;
@@ -184,6 +200,7 @@ impl TrmClient {
                         chain: SUI_CHAIN,
                     },
                 ],
+                caller,
                 deadline,
             ),
         )
@@ -193,6 +210,7 @@ impl TrmClient {
     async fn submit_deposit_transfer(
         &self,
         deposit: &DepositScreening,
+        caller: Caller,
         deadline: Instant,
     ) -> Result<Transfer, TrmError> {
         let submission = TransferSubmission {
@@ -214,30 +232,38 @@ impl TrmClient {
         let url = self.url(&["public", "v2", "tm", "transfers"]);
         self.send(
             &self.transfer_submissions,
+            caller,
             self.http.post(url).json(&submission),
             deadline,
         )
         .await
     }
 
-    async fn get_transfer(&self, uuid: &str, deadline: Instant) -> Result<Transfer, TrmError> {
+    async fn get_transfer(
+        &self,
+        uuid: &str,
+        caller: Caller,
+        deadline: Instant,
+    ) -> Result<Transfer, TrmError> {
         let mut url = self.url(&["public", "v2", "tm", "transfers"]);
         url.path_segments_mut()
             .expect("TRM base URL is an http(s) URL")
             .push(uuid);
-        self.send(&self.transfer_reads, self.http.get(url), deadline)
+        self.send(&self.transfer_reads, caller, self.http.get(url), deadline)
             .await
     }
 
     async fn screen_addresses(
         &self,
         queries: &[AddressQuery<'_>],
+        caller: Caller,
         deadline: Instant,
     ) -> Result<Verdict, TrmError> {
         let url = self.url(&["public", "v2", "screening", "addresses"]);
         let results: Vec<AddressScreening> = self
             .send(
                 &self.address_screenings,
+                caller,
                 self.http.post(url).json(queries),
                 deadline,
             )
@@ -276,10 +302,11 @@ impl TrmClient {
     async fn send<T: serde::de::DeserializeOwned>(
         &self,
         pacer: &Pacer,
+        caller: Caller,
         request: reqwest::RequestBuilder,
         deadline: Instant,
     ) -> Result<T, TrmError> {
-        pacer.wait_turn(deadline).await?;
+        pacer.wait_turn(caller, deadline).await?;
         let response = request
             .basic_auth(&self.api_key, Some(&self.api_key))
             .header(reqwest::header::ACCEPT, "application/json")
@@ -433,9 +460,10 @@ impl Transfer {
     }
 }
 
-/// Spaces the requests to one TRM endpoint `REQUEST_INTERVAL` apart.
 struct Pacer {
     turns: Mutex<Turns>,
+    front: tokio::sync::Mutex<()>,
+    queues: Mutex<HashMap<Caller, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 struct Turns {
@@ -451,30 +479,44 @@ impl Pacer {
                 next: now,
                 hold_until: now,
             }),
+            front: tokio::sync::Mutex::new(()),
+            queues: Mutex::default(),
         }
     }
 
-    /// Waits for the endpoint's next free turn. Refuses, without taking the
-    /// turn, when it would start after `deadline`.
-    async fn wait_turn(&self, deadline: Instant) -> Result<(), TrmError> {
-        loop {
-            let turn = {
-                let mut turns = self.turns.lock().unwrap();
-                let turn = turns.next.max(turns.hold_until).max(Instant::now());
+    async fn wait_turn(&self, caller: Caller, deadline: Instant) -> Result<(), TrmError> {
+        let queue = self.queue(caller);
+        tokio::time::timeout_at(deadline, async {
+            let _queued = queue.lock().await;
+            let _front = self.front.lock().await;
+            loop {
+                let turn = {
+                    let turns = self.turns.lock().unwrap();
+                    turns.next.max(turns.hold_until).max(Instant::now())
+                };
                 if turn > deadline {
-                    return Err(TrmError::Transient(anyhow!(
-                        "TRM requests are queued past the screening deadline"
-                    )));
+                    return Err(queued_past_deadline());
                 }
-                turns.next = turn + REQUEST_INTERVAL;
-                turn
-            };
-            tokio::time::sleep_until(turn).await;
-            // A 429 answered while this request waited takes its turn back.
-            if self.turns.lock().unwrap().hold_until <= turn {
-                return Ok(());
+                tokio::time::sleep_until(turn).await;
+                let mut turns = self.turns.lock().unwrap();
+                // A 429 answered while this request waited pushes its turn back.
+                if turns.hold_until <= turn {
+                    turns.next = turn + REQUEST_INTERVAL;
+                    return Ok(());
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| Err(queued_past_deadline()))
+    }
+
+    fn queue(&self, caller: Caller) -> Arc<tokio::sync::Mutex<()>> {
+        self.queues
+            .lock()
+            .unwrap()
+            .entry(caller)
+            .or_default()
+            .clone()
     }
 
     /// Holds back this endpoint's turns until `until`.
@@ -482,6 +524,12 @@ impl Pacer {
         let mut turns = self.turns.lock().unwrap();
         turns.hold_until = turns.hold_until.max(until);
     }
+}
+
+fn queued_past_deadline() -> TrmError {
+    TrmError::Transient(anyhow!(
+        "TRM requests are queued past the screening deadline"
+    ))
 }
 
 async fn with_deadline(
@@ -705,7 +753,10 @@ mod tests {
         .await;
 
         let verdict = client
-            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .screen_deposit(
+                &DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()),
+                Caller::Local,
+            )
             .await
             .unwrap();
 
@@ -759,7 +810,10 @@ mod tests {
         .await;
 
         let verdict = client
-            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .screen_deposit(
+                &DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()),
+                Caller::Local,
+            )
             .await
             .unwrap();
 
@@ -776,7 +830,10 @@ mod tests {
         .await;
 
         let verdict = client
-            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .screen_deposit(
+                &DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()),
+                Caller::Local,
+            )
             .await
             .unwrap();
 
@@ -804,7 +861,7 @@ mod tests {
         .await;
 
         let verdict = client
-            .screen_withdrawal(BITCOIN_ADDRESS, requester)
+            .screen_withdrawal(BITCOIN_ADDRESS, requester, Caller::Local)
             .await
             .unwrap();
 
@@ -887,7 +944,10 @@ mod tests {
         .await;
 
         let verdict = client
-            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .screen_deposit(
+                &DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()),
+                Caller::Local,
+            )
             .await
             .unwrap();
 
@@ -953,7 +1013,7 @@ mod tests {
             let (client, _) = mock_trm([(status, body.clone())]).await;
 
             let error = client
-                .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+                .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
                 .await
                 .unwrap_err();
 
@@ -984,7 +1044,7 @@ mod tests {
         let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
 
         let error = client
-            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
             .await
             .unwrap_err();
 
@@ -999,7 +1059,7 @@ mod tests {
         let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
 
         let error = client
-            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
             .await
             .unwrap_err();
 
@@ -1010,12 +1070,19 @@ mod tests {
     async fn requests_to_an_endpoint_take_turns() {
         let pacer = &Pacer::new();
         let started = Instant::now();
-        let turn = || async move {
-            pacer.wait_turn(started + SCREENING_TIMEOUT).await.unwrap();
+        let turn = |caller| async move {
+            pacer
+                .wait_turn(caller, started + SCREENING_TIMEOUT)
+                .await
+                .unwrap();
             started.elapsed()
         };
 
-        let turns = tokio::join!(turn(), turn(), turn());
+        let turns = tokio::join!(
+            turn(Caller::Local),
+            turn(Caller::Peer(Address::new([1; 32]))),
+            turn(Caller::Peer(Address::new([2; 32])))
+        );
 
         assert_eq!(
             turns,
@@ -1028,9 +1095,12 @@ mod tests {
         let pacer = Pacer::new();
         let started = Instant::now();
 
-        pacer.wait_turn(started).await.unwrap();
-        let refused = pacer.wait_turn(started).await;
-        pacer.wait_turn(started + SCREENING_TIMEOUT).await.unwrap();
+        pacer.wait_turn(Caller::Local, started).await.unwrap();
+        let refused = pacer.wait_turn(Caller::Local, started).await;
+        pacer
+            .wait_turn(Caller::Local, started + SCREENING_TIMEOUT)
+            .await
+            .unwrap();
 
         assert!(matches!(refused, Err(TrmError::Transient(_))));
         assert_eq!(started.elapsed(), REQUEST_INTERVAL);
@@ -1041,7 +1111,7 @@ mod tests {
         let (client, _) = mock_trm([(StatusCode::TOO_MANY_REQUESTS, json!({}))]).await;
 
         client
-            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
             .await
             .unwrap_err();
 
@@ -1050,7 +1120,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_rate_limit_holds_back_a_turn_already_taken() {
+    async fn a_rate_limit_holds_back_a_request_already_waiting() {
         let pacer = &Pacer::new();
         let started = Instant::now();
         let deadline = started + SCREENING_TIMEOUT;
@@ -1058,17 +1128,61 @@ mod tests {
         let retry_after = Duration::from_secs(2);
 
         let rate_limited = async move {
-            pacer.wait_turn(deadline).await.unwrap();
+            pacer.wait_turn(Caller::Local, deadline).await.unwrap();
             tokio::time::sleep(response_time).await;
             pacer.hold_until(Instant::now() + retry_after);
         };
         let queued = async move {
-            pacer.wait_turn(deadline).await.unwrap();
+            pacer.wait_turn(Caller::Local, deadline).await.unwrap();
             started.elapsed()
         };
         let ((), waited) = tokio::join!(rate_limited, queued);
 
         assert_eq!(waited, response_time + retry_after);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_caller_does_not_hold_up_another_callers_turn() {
+        let pacer = &Pacer::new();
+        let deadline = Instant::now() + SCREENING_TIMEOUT;
+        let busy = futures::future::join_all(
+            (0..40).map(|_| pacer.wait_turn(Caller::Peer(Address::new([1; 32])), deadline)),
+        );
+        let other = async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let asked = Instant::now();
+            pacer
+                .wait_turn(Caller::Peer(Address::new([2; 32])), deadline)
+                .await
+                .unwrap();
+            asked.elapsed()
+        };
+
+        let (_, waited) = tokio::join!(busy, other);
+
+        assert!(waited <= 2 * REQUEST_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_request_takes_no_turn() {
+        let pacer = Pacer::new();
+        let started = Instant::now();
+        let deadline = started + SCREENING_TIMEOUT;
+        let busy = Caller::Peer(Address::new([1; 32]));
+        pacer.wait_turn(busy, deadline).await.unwrap();
+        for _ in 0..40 {
+            let dropped =
+                tokio::time::timeout(Duration::from_millis(1), pacer.wait_turn(busy, deadline))
+                    .await;
+            assert!(dropped.is_err());
+        }
+
+        pacer
+            .wait_turn(Caller::Peer(Address::new([2; 32])), deadline)
+            .await
+            .unwrap();
+
+        assert_eq!(started.elapsed(), REQUEST_INTERVAL);
     }
 
     #[test]
@@ -1142,7 +1256,7 @@ mod tests {
         let client = live_client();
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
-                match client.screen_deposit(deposit).await.unwrap() {
+                match client.screen_deposit(deposit, Caller::Local).await.unwrap() {
                     Verdict::Pending => tokio::time::sleep(Duration::from_secs(10)).await,
                     verdict => break verdict,
                 }
@@ -1164,18 +1278,21 @@ mod tests {
         // On OFAC's SDN list.
         let sanctioned = "149w62rY42aZBox8fGcmqNsXUzSStKeq8C";
         let verdict = client
-            .screen_withdrawal(sanctioned, requester)
+            .screen_withdrawal(sanctioned, requester, Caller::Local)
             .await
             .unwrap();
         assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(sanctioned)));
 
         let verdict = client
-            .screen_withdrawal(genesis, CETUS_EXPLOITER.parse().unwrap())
+            .screen_withdrawal(genesis, CETUS_EXPLOITER.parse().unwrap(), Caller::Local)
             .await
             .unwrap();
         assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)));
 
-        let verdict = client.screen_withdrawal(genesis, requester).await.unwrap();
+        let verdict = client
+            .screen_withdrawal(genesis, requester, Caller::Local)
+            .await
+            .unwrap();
         assert_eq!(verdict, Verdict::Approved);
     }
 
