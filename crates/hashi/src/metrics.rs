@@ -628,7 +628,7 @@ impl Metrics {
             .unwrap(),
             kyoto_block_fetch_seconds: register_histogram_with_registry!(
                 "hashi_kyoto_block_fetch_seconds",
-                "Time from asking Kyoto for a block to its answer, queue wait included; a fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned",
+                "Time from asking Kyoto for a block to its answer, queue wait included; a deposit discovery's fetch is recorded when Kyoto answers or drops it, even after the discovery has timed out, and a block scan's fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned",
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
