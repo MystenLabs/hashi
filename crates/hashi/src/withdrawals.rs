@@ -718,6 +718,7 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_request_approval(
         &self,
         approval: &WithdrawalRequestApproval,
+        caller: trm::Caller,
     ) -> Result<hashi_types::proto::MemberSignature, WithdrawalApprovalError> {
         let request = self
             .onchain_state()
@@ -741,7 +742,7 @@ impl Hashi {
             )));
         }
 
-        self.screen_withdrawal(&request).await?;
+        self.screen_withdrawal(&request, caller).await?;
 
         self.sign_message_proto(&approval)
             .map_err(WithdrawalApprovalError::NeverRetry)
@@ -1983,6 +1984,7 @@ impl Hashi {
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
+        caller: trm::Caller,
     ) -> Result<(), WithdrawalApprovalError> {
         let Some(trm) = self.trm_client() else {
             return Ok(());
@@ -1994,7 +1996,7 @@ impl Hashi {
         .map_err(WithdrawalApprovalError::NeverRetry)?;
         let started = std::time::Instant::now();
         let result = trm
-            .screen_withdrawal(&bitcoin_address, request.sender)
+            .screen_withdrawal(&bitcoin_address, request.sender, caller)
             .await;
         self.metrics.record_trm_screening(
             metrics::TRM_FLOW_WITHDRAWAL,

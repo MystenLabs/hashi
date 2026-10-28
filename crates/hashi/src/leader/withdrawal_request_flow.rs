@@ -15,6 +15,7 @@ use crate::leader::retry::RetryTracker;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::trm;
 use crate::withdrawals::CommitmentItem;
 use crate::withdrawals::FeeEstimateUnavailable;
 use crate::withdrawals::RefusedItems;
@@ -209,7 +210,7 @@ impl LeaderService {
 
         // Validate, screen, and sign locally first
         let local_sig = match inner
-            .validate_and_sign_withdrawal_request_approval(&approval)
+            .validate_and_sign_withdrawal_request_approval(&approval, trm::Caller::Local)
             .await
         {
             Ok(sig) => {

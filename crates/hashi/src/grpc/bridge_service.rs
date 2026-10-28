@@ -19,6 +19,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
+use crate::trm;
 use crate::withdrawals::MalformedSigningRequest;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalAlreadyFinalized;
@@ -119,14 +120,14 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalRequestApprovalResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        self.admit_committee_member(caller)?;
+        let member = self.admit_committee_member(caller)?;
         let approval = parse_withdrawal_request_approval(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current()
             .record("request_id", tracing::field::display(&approval.request_id));
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_request_approval(&approval)
+            .validate_and_sign_withdrawal_request_approval(&approval, trm::Caller::Peer(member.0))
             .await
             .map_err(withdrawal_approval_refusal_status)?;
         tracing::info!("Signed withdrawal request approval");

@@ -93,6 +93,10 @@ impl BitcoindGate {
         Self(None)
     }
 
+    pub(crate) fn caller(&self) -> Option<Address> {
+        self.0.as_ref().map(|(limits, _)| limits.caller)
+    }
+
     pub(crate) async fn take_place(&self) -> Result<BitcoindCharge, BitcoindBusy> {
         let Some((limits, deadline)) = &self.0 else {
             return Ok(None);
