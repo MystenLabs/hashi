@@ -64,10 +64,14 @@ impl LeaderService {
         guardian: &crate::grpc::guardian_client::GuardianClient,
         timestamp_secs: u64,
         seq: u64,
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
+    ) -> anyhow::Result<Option<Vec<Vec<u8>>>> {
         let signed_request =
             Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
                 .await?;
+        if inner.onchain_state().state().hashi().config.paused() {
+            info!("Hashi is paused; not sending the withdrawal to the guardian");
+            return Ok(None);
+        }
         let proto_request = signed_standard_withdrawal_request_to_pb(&signed_request);
 
         let rpc_start = std::time::Instant::now();
@@ -146,7 +150,7 @@ impl LeaderService {
             rpc_elapsed,
         );
         info!(seq, "Guardian approved withdrawal");
-        Ok(guardian_signatures)
+        Ok(Some(guardian_signatures))
     }
 
     fn record_guardian_rpc_outcome(inner: &Arc<Hashi>, outcome: &str, elapsed_secs: f64) {

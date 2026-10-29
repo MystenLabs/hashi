@@ -19090,6 +19090,203 @@ fn retrieve_messages_does_not_starve_the_runtime() {
     ));
 }
 
+fn output_with_key(public_key: G) -> MpcOutput {
+    MpcOutput {
+        public_key,
+        key_shares: avss::SharesForNode { shares: vec![] },
+        commitments: BTreeMap::new(),
+        threshold: 1,
+    }
+}
+
+#[test]
+fn get_public_mpc_output_answers_while_the_mpc_write_lock_is_held() {
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto_tbls::threshold_schnorr::S;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_manager = hashi.mpc_manager().unwrap();
+    let public_key = G::generator() * S::rand(&mut rand::thread_rng());
+    mpc_manager
+        .write()
+        .unwrap()
+        .set_current_output(output_with_key(public_key));
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    rt.spawn_blocking(move || {
+        let _held = mpc_manager.write().unwrap();
+        entered_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let mut request = tonic::Request::new(proto::GetPublicMpcOutputRequest { epoch: Some(epoch) });
+    request.extensions_mut().insert(setup.address(1));
+    let (answered_tx, answered_rx) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        use proto::mpc_service_server::MpcService;
+        let _ = answered_tx.send(service.get_public_mpc_output(request).await);
+    });
+    let response = answered_rx.recv_timeout(Duration::from_secs(10));
+    release_tx.send(()).unwrap();
+
+    let response = response
+        .expect("the handler did not answer while the MPC write lock was held")
+        .unwrap()
+        .into_inner();
+    let served = GetPublicMpcOutputResponse::try_from(&response).unwrap();
+    assert_eq!(served.output.public_key, public_key);
+}
+
+#[test]
+fn installs_keep_the_epochs_the_incoming_manager_serves() {
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto_tbls::threshold_schnorr::S;
+    let setup = TestSetup::new(4);
+    let epoch = setup.epoch();
+    let committee = |epoch: u64| {
+        Committee::new(
+            (0..4)
+                .map(|i| {
+                    CommitteeMember::new(
+                        setup.address(i),
+                        setup.signing_keys[i].public_key(),
+                        setup.encryption_keys[i].public_key(),
+                        1,
+                    )
+                })
+                .collect(),
+            epoch,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let manager = |current: u64, pending: Option<u64>, committees: &[u64], target: u64| {
+        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(current)
+            .set_pending_epoch_change(pending)
+            .set_committees(
+                committees
+                    .iter()
+                    .map(|&epoch| (epoch, committee(epoch)))
+                    .collect(),
+            );
+        MpcManager::new(
+            setup.address(0),
+            &committee_set,
+            target,
+            ProtocolType::Dkg,
+            Some(setup.encryption_keys[0].clone()),
+            None,
+            Some(setup.signing_keys[0].duplicate()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
+            TEST_CHAIN_ID,
+            TEST_HASHI_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            ComplaintResponsePolicy::AllowAll,
+            &test_metrics(),
+        )
+        .unwrap()
+    };
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    let key = || G::generator() * S::rand(&mut rand::thread_rng());
+    let served = |epoch: u64| {
+        let shape = hashi.shape_params().unwrap();
+        hashi
+            .public_outputs()
+            .lookup(epoch, shape.epoch(), shape.previous_epoch())
+            .ok()
+            .map(|response| {
+                GetPublicMpcOutputResponse::try_from(&*response)
+                    .unwrap()
+                    .output
+                    .public_key
+            })
+    };
+    let set_outputs = |current: G, previous: G| {
+        let installed = hashi.mpc_manager().unwrap();
+        let mut installed = installed.write().unwrap();
+        installed.set_current_output(output_with_key(current));
+        installed.set_previous_output(output_with_key(previous));
+    };
+
+    let mut outgoing = manager(epoch, None, &[epoch - 1, epoch], epoch);
+    let first = key();
+    outgoing.set_current_output(output_with_key(first));
+    hashi.set_mpc_manager(outgoing);
+    hashi.set_mpc_manager(manager(
+        epoch,
+        Some(epoch + 1),
+        &[epoch - 1, epoch, epoch + 1],
+        epoch + 1,
+    ));
+    assert_eq!(served(epoch), Some(first));
+
+    let (current, previous) = (key(), key());
+    set_outputs(current, previous);
+    assert_eq!(served(epoch), Some(previous));
+    assert_eq!(served(epoch + 1), Some(current));
+
+    hashi.set_mpc_manager(manager(
+        epoch,
+        Some(epoch + 1),
+        &[epoch - 1, epoch, epoch + 1],
+        epoch + 1,
+    ));
+    assert_eq!(served(epoch + 1), Some(current));
+    assert_eq!(served(epoch), Some(previous));
+
+    hashi.set_mpc_manager(manager(
+        epoch,
+        Some(epoch + 2),
+        &[epoch - 1, epoch, epoch + 2],
+        epoch + 2,
+    ));
+    assert_eq!(hashi.public_outputs().epochs(), [epoch]);
+    assert_eq!(served(epoch), Some(previous));
+
+    hashi.set_mpc_manager(manager(epoch + 3, Some(epoch + 3), &[epoch + 3], epoch + 3));
+    let (current, previous) = (key(), key());
+    set_outputs(current, previous);
+    assert_eq!(served(epoch + 3), Some(current));
+
+    hashi.set_mpc_manager(manager(epoch + 3, Some(epoch + 4), &[epoch + 4], epoch + 4));
+    assert_eq!(served(epoch + 3), None);
+}
+
 #[test]
 fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
     let rt = tokio::runtime::Builder::new_multi_thread()

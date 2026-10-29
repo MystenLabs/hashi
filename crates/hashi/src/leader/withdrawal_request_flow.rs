@@ -7,6 +7,7 @@ use super::NoQuorum;
 use super::NoSignature;
 use super::collect_signatures;
 use super::is_already_approved_refusal;
+use super::is_expected_refusal;
 use super::parse_member_signature;
 use super::retry_peer_call;
 use crate::Hashi;
@@ -15,6 +16,7 @@ use crate::leader::retry::RetryTracker;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::trm;
 use crate::withdrawals::CommitmentItem;
 use crate::withdrawals::FeeEstimateUnavailable;
 use crate::withdrawals::RefusedItems;
@@ -209,7 +211,7 @@ impl LeaderService {
 
         // Validate, screen, and sign locally first
         let local_sig = match inner
-            .validate_and_sign_withdrawal_request_approval(&approval)
+            .validate_and_sign_withdrawal_request_approval(&approval, trm::Caller::Local)
             .await
         {
             Ok(sig) => {
@@ -363,6 +365,10 @@ impl LeaderService {
             Err(status) if is_already_approved_refusal(&status) => {
                 debug!("{validator_address} reports the withdrawal request already approved");
                 return Err(NoSignature::AlreadyApproved);
+            }
+            Err(status) if is_expected_refusal(&status) => {
+                debug!("{validator_address} refused the withdrawal request approval: {status}");
+                return Err(NoSignature::Failed);
             }
             Err(e) => {
                 error!(
