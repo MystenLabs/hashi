@@ -1318,6 +1318,12 @@ impl Hashi {
         &self,
         tracker: &mut guardian_limiter::LimiterStallTracker,
     ) {
+        let finalize_refused = {
+            let state = self.onchain_state().state();
+            let hashi = state.hashi();
+            hashi.config.paused() || hashi.committees.pending_epoch_change().is_some()
+        };
+        tracker.set_finalize_refused(finalize_refused);
         let Some((limiter, config, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
