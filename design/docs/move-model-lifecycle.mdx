@@ -319,3 +319,9 @@ drifted and adopting a new limiter policy after a guardian rotation.
 | `CommitteeMember`        | `Committee.members`                      | Validator with public_key and voting weight                            |
 | `CommitteeSignature`     | Built in the programmable transaction block (PTB) by `committee::new_committee_signature`; stored as `approval_cert` on requests | Aggregated BLS signature with signers bitmap |
 | `CertifiedMessage<T>`    | Verified onchain                         | Message proven to have committee quorum support                        |
+
+## What is the object mirror?
+
+Each committee node keeps an object mirror, a local copy of the Hashi object state. The node opens a Sui RPC transaction subscription (`subscribe_transactions`) whose filter matches every transaction that affects the Hashi object. For each transaction, the node applies the full post-state of every object that transaction wrote, along with the IDs it deleted. The mirror does not depend on events: a Move mutation that emits no event still arrives as an object write. Side effects such as the local limiter advance come from these state transitions and not from events.
+
+If a replay fails, the node rebuilds the mirror from a fresh scrape of the Hashi object. It then asks the reconcile loop to realign the local limiter, because the limiter might have missed fully signed transitions during the gap.
