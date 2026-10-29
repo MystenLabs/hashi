@@ -95,3 +95,28 @@ block-beta
 
   broadcast["Ordered broadcast channel"]
 ```
+
+## How peers authenticate over TLS
+
+A node's TLS identity is a self-signed certificate whose key pair is the node's Ed25519 TLS signing key, so the certificate carries the same public key that the node registers onchain. The node registers that key by calling `update_tls_public_key` in the `validator` module with a proof of possession: a signature by the TLS key over a preimage built from the `Hashi` object ID, the validator address, and the public key.
+
+When a node calls the guardian proxy, it presents its registered TLS key as its certificate. The proxy requires TLS 1.3 and a client certificate with an Ed25519 key, proven by the client's TLS 1.3 signature. Because nodes present self-signed certificates, the proxy checks no certificate chain. It reads the Ed25519 key from the certificate and decides per request which keys can call node RPCs.
+
+## What is the ordered broadcast channel?
+
+The ordered broadcast channel carries consensus-critical messages with total ordering: all validators see messages in the same order. A node publishes a message to the channel and receives the next message in the total order. A node can also fetch existing certificates paired with their dealer, and it must verify those certificates before acting on their weight.
+
+## What is the UTXO pool?
+
+The UTXO pool records the Bitcoin outputs that the bridge holds, each as active or spent. The second phase of deposit confirmation, `confirm_deposit`, mints BTC to the recipient and moves the UTXO into the active pool. A request whose UTXO is already in the pool, active or spent, aborts before any state change and before anything is minted. Withdrawal confirmation marks each input spent through its `utxo_records` entry, and `cleanup_spent_utxos` removes the record later.
+
+## Where the onchain state lives
+
+Hashi keeps the Bitcoin-side state in a `BitcoinState` object, attached to the `Hashi` shared object as a dynamic field keyed by `BitcoinStateKey`. Its fields are:
+
+- `deposit_queue`: the deposit request queue, of type `DepositRequestQueue`.
+- `withdrawal_queue`: the withdrawal request queue, of type `WithdrawalRequestQueue`.
+- `utxo_pool`: the UTXO pool, of type `UtxoPool`.
+- `user_requests`: a `Table<address, Bag>` that maps each user address to its deposit and withdrawal request IDs.
+
+The committee and config live in the `committees` and `config` fields of the `Hashi` object. The ordered broadcast channel is the `OrderedBroadcastChannel` interface in the node, not a Move object.
