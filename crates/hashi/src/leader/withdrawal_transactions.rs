@@ -7,6 +7,7 @@ use super::NoQuorum;
 use super::NoSignature;
 use super::collect_signatures;
 use super::is_already_approved_refusal;
+use super::is_expected_refusal;
 use super::parse_member_signature;
 use super::retry_peer_call;
 use crate::Hashi;
@@ -483,7 +484,7 @@ impl LeaderService {
         let guardian_signatures: Vec<Vec<u8>> =
             match (inner.guardian_client(), expected_limiter_seq) {
                 (Some(guardian), Some(seq)) => {
-                    let sigs = Self::finalize_withdrawal_through_guardian(
+                    let Some(sigs) = Self::finalize_withdrawal_through_guardian(
                         inner,
                         txn,
                         members,
@@ -491,7 +492,10 @@ impl LeaderService {
                         timestamp_secs,
                         seq,
                     )
-                    .await?;
+                    .await?
+                    else {
+                        return Ok(());
+                    };
                     inner.record_guardian_finalized(seq, txn.id);
                     sigs
                 }
@@ -1009,6 +1013,10 @@ impl LeaderService {
                 debug!("{validator_address} reports the withdrawal already finalized");
                 return Err(NoSignature::AlreadyApproved);
             }
+            Err(status) if is_expected_refusal(&status) => {
+                debug!("{validator_address} refused the withdrawal tx signing: {status}");
+                return Err(NoSignature::Failed);
+            }
             Err(e) => {
                 error!(
                     "Failed to get withdrawal tx signing signature from {validator_address}: {e}"
@@ -1065,6 +1073,10 @@ impl LeaderService {
             Err(status) if is_already_approved_refusal(&status) => {
                 debug!("{validator_address} reports the withdrawal already finalized");
                 return Err(NoSignature::AlreadyApproved);
+            }
+            Err(status) if is_expected_refusal(&status) => {
+                debug!("{validator_address} refused the mpc input signatures: {status}");
+                return Err(NoSignature::Failed);
             }
             Err(e) => {
                 error!(

@@ -4,6 +4,9 @@
 use super::caller_membership;
 use super::gates;
 use crate::grpc::HttpService;
+use crate::grpc::PAUSED_REFUSAL_MSG;
+use crate::grpc::SIGNING_MANAGER_NOT_READY_MSG;
+use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::STORED_ROW_SERVE;
 use crate::mpc::PreparedMessages;
 use crate::mpc::RetrieveOutcome;
@@ -365,6 +368,15 @@ impl MpcService for HttpService {
                     )
                 },
             )?;
+            let Some(onchain_state) = self.onchain_state_opt() else {
+                return Err(Status::unavailable(SIGNING_MANAGER_NOT_READY_MSG));
+            };
+            if onchain_state.state().hashi().config.paused() {
+                self.count_signing_refusal(caller, SIGNING_REFUSAL_PAUSED);
+                return Err(Status::unavailable(format!(
+                    "{SIGNING_MANAGER_NOT_READY_MSG}: {PAUSED_REFUSAL_MSG}"
+                )));
+            }
             signing_manager
                 .handle_get_partial_signatures_request(&internal_request)
                 .map_err(|e| {
