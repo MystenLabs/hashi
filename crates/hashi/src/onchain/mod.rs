@@ -305,6 +305,10 @@ impl OnchainState {
         self.0.state.read().unwrap()
     }
 
+    pub(crate) fn try_state(&self) -> Option<RwLockReadGuard<'_, State>> {
+        self.0.state.try_read().ok()
+    }
+
     /// How this binary's [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]
     /// relate to the current on-chain enabled+published versions.
     pub fn version_support(&self) -> version::VersionSupport {

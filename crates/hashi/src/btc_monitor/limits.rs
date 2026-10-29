@@ -16,6 +16,7 @@ use crate::metrics::Metrics;
 const PLACES: usize = 192;
 const CALLS: usize = 16;
 const DISCOVERIES: usize = 64;
+const FETCH_SLOTS: usize = 1;
 
 #[derive(Debug, thiserror::Error)]
 #[error("per-caller Bitcoin monitor queue is full")]
@@ -32,6 +33,7 @@ struct CallerLimits {
     places: Arc<Semaphore>,
     calls: Arc<Semaphore>,
     discoveries: Arc<Semaphore>,
+    fetch_slots: Arc<Semaphore>,
     places_in_use: IntGauge,
     calls_in_use: IntGauge,
     discoveries_in_use: IntGauge,
@@ -61,6 +63,7 @@ impl BitcoindLimiter {
                     places: Arc::new(Semaphore::new(PLACES)),
                     calls: Arc::new(Semaphore::new(CALLS)),
                     discoveries: Arc::new(Semaphore::new(DISCOVERIES)),
+                    fetch_slots: Arc::new(Semaphore::new(FETCH_SLOTS)),
                     places_in_use: metrics
                         .peer_bitcoind_places_in_use
                         .with_label_values(&[&label]),
@@ -88,6 +91,10 @@ pub struct BitcoindGate(Option<(Arc<CallerLimits>, tokio::time::Instant)>);
 impl BitcoindGate {
     pub fn local() -> Self {
         Self(None)
+    }
+
+    pub(crate) fn caller(&self) -> Option<Address> {
+        self.0.as_ref().map(|(limits, _)| limits.caller)
     }
 
     pub(crate) async fn take_place(&self) -> Result<BitcoindCharge, BitcoindBusy> {
@@ -129,6 +136,15 @@ impl CallerCharge {
             .await
             .expect("bitcoind call semaphores are never closed");
         Held::new(call, &self.limits.calls_in_use)
+    }
+
+    pub(crate) async fn fetch_slot(&self) -> OwnedSemaphorePermit {
+        self.limits
+            .fetch_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("Kyoto fetch slot semaphores are never closed")
     }
 
     pub(crate) fn try_discovery(&self) -> Option<Held> {

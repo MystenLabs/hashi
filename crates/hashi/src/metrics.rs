@@ -179,7 +179,7 @@ pub struct Metrics {
     /// metrics still look alive.
     task_last_iteration_timestamp_seconds: IntGaugeVec,
 
-    pub(crate) coinbase_deposit_observations_total: IntCounterVec,
+    pub(crate) coinbase_deposit_observations_total: IntCounter,
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
     pub deposit_lookup_cache_requests_total: IntCounterVec,
@@ -331,6 +331,7 @@ pub const SIGNING_REFUSAL_COMMITTEE: &str = "committee";
 pub const SIGNING_REFUSAL_CAP: &str = "cap";
 pub const SIGNING_REFUSAL_BUSY: &str = "busy";
 pub const SIGNING_REFUSAL_SHAPE: &str = "shape";
+pub const SIGNING_REFUSAL_PAUSED: &str = "paused";
 
 const MPC_REFUSAL_REQUEST: &str = "request";
 const MPC_REFUSAL_RESPONSE: &str = "response";
@@ -579,7 +580,7 @@ impl Metrics {
             .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
-                "SignDepositConfirmation, SignWithdrawalRequestApproval, SignWithdrawalTxConstruction, SignWithdrawalTransaction, SignWithdrawalTxSigning, SignMpcInputSignatures and SignWithdrawalConfirmation calls refused, by caller and reason (committee, cap, busy or shape)",
+                "SignDepositConfirmation, SignWithdrawalRequestApproval, SignWithdrawalTxConstruction, SignWithdrawalTransaction, SignWithdrawalTxSigning, SignMpcInputSignatures, SignWithdrawalConfirmation and SignGuardianWithdrawalRequest calls refused, and GetPartialSignatures calls refused while paused, by caller and reason (committee, cap, busy, shape or paused)",
                 &["peer", "reason"],
                 registry,
             )
@@ -628,7 +629,7 @@ impl Metrics {
             .unwrap(),
             kyoto_block_fetch_seconds: register_histogram_with_registry!(
                 "hashi_kyoto_block_fetch_seconds",
-                "Time from asking Kyoto for a block to its answer, queue wait included; a fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned",
+                "Time from asking Kyoto for a block to its answer, queue wait included; a deposit discovery's fetch is recorded when Kyoto answers or drops it, even after the discovery has timed out, and a block scan's fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned",
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
@@ -1195,10 +1196,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            coinbase_deposit_observations_total: register_int_counter_vec_with_registry!(
+            coinbase_deposit_observations_total: register_int_counter_with_registry!(
                 "hashi_coinbase_deposit_observations_total",
-                "Total times a tracked deposit outpoint was classified as a coinbase output, labeled by Bitcoin outpoint",
-                &["outpoint"],
+                "Total times a tracked deposit outpoint was classified as a coinbase output",
                 registry,
             )
             .unwrap(),

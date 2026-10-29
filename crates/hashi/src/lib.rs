@@ -67,6 +67,7 @@ pub struct Hashi {
     onchain_state: OnceLock<onchain::OnchainState>,
     mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
     shape_params: RwLock<Option<Arc<mpc::shape_params::ShapeParams>>>,
+    public_outputs: Arc<mpc::public_outputs::PublicOutputs>,
     mpc_manager_install: Mutex<()>,
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
@@ -113,6 +114,7 @@ impl Hashi {
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
             shape_params: RwLock::new(None),
+            public_outputs: Arc::default(),
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
@@ -157,6 +159,7 @@ impl Hashi {
             onchain_state: OnceLock::new(),
             mpc_manager: OnceLock::new(),
             shape_params: RwLock::new(None),
+            public_outputs: Arc::default(),
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
@@ -220,7 +223,7 @@ impl Hashi {
         self.mpc_manager.get().cloned()
     }
 
-    pub fn set_mpc_manager(&self, manager: mpc::MpcManager) {
+    pub fn set_mpc_manager(&self, mut manager: mpc::MpcManager) {
         let _installing = self.mpc_manager_install.lock().unwrap();
         self.metrics
             .mpc_manager_epoch
@@ -233,10 +236,13 @@ impl Hashi {
             Some(lock) => {
                 // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
                 // Poisoning indicates a bug, so we propagate the panic rather than recover.
-                *lock.write().unwrap() = manager;
+                let mut installed = lock.write().unwrap();
+                manager.adopt_public_outputs(&self.public_outputs);
+                *installed = manager;
             }
             None => {
                 // First-time initialization (e.g. new committee member joining mid-rotation).
+                manager.adopt_public_outputs(&self.public_outputs);
                 let _ = self.mpc_manager.set(Arc::new(RwLock::new(manager)));
             }
         }
@@ -244,6 +250,10 @@ impl Hashi {
 
     pub(crate) fn shape_params(&self) -> Option<Arc<mpc::shape_params::ShapeParams>> {
         self.shape_params.read().unwrap().clone()
+    }
+
+    pub(crate) fn public_outputs(&self) -> &mpc::public_outputs::PublicOutputs {
+        &self.public_outputs
     }
 
     pub fn signing_manager_for(&self, epoch: u64) -> Option<Arc<mpc::SigningManager>> {

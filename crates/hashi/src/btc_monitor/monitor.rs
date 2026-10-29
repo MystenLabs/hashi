@@ -4,12 +4,15 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::PoisonError;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -28,6 +31,7 @@ use prometheus::Histogram;
 use rand::Rng;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tracing::debug;
@@ -42,6 +46,7 @@ use crate::deposit_tracker::DepositDiscovery;
 use crate::deposit_tracker::DepositStatus;
 use crate::deposit_tracker::DepositTracker;
 use crate::deposit_tracker::DiscoveryResolution;
+use crate::deposit_tracker::RecordedOutput;
 use crate::deposit_tracker::effective_deposit_confirmation_threshold;
 use crate::metrics::Metrics;
 
@@ -131,14 +136,14 @@ pub enum DepositConfirmError {
     InvalidVout { txid: bitcoin::Txid, vout: u32 },
     #[error(
         "output {txid}:{vout} pays {}, not the expected {}",
-        txout_summary(.actual),
+        output_summary(.actual),
         txout_summary(.expected)
     )]
     OutputMismatch {
         txid: bitcoin::Txid,
         vout: u32,
         expected: bitcoin::TxOut,
-        actual: bitcoin::TxOut,
+        actual: RecordedOutput,
     },
     #[error("per-caller deposit discovery limit reached")]
     DiscoveriesFull,
@@ -149,14 +154,29 @@ pub enum DepositConfirmError {
 }
 
 fn txout_summary(txout: &bitcoin::TxOut) -> String {
+    output_summary(&RecordedOutput::new(txout))
+}
+
+fn output_summary(output: &RecordedOutput) -> String {
     const SHOWN: usize = 34;
-    let script = txout.script_pubkey.as_bytes();
+    let (value, script, script_len) = match output {
+        RecordedOutput::Kept(txout) => (
+            txout.value,
+            txout.script_pubkey.as_bytes(),
+            txout.script_pubkey.len(),
+        ),
+        RecordedOutput::LongScript {
+            value,
+            script_start,
+            script_len,
+        } => (*value, script_start.as_slice(), *script_len),
+    };
+    let shown = &script[..script.len().min(SHOWN)];
     format!(
-        "{} sat to script 0x{}{} ({} bytes)",
-        txout.value.to_sat(),
-        hex::encode(&script[..script.len().min(SHOWN)]),
-        if script.len() > SHOWN { "..." } else { "" },
-        script.len()
+        "{} sat to script 0x{}{} ({script_len} bytes)",
+        value.to_sat(),
+        hex::encode(shown),
+        if shown.len() < script_len { "..." } else { "" },
     )
 }
 
@@ -177,10 +197,62 @@ impl DepositCheckRequest {
 
 type DiscoveryGroup = (bitcoin::OutPoint, Option<Address>);
 
+struct CachedOutputs {
+    is_coinbase: bool,
+    outputs: Vec<bitcoin::TxOut>,
+    bytes: usize,
+}
+
+impl CachedOutputs {
+    fn new(transaction: &bitcoin::Transaction) -> Self {
+        let outputs = transaction.output.clone();
+        let bytes = outputs.capacity() * size_of::<bitcoin::TxOut>()
+            + outputs
+                .iter()
+                .map(|output| output.script_pubkey.len())
+                .sum::<usize>();
+        Self {
+            is_coinbase: transaction.is_coinbase(),
+            outputs,
+            bytes,
+        }
+    }
+}
+
+type BlockAnswer = Result<kyoto::IndexedBlock, kyoto::error::FetchBlockError>;
+type FetchedOutputs = Result<Arc<CachedOutputs>, String>;
+type RequestedFetch = (u64, oneshot::Receiver<BlockAnswer>);
+type FetchAnswers = Vec<(oneshot::Sender<FetchedOutputs>, FetchedOutputs)>;
+
+struct BlockFetch {
+    id: u64,
+    txids: HashSet<bitcoin::Txid>,
+    registrants: Vec<(bitcoin::Txid, oneshot::Sender<FetchedOutputs>)>,
+}
+
+impl BlockFetch {
+    fn register(&mut self, txid: bitcoin::Txid) -> oneshot::Receiver<FetchedOutputs> {
+        self.registrants
+            .retain(|(_, registrant)| !registrant.is_closed());
+        self.txids.insert(txid);
+        let (registrant, outputs) = oneshot::channel();
+        self.registrants.push((txid, registrant));
+        outputs
+    }
+}
+
+enum OutputsLookup {
+    Cached(Arc<CachedOutputs>),
+    Fetching(oneshot::Receiver<FetchedOutputs>),
+}
+
 struct DepositLookupCache {
     tx_blocks: LruCache<bitcoin::Txid, HashCheckpoint>,
     block_heights: LruCache<bitcoin::BlockHash, u32>,
-    transactions: LruCache<bitcoin::Txid, Arc<bitcoin::Transaction>>,
+    outputs: LruCache<bitcoin::Txid, Arc<CachedOutputs>>,
+    output_bytes: usize,
+    fetches: HashMap<bitcoin::BlockHash, BlockFetch>,
+    next_fetch_id: u64,
 }
 
 impl DepositLookupCache {
@@ -188,19 +260,128 @@ impl DepositLookupCache {
     /// per-output lookups for large deposit transactions while keeping memory bounded.
     const TX_BLOCK_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
     const BLOCK_HEIGHT_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(128).unwrap();
-    const TRANSACTION_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+    const OUTPUT_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+    const OUTPUT_CACHE_BYTES: usize = 32 << 20;
 
     fn new() -> Self {
         Self {
             tx_blocks: LruCache::new(Self::TX_BLOCK_CACHE_SIZE),
             block_heights: LruCache::new(Self::BLOCK_HEIGHT_CACHE_SIZE),
-            transactions: LruCache::new(Self::TRANSACTION_CACHE_SIZE),
+            outputs: LruCache::new(Self::OUTPUT_CACHE_SIZE),
+            output_bytes: 0,
+            fetches: HashMap::new(),
+            next_fetch_id: 0,
         }
+    }
+
+    fn lock(cache: &Mutex<Self>) -> std::sync::MutexGuard<'_, Self> {
+        cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn put_outputs(
+        &mut self,
+        txid: bitcoin::Txid,
+        outputs: Arc<CachedOutputs>,
+    ) -> Vec<Arc<CachedOutputs>> {
+        let mut evicted = Vec::new();
+        if outputs.bytes > Self::OUTPUT_CACHE_BYTES {
+            return evicted;
+        }
+        self.output_bytes += outputs.bytes;
+        if let Some((_, displaced)) = self.outputs.push(txid, outputs) {
+            self.output_bytes -= displaced.bytes;
+            evicted.push(displaced);
+        }
+        while self.output_bytes > Self::OUTPUT_CACHE_BYTES
+            && let Some((_, lru)) = self.outputs.pop_lru()
+        {
+            self.output_bytes -= lru.bytes;
+            evicted.push(lru);
+        }
+        evicted
     }
 
     fn invalidate_tx(&mut self, txid: &bitcoin::Txid) {
         self.tx_blocks.pop(txid);
-        self.transactions.pop(txid);
+        if let Some(outputs) = self.outputs.pop(txid) {
+            self.output_bytes -= outputs.bytes;
+        }
+    }
+
+    fn find_outputs(
+        &mut self,
+        txid: bitcoin::Txid,
+        block_hash: bitcoin::BlockHash,
+    ) -> Option<OutputsLookup> {
+        if let Some(outputs) = self.outputs.get(&txid) {
+            return Some(OutputsLookup::Cached(outputs.clone()));
+        }
+        self.fetches
+            .get_mut(&block_hash)
+            .map(|fetch| OutputsLookup::Fetching(fetch.register(txid)))
+    }
+
+    fn insert_fetch(
+        &mut self,
+        block_hash: bitcoin::BlockHash,
+        txid: bitcoin::Txid,
+    ) -> (u64, oneshot::Receiver<FetchedOutputs>) {
+        let id = self.next_fetch_id;
+        self.next_fetch_id += 1;
+        let mut fetch = BlockFetch {
+            id,
+            txids: HashSet::new(),
+            registrants: Vec::new(),
+        };
+        let outputs = fetch.register(txid);
+        self.fetches.insert(block_hash, fetch);
+        (id, outputs)
+    }
+
+    fn take_fetch(&mut self, block_hash: bitcoin::BlockHash, id: u64) -> Option<BlockFetch> {
+        if self.fetches.get(&block_hash)?.id != id {
+            return None;
+        }
+        self.fetches.remove(&block_hash)
+    }
+
+    fn finish_fetch(
+        &mut self,
+        block_hash: bitcoin::BlockHash,
+        id: u64,
+        index: &Result<HashMap<bitcoin::Txid, &bitcoin::Transaction>, &str>,
+    ) -> (FetchAnswers, Vec<Arc<CachedOutputs>>) {
+        let Some(fetch) = self.take_fetch(block_hash, id) else {
+            return Default::default();
+        };
+        let mut evicted = Vec::new();
+        let mut results = HashMap::new();
+        for txid in fetch.txids {
+            let result = match index.as_ref().map(|index| index.get(&txid)) {
+                Ok(Some(transaction)) => {
+                    let outputs = Arc::new(CachedOutputs::new(transaction));
+                    evicted.extend(self.put_outputs(txid, outputs.clone()));
+                    Ok(outputs)
+                }
+                Ok(None) => {
+                    self.invalidate_tx(&txid);
+                    Err(format!(
+                        "Transaction {txid} is not present in block {block_hash} reported by Bitcoin Core"
+                    ))
+                }
+                Err(error) => {
+                    self.invalidate_tx(&txid);
+                    Err(error.to_string())
+                }
+            };
+            results.insert(txid, result);
+        }
+        let answers = fetch
+            .registrants
+            .into_iter()
+            .map(|(txid, registrant)| (registrant, results[&txid].clone()))
+            .collect();
+        (answers, evicted)
     }
 }
 
@@ -242,24 +423,40 @@ impl SharedDepositLookupCache {
         self.lock().block_heights.put(block_hash, height);
     }
 
-    fn get_transaction(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
-        let result = self.lock().transactions.get(txid).cloned();
-        self.record_request("transaction", result.is_some());
-        result
+    fn find_outputs(
+        &self,
+        txid: bitcoin::Txid,
+        block_hash: bitcoin::BlockHash,
+    ) -> Option<OutputsLookup> {
+        let lookup = self.lock().find_outputs(txid, block_hash);
+        self.record_request(
+            "transaction",
+            matches!(lookup, Some(OutputsLookup::Cached(_))),
+        );
+        lookup
     }
 
-    fn put_transaction(&self, txid: bitcoin::Txid, transaction: Arc<bitcoin::Transaction>) {
-        self.lock().transactions.put(txid, transaction);
+    fn find_or_fetch_outputs(
+        &self,
+        txid: bitcoin::Txid,
+        block_hash: bitcoin::BlockHash,
+        requester: &kyoto::Requester,
+    ) -> Result<(OutputsLookup, Option<RequestedFetch>), kyoto::error::FetchBlockError> {
+        let mut cache = self.lock();
+        if let Some(lookup) = cache.find_outputs(txid, block_hash) {
+            return Ok((lookup, None));
+        }
+        let block = requester.request_block(block_hash)?;
+        let (id, outputs) = cache.insert_fetch(block_hash, txid);
+        Ok((OutputsLookup::Fetching(outputs), Some((id, block))))
     }
 
-    fn invalidate_tx(&self, txid: &bitcoin::Txid) {
-        self.lock().invalidate_tx(txid);
+    fn downgrade(&self) -> Weak<Mutex<DepositLookupCache>> {
+        Arc::downgrade(&self.inner)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, DepositLookupCache> {
-        self.inner
-            .lock()
-            .expect("deposit lookup cache lock poisoned")
+        DepositLookupCache::lock(&self.inner)
     }
 
     fn record_request(&self, cache: &'static str, hit: bool) {
@@ -296,6 +493,7 @@ struct DepositDiscoveryContext {
     bitcoind_rpc: BitcoindRpc,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
+    deposit_tracker: DepositTracker,
     generation: u64,
     fetch_seconds: Histogram,
 }
@@ -413,6 +611,20 @@ fn release_discovery_token(
     }
 }
 
+fn recorded_in_block(
+    tracker: &DepositTracker,
+    outpoint: &bitcoin::OutPoint,
+    block_info: HashCheckpoint,
+) -> Option<DepositStatus> {
+    tracker.recorded_status(outpoint).filter(|status| {
+        matches!(
+            status,
+            DepositStatus::InBlock { checkpoint, .. } | DepositStatus::InvalidVout { checkpoint }
+                if *checkpoint == block_info
+        )
+    })
+}
+
 struct BlockFetchTimer {
     fetch_seconds: Histogram,
     started: Instant,
@@ -431,6 +643,73 @@ impl Drop for BlockFetchTimer {
     fn drop(&mut self) {
         self.fetch_seconds
             .observe(self.started.elapsed().as_secs_f64());
+    }
+}
+
+struct FetchWaiter {
+    cache: Weak<Mutex<DepositLookupCache>>,
+    block_info: HashCheckpoint,
+    id: u64,
+    deposit_tracker: DepositTracker,
+    generation: u64,
+    _slot: Option<OwnedSemaphorePermit>,
+}
+
+impl FetchWaiter {
+    async fn wait(self, block: oneshot::Receiver<BlockAnswer>, timer: BlockFetchTimer) {
+        let answer = block
+            .await
+            .unwrap_or(Err(kyoto::error::FetchBlockError::RecvError));
+        drop(timer);
+        let hash = self.block_info.hash;
+        let block = answer
+            .map_err(|e| format!("Failed to look up block {hash}: {e}"))
+            .and_then(|fetched| {
+                let fetched_hash = fetched.block.block_hash();
+                if fetched.height == self.block_info.height && fetched_hash == hash {
+                    Ok(fetched.block)
+                } else {
+                    Err(format!(
+                        "Kyoto returned block {fetched_hash} at height {} for requested {hash} at height {}",
+                        fetched.height, self.block_info.height,
+                    ))
+                }
+            });
+        let txids: Vec<bitcoin::Txid> = block
+            .iter()
+            .flat_map(|block| &block.txdata)
+            .map(|transaction| transaction.compute_txid())
+            .collect();
+        if let Ok(block) = &block {
+            self.deposit_tracker.apply_block_with_txids_if_current(
+                self.generation,
+                self.block_info,
+                block,
+                &txids,
+            );
+        }
+        if let Some(cache) = self.cache.upgrade() {
+            let index = block
+                .as_ref()
+                .map(|block| txids.iter().copied().zip(&block.txdata).collect())
+                .map_err(String::as_str);
+            let (answers, evicted) =
+                DepositLookupCache::lock(&cache).finish_fetch(hash, self.id, &index);
+            drop(evicted);
+            for (registrant, outputs) in answers {
+                let _ = registrant.send(outputs);
+            }
+        }
+    }
+}
+
+impl Drop for FetchWaiter {
+    fn drop(&mut self) {
+        let Some(cache) = self.cache.upgrade() else {
+            return;
+        };
+        let fetch = DepositLookupCache::lock(&cache).take_fetch(self.block_info.hash, self.id);
+        drop(fetch);
     }
 }
 
@@ -576,6 +855,7 @@ impl Monitor {
             bitcoind_rpc: BitcoindRpc::new(self.bitcoind_rpc.clone(), charge),
             requester: self.requester.clone(),
             deposit_lookup_cache: self.deposit_lookup_cache.clone(),
+            deposit_tracker: self.deposit_tracker.clone(),
             generation: self.deposit_tracker.bitcoin_generation(),
             fetch_seconds: self.metrics.kyoto_block_fetch_seconds.clone(),
         }
@@ -1565,14 +1845,7 @@ async fn process_deposit_discovery(
     let _starters_place = context.bitcoind_rpc.charge.clone();
     let (outpoint, _) = group;
     let generation = context.generation;
-    let lookup = AssertUnwindSafe(discover_deposit(
-        context.bitcoind_rpc,
-        context.requester,
-        context.deposit_lookup_cache,
-        outpoint,
-        context.tip,
-        context.fetch_seconds,
-    ));
+    let lookup = AssertUnwindSafe(discover_deposit(context, outpoint));
     let result = match tokio::time::timeout(DEPOSIT_DISCOVERY_TIMEOUT, lookup.catch_unwind()).await
     {
         Ok(Ok(result)) => result,
@@ -1648,16 +1921,19 @@ async fn check_result_from_status(
         DepositStatus::InBlock {
             checkpoint,
             is_coinbase,
-            txout,
+            output,
         } => {
-            if txout != expected_txout {
-                return Err(DepositConfirmError::OutputMismatch {
-                    txid: outpoint.txid,
-                    vout: outpoint.vout,
-                    expected: expected_txout,
-                    actual: txout,
-                });
-            }
+            let txout = match output {
+                RecordedOutput::Kept(txout) if txout == expected_txout => txout,
+                actual => {
+                    return Err(DepositConfirmError::OutputMismatch {
+                        txid: outpoint.txid,
+                        vout: outpoint.vout,
+                        expected: expected_txout,
+                        actual,
+                    });
+                }
+            };
             let confirmations = tip
                 .height
                 .saturating_add(1)
@@ -1792,14 +2068,20 @@ where
 }
 
 async fn discover_deposit(
-    bitcoind_rpc: BitcoindRpc,
-    requester: kyoto::Requester,
-    deposit_lookup_cache: SharedDepositLookupCache,
+    context: DepositDiscoveryContext,
     outpoint: bitcoin::OutPoint,
-    tip: HashCheckpoint,
-    fetch_seconds: Histogram,
 ) -> Result<DepositStatus, DepositConfirmError> {
+    let DepositDiscoveryContext {
+        tip,
+        bitcoind_rpc,
+        requester,
+        deposit_lookup_cache,
+        deposit_tracker,
+        generation,
+        fetch_seconds,
+    } = context;
     let txid = outpoint.txid;
+    let charge = bitcoind_rpc.charge.clone();
     let block_info = match lookup_tx_block(
         bitcoind_rpc,
         requester.clone(),
@@ -1814,54 +2096,62 @@ async fn discover_deposit(
         TxBlockLookup::NotFound => return Ok(DepositStatus::NotFound),
     };
 
-    let transaction = if let Some(transaction) = deposit_lookup_cache.get_transaction(&txid) {
-        transaction
-    } else {
-        let fetched = {
-            let _timer = BlockFetchTimer::start(&fetch_seconds);
-            requester.get_block(block_info.hash).await
-        };
-        let indexed_block = fetched
-            .map_err(|e| anyhow::anyhow!("Failed to look up block {}: {e}", block_info.hash))?;
-        let fetched_hash = indexed_block.block.block_hash();
-        if indexed_block.height != block_info.height || fetched_hash != block_info.hash {
-            deposit_lookup_cache.invalidate_tx(&txid);
-            return Err(anyhow::anyhow!(
-                "Kyoto returned block {fetched_hash} at height {} for requested {} at height {}",
-                indexed_block.height,
-                block_info.hash,
-                block_info.height,
-            )
-            .into());
+    let lookup = match deposit_lookup_cache.find_outputs(txid, block_info.hash) {
+        Some(lookup) => lookup,
+        None => {
+            if let Some(status) = recorded_in_block(&deposit_tracker, &outpoint, block_info) {
+                return Ok(status);
+            }
+            let slot = match &charge {
+                Some(charge) => {
+                    let slot = charge.fetch_slot().await;
+                    if let Some(status) = recorded_in_block(&deposit_tracker, &outpoint, block_info)
+                    {
+                        return Ok(status);
+                    }
+                    Some(slot)
+                }
+                None => None,
+            };
+            let (lookup, requested) = deposit_lookup_cache
+                .find_or_fetch_outputs(txid, block_info.hash, &requester)
+                .map_err(|e| anyhow::anyhow!("Failed to look up block {}: {e}", block_info.hash))?;
+            if let Some((id, block)) = requested {
+                let waiter = FetchWaiter {
+                    cache: deposit_lookup_cache.downgrade(),
+                    block_info,
+                    id,
+                    deposit_tracker,
+                    generation,
+                    _slot: slot,
+                };
+                tokio::spawn(waiter.wait(block, BlockFetchTimer::start(&fetch_seconds)));
+            }
+            lookup
         }
-        let Some(transaction) = indexed_block
-            .block
-            .txdata
-            .iter()
-            .find(|transaction| transaction.compute_txid() == txid)
-        else {
-            deposit_lookup_cache.invalidate_tx(&txid);
-            return Err(anyhow::anyhow!(
-                "Transaction {txid} is not present in block {} reported by Bitcoin Core",
-                block_info.hash,
-            )
-            .into());
-        };
-        let transaction = Arc::new(transaction.clone());
-        deposit_lookup_cache.put_transaction(txid, transaction.clone());
-        transaction
     };
-    let is_coinbase = transaction.is_coinbase();
+    let cached = match lookup {
+        OutputsLookup::Cached(cached) => cached,
+        OutputsLookup::Fetching(outputs) => outputs
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Kyoto's fetch of block {} ended without an answer",
+                    block_info.hash
+                )
+            })?
+            .map_err(anyhow::Error::msg)?,
+    };
 
-    let Some(txout) = transaction.output.get(outpoint.vout as usize) else {
+    let Some(txout) = cached.outputs.get(outpoint.vout as usize) else {
         return Ok(DepositStatus::InvalidVout {
             checkpoint: block_info,
         });
     };
     Ok(DepositStatus::InBlock {
         checkpoint: block_info,
-        is_coinbase,
-        txout: txout.clone(),
+        is_coinbase: cached.is_coinbase,
+        output: RecordedOutput::new(txout),
     })
 }
 
@@ -2514,10 +2804,43 @@ mod tests {
 
         cache.put_tx_block(txid, block_info);
         cache.put_block_height(block_hash, 42);
-        cache.invalidate_tx(&txid);
+        cache.lock().invalidate_tx(&txid);
 
         assert!(cache.get_tx_block(&txid).is_none());
         assert_eq!(cache.get_block_height(&block_hash), Some(42));
+    }
+
+    #[test]
+    fn deposit_lookup_cache_keeps_outputs_within_its_byte_budget() {
+        let cache = SharedDepositLookupCache::new(Arc::new(fresh_metrics()));
+        let cached = |script_bytes: usize| {
+            Arc::new(CachedOutputs::new(&bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; script_bytes]),
+                }],
+            }))
+        };
+        let half = DepositLookupCache::OUTPUT_CACHE_BYTES / 2;
+        let [first, second, oversized] = [1, 2, 3].map(|seed| make_outpoint(seed).txid);
+
+        cache.lock().put_outputs(first, cached(half));
+        cache.lock().put_outputs(second, cached(half));
+        cache
+            .lock()
+            .put_outputs(oversized, cached(DepositLookupCache::OUTPUT_CACHE_BYTES));
+
+        assert!(cache.lock().outputs.peek(&first).is_none());
+        assert_eq!(
+            cache.lock().outputs.peek(&second).unwrap().outputs[0]
+                .script_pubkey
+                .len(),
+            half
+        );
+        assert!(cache.lock().outputs.peek(&oversized).is_none());
     }
 
     #[tokio::test]
@@ -2796,7 +3119,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: false,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
         ));
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2916,6 +3239,196 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_fetch_keeps_its_callers_slot_after_its_discovery_times_out() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker);
+        let (kyoto_node, kyoto_client) = kyoto::Builder::new(bitcoin::Network::Bitcoin)
+            .chain_state(kyoto::ChainState::Checkpoint(HashCheckpoint::from_genesis(
+                bitcoin::Network::Bitcoin,
+            )))
+            .build();
+        monitor.requester = kyoto_client.requester;
+        monitor.synced = true;
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let outpoint = make_outpoint(1);
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(outpoint.txid, HashCheckpoint::new(42, block_hash(2)));
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics);
+        let charge = charge_for(&limiter, Address::new([7; 32])).await;
+        let (mut request, _result_rx) = deposit_check_request_for(outpoint);
+        request.charge = Some(charge.clone());
+
+        monitor.confirm_deposit(request);
+        let discovery = monitor
+            .deposit_discovery_workers
+            .join_next()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(discovery.result.is_err());
+        assert!(charge.fetch_slot().now_or_never().is_none());
+        drop(kyoto_node);
+        wait_for(|| charge.fetch_slot().now_or_never().is_some()).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_discovery_shares_an_outstanding_fetch_without_its_callers_slot() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker);
+        let (_kyoto_node, kyoto_client) = kyoto::Builder::new(bitcoin::Network::Bitcoin)
+            .chain_state(kyoto::ChainState::Checkpoint(HashCheckpoint::from_genesis(
+                bitcoin::Network::Bitcoin,
+            )))
+            .build();
+        monitor.requester = kyoto_client.requester;
+        monitor.synced = true;
+        let block = HashCheckpoint::new(42, block_hash(2));
+        monitor.tip = Some(block);
+        let [first, second] = [make_outpoint(1), make_outpoint(2)];
+        for outpoint in [first, second] {
+            monitor
+                .deposit_lookup_cache
+                .put_tx_block(outpoint.txid, block);
+        }
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics);
+        let _second_callers_slot = charge_for(&limiter, Address::new([8; 32]))
+            .await
+            .fetch_slot()
+            .await;
+        let mut receivers = Vec::new();
+
+        for (outpoint, caller) in [(first, [7; 32]), (second, [8; 32])] {
+            let (mut request, result_rx) = deposit_check_request_for(outpoint);
+            request.charge = Some(charge_for(&limiter, Address::new(caller)).await);
+            monitor.confirm_deposit(request);
+            receivers.push(result_rx);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let cache = monitor.deposit_lookup_cache.lock();
+        assert_eq!(cache.fetches.len(), 1);
+        assert_eq!(
+            cache.fetches[&block.hash].txids,
+            HashSet::from([first.txid, second.txid])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_discovery_that_waited_for_its_slot_uses_a_recorded_block() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker.clone());
+        let (_kyoto_node, kyoto_client) = kyoto::Builder::new(bitcoin::Network::Bitcoin)
+            .chain_state(kyoto::ChainState::Checkpoint(HashCheckpoint::from_genesis(
+                bitcoin::Network::Bitcoin,
+            )))
+            .build();
+        monitor.requester = kyoto_client.requester;
+        monitor.synced = true;
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
+        let checkpoint = HashCheckpoint::new(0, block.block_hash());
+        monitor.tip = Some(checkpoint);
+        let outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(outpoint.txid, checkpoint);
+        let limiter = crate::btc_monitor::limits::BitcoindLimiter::new(metrics);
+        let charge = charge_for(&limiter, Address::new([7; 32])).await;
+        let slot = charge.fetch_slot().await;
+        let (mut request, _result_rx) = deposit_check_request_for(outpoint);
+        request.charge = Some(charge);
+
+        monitor.confirm_deposit(request);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tracker.apply_block_if_current(tracker.bitcoin_generation(), checkpoint, &block);
+        drop(slot);
+        let discovery = monitor
+            .deposit_discovery_workers
+            .join_next()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            discovery.result.unwrap(),
+            tracker.recorded_status(&outpoint).unwrap()
+        );
+        assert!(monitor.deposit_lookup_cache.lock().fetches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_discovery_uses_a_recorded_block_instead_of_fetching_it() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let monitor = test_monitor(metrics, tracker.clone());
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
+        let checkpoint = HashCheckpoint::new(0, block.block_hash());
+        let outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
+        tracker.apply_block_if_current(tracker.bitcoin_generation(), checkpoint, &block);
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(outpoint.txid, checkpoint);
+
+        let status = discover_deposit(
+            monitor.deposit_discovery_context(checkpoint, None),
+            outpoint,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(Some(status), tracker.recorded_status(&outpoint));
+    }
+
+    #[tokio::test]
+    async fn a_fetch_answered_after_its_discovery_timed_out_records_the_deposit() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
+        let outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
+        let cache = SharedDepositLookupCache::new(metrics.clone());
+        let block_info = HashCheckpoint::new(0, block.block_hash());
+        let (id, timed_out) = cache.lock().insert_fetch(block_info.hash, outpoint.txid);
+        drop(timed_out);
+        let (answer_tx, answer) = oneshot::channel();
+        answer_tx
+            .send(Ok(kyoto::IndexedBlock {
+                height: 0,
+                block: block.clone(),
+            }))
+            .unwrap();
+
+        FetchWaiter {
+            cache: cache.downgrade(),
+            block_info,
+            id,
+            deposit_tracker: tracker.clone(),
+            generation: tracker.bitcoin_generation(),
+            _slot: None,
+        }
+        .wait(
+            answer,
+            BlockFetchTimer::start(&metrics.kyoto_block_fetch_seconds),
+        )
+        .await;
+
+        assert_eq!(
+            tracker.recorded_status(&outpoint),
+            Some(DepositStatus::InBlock {
+                checkpoint: block_info,
+                is_coinbase: true,
+                output: RecordedOutput::new(&block.txdata[0].output[0]),
+            })
+        );
+    }
+
     #[tokio::test]
     async fn deposit_check_during_kyoto_catch_up_is_refused() {
         let metrics = Arc::new(fresh_metrics());
@@ -2988,7 +3501,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: block_info,
                 is_coinbase: false,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
         );
         let mut result_rxs = Vec::new();
@@ -3038,7 +3551,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: true,
-                txout: deposit_txout(),
+                output: RecordedOutput::Kept(deposit_txout()),
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
@@ -3074,7 +3587,7 @@ mod tests {
             DepositStatus::InBlock {
                 checkpoint: HashCheckpoint::new(42, block_hash(2)),
                 is_coinbase: false,
-                txout: recorded.clone(),
+                output: RecordedOutput::new(&recorded),
             },
             HashCheckpoint::new(140, block_hash(3)),
             6,
@@ -3093,12 +3606,61 @@ mod tests {
             matches!(
                 &result,
                 Err(DepositConfirmError::OutputMismatch { expected, actual, .. })
-                    if *expected == deposit_txout() && *actual == recorded
+                    if *expected == deposit_txout() && *actual == RecordedOutput::new(&recorded)
             ),
             "{:?}",
             result.as_ref().map_err(ToString::to_string)
         );
         assert!(result.unwrap_err().to_string().len() < 300);
+    }
+
+    #[tokio::test]
+    async fn a_long_script_is_recorded_by_its_start_and_never_matches() {
+        let expected = bitcoin::TxOut {
+            value: deposit_txout().value,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; 34]),
+        };
+        assert_eq!(
+            RecordedOutput::new(&expected),
+            RecordedOutput::Kept(expected.clone())
+        );
+        let output = RecordedOutput::new(&bitcoin::TxOut {
+            value: expected.value,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51; 35]),
+        });
+        assert_eq!(
+            output,
+            RecordedOutput::LongScript {
+                value: expected.value,
+                script_start: [0x51; 34],
+                script_len: 35,
+            }
+        );
+
+        let result = check_result_from_status(
+            DepositStatus::InBlock {
+                checkpoint: HashCheckpoint::new(42, block_hash(2)),
+                is_coinbase: false,
+                output,
+            },
+            HashCheckpoint::new(140, block_hash(3)),
+            6,
+            BitcoindRpc::new(
+                Arc::new(corepc_client::client_sync::v29::Client::new(
+                    "http://127.0.0.1:1",
+                )),
+                None,
+            ),
+            make_outpoint(1),
+            expected,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(DepositConfirmError::OutputMismatch { .. })),
+            "{:?}",
+            result.map_err(|e| e.to_string())
+        );
     }
 
     #[tokio::test]

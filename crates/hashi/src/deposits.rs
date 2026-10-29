@@ -47,7 +47,7 @@ impl Hashi {
             .await?;
         self.validate_deposit_request_on_bitcoin(deposit_request, gate)
             .await?;
-        self.screen_deposit(deposit_request).await?;
+        self.screen_deposit(deposit_request, gate).await?;
         Ok(())
     }
 
@@ -55,6 +55,7 @@ impl Hashi {
     async fn screen_deposit(
         &self,
         deposit_request: &DepositRequest,
+        gate: &BitcoindGate,
     ) -> Result<(), UnapprovedDepositError> {
         let Some(trm) = self.trm_client() else {
             return Ok(());
@@ -63,8 +64,9 @@ impl Hashi {
             .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
             .map_err(UnapprovedDepositError::DepositAddressUnavailable)?;
         let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
+        let caller = gate.caller().map_or(trm::Caller::Local, trm::Caller::Peer);
         let started = std::time::Instant::now();
-        let result = trm.screen_deposit(&screening).await;
+        let result = trm.screen_deposit(&screening, caller).await;
         self.metrics.record_trm_screening(
             metrics::TRM_FLOW_DEPOSIT,
             &result,

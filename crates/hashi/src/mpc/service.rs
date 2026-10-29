@@ -2997,14 +2997,6 @@ fn reconfig_window_closed(latest_sui_epoch: u64, target_epoch: u64) -> bool {
     latest_sui_epoch > target_epoch
 }
 
-/// Whether the `MpcManager` must be rebuilt for `current_epoch`, given the
-/// installed manager as `(its epoch, whether it carries that epoch's MPC
-/// output)` or `None` when none is installed. A rebuild is due unless the
-/// manager is for this epoch and carries its output: an epoch match alone is
-/// what the recovery path leaves behind when it installs the manager and then
-/// fails to reconstruct, which serves peers nothing. While a reconfiguration
-/// is pending the manager belongs to its target, which `handle_reconfig` owns
-/// and replaces itself, so nothing is touched.
 fn manager_needs_restore(
     installed: Option<(u64, bool)>,
     current_epoch: u64,
@@ -3014,7 +3006,6 @@ fn manager_needs_restore(
         && !matches!(installed, Some((epoch, has_output)) if epoch == current_epoch && has_output)
 }
 
-/// Pending on chain and inside its Sui epoch window.
 fn reconfig_target_pending(pending: Option<u64>, latest_sui_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) && !reconfig_window_closed(latest_sui_epoch, target_epoch)
 }
@@ -3337,8 +3328,8 @@ mod manager_restore_tests {
     fn a_manager_on_the_current_epoch_without_its_output_is_restored() {
         // The recovery path installs the manager and only then reconstructs,
         // so a failure after that point leaves the epoch matching with no
-        // output to serve peers. Judging by the epoch alone would call this
-        // done and never retry.
+        // output. Judging by the epoch alone would call this done and never
+        // retry.
         assert!(manager_needs_restore(Some((6, false)), 6, None));
     }
 

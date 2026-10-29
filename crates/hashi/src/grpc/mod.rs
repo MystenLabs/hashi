@@ -17,6 +17,7 @@ pub(crate) const SIGNING_MANAGER_NOT_READY_MSG: &str = "SigningManager not avail
 pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reached";
 pub(crate) const PEER_CONNECTION_LIMIT_MSG: &str =
     "per-peer in-flight limit reached: too many connections";
+pub(crate) const PAUSED_REFUSAL_MSG: &str = "Hashi is paused";
 
 mod client;
 mod connection_limit;
@@ -259,6 +260,10 @@ impl HttpService {
         self.inner
             .shape_params()
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
+    }
+
+    pub(crate) fn public_outputs(&self) -> &crate::mpc::public_outputs::PublicOutputs {
+        self.inner.public_outputs()
     }
 
     pub fn signing_manager_for(

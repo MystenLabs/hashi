@@ -21,6 +21,7 @@ use crate::metrics::STORED_ROW_READ;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
 use crate::mpc::public_outputs::MpcOutputs;
+use crate::mpc::public_outputs::PublicOutputs;
 use crate::mpc::rpc::public_output_response_limit;
 use crate::mpc::rpc::response_checks;
 use crate::mpc::shape_params::CommitteeShape;
@@ -6772,7 +6773,18 @@ impl MpcManager {
 
     fn set_previous_output(&mut self, output: MpcOutput) {
         self.outputs
-            .set_previous(self.previous_epoch, self.mpc_config.epoch, output);
+            .set_previous(self.published_previous_epoch(), output);
+    }
+
+    fn published_previous_epoch(&self) -> Option<u64> {
+        (self.previous_committee.is_some() && self.previous_epoch != self.mpc_config.epoch)
+            .then_some(self.previous_epoch)
+    }
+
+    pub(crate) fn adopt_public_outputs(&mut self, public: &Arc<PublicOutputs>) {
+        let previous_epoch = self.published_previous_epoch();
+        self.outputs
+            .adopt(public, self.mpc_config.epoch, previous_epoch);
     }
 }
 
