@@ -225,6 +225,7 @@ impl PeerInflightLimiter {
                 for reason in [
                     crate::metrics::SIGNING_REFUSAL_BUSY,
                     crate::metrics::SIGNING_REFUSAL_SHAPE,
+                    crate::metrics::SIGNING_REFUSAL_PAUSED,
                 ] {
                     metrics
                         .withdrawal_signing_refused_total

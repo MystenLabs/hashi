@@ -255,7 +255,13 @@ impl LeaderService {
             call,
         )
         .await
-        .inspect_err(|status| error!("Failed to get {what} from {validator}: {status}"))
+        .inspect_err(|status| {
+            if is_expected_refusal(status) {
+                debug!("{validator} refused {what}: {status}");
+            } else {
+                error!("Failed to get {what} from {validator}: {status}");
+            }
+        })
         .ok()
     }
 
@@ -637,6 +643,11 @@ enum NoSignature {
 /// `withdrawal_approval_refusal_status`, `withdrawal_signing_refusal_status`).
 fn is_already_approved_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::AlreadyExists
+}
+
+fn is_expected_refusal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
+        && status.message().contains(crate::grpc::PAUSED_REFUSAL_MSG)
 }
 
 enum NoQuorum {

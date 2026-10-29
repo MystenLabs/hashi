@@ -14,6 +14,7 @@ use crate::deposits::UnapprovedDepositError;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
 use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
+use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::SIGNING_REFUSAL_SHAPE;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
@@ -53,6 +54,7 @@ use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
 use super::HttpService;
+use super::PAUSED_REFUSAL_MSG;
 use super::peer_limit::CallerTaskSlot;
 use super::peer_limit::SigningPlace;
 
@@ -237,6 +239,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignGuardianWithdrawalRequestResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
+        self.admit_committee_member(caller)?;
         let req = request.get_ref();
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
@@ -298,6 +301,7 @@ impl BridgeService for HttpService {
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
         let inner = self.inner.clone();
         let work_seconds = self.work_seconds(caller);
+        let paused_refusals = self.signing_refusals(caller, SIGNING_REFUSAL_PAUSED);
         tokio::spawn(
             async move {
                 let _slot = slot;
@@ -307,6 +311,14 @@ impl BridgeService for HttpService {
                     () = tx.closed() => return,
                     run = place.run() => run,
                 };
+                if inner.onchain_state().state().hashi().config.paused() {
+                    paused_refusals.inc();
+                    tracing::info!("Refusing sign_withdrawal_transaction: {PAUSED_REFUSAL_MSG}");
+                    let _ = tx
+                        .send(Err(Status::failed_precondition(PAUSED_REFUSAL_MSG)))
+                        .await;
+                    return;
+                }
                 let job_inner = inner.clone();
                 let (signing, place) = run
                     .run_blocking(work_seconds, move || {
@@ -468,29 +480,40 @@ const ADMIT_WINDOW: Duration = Duration::from_secs(super::client::REQUEST_TIMEOU
 struct Member(Address);
 
 impl HttpService {
-    fn count_signing_refusal(&self, caller: Address, reason: &str) {
+    pub(crate) fn count_signing_refusal(&self, caller: Address, reason: &str) {
+        self.signing_refusals(caller, reason).inc();
+    }
+
+    fn signing_refusals(&self, caller: Address, reason: &str) -> prometheus::IntCounter {
         self.inner
             .metrics
             .withdrawal_signing_refused_total
             .with_label_values(&[caller.to_string().as_str(), reason])
-            .inc();
     }
 
     fn admit_committee_member(&self, caller: Address) -> Result<Member, Status> {
-        let refusal = {
+        let (refusal, paused) = {
             let state = self.inner.onchain_state().state();
-            let committees = &state.hashi().committees;
-            let epoch = committees.epoch();
-            match committees.current_committee() {
-                Some(committee) if committee.index_of(&caller).is_some() => {
-                    return Ok(Member(caller));
-                }
-                Some(_) => format!("caller is not in the epoch {epoch} committee"),
-                None => format!("this node does not know the epoch {epoch} committee"),
-            }
+            let hashi = state.hashi();
+            let epoch = hashi.committees.epoch();
+            let refusal = match hashi.committees.current_committee() {
+                Some(committee) if committee.index_of(&caller).is_some() => None,
+                Some(_) => Some(format!("caller is not in the epoch {epoch} committee")),
+                None => Some(format!(
+                    "this node does not know the epoch {epoch} committee"
+                )),
+            };
+            (refusal, hashi.config.paused())
         };
-        self.count_signing_refusal(caller, SIGNING_REFUSAL_COMMITTEE);
-        Err(Status::permission_denied(refusal))
+        if let Some(refusal) = refusal {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_COMMITTEE);
+            return Err(Status::permission_denied(refusal));
+        }
+        if paused {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_PAUSED);
+            return Err(Status::failed_precondition(PAUSED_REFUSAL_MSG));
+        }
+        Ok(Member(caller))
     }
 
     fn admit_withdrawal_signing(&self, member: &Member) -> Result<CallerTaskSlot, Status> {

@@ -1981,6 +1981,170 @@ mod tests {
         Ok(())
     }
 
+    async fn set_paused(networks: &TestNetworks, paused: bool) -> Result<()> {
+        let hashi_ids = networks.hashi_network.ids();
+        let nodes = networks.hashi_network.nodes();
+        let execute_package_id = nodes[0]
+            .hashi()
+            .onchain_state()
+            .package_id()
+            .unwrap_or(hashi_ids.package_id);
+        let mut executors: Vec<SuiTxExecutor> = nodes
+            .iter()
+            .map(|node| {
+                let hashi = node.hashi();
+                SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+            })
+            .collect::<Result<_>>()?;
+        let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+            &mut networks.sui_network.client.clone(),
+            hashi_ids.hashi_object_id,
+        )
+        .await?;
+        let emergency_pause_type_tag =
+            sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
+                hashi_ids.package_id,
+                sui_sdk_types::Identifier::from_static("emergency_pause"),
+                sui_sdk_types::Identifier::from_static("EmergencyPause"),
+                vec![],
+            )));
+        crate::submit_proposal_through_quorum(
+            hashi_ids,
+            hashi_isv,
+            execute_package_id,
+            &mut executors,
+            hashi::cli::client::CreateProposalParams::EmergencyPause {
+                pause: paused,
+                metadata: vec![],
+            },
+            emergency_pause_type_tag,
+            "emergency_pause",
+            "EmergencyPause",
+        )
+        .await?;
+        wait_until(
+            &format!("every node to see paused = {paused}"),
+            Duration::from_secs(30),
+            || {
+                nodes.iter().all(|node| {
+                    node.hashi().onchain_state().state().hashi().config.paused() == paused
+                })
+            },
+        )
+        .await
+    }
+
+    fn paused_refusals(node: &crate::HashiNodeHandle, caller: Address) -> f64 {
+        let caller = caller.to_string();
+        node.metrics_registry()
+            .gather()
+            .iter()
+            .filter(|family| family.name() == "hashi_withdrawal_signing_refused_total")
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                let labels = metric.get_label();
+                labels
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == caller)
+                    && labels
+                        .iter()
+                        .any(|label| label.name() == "reason" && label.value() == "paused")
+            })
+            .map(|metric| metric.get_counter().value())
+            .sum()
+    }
+
+    async fn request_signatures(
+        caller: &crate::HashiNodeHandle,
+        peer: &crate::HashiNodeHandle,
+        withdrawal_txn_id: Address,
+    ) -> Result<(
+        Vec<tonic::Status>,
+        Result<tonic::Response<hashi_types::proto::GetPartialSignaturesResponse>, tonic::Status>,
+    )> {
+        use hashi_types::proto::GetPartialSignaturesRequest;
+        use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
+        use hashi_types::proto::SignWithdrawalTransactionRequest;
+
+        let onchain_state = caller.hashi().onchain_state();
+        let peer_address = peer.validator_address();
+        let mut bridge = onchain_state
+            .bridge_service_client(&peer_address)
+            .context("no bridge service client for the peer")?;
+        let guardian_request = bridge
+            .sign_guardian_withdrawal_request(SignGuardianWithdrawalRequestRequest {
+                withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
+                timestamp_secs: onchain_state.latest_checkpoint_timestamp_ms() / 1000,
+                seq: 0,
+            })
+            .await
+            .err()
+            .context("the peer signed a guardian request for a made-up withdrawal")?;
+        let withdrawal_signing = bridge
+            .sign_withdrawal_transaction(SignWithdrawalTransactionRequest {
+                withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
+                input_indices: vec![0],
+            })
+            .await
+            .err()
+            .context("the peer admitted signing a made-up withdrawal")?;
+        let partials = onchain_state
+            .mpc_service_client(&peer_address)
+            .context("no MPC service client for the peer")?
+            .get_partial_signatures(GetPartialSignaturesRequest {
+                epoch: Some(onchain_state.epoch()),
+                signing_ids: vec![withdrawal_txn_id.to_string()],
+            })
+            .await;
+        Ok((vec![guardian_request, withdrawal_signing], partials))
+    }
+
+    #[tokio::test]
+    async fn test_paused_node_refuses_signing() -> Result<()> {
+        init_test_logging();
+
+        let networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let nodes = networks.hashi_network.nodes();
+        let (caller, peer) = (&nodes[0], &nodes[1]);
+        let withdrawal_txn_id = Address::new([7; 32]);
+        peer.wait_for_mpc_key(Duration::from_secs(60)).await?;
+
+        set_paused(&networks, true).await?;
+        let refused_before = paused_refusals(peer, caller.validator_address());
+        let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
+        for refusal in &refusals {
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
+            assert_eq!(refusal.message(), "Hashi is paused");
+        }
+        let refusal = partials.expect_err("a paused peer served partial signatures");
+        assert_eq!(refusal.code(), tonic::Code::Unavailable, "{refusal}");
+        assert_eq!(
+            refusal.message(),
+            "SigningManager not available: Hashi is paused"
+        );
+        assert_eq!(
+            paused_refusals(peer, caller.validator_address()),
+            refused_before + 3.0
+        );
+
+        set_paused(&networks, false).await?;
+        let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
+        for refusal in &refusals {
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
+            assert!(
+                refusal.message().contains("not found on-chain"),
+                "{refusal}"
+            );
+        }
+        assert!(partials?.into_inner().partial_sigs.is_empty());
+        assert_eq!(
+            paused_refusals(peer, caller.validator_address()),
+            refused_before + 3.0
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_resigned_member_excluded_then_removed_permissionlessly() -> Result<()> {
         init_test_logging();
