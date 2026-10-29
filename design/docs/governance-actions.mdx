@@ -179,3 +179,7 @@ instead; see [Abort Reconfig](reconfiguration.mdx#abort-reconfig). Holding
 off the replacement that would otherwise follow is an `UpdateConfig` setting
 [`reconfig_hold`](config.mdx#reconfig_hold), passed by the committee that is
 still in service.
+
+## Choose the `AddConfig` target store
+
+The boolean `epoch` field of the `AddConfig` proposal selects the target store: `true` targets the epoch config, and `false` targets the instant config. Every committee formed after execution carries a copy of keys added to the epoch config, and nodes read them from the committee's pinned snapshot, so they change only at epoch boundaries. Nodes read keys added to the instant config live from the `Hashi` object. A proposal must contain at least one entry (`ENoEntriesProvided`). In the CLI, set the `epoch` flag to add the key to the epoch config instead of the instant config, and prefix the value with its type, for example `u64:123` or `bool:true`.
