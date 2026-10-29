@@ -259,10 +259,21 @@ pub(crate) const STALL_RECONCILE_TICKS: usize = 20;
 pub(crate) struct LimiterStallTracker {
     /// Guardian `next_seq` seen on each of the last [`STALL_RECONCILE_TICKS`] ticks.
     guardian_seq_window: VecDeque<u64>,
+    finalize_refused: bool,
 }
 
 impl LimiterStallTracker {
+    pub(crate) fn set_finalize_refused(&mut self, finalize_refused: bool) {
+        self.finalize_refused = finalize_refused;
+        if finalize_refused {
+            self.guardian_seq_window.clear();
+        }
+    }
+
     pub(crate) fn observe(&mut self, local_seq: u64, guardian_seq: u64) -> bool {
+        if self.finalize_refused {
+            return false;
+        }
         // Once the window is full its front is the guardian seq from a full
         // window ago; the mirror should have reached it by now.
         let stalled = self.guardian_seq_window.len() == STALL_RECONCILE_TICKS
@@ -517,6 +528,23 @@ mod tests {
             assert!(!tracker.observe(30, 28));
         }
         assert!(tracker.observe(30, 28));
+    }
+
+    #[test]
+    fn stall_tracker_never_fires_while_finalize_is_refused_and_restarts_its_window_after() {
+        let mut tracker = LimiterStallTracker::default();
+        for _ in 0..STALL_RECONCILE_TICKS / 2 {
+            assert!(!tracker.observe(50, 52));
+        }
+        for _ in 0..2 * STALL_RECONCILE_TICKS {
+            tracker.set_finalize_refused(true);
+            assert!(!tracker.observe(50, 52));
+        }
+        tracker.set_finalize_refused(false);
+        for _ in 0..STALL_RECONCILE_TICKS {
+            assert!(!tracker.observe(50, 52));
+        }
+        assert!(tracker.observe(50, 52));
     }
 
     #[test]
