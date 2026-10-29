@@ -297,3 +297,24 @@ sequenceDiagram
     Guardian->>S3: log(committee-update)
     Guardian-->>MPC: current_committee_epoch via proxy
 ```
+
+## What is a sharing instance?
+
+The sharing instance is the secret-sharing instance that a ceremony produces: its commitments, the share count `n`, the threshold `t`, and its `sharing_seq`. The `sharing_seq` keys the completed record at `ceremony/{sharing_seq:020}.json`, and a rotation advances it to a greater value. A `session_id` is a different identifier: the first 16 hex characters of the enclave's ephemeral signing public key, which tags one enclave session. During provisioning, each KP reads the latest `ceremony/` log and requires its secret-sharing instance to match the one the enclave booted with.
+
+## How do later deploys load genesis state?
+
+On later deploys, operator provisioning runs without `--do-genesis`, and no party re-derives genesis state from the chain. The enclave reads and verifies the signed record at `genesis/record.json`, rejects the arming when that record is missing, and takes the immutable Hashi object ID and MPC master `G` from it. The enclave also rejects a supplied `GenesisState` once a `committee-update/` or `genesis` record exists. Trust in the record comes from the KP threshold that authorized its write on first deploy, not from a fresh onchain check.
+
+## KP rotation steps
+
+To rotate the KP set with `RotateKpSet`:
+
+1. The operator runs `init`, which calls ceremony-mode `OperatorInit`, pins the session, verifies the latest `ceremony/` and `kp-shares/` logs, and prints the proposal.
+2. Each current KP runs `key-provisioner rotate-kp-set` and sends the operator its submission file.
+3. The operator relays threshold-many submissions through `RotateKpSet`. The enclave reconstructs the BTC key and re-splits it for the new set.
+4. Each new KP verifies its share from `kp-shares/proposed/` and confirms. Keep the ceremony guardian running until every new KP confirms.
+5. The guardian writes `kp-shares` at `cert_seq=0`, then the `Rotate` ceremony record.
+6. The new KPs provision a replacement guardian, which the operator activates after stopping the old one.
+
+For `ProvisionerRotateCert`, the enclave decrypts the current share, verifies it, re-encrypts it to the new certificate, and logs the share state at the next `cert_seq`.
