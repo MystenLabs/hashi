@@ -224,3 +224,11 @@ corresponding amount of `hBTC` and sends it to the Sui address in the UTXO's
 `derivation_path` (a UTXO whose `derivation_path` is `None` mints nothing). The
 deposited UTXO is added to the Hashi-managed UTXO pool, making it available
 for future withdrawal coin selection.
+
+## Default time-delay window
+
+At launch, `bitcoin_deposit_time_delay_ms` falls back to the Move package's `init_defaults` value, currently `600_000` milliseconds, unless the launch overrides it. Sui Mainnet refuses a value below this default. If the config key is missing, the node treats the delay as 0, which matches the Move side defaulting to no delay.
+
+## How do you get the deposit request ID?
+
+A successful `deposit` call emits a `DepositRequested` event. The event carries the `request_id` together with `utxo_id`, `amount`, `derivation_path`, `timestamp_ms`, `requester_address`, and `sui_tx_digest`. To get the ID, read the `DepositRequested` event from the deposit transaction's events. Validators observe this event to build the certificate they pass to `approve_deposit`. The later `DepositApproved`, `DepositConfirmed`, and `ExpiredDepositDeleted` events carry the same `request_id`, so you can use it to track the request through each phase.
