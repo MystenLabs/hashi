@@ -1,0 +1,264 @@
+---
+title: Troubleshooting
+description: >-
+  Symptoms, causes, and fixes for Hashi node startup failures, CLI configuration errors, registration and offline signing problems, and Bitcoin light client issues.
+keywords:
+  - operator
+  - troubleshooting
+  - startup
+  - panic
+  - package_id is required
+  - ENotAnActiveSuiValidator
+  - Kyoto
+  - light client
+goal:
+  description: >-
+    Reader can match a symptom to its cause and fix
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 600
+      label: Needs enough content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - Why does my Hashi node panic at startup?
+  - Why does the Hashi CLI say package_id is required?
+  - Why does Hashi registration fail with ENotAnActiveSuiValidator?
+  - Why is the Hashi Bitcoin light client not syncing?
+answer: >-
+  Most Hashi startup panics come from a missing sui-rpc or an unrecognized bitcoin-chain-id. The CLI reports package_id is required when it cannot find a filled-in CLI config. Registration must be signed by the Sui validator account key, and the Bitcoin light client needs a peer that serves compact block filters.
+---
+
+Common failures, grouped by where they surface. Each entry gives the **symptom**, the **likely cause**, and the **fix**. Where an error message originates in Sui tooling rather than in Hashi itself, this section says so, because the exact wording can change independently of Hashi.
+
+## Node fails to start
+
+**Symptom:** the process panics at startup with:
+
+```
+thread 'main' panicked at ...: called `Option::unwrap()` on a `None` value
+```
+
+**Likely cause:** a required value is missing from the **validator config**. Apart from `backup-pgp-cert` and `backup-dir`, every field in the validator config is optional as far as parsing is concerned. A missing field instead takes a default, fails with an error, or, for the two values below, panics during startup:
+
+- **`sui-rpc` is not set.** This is the most common case: the node reads it to label the `hashi_sui_rpc_info` metric, so it panics right after the config loads, before the chain-ID and database checks.
+- **`bitcoin-chain-id` is set to a value that is not a recognized genesis block hash** (a typo, or a hash from a different Bitcoin network). The node maps this hash to a Bitcoin network and has no fallback when it does not recognize the hash.
+
+**Fix:** set both explicitly, using the values for your target network from the [Networks](../reference/networks.mdx) table:
+
+<Tabs groupId="network" queryString>
+<TabItem value="mainnet" label="Mainnet" default>
+
+```toml
+sui-rpc = "http://<sui-fullnode-host>:9000"
+bitcoin-chain-id = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"  # mainnet genesis
+```
+
+</TabItem>
+<TabItem value="testnet" label="Testnet">
+
+```toml
+sui-rpc = "https://fullnode.testnet.sui.io:443"
+bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"  # signet genesis
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+**Symptom:** startup fails with `refusing Bitcoin mainnet (...) on Sui chain ...: Bitcoin mainnet is allowed on Sui mainnet only ...` or `refusing Bitcoin Signet (...) on Sui mainnet: Sui mainnet requires Bitcoin mainnet`.
+
+**Likely cause:** the validator config pairs a Sui network with the wrong Bitcoin network. On Sui Testnet the usual case is a missing `bitcoin-chain-id`, which defaults to Bitcoin Mainnet. `hashi register` reports the same error for the same config.
+
+**Fix:** set `bitcoin-chain-id` to the genesis hash from the [Networks](../reference/networks.mdx) table for your Sui network.
+
+---
+
+**Symptom:** startup fails with ``missing required `db` in node config``.
+
+**Likely cause:** the `db` field is absent. Unlike the two values above, the node reports this one as a clean error rather than a panic.
+
+**Fix:** set `db` to a persistent path, for example `db = "/var/lib/hashi/db"`.
+
+---
+
+**Symptom:** the node rejects the config file on load because of an unknown field.
+
+**Likely cause:** a misspelled or wrongly-cased key. The validator config rejects unknown fields outright, and its keys are **kebab-case** (`sui-rpc`, `bitcoin-chain-id`, `tls-private-key`), not snake_case. The **CLI** config in [CLI config](configuration.mdx#cli-config) uses snake_case (`sui_rpc_url`, `package_id`), so the two files do not share a convention.
+
+**Fix:** correct the key to kebab-case and re-check it against the template in [Validator config](configuration.mdx#validator-config).
+
+---
+
+**Symptom:** startup fails, after the Sui chain-ID check, with the fullnode's error for a missing object.
+
+**Likely cause:** the `[hashi-ids]` section is missing. When it is absent the node uses the zero address (`0x0`) for both `package_id` and `hashi_object_id`, and its first onchain read fails.
+
+**Fix:** set both IDs from the [Networks](../reference/networks.mdx) table.
+
+## Configuration and CLI errors
+
+**Symptom:**
+
+```
+package_id is required. Set it via --package-id or in the config file.
+```
+
+(or the same message for `hashi_object_id`)
+
+**Likely cause:** the CLI could not find a CLI config, or found one that does not set the IDs. Two traps account for most occurrences:
+
+1. **The template is not written where the CLI looks for it.** `hashi config template` writes `hashi-cli.toml` into the **current directory** by default, but when you do not pass `--config`, the CLI's default search path is `.hashi/localnet/hashi-cli.toml`, relative to the current directory. Generating a template and then running a command without `-c` therefore does **not** pick it up. There is no fallback to a location in your home directory.
+2. **The template ships with both IDs commented out, and `sui_rpc_url` set to Mainnet.** Generating it is not enough; you must uncomment and fill in the IDs and point `sui_rpc_url` at your network.
+
+**Fix:** generate the template, fill in the IDs and endpoint, and pass it explicitly, remembering the flag placement from [Global options](../reference/cli.mdx#global-options):
+
+```bash
+hashi config template -o hashi-cli.toml
+# edit hashi-cli.toml: set sui_rpc_url (the template defaults to Mainnet),
+# then uncomment and set package_id and hashi_object_id
+hashi config -c hashi-cli.toml show      # confirm the values are picked up
+```
+
+Or bypass the file entirely with environment variables, which always override file values:
+
+```bash
+export SUI_RPC_URL=<sui-rpc-url>                  # your network's Sui gRPC endpoint
+export HASHI_PACKAGE_ID=0x<package-id>
+export HASHI_OBJECT_ID=0x<hashi-object-id>
+export HASHI_CLI_CONFIG=/path/to/hashi-cli.toml   # or point at the file directly
+```
+
+> You cannot use `hashi config on-chain` to discover these IDs: it needs them already configured in order to connect, so it reports this same error when they are missing.
+
+---
+
+**Symptom:**
+
+```
+Failed to initialize on-chain state
+...
+Hashi object 0x... (package 0x...) was not found on <url>: check that package-id, hashi-object-id and the RPC URL all belong to the same network
+```
+
+**Likely cause:** the Sui fullnode returned gRPC `NotFound` (`Some requested entity was not found`): the object or package you asked for does not exist **on the chain you are talking to**. In practice: `package_id` or `hashi_object_id` is wrong, or the IDs are right but `sui_rpc_url` points at a different network. Testnet IDs queried against a Mainnet fullnode fail exactly this way. A self-hosted fullnode running without `rpc.enable-indexing` produces the same `NotFound` even with the right IDs, because Hashi reads state through index-backed list calls (see [Sui RPC](prerequisites.mdx#sui-rpc)).
+
+**Fix:** confirm the IDs and the endpoint agree with a single column of the [Networks](../reference/networks.mdx) table, and that a self-hosted fullnode has `rpc.enable-indexing: true`:
+
+```bash
+hashi config -c hashi-cli.toml show      # shows the effective IDs and endpoint
+```
+
+The validator config additionally verifies that the fullnode's reported chain ID matches `sui-chain-id` and refuses to start on mismatch (see [Sui RPC](prerequisites.mdx#sui-rpc)), so a mismatched CLI config is the more common source of this error.
+
+## Registration and offline signing
+
+Apart from the first entry, which is Hashi's own Move abort, **Sui tooling** (the `sui` CLI and the Sui framework) produces the errors in this subsection, not Hashi. This repository does not verify their exact wording, which might differ in your version of the Sui CLI. The causes and fixes below are the Hashi-side explanation.
+
+**Symptom:** registration aborts with `ENotAnActiveSuiValidator` (`Only an active Sui validator may register as a Hashi member`).
+
+**Likely cause:** the transaction came from an address that is not in the Sui **active validator set**. Hashi's onchain registration asserts that the sender is an active Sui validator, so a fresh key, an operator key, or a pending validator that Sui has not yet activated cannot register.
+
+**Fix:** sign and send the initial registration from the **Sui validator account key**, as described in [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key). The operator address goes in `--operator-address`; it is not the sender.
+
+---
+
+**Symptom:** `sui keytool sign` reports that it found no keystore entry for the given key identity.
+
+**Likely cause:** `sui keytool sign` signs only with keys held in your local Sui keystore, and the validator account key is not in it. This is the normal situation, because that key usually lives in cold storage or on a hardware wallet.
+
+**Fix:** this is expected, not a misconfiguration. The offline flow in [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key) deliberately separates the two steps: `hashi register --serialize-unsigned-transaction` builds the unsigned transaction **without the validator account key or the operator key**, and you then sign it wherever the key actually lives. Use `sui keytool sign` only if the account key genuinely is in your local keystore; otherwise produce the signature with your hardware wallet or multisig tooling and broadcast the result with `sui client execute-signed-tx`.
+
+---
+
+**Symptom:** a transaction fails reporting that the address owns no gas coins.
+
+**Likely cause:** the sending address holds no SUI. For registration this is the validator account address; for day-to-day node operation it is the operator address.
+
+**Fix:** fund the address. For the operator key specifically, fund it with **at least 2 SUI**. See the note in [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing) explaining why exactly 1 SUI is not enough and produces `InsufficientCoinBalance`.
+
+---
+
+**Symptom:** registration fails with a signer/sender mismatch.
+
+**Likely cause:** the plain `hashi register` execute path signs with the configured operator key while forcing the sender to the validator address.
+
+**Fix:** use `--serialize-unsigned-transaction` and sign offline. [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key) covers this.
+
+## Bitcoin light client (Kyoto)
+
+The embedded light client logs its own messages under a `Kyoto:` prefix. Progress and percent-complete lines come from the light client library rather than from Hashi, so their exact wording is not guaranteed by this repository; use the `hashi_kyoto_sync_percent` metric from [Key metrics](monitoring.mdx#key-metrics) as the authoritative progress signal.
+
+**Symptom:** sync progress sits at 0 and does not climb; `hashi_kyoto_synced` stays `0`.
+
+**Likely cause:** the configured peer is reachable but is **not serving compact block filters**. The light client syncs through BIP-157/158 filters, so a peer without the filter index built and filter serving enabled cannot advance it, even though the JSON-RPC channel works fine.
+
+**Fix:** confirm both settings are present in `bitcoin.conf` and that the node advertises the capability:
+
+```bash
+# On Testnet, add -signet to both commands
+bitcoin-cli getindexinfo      # basic block filter index must be present and synced
+bitcoin-cli getnetworkinfo    # NODE_COMPACT_FILTERS must be advertised
+```
+
+`blockfilterindex=1` builds the index and `peerblockfilters=1` serves it. **Both** are required, and adding them to an existing node triggers a one-time index build that must finish before sync progresses. See [Bitcoin node](prerequisites.mdx#bitcoin-node).
+
+---
+
+**Symptom:** the log repeats:
+
+```
+Kyoto node exited cleanly; restarting
+Kyoto node exited with error: ...; restarting
+```
+
+**Likely cause:** the light client lost all of its peers and its supervision loop is rebuilding it. Because the client runs in whitelist-only mode, it connects **only** to `bitcoin-trusted-peers` and cannot fall back to peer discovery. If every configured peer is unreachable, the node exits and restarts after a short backoff.
+
+**Fix:** verify each entry in `bitcoin-trusted-peers` is reachable from the Hashi host on its **P2P** port (8333 on Mainnet, 38333 on Signet), not the RPC port, and that the Bitcoin node has `listen=1`. Restarts are also expected, and harmless, whenever the Bitcoin node itself restarts. Watch `hashi_kyoto_restarts_total` to distinguish a one-off from a loop.
+
+---
+
+**Symptom:**
+
+```
+Lost connectivity to Bitcoin peers after 15 consecutive failures. Restarting Kyoto node...
+```
+
+**Likely cause:** 15 consecutive peer connection failures. Same root causes as above: wrong port, firewall, or a Bitcoin node that is down.
+
+**Fix:** as above. `hashi_kyoto_consecutive_failures` shows the count climbing toward this threshold, so it gives earlier warning than the restart message.
+
+---
+
+**Symptom:** the node fails to start with `Invalid bitcoin peer '<value>': expected 'host:port' format`.
+
+**Likely cause:** an entry in `bitcoin-trusted-peers` omits the port. The port is **mandatory**; there is no default.
+
+**Fix:** add the P2P port, for example `bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]` on Mainnet (`38333` on Signet).
+
+---
+
+**Symptom:** connected peer count is low but stable, for example `1`.
+
+**Likely cause:** this is normal. See the explanation in [Key metrics](monitoring.mdx#key-metrics): the light client keeps a single peer connection, however many `bitcoin-trusted-peers` you list.
+
+**Fix:** none needed. Alert on `== 0`, not on a low count.
+
+---
+
+**Symptom:** `hashi_kyoto_best_height` stays at `0` and the log repeats:
+
+```
+Waiting for bitcoind to reach start height 300000; it is at 214173
+```
+
+**Likely cause:** the light client anchors at `bitcoin-start-height` and cannot start until your Bitcoin node has that block. This wait happens off Mainnet (the default is `300000` on Signet, as in the example above); on Mainnet with the default start height the light client anchors at a built-in checkpoint and does not wait here. Either the node is still syncing, or the height is past its tip.
+
+**Fix:** none needed while the node is syncing. The height in the log climbs, and Hashi anchors and carries on by itself once it arrives, with no restart. If the height is not climbing, set `bitcoin-start-height` at or below your node's tip, as noted in [Bitcoin node](prerequisites.mdx#bitcoin-node).

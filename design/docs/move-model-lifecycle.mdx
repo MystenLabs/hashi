@@ -67,8 +67,8 @@ pending.
 The last 4 rows never check pause, because an
 emergency pause must not block operators from maintaining nodes or the chain
 from shedding dead state. Nodes themselves stop all leader work while paused,
-garbage collection included, so during a pause that state is shed only by a
-manual call. One asymmetry is intentional: users can *request* deposits and
+garbage collection included, so during a pause only a
+manual call sheds that state. One asymmetry is intentional: users can request deposits and
 withdrawals during reconfiguration (a withdrawal request only escrows their
 hBTC); only committee approval, commitment, signing, and deposit confirmation
 wait for the new committee.
@@ -149,7 +149,7 @@ flowchart TD
 | 3    | Committee members | Committee members wait for Bitcoin confirmations | `bitcoin_confirmation_threshold` blocks on the deposit transaction                    |
 | 4    | Committee members | Committee members screen and sign request        | Members with a TRM API key screen it (Mainnet only); BLS signatures aggregated → `CommitteeSignature` |
 | 5    | Leader            | Leader calls `approve_deposit()` with cert       | `verify_certificate()` → request stores `approval_cert` and `approved_timestamp_ms`   |
-| 6    | None              | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before anything is minted) |
+| 6    | None              | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (a window to catch a faulty approval and pause before the contract mints anything) |
 | 7    | Anyone            | Anyone calls `confirm_deposit()`                 | Re-`verify_certificate()` → `CertifiedMessage<DepositConfirmationMessage>`            |
 | 8    | Treasury          | Treasury mints tokens                            | If the UTXO has a derivation path, `Utxo.amount` → `Balance<BTC>` sent to that address |
 | 9    | None              | Certified request processed                      | `Utxo` → `UtxoPool`; `DepositRequest` → `DepositRequestQueue.processed` with `confirmed_timestamp_ms` set |
@@ -261,8 +261,8 @@ flowchart TD
 
 :::info
 
-The Bitcoin confirmation threshold is stored onchain in the config key
-`bitcoin_confirmation_threshold` (default `6`). Witness signatures are stored
+The config key `bitcoin_confirmation_threshold` (default `6`) stores the
+Bitcoin confirmation threshold onchain. Hashi stores witness signatures
 onchain so that any leader can reconstruct and re-broadcast the signed
 Bitcoin transaction without MPC re-signing (for example, after leader
 rotation, mempool eviction, or a Bitcoin reorganization).

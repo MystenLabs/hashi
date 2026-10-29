@@ -65,6 +65,20 @@ function emit(slug, markdown) {
   fs.writeFileSync(outFile, markdown, "utf8");
 }
 
+function listPages(dir, prefix) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.name.startsWith(".") || e.name.startsWith("_")) continue;
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (rel !== "snippets") out.push(...listPages(path.join(dir, e.name), rel));
+    } else if (e.isFile() && e.name.endsWith(".mdx")) {
+      out.push(rel);
+    }
+  }
+  return out;
+}
+
 function main() {
   if (!fs.existsSync(BUILD_DIR)) {
     console.error(
@@ -73,23 +87,22 @@ function main() {
     process.exit(1);
   }
 
-  const entries = fs
-    .readdirSync(DOCS_DIR, { withFileTypes: true })
-    .filter((e) => e.isFile() && e.name.endsWith(".mdx"))
-    .filter((e) => !e.name.startsWith("."));
+  // Walk docs/ recursively so nested pages (validators/, hbtc/, reference/)
+  // get a .md copy too. snippets/ holds partials, not pages.
+  const files = listPages(DOCS_DIR, "");
 
   let count = 0;
-  for (const entry of entries) {
-    const filePath = path.join(DOCS_DIR, entry.name);
+  for (const rel of files) {
+    const filePath = path.join(DOCS_DIR, rel);
     const raw = fs.readFileSync(filePath, "utf8");
     const parsed = matter(raw);
     const md = cleanForMarkdown(parsed.content, parsed.data);
 
     // README.mdx is mounted at the docs root (slug: /).
     const slug =
-      entry.name === "README.mdx"
+      rel === "README.mdx"
         ? ""
-        : entry.name.replace(/\.mdx$/, "");
+        : rel.replace(/\.mdx$/, "");
     emit(slug, md);
     count += 1;
   }

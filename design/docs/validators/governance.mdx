@@ -1,0 +1,123 @@
+---
+title: Governance Participation
+description: >-
+  How Hashi committee members create, vote on, and execute governance proposals, the proposal types and thresholds, and the configurable protocol parameters.
+keywords:
+  - operator
+  - governance
+  - proposal
+  - vote
+  - quorum
+  - UpdateConfig
+  - emergency pause
+  - upgrade
+goal:
+  description: >-
+    Reader can create, vote on, and execute a proposal and knows each proposal type and its threshold
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 400
+      label: Needs enough content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Hashi governance work?
+  - What proposal types does Hashi have?
+  - How do I vote on a Hashi proposal?
+  - What quorum does a Hashi proposal need?
+answer: >-
+  Any committee member can create a proposal, which also casts their vote. Most proposals need 2/3 of committee weight; an emergency pause needs 5% to pause and 2/3 to unpause. Vote with hashi proposal vote, and anyone can execute a proposal once it reaches quorum.
+---
+
+## How proposals work
+
+- Any committee member can create a proposal, and creating one also casts your vote. Quorum is stake-weighted: most proposals require **2/3 of committee weight**, while an emergency pause uses a lower threshold (5% by default) so the committee can halt the protocol quickly (resuming again requires 2/3 by default). See the threshold column in [Proposal types](#proposal-types).
+- You can add or remove votes before execution. Once the proposal reaches quorum, anyone can execute it; the sender only pays gas.
+- The `--execute` flag on `vote` auto-executes if your vote reaches quorum (except for Upgrade proposals).
+- Proposals carry optional `-m key=value` metadata for human context.
+
+> A committee [member](keys.mdx#operator-key-day-to-day-signing) authorizes governance actions: the signer must be the committee member's validator key **or** its delegated operator key, and the system records the vote under the validator for stake-weight purposes. So your operator key can vote on the validator's behalf.
+
+## Proposal types
+
+Config parameters live in 2 stores: **instant config**, where a change applies as soon as the proposal executes, and **epoch config**, where a change lands in the next committee.
+
+| Type | Threshold | Purpose | Parameters |
+|------|-----------|---------|-----------|
+| **UpdateConfig** | 2/3 | Change an existing instant config parameter (applies on execute) | `key` and type-prefixed `value` |
+| **UpdateEpochConfig** | 2/3 | Change an existing epoch config parameter (lands in the next committee) | `key` and type-prefixed `value` |
+| **AddConfig** | 2/3 | Add a new config key to either store (insert-only) | `key`, type-prefixed `value`, `--epoch` for the epoch store |
+| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta (submitted as an `UpdateEpochConfig` proposal) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
+| **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
+| **DisableVersion** | 2/3 | Disable a package version | `version` number (a version cannot disable itself; execute through an older enabled version) |
+| **IgnoreMember** | 2/3 | Leave a registered member out of the next committee formed, or re-admit it | `--validator`, `--unignore` to re-admit |
+| **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
+
+> EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Both are defaults, stored in the `governance_emergency_pause_threshold_bps` and `governance_emergency_unpause_threshold_bps` config keys (`hashi config on-chain` shows the live values). Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
+
+> The guardian endpoints have no proposal type of their own: they are the `guardian_node_url` and `guardian_url` keys (both `string`), changed with an UpdateConfig proposal (2/3 threshold). A running node keeps the endpoint it already resolved, so restart each node after a `guardian_node_url` change. Launch pins the guardian's BTC public key, and no proposal can change it.
+
+**Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold gates the [deposit approve step](../deposit.mdx#approve) (and a withdrawal's confirmation), the time delay gates the [deposit confirm step](../deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](../withdraw.mdx#request). `hashi launch` can override the threshold and delay defaults:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `bitcoin_deposit_minimum` | u64 | 30,000 sats | Minimum deposit amount (floor: 546 sats) |
+| `bitcoin_withdrawal_minimum` | u64 | 30,000 sats | Minimum withdrawal amount (floor: 547 sats) |
+| `bitcoin_confirmation_threshold` | u64 | 6 blocks | Confirmations nodes require before approving a deposit or confirming a withdrawal |
+| `bitcoin_deposit_time_delay_ms` | u64 | **600,000 ms (10 min)** | Delay between deposit approval and confirmation (fraud window) |
+| `withdrawal_cancellation_cooldown_ms` | u64 | 3,600,000 ms (1 hr) | Cooldown before a user can cancel a withdrawal |
+| `paused` | bool | false | Pause all deposit and withdrawal processing |
+
+> The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`, `guardian_node_url`); `bitcoin_deposit_time_delay_ms` is still settable.
+
+## Lifecycle example: UpdateConfig
+
+Executed proposals stay on chain for inspection. The CLI refuses to vote on, remove a vote from, or execute one before signing anything, with a message that names the proposal and its type; `hashi proposal view <id>` shows `Status: Executed`, `Active (expires <date>)`, or `Expired` for a proposal past its seven-day window.
+
+```bash
+# 1. Create the proposal
+hashi proposal create update-config bitcoin_deposit_minimum u64:50000 \
+  -m reason="Increase minimum to reduce small-value UTXO accumulation"
+# note the proposal ID: 0x<proposal-id>
+
+# 2. Share the proposal ID with other committee members
+
+# 3. Other members vote (creating it cast yours; --execute auto-executes if quorum is reached)
+hashi proposal vote 0x<proposal-id> --execute
+
+# 4. Check status
+hashi proposal view 0x<proposal-id>
+
+# 5. Execute manually if needed
+hashi proposal execute 0x<proposal-id>
+
+# 6. Verify
+hashi config on-chain
+```
+
+## Package upgrade flow
+
+You must first classify every package upgrade as exclusive or non-exclusive.
+See [Move Package Upgrades](../move-upgrades.mdx) for the safety criteria, binary
+rollout contract, and the special Testnet v1-to-v2 sequence.
+
+```bash
+# Build and propose (CLI verifies PACKAGE_VERSION is incremented)
+hashi proposal create upgrade --exclusive true --package-path /path/to/packages/hashi
+
+# Vote (--execute is NOT supported for Upgrade proposals)
+hashi proposal vote 0x<proposal-id>
+
+# After quorum: one programmable transaction executes the proposal, publishes
+# the package, and finalizes the upgrade. Build from the same commit, with the
+# same `sui`, that produced the proposal's digest. The generic
+# `proposal execute` command rejects upgrade types.
+hashi proposal execute-upgrade 0x<proposal-id> --package-path /path/to/packages/hashi
+```

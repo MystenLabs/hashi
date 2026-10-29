@@ -140,7 +140,16 @@ function convertAlerts(text) {
 //     fullnode-served `/graphql` endpoints, which are being retired — testnet
 //     already returns 404 — and onto the dedicated `graphql.<network>.sui.io`
 //     hosts. The README still documents the old default.
+//   - The README's network-support note describes Mainnet as not yet deployed
+//     and says `hashi()` throws "until it lands". The docs must not announce or
+//     date a launch, so the published page states the behavior without a
+//     timeline. Delete this entry once the README drops the launch language.
 const STALE_FACT_FIXES = [
+  {
+    from: /Mainnet is not yet deployed;\n> `hashi\(\)` will throw until it lands, based on the network of the client it's extending\./,
+    to: "`hashi()` throws\n> on any other network of the client it's extending.",
+    note: "network-support note — no launch timeline",
+  },
   {
     from: /https:\/\/fullnode\.\{network\}\.sui\.io:443\/graphql/g,
     to: "https://graphql.{network}.sui.io/graphql",

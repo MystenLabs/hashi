@@ -1,61 +1,112 @@
 // @ts-check
 
+// Sections:
+//   Protocol     how Hashi works: architecture, lifecycles, governance, security, fees
+//   hBTC         user flows overview, deposit, withdraw, cancel, FAQ
+//   Integration  SDKs and integration guides
+//   Validators   committee member runbooks
+//   Reference    parameters and API links
+
 /** @type {import('@docusaurus/plugin-content-docs').SidebarsConfig} */
 const sidebars = {
   designSidebar: [
     'README',
-    'user-flows',
     {
       type: 'category',
-      label: 'Design',
+      label: 'Protocol',
       collapsed: true,
       items: [
         {
           type: 'category',
           label: 'Architecture',
-          collapsed: false,
-          items: ['service', 'committee', 'mpc-protocol', 'guardian'],
+          collapsed: true,
+          items: [
+            'service',
+            'committee',
+            'mpc-protocol',
+            'guardian',
+            'address-scheme',
+            'move-model-lifecycle',
+          ],
         },
-        {
-          type: 'category',
-          label: 'Bitcoin handling',
-          collapsed: false,
-          items: ['address-scheme', 'fees', 'limiter', 'sanctions'],
-        },
+        'deposit',
+        'withdraw',
+        'reconfiguration',
         {
           type: 'category',
           label: 'Governance',
-          collapsed: false,
-          items: ['config', 'governance-actions', 'move-upgrades'],
+          collapsed: true,
+          items: ['governance-actions', 'move-upgrades'],
         },
+        {
+          type: 'category',
+          label: 'Security',
+          collapsed: true,
+          items: ['limiter', 'sanctions'],
+        },
+        'fees',
       ],
     },
     {
       type: 'category',
-      label: 'Flows',
+      label: 'hBTC',
       collapsed: true,
       items: [
-        'reconfiguration',
-        'deposit',
-        'withdraw',
-        'move-model-lifecycle',
+        'user-flows',
+        'hbtc/deposit',
+        'hbtc/withdraw',
+        'hbtc/cancel',
+        'hbtc/faq',
       ],
     },
     {
       type: 'category',
-      label: 'Operators',
+      label: 'Integration',
       collapsed: true,
+      items: ['ts-sdk'],
+    },
+    {
+      type: 'category',
+      label: 'Validators',
+      collapsed: true,
+      link: { type: 'doc', id: 'validators/index' },
       items: [
-        'node-operator-runbook',
+        'validators/prerequisites',
+        'validators/keys',
+        'validators/configuration',
+        'validators/genesis',
+        'validators/governance',
+        'validators/monitoring',
+        'validators/epoch-changes',
+        'validators/backup-restore',
         'node-backup',
+        'validators/troubleshooting',
       ],
     },
     {
       type: 'category',
-      label: 'SDKs',
+      label: 'Reference',
       collapsed: true,
       items: [
-        'ts-sdk',
+        'reference/networks',
+        'config',
+        'reference/cli',
+        'reference/releases',
+        {
+          type: 'link',
+          label: 'Move Package',
+          href: 'https://github.com/MystenLabs/hashi/tree/main/packages/hashi',
+        },
+        {
+          type: 'link',
+          label: 'gRPC API',
+          href: 'https://github.com/MystenLabs/hashi/tree/main/crates/hashi-types/proto/sui/hashi/v1alpha',
+        },
+        {
+          type: 'link',
+          label: 'Rust API',
+          href: 'https://mystenlabs.github.io/hashi/rustdoc/hashi',
+        },
       ],
     },
   ],

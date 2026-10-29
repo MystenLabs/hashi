@@ -62,7 +62,7 @@ for 2 minutes.
 
 ## How is the Hashi Move package published?
 
-- The Hashi Move package is published as a normal package. It is not a system
+- Hashi publishes its Move package as a normal package. It is not a system
   package and is not part of the Sui framework.
 
 ## Is the Hashi service stateless?
@@ -70,9 +70,9 @@ for 2 minutes.
 A main goal of this design is to make the Hashi service as stateless as
 possible. Outside of any cryptographic material required for participating in
 the protocol, any state critical for the functioning of the service must be
-stored on Sui as part of the live object set. Knowledge of any historical
-transactions or events previously emitted must not be needed for correct
-operation of the service.
+stored on Sui as part of the live object set. Correct operation of the
+service must not depend on knowledge of historical transactions or events
+previously emitted.
 
 The set of data structures and state kept onchain is as follows:
 
