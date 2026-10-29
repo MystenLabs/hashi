@@ -647,7 +647,12 @@ fn is_already_approved_refusal(status: &tonic::Status) -> bool {
 
 fn is_expected_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::FailedPrecondition
-        && status.message().contains(crate::grpc::PAUSED_REFUSAL_MSG)
+        && [
+            crate::grpc::PAUSED_REFUSAL_MSG,
+            crate::grpc::NOT_READY_TO_FINALIZE_MSG,
+        ]
+        .iter()
+        .any(|marker| status.message().contains(marker))
 }
 
 enum NoQuorum {

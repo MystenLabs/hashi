@@ -18,6 +18,7 @@ pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reach
 pub(crate) const PEER_CONNECTION_LIMIT_MSG: &str =
     "per-peer in-flight limit reached: too many connections";
 pub(crate) const PAUSED_REFUSAL_MSG: &str = "Hashi is paused";
+pub(crate) const NOT_READY_TO_FINALIZE_MSG: &str = "not ready to finalize";
 
 mod client;
 mod connection_limit;

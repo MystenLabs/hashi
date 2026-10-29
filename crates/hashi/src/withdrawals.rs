@@ -31,6 +31,7 @@ use crate::btc_monitor::limits::BitcoindCharge;
 use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
+use crate::grpc::NOT_READY_TO_FINALIZE_MSG;
 use crate::grpc::RunGate;
 use crate::leader::RetryPolicy;
 use crate::metrics;
@@ -169,6 +170,22 @@ fn check_withdrawal_tx_signing_shape(
     }
     check_signature_lengths("MPC", signatures, 0..)?;
     check_signature_lengths("guardian", guardian_signatures, 0..)
+}
+
+fn ensure_ready_to_finalize(txn: &WithdrawalTransaction) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !txn.is_fully_signed(),
+        "WithdrawalTransaction {} is {NOT_READY_TO_FINALIZE_MSG}: already finalized",
+        txn.id,
+    );
+    anyhow::ensure!(
+        txn.signing.is_complete(),
+        "WithdrawalTransaction {} is {NOT_READY_TO_FINALIZE_MSG}: {} input(s) not MPC-signed in \
+         this node's view",
+        txn.id,
+        txn.signing.pending_count(),
+    );
+    Ok(())
 }
 
 fn ensure_current_signing_epoch(txn: &WithdrawalTransaction, epoch: u64) -> anyhow::Result<()> {
@@ -1086,6 +1103,8 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
+        ensure_ready_to_finalize(&txn)
+            .inspect_err(|e| tracing::info!("Refusing guardian withdrawal request: {e}"))?;
 
         let guardian_request = build_guardian_withdrawal_request(self, &txn, timestamp_secs, seq)?;
 
@@ -3125,6 +3144,27 @@ mod tests {
             withdrawal_batch_request_cap(500, 500),
             CONSOLIDATION_MODE_MAX_REQUESTS
         );
+    }
+
+    #[test]
+    fn guardian_request_is_refused_unless_ready_to_finalize() {
+        let mut txn = make_txn(vec![1_000, 2_000], vec![2_500], vec![]);
+        txn.signing = signing(vec![
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Pending(11),
+        ]);
+        let refusal = ensure_ready_to_finalize(&txn).unwrap_err().to_string();
+        assert!(refusal.contains(NOT_READY_TO_FINALIZE_MSG), "{refusal}");
+
+        txn.signing = signing(vec![
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Signed(vec![2; 64]),
+        ]);
+        ensure_ready_to_finalize(&txn).unwrap();
+
+        txn.guardian_signatures = Some(vec![vec![3; 64], vec![4; 64]]);
+        let refusal = ensure_ready_to_finalize(&txn).unwrap_err().to_string();
+        assert!(refusal.contains(NOT_READY_TO_FINALIZE_MSG), "{refusal}");
     }
 
     #[test]
