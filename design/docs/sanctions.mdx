@@ -121,3 +121,7 @@ one validator preferred to not accept, or a previous committee accepted a
 deposit that the current committee would have rejected. In either case, after
 a UTXO is accepted into Hashi's pool, the protocol treats it as its own, and
 it must be available during coin selection to process withdraw requests.
+
+## What happens when the TRM API key is invalid
+
+An invalid or unauthorized API key does not let requests through, and it does not mark addresses as sanctioned. When TRM answers with `401 Unauthorized`, the node treats the failure as transient. It logs a warning such as `TRM is unavailable to screen deposit` or `TRM is unavailable to screen withdrawal request` and does not vote. The leader retries a deposit on the next Bitcoin block, so the node keeps abstaining until you fix the key. To find a misconfigured key, search the node logs for `TRM returned 401 Unauthorized`.
