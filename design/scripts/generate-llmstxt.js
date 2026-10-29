@@ -29,34 +29,64 @@ const HEADER =
 // Sidebar grouping (mirrors design/sidebars.js so the output matches the
 // human-facing docs navigation).
 const SECTIONS = [
-  { label: null, items: ["README", "user-flows"] },
+  { label: null, items: ["README"] },
   {
-    label: "Design",
+    label: "Protocol",
     items: [
-      "committee",
-      "governance-actions",
-      "move-upgrades",
-      "sanctions",
       "service",
+      "committee",
       "mpc-protocol",
       "guardian",
       "address-scheme",
+      "move-model-lifecycle",
+      "deposit",
+      "withdraw",
+      "reconfiguration",
+      "governance-actions",
+      "move-upgrades",
       "limiter",
+      "sanctions",
       "fees",
-      "config",
     ],
   },
   {
-    label: "Flows",
-    items: ["reconfiguration", "deposit", "withdraw"],
+    label: "hBTC",
+    items: [
+      "user-flows",
+      "hbtc/deposit",
+      "hbtc/withdraw",
+      "hbtc/cancel",
+      "hbtc/faq",
+    ],
   },
   {
-    label: "Operators",
-    items: ["node-operator-runbook", "node-backup"],
-  },
-  {
-    label: "SDKs",
+    label: "Integration",
     items: ["ts-sdk"],
+  },
+  {
+    label: "Validators",
+    items: [
+      "validators/index",
+      "validators/prerequisites",
+      "validators/keys",
+      "validators/configuration",
+      "validators/genesis",
+      "validators/governance",
+      "validators/monitoring",
+      "validators/epoch-changes",
+      "validators/backup-restore",
+      "node-backup",
+      "validators/troubleshooting",
+    ],
+  },
+  {
+    label: "Reference",
+    items: [
+      "reference/networks",
+      "config",
+      "reference/cli",
+      "reference/releases",
+    ],
   },
 ];
 
