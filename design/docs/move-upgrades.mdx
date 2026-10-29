@@ -56,7 +56,7 @@ the emergency pause closes it.
 
 ## When must an upgrade be exclusive or non-exclusive?
 
-Every upgrade proposal must be labeled **exclusive** or **non-exclusive** in
+Every upgrade proposal must carry an **exclusive** or **non-exclusive** label in
 its design and rollout plan. Reviewers should treat a missing classification as
 an incomplete upgrade.
 
@@ -66,7 +66,7 @@ Use an **exclusive upgrade** when any of the following is true:
 - An old entry function could undo, overwrite, replay, or misclassify a new
   version's write.
 - Safety depends on all callers using the new validation or authorization rule.
-- Cross-version behavior has not been tested directly.
+- No one has tested cross-version behavior directly.
 
 Exclusive should be the default when there is doubt. It atomically replaces the
 enabled-version set (the package versions that are still callable against the
@@ -86,14 +86,14 @@ decision in its `exclusive`
 field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
 authorization carrying the approved setting. Finalization consumes both in the
 same programmable transaction, binding the committee vote to the version policy
-that is applied when the package is committed. The CLI requires
-`--exclusive true` or `--exclusive false`; omission is rejected so the
+that applies when the package commits. The CLI requires
+`--exclusive true` or `--exclusive false`, and rejects an omission so the
 classification cannot be an accidental default.
 
 ## How should validators coordinate a Move package upgrade?
 
 An exclusive upgrade deliberately makes old binaries unable to perform normal
-writes once the upgrade checkpoint is observed. An old binary does not contain
+writes once they observe the upgrade checkpoint. An old binary does not contain
 the code or ABI routing for the newest package, and the previous package is no
 longer enabled. Updated Hashi nodes detect that they support no enabled package
 version and halt autonomous mutations instead of falling back unsafely.
@@ -124,9 +124,9 @@ an exclusive publication causes old binaries to stop writing.
 
 ## What is the Testnet v1 to v2 upgrade plan?
 
-The deployed testnet v1 package only has the legacy `upgrade` proposal. That
+The deployed Testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first
-v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small
+v1-to-v2 transition atomic. Testnet carries no real funds, and the team accepts a small
 race window for this one migration. Run the migration under the emergency
 pause, which closes the withdrawal-replay surface described below; the
 withdrawal queue does not need to drain first.
@@ -148,7 +148,7 @@ withdrawal queue does not need to drain first.
 
 Proposal execution checks only quorum, not the caller, so any quorum-complete
 proposal is executable by any account. The strict ordering therefore votes the
-unpause only after `DisableVersion(1)` is verified: a pre-voted unpause would
+unpause only after verifying `DisableVersion(1)`: a pre-voted unpause would
 let an adversary unpause and commit through v2 in one transaction inside the
 window. The Testnet migration relaxes this and pre-votes the unpause
 alongside the other proposals, accepting the theoretical window: nothing of
@@ -164,7 +164,7 @@ disable-v1 must execute through v2 after publication.
 
 The pause is what makes the window between them safe for withdrawals.
 Commitment and approval certificates bind no package version, so while both
-versions are enabled a live certificate can be replayed through v2's
+versions are enabled an attacker can replay a live certificate through v2's
 `commit_withdrawal_tx`. That commits the request in place, where v1's
 pause-exempt `cancel_withdrawal` (it is not gated by the emergency pause and
 checks only the `processed` bag) can
@@ -179,6 +179,6 @@ through the flip without draining: committed batches sign, confirm, and
 archive from their v1 locations, and approved or requested entries commit
 v2-style afterward.
 
-The pre-mainnet tree ships this way already: the legacy module is deleted,
-the atomic proposal type is named `upgrade`, and it is the only upgrade path.
+The pre-Mainnet tree ships this way already: the legacy module is gone,
+the atomic proposal type carries the name `upgrade`, and it is the only upgrade path.
 Mainnet begins with it from genesis.

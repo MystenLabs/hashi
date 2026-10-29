@@ -40,7 +40,7 @@ On every Sui epoch change, the Hashi committee reconfigures:
 1. A node detects the Sui epoch change and submits `start_reconfig`.
 2. The system pauses deposit and withdrawal processing.
 3. **Key rotation** runs. The old committee redistributes key shares to the new committee (the Bitcoin master public key is unchanged). The genesis epoch runs DKG instead.
-4. Validators exchange BLS signatures; once 2/3 weight signs, `end_reconfig` is submitted.
+4. Validators exchange BLS signatures; once 2/3 weight signs, a node submits `end_reconfig`.
 5. The new committee generates presignatures.
 6. Normal operations resume.
 
@@ -54,7 +54,7 @@ On every Sui epoch change, the Hashi committee reconfigures:
 
 ## Stuck reconfigurations
 
-A reconfiguration must complete within the Sui epoch it started in. If it stalls (offline validators, misconfigured endpoints, protocol failures), the nodes handle it: at the next Sui epoch boundary they stop working on it, one of them submits `abort_reconfig` (no proposal or vote is involved; the chain settles the race), and they submit a fresh `start_reconfig` as soon as the abort is reflected. `hashi_reconfig_aborted_total` counts these; alert on it and find out why the reconfiguration stalled. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
+A reconfiguration must complete within the Sui epoch it started in. If it stalls (offline validators, misconfigured endpoints, protocol failures), the nodes handle it: at the next Sui epoch boundary they stop working on it, one of them submits `abort_reconfig` (this involves no proposal or vote; the chain settles the race), and they submit a fresh `start_reconfig` as soon as they observe the abort. `hashi_reconfig_aborted_total` counts these; alert on it and find out why the reconfiguration stalled. Common causes: too much registered stake offline or unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
 
 If no node is running to do this, anyone can abort by hand:
 
@@ -62,9 +62,9 @@ If no node is running to do this, anyone can abort by hand:
 hashi committee abort-reconfig
 ```
 
-The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and any running node that observes it starts the replacement reconfiguration right away.
+The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and you must let it complete. After the abort, the previous committee resumes and any running node that observes it starts the replacement reconfiguration right away.
 
-The replacement can be started by hand as well, for when no node is running to submit it or `hashi_epoch` stays behind `hashi_sui_epoch` with `hashi_reconfig_in_progress` at `0`:
+You can also start the replacement by hand, for when no node is running to submit it or `hashi_epoch` stays behind `hashi_sui_epoch` with `hashi_reconfig_in_progress` at `0`:
 
 ```bash
 hashi committee start-reconfig
@@ -72,7 +72,7 @@ hashi committee start-reconfig
 
 The chain accepts it only while nothing is pending and Hashi's epoch lags Sui's; the command checks both up front and refuses otherwise. Every running node then drives the new reconfiguration as usual.
 
-To stay on the previous committee instead, for example while the cause of the stall is fixed so the replacement does not stall the same way, have governance set the `reconfig_hold` config flag before the abort lands:
+To stay on the previous committee instead, for example while you fix the cause of the stall so the replacement does not stall the same way, have governance set the `reconfig_hold` config flag before the abort lands:
 
 ```bash
 hashi proposal create update-config reconfig_hold bool:true

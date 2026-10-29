@@ -48,7 +48,7 @@ thread 'main' panicked at ...: called `Option::unwrap()` on a `None` value
 **Likely cause:** a required value is missing from the **validator config**. Apart from `backup-pgp-cert` and `backup-dir`, every field in the validator config is optional as far as parsing is concerned. A missing field instead takes a default, fails with an error, or, for the two values below, panics during startup:
 
 - **`sui-rpc` is not set.** This is the most common case: the node reads it to label the `hashi_sui_rpc_info` metric, so it panics right after the config loads, before the chain-ID and database checks.
-- **`bitcoin-chain-id` is set to a value that is not a recognized genesis block hash** (a typo, or a hash from a different Bitcoin network). The node maps this hash to a Bitcoin network and has no fallback when the hash is unrecognized.
+- **`bitcoin-chain-id` is set to a value that is not a recognized genesis block hash** (a typo, or a hash from a different Bitcoin network). The node maps this hash to a Bitcoin network and has no fallback when it does not recognize the hash.
 
 **Fix:** set both explicitly, using the values for your target network from the [Networks](../reference/networks.mdx) table:
 
@@ -75,7 +75,7 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 **Symptom:** startup fails with `refusing Bitcoin mainnet (...) on Sui chain ...: Bitcoin mainnet is allowed on Sui mainnet only ...` or `refusing Bitcoin Signet (...) on Sui mainnet: Sui mainnet requires Bitcoin mainnet`.
 
-**Likely cause:** the validator config pairs a Sui network with the wrong Bitcoin network. On Sui Testnet the usual case is a missing `bitcoin-chain-id`, which defaults to Bitcoin mainnet. `hashi register` reports the same error for the same config.
+**Likely cause:** the validator config pairs a Sui network with the wrong Bitcoin network. On Sui Testnet the usual case is a missing `bitcoin-chain-id`, which defaults to Bitcoin Mainnet. `hashi register` reports the same error for the same config.
 
 **Fix:** set `bitcoin-chain-id` to the genesis hash from the [Networks](../reference/networks.mdx) table for your Sui network.
 
@@ -83,13 +83,13 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 **Symptom:** startup fails with ``missing required `db` in node config``.
 
-**Likely cause:** the `db` field is absent. Unlike the two values above, this one is reported as a clean error rather than a panic.
+**Likely cause:** the `db` field is absent. Unlike the two values above, the node reports this one as a clean error rather than a panic.
 
 **Fix:** set `db` to a persistent path, for example `db = "/var/lib/hashi/db"`.
 
 ---
 
-**Symptom:** the config file is rejected on load because of an unknown field.
+**Symptom:** the node rejects the config file on load because of an unknown field.
 
 **Likely cause:** a misspelled or wrongly-cased key. The validator config rejects unknown fields outright, and its keys are **kebab-case** (`sui-rpc`, `bitcoin-chain-id`, `tls-private-key`), not snake_case. The **CLI** config in [CLI config](configuration.mdx#cli-config) uses snake_case (`sui_rpc_url`, `package_id`), so the two files do not share a convention.
 
@@ -136,7 +136,7 @@ export HASHI_OBJECT_ID=0x<hashi-object-id>
 export HASHI_CLI_CONFIG=/path/to/hashi-cli.toml   # or point at the file directly
 ```
 
-> `hashi config on-chain` cannot be used to discover these IDs: it needs them already configured in order to connect, so it reports this same error when they are missing.
+> You cannot use `hashi config on-chain` to discover these IDs: it needs them already configured in order to connect, so it reports this same error when they are missing.
 
 ---
 
@@ -160,17 +160,17 @@ The validator config additionally verifies that the fullnode's reported chain ID
 
 ## Registration and offline signing
 
-Apart from the first entry, which is Hashi's own Move abort, the errors in this subsection are produced by **Sui tooling** (the `sui` CLI and the Sui framework), not by Hashi. Their exact wording is not verified against this repository and might differ in your version of the Sui CLI. The causes and fixes below are the Hashi-side explanation.
+Apart from the first entry, which is Hashi's own Move abort, **Sui tooling** (the `sui` CLI and the Sui framework) produces the errors in this subsection, not Hashi. This repository does not verify their exact wording, which might differ in your version of the Sui CLI. The causes and fixes below are the Hashi-side explanation.
 
 **Symptom:** registration aborts with `ENotAnActiveSuiValidator` (`Only an active Sui validator may register as a Hashi member`).
 
-**Likely cause:** the transaction was sent from an address that is not in the Sui **active validator set**. Hashi's onchain registration asserts that the sender is an active Sui validator, so a fresh key, an operator key, or a pending validator that has not yet been activated cannot register.
+**Likely cause:** the transaction came from an address that is not in the Sui **active validator set**. Hashi's onchain registration asserts that the sender is an active Sui validator, so a fresh key, an operator key, or a pending validator that Sui has not yet activated cannot register.
 
 **Fix:** sign and send the initial registration from the **Sui validator account key**, as described in [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key). The operator address goes in `--operator-address`; it is not the sender.
 
 ---
 
-**Symptom:** `sui keytool sign` reports that no keystore entry was found for the given key identity.
+**Symptom:** `sui keytool sign` reports that it found no keystore entry for the given key identity.
 
 **Likely cause:** `sui keytool sign` signs only with keys held in your local Sui keystore, and the validator account key is not in it. This is the normal situation, because that key usually lives in cold storage or on a hardware wallet.
 
@@ -178,7 +178,7 @@ Apart from the first entry, which is Hashi's own Move abort, the errors in this 
 
 ---
 
-**Symptom:** a transaction fails reporting that no gas coins are owned by the address.
+**Symptom:** a transaction fails reporting that the address owns no gas coins.
 
 **Likely cause:** the sending address holds no SUI. For registration this is the validator account address; for day-to-day node operation it is the operator address.
 
@@ -190,7 +190,7 @@ Apart from the first entry, which is Hashi's own Move abort, the errors in this 
 
 **Likely cause:** the plain `hashi register` execute path signs with the configured operator key while forcing the sender to the validator address.
 
-**Fix:** use `--serialize-unsigned-transaction` and sign offline. This is covered in [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key).
+**Fix:** use `--serialize-unsigned-transaction` and sign offline. [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key) covers this.
 
 ## Bitcoin light client (Kyoto)
 
@@ -219,7 +219,7 @@ Kyoto node exited cleanly; restarting
 Kyoto node exited with error: ...; restarting
 ```
 
-**Likely cause:** the light client lost all of its peers and its supervision loop is rebuilding it. Because the client runs in whitelist-only mode, it connects **only** to `bitcoin-trusted-peers` and cannot fall back to peer discovery. If every configured peer is unreachable, the node exits and is restarted with a short backoff.
+**Likely cause:** the light client lost all of its peers and its supervision loop is rebuilding it. Because the client runs in whitelist-only mode, it connects **only** to `bitcoin-trusted-peers` and cannot fall back to peer discovery. If every configured peer is unreachable, the node exits and restarts after a short backoff.
 
 **Fix:** verify each entry in `bitcoin-trusted-peers` is reachable from the Hashi host on its **P2P** port (8333 on Mainnet, 38333 on Signet), not the RPC port, and that the Bitcoin node has `listen=1`. Restarts are also expected, and harmless, whenever the Bitcoin node itself restarts. Watch `hashi_kyoto_restarts_total` to distinguish a one-off from a loop.
 
@@ -261,4 +261,4 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 
 **Likely cause:** the light client anchors at `bitcoin-start-height` and cannot start until your Bitcoin node has that block. This wait happens off Mainnet (the default is `300000` on Signet, as in the example above); on Mainnet with the default start height the light client anchors at a built-in checkpoint and does not wait here. Either the node is still syncing, or the height is past its tip.
 
-**Fix:** none needed while the node is syncing — the height in the log climbs, and Hashi anchors and carries on by itself once it arrives, with no restart. If the height is not climbing, set `bitcoin-start-height` at or below your node's tip, as noted in [Bitcoin node](prerequisites.mdx#bitcoin-node).
+**Fix:** none needed while the node is syncing. The height in the log climbs, and Hashi anchors and carries on by itself once it arrives, with no restart. If the height is not climbing, set `bitcoin-start-height` at or below your node's tip, as noted in [Bitcoin node](prerequisites.mdx#bitcoin-node).

@@ -67,7 +67,7 @@ Make sure the file is readable by the user running `hashi` (for example, `chmod 
 
 Your **Sui validator account key must sign and broadcast the initial registration transaction.** Onchain, `validator::register` sets the member's `validator_address = ctx.sender()` and asserts the sender is in the Sui active validator set, so no operator key can substitute for this first transaction. Registration places no constraint on the account's key scheme (Ed25519, multisig, secp256k1, or zkLogin all work); it requires only that the sender is an active Sui validator.
 
-Because that key is typically in cold storage or a hardware wallet, use the **offline signing flow**: `hashi register --serialize-unsigned-transaction` (`--print-only` is a deprecated alias) builds the unsigned transaction and prints it as base64 **without the validator account key or the operator key**. It does read `tls-private-key`, to sign the TLS key's proof of possession. Sign it externally with the account key and broadcast. (`hashi register --dry-run` builds and simulates the same transaction without executing it, reporting the gas estimate.) Both forms resolve the network's highest enabled package version on-chain before building, so the transaction targets the live package even after an upgrade; a build against a retired package fails in simulation instead of being emitted.
+Because that key is typically in cold storage or a hardware wallet, use the **offline signing flow**: `hashi register --serialize-unsigned-transaction` (`--print-only` is a deprecated alias) builds the unsigned transaction and prints it as base64 **without the validator account key or the operator key**. It does read `tls-private-key`, to sign the TLS key's proof of possession. Sign it externally with the account key and broadcast. (`hashi register --dry-run` builds and simulates the same transaction without executing it, reporting the gas estimate.) Both forms resolve the network's highest enabled package version onchain before building, so the transaction targets the live package even after an upgrade; a build against a retired package fails in simulation instead of being emitted.
 
 ```bash
 # Emit the unsigned registration tx (no account or operator key required)
@@ -102,15 +102,15 @@ sui client execute-signed-tx --tx-bytes "$TX_BYTES" --signatures "$SIG"
 
 `--operator-address` is the Sui address of the **fresh operator key** you generate in [Operator key (day-to-day signing)](#operator-key-day-to-day-signing). It is **not** your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
 
-> Do **not** rely on the plain `hashi register` (execute) path for the first registration unless your configured `operator-private-key` *is* the validator account key. The builder forces the sender to the validator address while the execute path signs with the operator key, producing a signer/sender mismatch.
+> Do **not** rely on the plain `hashi register` (execute) path for the first registration unless your configured `operator-private-key` is the validator account key. The builder forces the sender to the validator address while the execute path signs with the operator key, producing a signer and sender mismatch.
 
 ## Operator key (day-to-day signing)
 
-Generate a fresh keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, leader work, and metadata updates. Governance votes go through the CLI, which can sign with the same key (see [How proposals work](governance.mdx#how-proposals-work)).
+Generate a fresh key pair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, leader work, and metadata updates. Governance votes go through the CLI, which can sign with the same key (see [How proposals work](governance.mdx#how-proposals-work)).
 
 > **Fund the operator address with at least 2 SUI.** At startup and every 10 minutes the node moves 1 SUI into the account's address balance (used to pay gas for parallel transactions) if it holds less, then sweeps in the rest. With exactly 1 SUI that first move cannot also pay its own gas: it fails with `InsufficientCoinBalance`, and the node logs `Failed to sweep SUI coin objects into address balance` every 10 minutes until you add SUI.
 
-All three simple Sui key schemes (Ed25519, secp256k1, and secp256r1) are accepted, in any of the formats standard tooling produces. The value may be a file path or the key itself inline:
+Hashi accepts all three basic Sui key schemes (Ed25519, secp256k1, and secp256r1), in any of the formats standard tooling produces. The value can be a file path or the key itself inline:
 
 | Format | Produced by |
 | --- | --- |
@@ -138,7 +138,7 @@ operator-private-key = "/path/to/hashi-operator-key.pem"
 
 The `<address>.key` file needs no conversion: point `operator-private-key` straight at it.
 
-**Finding the operator address.** You need the key's Sui address to fund it and to pass as `--operator-address`. With `sui keytool generate` the address is printed at generation (and is the name of the `.key` file it writes). For an existing openssl PEM, derive it from the public key (Ed25519 keys only; `0x00` is the Ed25519 scheme flag):
+**Finding the operator address.** You need the key's Sui address to fund it and to pass as `--operator-address`. With `sui keytool generate` the command prints the address at generation (and is the name of the `.key` file it writes). For an existing openssl PEM, derive it from the public key (Ed25519 keys only; `0x00` is the Ed25519 scheme flag):
 
 ```bash
 openssl pkey -in hashi-operator-key.pem -pubout -outform DER | tail -c 32 | \
@@ -147,7 +147,7 @@ openssl pkey -in hashi-operator-key.pem -pubout -outform DER | tail -c 32 | \
 
 > A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
 
-**Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [Registration must be signed by the account key](#registration-must-be-signed-by-the-account-key), so one transaction registers **and** delegates. If you registered without it, run the same command again; it is idempotent and sends only the missing updates. With no operator delegated yet, the validator account key signs it:
+**Delegating to the operator key.** You set delegation with `--operator-address`, normally during initial registration as shown in [Registration must be signed by the account key](#registration-must-be-signed-by-the-account-key), so one transaction registers **and** delegates. If you registered without it, run the same command again; it is idempotent and sends only the missing updates. With no operator delegated yet, the validator account key signs it:
 
 ```bash
 hashi register --config /path/to/validator.toml \
@@ -156,9 +156,9 @@ hashi register --config /path/to/validator.toml \
 # sign with the validator account key (cold/hardware) and broadcast
 ```
 
-Onchain, every member action is authorized by `member_authorized(validator, sender)`, where the sender must be the member's validator key **or** its registered operator address. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to recover from a lost or compromised operator key, or to register again after your registration is removed. To rotate a working operator key, a plain `hashi register --operator-address 0x<new-operator>` signs with the configured `operator-private-key`.
+Onchain, `member_authorized(validator, sender)` authorizes every member action, where the sender must be the member's validator key **or** its registered operator address. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to recover from a lost or compromised operator key, or to register again after your registration is removed. To rotate a working operator key, a plain `hashi register --operator-address 0x<new-operator>` signs with the configured `operator-private-key`.
 
-Metadata maintenance is automatic once delegated: at startup the node compares its config against the onchain member record and sends only what changed. To update your endpoint URL, TLS key, or other metadata, edit the config file and restart the node; no manual `hashi register` re-run is needed.
+Metadata maintenance is automatic once delegated: at startup the node compares its config against the onchain member record and sends only what changed. To update your endpoint URL, TLS key, or other metadata, edit the config file and restart the node; you do not need to re-run `hashi register` by hand.
 
 **Revoking an operator key.** Either key can change the operator address: onchain, `set_operator_address` accepts the validator or the current operator. A compromised operator key can therefore re-delegate or resign the member, but it cannot lock you out, because the validator key keeps full authority. To revoke it, pull the validator key from cold storage, run `hashi register --operator-address 0x<new-operator> --serialize-unsigned-transaction`, and sign offline with the validator key.
 
@@ -178,4 +178,4 @@ backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public ce
 backup-dir = "/var/lib/hashi/backups"
 ```
 
-Key generation is covered in the [Hashi Node Backups](../node-backup.mdx) guide, and restoring a node in [Restoring a node](backup-restore.mdx#restoring-a-node). Store the private key / YubiKey securely and separately from the backup files. Keep a copy of the public certificate file as well: backups do not include it, and a config that points at a missing certificate file does not load.
+The [Hashi Node Backups](../node-backup.mdx) guide covers key generation, and [Restoring a node](backup-restore.mdx#restoring-a-node) covers restoring a node. Store the private key / YubiKey securely and separately from the backup files. Keep a copy of the public certificate file as well: backups do not include it, and a config that points at a missing certificate file does not load.

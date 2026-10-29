@@ -35,7 +35,7 @@ answer: >-
 
 ## Prometheus endpoint
 
-Metrics are served at `http://127.0.0.1:9180/metrics` (configurable through `metrics-http-address`).
+The node serves metrics at `http://127.0.0.1:9180/metrics` (configurable through `metrics-http-address`).
 
 ```bash
 curl -s http://localhost:9180/metrics | grep hashi_
@@ -71,7 +71,7 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 Notes:
 
 - `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [Validator config](configuration.mdx#validator-config).
-- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. The endpoint accepts pushes only from committee members, so until your node is seated (at launch, or at a later committee formation if you register afterwards) each push is refused and logged as `unable to push metrics`. That is expected.
+- **You need no extra credentials.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. The endpoint accepts pushes only from committee members, so until your node is seated (at launch, or at a later committee formation if you register afterwards) the endpoint refuses each push and the node logs `unable to push metrics`. That is expected.
 - The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
 
 ## Key metrics
@@ -84,21 +84,21 @@ Notes:
 | `hashi_sui_rpc_info` | gauge | Configured Sui RPC endpoint. The `endpoint` label identifies the fullnode used by this validator. |
 | `hashi_reconfig_in_progress` | gauge | 1 during reconfiguration. Extended periods = problem. |
 | `hashi_reconfig_aborted_total` | counter | Reconfigurations torn down by `abort_reconfig`, whoever submitted it. Each one means a reconfiguration stalled for a whole Sui epoch. |
-| `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. The separate pause that occurs during reconfiguration is reflected by `hashi_reconfig_in_progress`, not here. |
+| `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. `hashi_reconfig_in_progress`, not this gauge, reflects the separate pause that occurs during reconfiguration. |
 | `hashi_reconfig_hold` | gauge | 1 when the onchain `reconfig_hold` config flag is set: the chain refuses `start_reconfig`, so Hashi stays behind Sui's epoch on its current committee until governance clears it (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). Healthy: `0`. |
 | `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |
 | `hashi_is_leader` | gauge | 1 when this node is the current leader. |
 | `hashi_kyoto_synced` | gauge | 1 when the Bitcoin light client is synced. Healthy: `1` in steady state. |
 | `hashi_kyoto_best_height` | gauge | Bitcoin tip block height. Healthy: tracks your Bitcoin node's `getblockchaininfo` height. |
 | `hashi_kyoto_connected_peers` | gauge | Bitcoin P2P peer count. See the note below on what value is healthy. |
-| `hashi_kyoto_sync_percent` | gauge | Compact block filter sync progress (0–100). Healthy: reaches `100`; should climb during initial sync. |
+| `hashi_kyoto_sync_percent` | gauge | Compact block filter sync progress (0 to 100). Healthy: reaches `100`; should climb during initial sync. |
 | `hashi_kyoto_restarts_total` | counter | Light client restarts after connectivity loss. Healthy: flat. |
 | `hashi_kyoto_consecutive_failures` | gauge | Consecutive peer connection failures. Healthy: `0`. |
 | `hashi_deposit_queue_size` | gauge | Pending deposit requests. |
 | `hashi_withdrawal_queue_size` | gauge | Pending withdrawals (by status). |
 | `hashi_utxo_pool_size` | gauge | Managed UTXOs (available / unconfirmed_change / locked); `unconfirmed_change` is a subset of `available`. |
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
-| `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG/rotation duration. |
+| `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG or rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
 | `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
@@ -125,7 +125,7 @@ Notes:
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [Bitcoin node](prerequisites.mdx#bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [Suggested alerts](#suggested-alerts) fires on `== 0`, not on a low count.
 
-**Checking committee membership and status.** Committee state is queried through the CLI (note the flag placement from [Global options](../reference/cli.mdx#global-options)):
+**Checking committee membership and status.** Query committee state through the CLI (note the flag placement from [Global options](../reference/cli.mdx#global-options)):
 
 ```bash
 hashi committee -c hashi-cli.toml list            # all members for the current epoch
@@ -135,14 +135,14 @@ hashi committee -c hashi-cli.toml epoch           # current epoch info
 
 See [Committee](../committee.mdx) for what membership means and how Hashi derives the member set from the Sui validator set.
 
-> The **CLI is the status of record** for committee membership. These pages do not link a public explorer view for Hashi committee state, because none is confirmed; do not rely on a third-party dashboard to determine whether your node is in the committee.
+> The **CLI is the status of record** for committee membership. These pages do not link a public explorer view for Hashi committee state, because the team has confirmed none; do not rely on a third-party dashboard to determine whether your node is in the committee.
 
 ## Suggested alerts
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
-| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Nodes abort and restart it themselves once it overruns its Sui epoch; `hashi committee abort-reconfig` is the manual fallback (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). |
-| `increase(hashi_reconfig_aborted_total[1h]) > 0` | Warning | A reconfiguration stalled for a full Sui epoch and was aborted; the replacement starts on its own. Find out why the first one stalled (offline stake, bad endpoints or keys, partitions). |
+| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG or rotation errors. Nodes abort and restart it themselves once it overruns its Sui epoch; `hashi committee abort-reconfig` is the manual fallback (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). |
+| `increase(hashi_reconfig_aborted_total[1h]) > 0` | Warning | A reconfiguration stalled for a full Sui epoch and the nodes aborted it; the replacement starts on its own. Find out why the first one stalled (offline stake, bad endpoints or keys, partitions). |
 | `hashi_presig_pool_remaining == 0` for > 10 min on a committee member | Critical | Node cannot sign. Check reconfig status and MPC logs. The gauge also reads 0 right after a restart and on a node that hasn't been in the committee since it started; a node that has left keeps its last value. |
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` for > 5 min | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. Each light-client restart briefly resets it to 0. |
@@ -150,7 +150,7 @@ See [Committee](../committee.mdx) for what membership means and how Hashi derive
 | `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
 | `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
 | `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
-| A per-peer shed counter from [Key metrics](#key-metrics), or a `busy` or `shape` withdrawal signing or construction refusal, counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | For a shed counter, the `peer` may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first (`hashi_request_latency`). A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). Then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
+| A per-peer shed counter from [Key metrics](#key-metrics), or a `busy` or `shape` withdrawal signing or construction refusal, counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | For a shed counter, the `peer` might be misbehaving, or your node might be slow or have its limits set too low: rule your node out first (`hashi_request_latency`). A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). Then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
 | 3 or more peers hit the request count or MPC work limits within 10 min | Critical | Usually your node is slow, not the peers, though colluding members can also cause it. Check `hashi_request_latency` and tell the operator channel. |
 | `hashi_mpc_unguarded_spawn_blocking_total` increasing | Warning | A node bug. Report it to the hashi team with your version. |
 | A peer's MPC requests or responses refused in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch (`reason="hash"` in `hashi_mpc_refusals_total`) can also come from an honest signer that lost its stored copy. Look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |

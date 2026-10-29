@@ -52,8 +52,8 @@ two leaves:
    60-day BIP-68 relative timelock enforced by `OP_CHECKSEQUENCEVERIFY`
    (BIP-112). This is an
    escape hatch: if the Guardian key is ever lost, funds become recoverable by
-   the MPC committee once the delay elapses. The delay is measured from when
-   the UTXO confirms and is baked into the script, so changing it changes
+   the MPC committee once the delay elapses. The delay counts from when
+   the UTXO confirms, and the script encodes it, so changing it changes
    every deposit address.
 
 ## What is the exact descriptor?

@@ -128,7 +128,7 @@ Notes:
 hashi register --config <path> [--operator-address <addr>] [--serialize-unsigned-transaction | --dry-run] [--sui-rpc-url <url>] [-v] [-y]
 ```
 
-Register or update your validator onchain. Initial registration must be signed by the validator account key; use `--serialize-unsigned-transaction` (deprecated alias `--print-only`) for offline signing. Idempotent.
+Register or update your validator onchain. The validator account key must sign the initial registration; use `--serialize-unsigned-transaction` (deprecated alias `--print-only`) for offline signing. Idempotent.
 
 ## Committee
 
@@ -210,7 +210,7 @@ With S3 configured, a `--backup-pgp-cert` override with different usable encrypt
 
 S3 restore requires `--region`; `--version-id` optionally selects an exact
 version. Neither flag applies to local paths. Use the secret-key flag above or
-`--use-gpg-agent`; no original node configuration is needed.
+`--use-gpg-agent`; you need no original node configuration.
 
 `--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory and installs nothing. To put the config, keys, and database back and restart the node, follow [Restoring a node](../validators/backup-restore.mdx#restoring-a-node).
 
@@ -252,4 +252,4 @@ hashi validator withdraw-resignation         # Revoke a pending resignation
 hashi validator remove-inactive <address>    # Remove a member that holds no epoch duties and is resigned or not an active Sui validator (permissionless)
 ```
 
-Keep a resigned node running until the next committee forms. Members ignored by governance cannot be removed.
+Keep a resigned node running until the next committee forms. No one can remove members that governance ignores.

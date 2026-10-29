@@ -38,7 +38,7 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ## What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](../node-backup.mdx#configuring-hashi). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](../node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it. Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](../node-backup.mdx#configure-hashi-backups). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](../node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it. Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Each archive holds:
 
@@ -57,7 +57,7 @@ attempt; failed uploads retain the local archive and are not queued or retried.
 See [Back up to S3](../node-backup.mdx#back-up-to-s3) for the server-side
 missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
 read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
-read access is unchanged; per-node AWS credentials remain to be provisioned.
+read access is unchanged; Mysten still has to provision per-node AWS credentials.
 
 ```bash
 # Manual backup (stop the node first; backup save refuses while it holds the database)
@@ -74,12 +74,12 @@ For **accidental machine or disk loss without suspected compromise**, follow
 [Machine-loss recovery](../node-backup.mdx#machine-loss-recovery) for installation
 and plaintext handling.
 
-For **suspected compromise**, assume host-held operator, TLS, and MPC private
-keys are exposed; even a pre-compromise backup can contain those same keys.
+For **suspected compromise**, assume the host-held operator, TLS, and MPC private
+keys have leaked; even a pre-compromise backup can contain those same keys.
 For a single affected node with sufficient healthy peers, fence it, use the
-trusted validator account authority to revoke/replace its operator and TLS
-identities ([TLS key (dedicated)](keys.mdx#tls-key-dedicated)–[Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing)),
-then start a fresh machine with an empty DB to generate/register fresh MPC node
+trusted validator account authority to revoke or replace its operator and TLS
+identities (see [TLS key (dedicated)](keys.mdx#tls-key-dedicated) and [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing)),
+then start a fresh machine with an empty DB to generate and register fresh MPC node
 keys and rejoin through [reconfiguration](epoch-changes.mdx).
 Do not restore possibly exposed keys. See
 [Suspected node compromise](../node-backup.mdx#suspected-node-compromise).
@@ -91,7 +91,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
 
 **Which backup to use.** Use the newest trusted backup. For S3, use independently retained receipts and audit history to select an exact version, then pin it with `--version-id`; neither the newest object nor successful decryption proves its origin. To take part in the current epoch, the restored database must hold the encryption and signing keys recorded for your node in the current committee, and the backup the node wrote at the most recent epoch change does. An older backup, or an empty database, still gives you a working node: it registers replacement keys by itself and rejoins at the next reconfiguration, without taking part in MPC until then. There is no fixed age limit: what matters is whether the backup holds those keys, and if it does not, the cost is that wait.
 
-**What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the backup was written.
+**What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the node wrote the backup.
 
 1. **Stop the node, and keep every other copy of it stopped.** If you are moving to a new host, make sure the node on the old host cannot start again. Two running copies would both act as the same committee member.
 
@@ -99,7 +99,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
    sudo systemctl stop hashi
    ```
 
-2. **Extract the archive into a private directory.** The extracted files are plaintext keys and database contents. Use a directory only your user can read, on the same filesystem as the `db` path so the database can be moved rather than copied.
+2. **Extract the archive into a private directory.** The extracted files are plaintext keys and database contents. Use a directory only your user can read, on the same filesystem as the `db` path so you can move the database rather than copy it.
 
    ```bash
    umask 077
@@ -164,7 +164,7 @@ or disk loss without suspected compromise**, not to compromise recovery.
    ```
 
    - **Back in the current epoch:** the node logs `recover_mpc_state: recovered vk=...`.
-   - **Waiting for the next epoch:** the node logs `no DB encryption or signing key matches the current committee record; registering fresh keys for epoch <N> so the node rejoins at that reconfig`, and `hashi_mpc_committee_key_lost_total` increases. Nothing more is needed from you. Leave the node running and it rejoins at that reconfiguration.
+   - **Waiting for the next epoch:** the node logs `no DB encryption or signing key matches the current committee record; registering fresh keys for epoch <N> so the node rejoins at that reconfig`, and `hashi_mpc_committee_key_lost_total` increases. You need to do nothing more. Leave the node running and it rejoins at that reconfiguration.
 
 8. **Delete the extracted copy.** The directory from step 2 holds decrypted keys and nothing cleans it up for you. Do the same with `db.old` once the node is healthy.
 
