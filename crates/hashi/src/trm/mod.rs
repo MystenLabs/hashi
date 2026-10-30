@@ -6,11 +6,15 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use futures::future::FutureExt;
+use futures::future::Shared;
+use futures::future::TryFutureExt;
 use sui_sdk_types::Address;
 use tokio::time::Instant;
 
@@ -43,12 +47,13 @@ pub struct TrmClient {
     http: reqwest::Client,
     base_url: reqwest::Url,
     api_key: String,
-    transfer_submissions: Pacer,
-    transfer_reads: Pacer,
-    address_screenings: Pacer,
+    transfer_submissions: Arc<Pacer>,
+    transfer_reads: Arc<Pacer>,
+    address_screenings: Arc<Pacer>,
+    coalescer: Coalescer,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Approved,
     Rejected(String),
@@ -104,7 +109,13 @@ impl TrmClient {
     /// only with Sui mainnet.
     pub fn from_config(config: &Config) -> anyhow::Result<Option<Self>> {
         match (config.trm_api_key(), config.bitcoin_network()) {
-            (Some(api_key), Network::Bitcoin) => Self::new(api_key.to_owned()).map(Some),
+            (Some(api_key), Network::Bitcoin) => Self::new(
+                api_key.to_owned(),
+                config.trm_per_caller_burst() as f64,
+                config.trm_per_caller_refill_per_sec(),
+                Duration::from_millis(config.trm_verdict_reuse_ms()),
+            )
+            .map(Some),
             (None, Network::Bitcoin) => {
                 tracing::warn!("No TRM API key configured; AML screening is disabled");
                 Ok(None)
@@ -117,11 +128,22 @@ impl TrmClient {
         }
     }
 
-    fn new(api_key: String) -> anyhow::Result<Self> {
-        Self::with_base_url(api_key, TRM_API_URL)
+    fn new(
+        api_key: String,
+        burst: f64,
+        refill_per_sec: f64,
+        verdict_reuse: Duration,
+    ) -> anyhow::Result<Self> {
+        Self::with_base_url(api_key, TRM_API_URL, burst, refill_per_sec, verdict_reuse)
     }
 
-    fn with_base_url(api_key: String, base_url: &str) -> anyhow::Result<Self> {
+    fn with_base_url(
+        api_key: String,
+        base_url: &str,
+        burst: f64,
+        refill_per_sec: f64,
+        verdict_reuse: Duration,
+    ) -> anyhow::Result<Self> {
         // reqwest would turn a redirected POST into a bodyless GET.
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -130,9 +152,10 @@ impl TrmClient {
             http,
             base_url: reqwest::Url::parse(base_url)?,
             api_key,
-            transfer_submissions: Pacer::new(),
-            transfer_reads: Pacer::new(),
-            address_screenings: Pacer::new(),
+            transfer_submissions: Arc::new(Pacer::new(burst, refill_per_sec)),
+            transfer_reads: Arc::new(Pacer::new(burst, refill_per_sec)),
+            address_screenings: Arc::new(Pacer::new(burst, refill_per_sec)),
+            coalescer: Coalescer::new(verdict_reuse),
         })
     }
 
@@ -230,7 +253,8 @@ impl TrmClient {
             transfer_type: "CRYPTO_DEPOSIT",
         };
         let url = self.url(&["public", "v2", "tm", "transfers"]);
-        self.send(
+        Self::send(
+            &self.api_key,
             &self.transfer_submissions,
             caller,
             self.http.post(url).json(&submission),
@@ -249,8 +273,14 @@ impl TrmClient {
         url.path_segments_mut()
             .expect("TRM base URL is an http(s) URL")
             .push(uuid);
-        self.send(&self.transfer_reads, caller, self.http.get(url), deadline)
-            .await
+        Self::send(
+            &self.api_key,
+            &self.transfer_reads,
+            caller,
+            self.http.get(url),
+            deadline,
+        )
+        .await
     }
 
     async fn screen_addresses(
@@ -259,56 +289,115 @@ impl TrmClient {
         caller: Caller,
         deadline: Instant,
     ) -> Result<Verdict, TrmError> {
-        let url = self.url(&["public", "v2", "screening", "addresses"]);
-        let results: Vec<AddressScreening> = self
-            .send(
-                &self.address_screenings,
+        let key = address_key(queries);
+        let (generation, shared) = {
+            let mut state = self.coalescer.state.lock().unwrap();
+            if let Some((verdict, at)) = state.verdicts.get(&key) {
+                if at.elapsed() < self.coalescer.reuse {
+                    return Ok(verdict.clone());
+                }
+                state.verdicts.remove(&key);
+            }
+            if let Some((generation, shared)) = state.in_flight.get(&key) {
+                (*generation, shared.clone())
+            } else {
+                let generation = state.next_gen;
+                state.next_gen += 1;
+                let shared = self.new_address_screening(queries, caller, deadline);
+                state
+                    .in_flight
+                    .insert(key.clone(), (generation, shared.clone()));
+                (generation, shared)
+            }
+        };
+        let result = shared.await;
+        {
+            let mut state = self.coalescer.state.lock().unwrap();
+            if state
+                .in_flight
+                .get(&key)
+                .is_some_and(|(g, _)| *g == generation)
+            {
+                state.in_flight.remove(&key);
+            }
+            if let Ok(verdict) = &result {
+                state
+                    .verdicts
+                    .insert(key, (verdict.clone(), Instant::now()));
+            }
+        }
+        result.map_err(|shared| rebuild_trm_error(&shared))
+    }
+
+    fn new_address_screening(
+        &self,
+        queries: &[AddressQuery<'_>],
+        caller: Caller,
+        deadline: Instant,
+    ) -> SharedScreening {
+        let http = self.http.clone();
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
+        let pacer = self.address_screenings.clone();
+        let owned: Vec<(String, String)> = queries
+            .iter()
+            .map(|q| (q.chain.to_owned(), q.address.to_owned()))
+            .collect();
+        async move {
+            let queries: Vec<AddressQuery<'_>> = owned
+                .iter()
+                .map(|(chain, address)| AddressQuery { address, chain })
+                .collect();
+            let url = url_of(&base_url, &["public", "v2", "screening", "addresses"]);
+            let results: Vec<AddressScreening> = TrmClient::send(
+                &api_key,
+                &pacer,
                 caller,
-                self.http.post(url).json(queries),
+                http.post(url).json(&queries),
                 deadline,
             )
             .await?;
-        if let Some(missing) = queries.iter().find(|query| {
-            !results
+            if let Some(missing) = queries.iter().find(|query| {
+                !results
+                    .iter()
+                    .any(|result| result.address_submitted == query.address)
+            }) {
+                return Err(TrmError::Permanent(anyhow!(
+                    "TRM returned no screening result for {} address {}",
+                    missing.chain,
+                    missing.address
+                )));
+            }
+            let rejections: Vec<String> = results
                 .iter()
-                .any(|result| result.address_submitted == query.address)
-        }) {
-            return Err(TrmError::Permanent(anyhow!(
-                "TRM returned no screening result for {} address {}",
-                missing.chain,
-                missing.address
-            )));
+                .filter_map(AddressScreening::rejection)
+                .collect();
+            Ok(if rejections.is_empty() {
+                Verdict::Approved
+            } else {
+                Verdict::Rejected(rejections.join("; "))
+            })
         }
-        let rejections: Vec<String> = results
-            .iter()
-            .filter_map(AddressScreening::rejection)
-            .collect();
-        if rejections.is_empty() {
-            Ok(Verdict::Approved)
-        } else {
-            Ok(Verdict::Rejected(rejections.join("; ")))
-        }
+        .map_err(Arc::new)
+        .boxed()
+        .shared()
     }
 
     fn url(&self, segments: &[&str]) -> reqwest::Url {
-        let mut url = self.base_url.clone();
-        url.path_segments_mut()
-            .expect("TRM base URL is an http(s) URL")
-            .pop_if_empty()
-            .extend(segments);
-        url
+        url_of(&self.base_url, segments)
     }
 
     async fn send<T: serde::de::DeserializeOwned>(
-        &self,
+        api_key: &str,
         pacer: &Pacer,
         caller: Caller,
         request: reqwest::RequestBuilder,
         deadline: Instant,
     ) -> Result<T, TrmError> {
         pacer.wait_turn(caller, deadline).await?;
+        pacer.take_token(caller)?;
         let response = request
-            .basic_auth(&self.api_key, Some(&self.api_key))
+            .basic_auth(api_key, Some(api_key))
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
@@ -353,6 +442,56 @@ impl TrmClient {
             .map_err(|e| TrmError::Transient(e.into()))?;
         serde_json::from_slice(&body)
             .map_err(|e| TrmError::Permanent(anyhow!("unexpected TRM response: {e}")))
+    }
+}
+
+fn url_of(base_url: &reqwest::Url, segments: &[&str]) -> reqwest::Url {
+    let mut url = base_url.clone();
+    url.path_segments_mut()
+        .expect("TRM base URL is an http(s) URL")
+        .pop_if_empty()
+        .extend(segments);
+    url
+}
+
+fn rebuild_trm_error(shared: &Arc<TrmError>) -> TrmError {
+    match &**shared {
+        TrmError::Transient(e) => TrmError::Transient(anyhow!("{e}")),
+        TrmError::Permanent(e) => TrmError::Permanent(anyhow!("{e}")),
+    }
+}
+
+fn address_key(queries: &[AddressQuery<'_>]) -> AddrKey {
+    let mut key: AddrKey = queries
+        .iter()
+        .map(|q| (q.chain.to_owned(), q.address.to_owned()))
+        .collect();
+    key.sort();
+    key
+}
+
+type AddrKey = Vec<(String, String)>;
+
+type SharedScreening = Shared<Pin<Box<dyn Future<Output = Result<Verdict, Arc<TrmError>>> + Send>>>;
+
+struct Coalescer {
+    state: Mutex<CoalescerState>,
+    reuse: Duration,
+}
+
+#[derive(Default)]
+struct CoalescerState {
+    in_flight: HashMap<AddrKey, (u64, SharedScreening)>,
+    verdicts: HashMap<AddrKey, (Verdict, Instant)>,
+    next_gen: u64,
+}
+
+impl Coalescer {
+    fn new(reuse: Duration) -> Self {
+        Self {
+            state: Mutex::new(CoalescerState::default()),
+            reuse,
+        }
     }
 }
 
@@ -464,6 +603,9 @@ struct Pacer {
     turns: Mutex<Turns>,
     front: tokio::sync::Mutex<()>,
     queues: Mutex<HashMap<Caller, Arc<tokio::sync::Mutex<()>>>>,
+    budgets: Mutex<HashMap<Caller, Budget>>,
+    burst: f64,
+    refill_per_sec: f64,
 }
 
 struct Turns {
@@ -471,8 +613,13 @@ struct Turns {
     hold_until: Instant,
 }
 
+struct Budget {
+    tokens: f64,
+    last: Instant,
+}
+
 impl Pacer {
-    fn new() -> Self {
+    fn new(burst: f64, refill_per_sec: f64) -> Self {
         let now = Instant::now();
         Self {
             turns: Mutex::new(Turns {
@@ -481,6 +628,29 @@ impl Pacer {
             }),
             front: tokio::sync::Mutex::new(()),
             queues: Mutex::default(),
+            budgets: Mutex::default(),
+            burst,
+            refill_per_sec,
+        }
+    }
+
+    fn take_token(&self, caller: Caller) -> Result<(), TrmError> {
+        let now = Instant::now();
+        let mut budgets = self.budgets.lock().unwrap();
+        let budget = budgets.entry(caller).or_insert(Budget {
+            tokens: self.burst,
+            last: now,
+        });
+        let elapsed = now.saturating_duration_since(budget.last).as_secs_f64();
+        budget.tokens = (budget.tokens + elapsed * self.refill_per_sec).min(self.burst);
+        budget.last = now;
+        if budget.tokens >= 1.0 {
+            budget.tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(TrmError::Transient(anyhow!(
+                "per-caller TRM call budget exhausted for {caller:?}; retry"
+            )))
         }
     }
 
@@ -622,6 +792,13 @@ mod tests {
     type Mock = Arc<Mutex<MockTrm>>;
 
     async fn mock_trm<const N: usize>(responses: [(StatusCode, Value); N]) -> (TrmClient, Mock) {
+        mock_trm_reuse(responses, Duration::ZERO).await
+    }
+
+    async fn mock_trm_reuse<const N: usize>(
+        responses: [(StatusCode, Value); N],
+        reuse: Duration,
+    ) -> (TrmClient, Mock) {
         let mock = Arc::new(Mutex::new(MockTrm {
             responses: responses.into(),
             requests: Vec::new(),
@@ -633,7 +810,8 @@ mod tests {
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (
-            TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap(),
+            TrmClient::with_base_url(API_KEY.to_owned(), &base_url, f64::INFINITY, 0.0, reuse)
+                .unwrap(),
             mock,
         )
     }
@@ -1041,7 +1219,14 @@ mod tests {
             socket.shutdown().await.unwrap();
             let _ = socket.read_to_end(&mut Vec::new()).await;
         });
-        let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
+        let client = TrmClient::with_base_url(
+            API_KEY.to_owned(),
+            &base_url,
+            f64::INFINITY,
+            0.0,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let error = client
             .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
@@ -1056,7 +1241,14 @@ mod tests {
         // Connections wait in the listener's backlog and never get a response.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
+        let client = TrmClient::with_base_url(
+            API_KEY.to_owned(),
+            &base_url,
+            f64::INFINITY,
+            0.0,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let error = client
             .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]), Caller::Local)
@@ -1068,7 +1260,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn requests_to_an_endpoint_take_turns() {
-        let pacer = &Pacer::new();
+        let pacer = &Pacer::new(f64::INFINITY, 0.0);
         let started = Instant::now();
         let turn = |caller| async move {
             pacer
@@ -1092,7 +1284,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_turn_after_the_deadline_is_refused_without_taking_it() {
-        let pacer = Pacer::new();
+        let pacer = Pacer::new(f64::INFINITY, 0.0);
         let started = Instant::now();
 
         pacer.wait_turn(Caller::Local, started).await.unwrap();
@@ -1121,7 +1313,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_rate_limit_holds_back_a_request_already_waiting() {
-        let pacer = &Pacer::new();
+        let pacer = &Pacer::new(f64::INFINITY, 0.0);
         let started = Instant::now();
         let deadline = started + SCREENING_TIMEOUT;
         let response_time = Duration::from_millis(50);
@@ -1143,7 +1335,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_busy_caller_does_not_hold_up_another_callers_turn() {
-        let pacer = &Pacer::new();
+        let pacer = &Pacer::new(f64::INFINITY, 0.0);
         let deadline = Instant::now() + SCREENING_TIMEOUT;
         let busy = futures::future::join_all(
             (0..40).map(|_| pacer.wait_turn(Caller::Peer(Address::new([1; 32])), deadline)),
@@ -1165,7 +1357,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_dropped_request_takes_no_turn() {
-        let pacer = Pacer::new();
+        let pacer = Pacer::new(f64::INFINITY, 0.0);
         let started = Instant::now();
         let deadline = started + SCREENING_TIMEOUT;
         let busy = Caller::Peer(Address::new([1; 32]));
@@ -1216,7 +1408,13 @@ mod tests {
     /// TRM_API_KEY=<key> cargo nextest run -p hashi --run-ignored only trm::tests::live
     /// ```
     fn live_client() -> TrmClient {
-        TrmClient::new(std::env::var("TRM_API_KEY").expect("TRM_API_KEY")).unwrap()
+        TrmClient::new(
+            std::env::var("TRM_API_KEY").expect("TRM_API_KEY"),
+            f64::INFINITY,
+            0.0,
+            Duration::ZERO,
+        )
+        .unwrap()
     }
 
     /// TRM attributes this Sui address to the May 2025 Cetus exploiter. Its
@@ -1313,5 +1511,122 @@ mod tests {
             screen_live_deposit(&from_sanctioned).await,
             Verdict::Rejected(reason) if reason.contains("raised an alert")
         ));
+    }
+
+    #[tokio::test]
+    async fn reuses_a_fresh_address_verdict() {
+        let requester = Address::new([7; 32]);
+        let (client, mock) = mock_trm_reuse(
+            [(
+                StatusCode::CREATED,
+                json!([
+                    address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                    address_screening(&requester.to_string(), "sui", json!([])),
+                ]),
+            )],
+            Duration::from_secs(60),
+        )
+        .await;
+
+        let first = client
+            .screen_withdrawal(BITCOIN_ADDRESS, requester, Caller::Local)
+            .await
+            .unwrap();
+        let second = client
+            .screen_withdrawal(BITCOIN_ADDRESS, requester, Caller::Local)
+            .await
+            .unwrap();
+
+        assert_eq!(first, Verdict::Approved);
+        assert_eq!(second, Verdict::Approved);
+        assert_eq!(mock.lock().unwrap().requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn distinct_subjects_are_not_coalesced() {
+        let a = Address::new([1; 32]);
+        let b = Address::new([2; 32]);
+        let (client, mock) = mock_trm_reuse(
+            [
+                (
+                    StatusCode::CREATED,
+                    json!([
+                        address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                        address_screening(&a.to_string(), "sui", json!([])),
+                    ]),
+                ),
+                (
+                    StatusCode::CREATED,
+                    json!([
+                        address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                        address_screening(&b.to_string(), "sui", json!([])),
+                    ]),
+                ),
+            ],
+            Duration::from_secs(60),
+        )
+        .await;
+
+        client
+            .screen_withdrawal(BITCOIN_ADDRESS, a, Caller::Local)
+            .await
+            .unwrap();
+        client
+            .screen_withdrawal(BITCOIN_ADDRESS, b, Caller::Local)
+            .await
+            .unwrap();
+
+        assert_eq!(mock.lock().unwrap().requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_errored_screening_is_not_reused() {
+        let requester = Address::new([3; 32]);
+        let (client, mock) = mock_trm_reuse(
+            [
+                (StatusCode::INTERNAL_SERVER_ERROR, json!({})),
+                (
+                    StatusCode::CREATED,
+                    json!([
+                        address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                        address_screening(&requester.to_string(), "sui", json!([])),
+                    ]),
+                ),
+            ],
+            Duration::from_secs(60),
+        )
+        .await;
+
+        let error = client
+            .screen_withdrawal(BITCOIN_ADDRESS, requester, Caller::Local)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TrmError::Transient(_)));
+        let verdict = client
+            .screen_withdrawal(BITCOIN_ADDRESS, requester, Caller::Local)
+            .await
+            .unwrap();
+        assert_eq!(verdict, Verdict::Approved);
+        assert_eq!(mock.lock().unwrap().requests.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn budget_caps_calls_per_caller_then_refills() {
+        let pacer = Pacer::new(2.0, 1.0);
+        let caller = Caller::Local;
+
+        assert!(pacer.take_token(caller).is_ok());
+        assert!(pacer.take_token(caller).is_ok());
+        assert!(pacer.take_token(caller).is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(pacer.take_token(caller).is_ok());
+        assert!(pacer.take_token(caller).is_err());
+
+        assert!(
+            pacer
+                .take_token(Caller::Peer(Address::new([9; 32])))
+                .is_ok()
+        );
     }
 }
