@@ -20,6 +20,10 @@ const DEFAULT_WITHDRAWAL_SIGNING_PER_CALLER_LIMIT: usize = 4;
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 pub(crate) const DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT: u32 = 200;
 pub(crate) const DEFAULT_GRPC_PER_PEER_CONNECTION_LIMIT: usize = 4;
+const DEFAULT_TRM_PER_CALLER_BURST: u32 = 200;
+const DEFAULT_TRM_PER_CALLER_REFILL_PER_SEC: f64 = 1.0;
+const DEFAULT_TRM_VERDICT_REUSE_MS: u64 = 300_000;
+const MIN_TRM_PER_CALLER_BURST: u32 = 64;
 /// Core's short fee-estimation horizon. Longer targets are answered from
 /// horizons that lag the fee market by hours to days.
 const MAX_WITHDRAWAL_FEE_CONF_TARGET: u16 = 12;
@@ -129,6 +133,23 @@ pub struct Config {
     /// set, AML screening is skipped. TRM only screens mainnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_api_key: Option<String>,
+
+    /// Per-caller TRM call budget at each screening endpoint: token-bucket
+    /// burst capacity. Defaults to 200; at least 64 (a leader's concurrent
+    /// burst). Bounds one committee member's TRM spend per node (MF-52).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trm_per_caller_burst: Option<u32>,
+
+    /// Per-caller TRM call budget refill, calls per second. Defaults to 1.0.
+    /// A cap on one caller's sustained TRM spend; size it above the real
+    /// sustained screening-plus-retry rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trm_per_caller_refill_per_sec: Option<f64>,
+
+    /// How long a terminal TRM address verdict is reused for the same
+    /// addresses without re-screening, in milliseconds. Defaults to 300000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trm_verdict_reuse_ms: Option<u64>,
 
     /// The guardian's node endpoint, used only when the chain has no
     /// `guardian_node_url` at startup; the node keeps it until restarted.
@@ -622,6 +643,16 @@ impl Config {
         );
         anyhow::ensure!(
             config
+                .trm_per_caller_burst
+                .is_none_or(|b| b >= MIN_TRM_PER_CALLER_BURST),
+            "trm_per_caller_burst must be at least {MIN_TRM_PER_CALLER_BURST}"
+        );
+        anyhow::ensure!(
+            config.trm_per_caller_refill_per_sec.is_none_or(|r| r > 0.0),
+            "trm_per_caller_refill_per_sec must be a positive number of calls per second"
+        );
+        anyhow::ensure!(
+            config
                 .withdrawal_fee_conf_target
                 .is_none_or(|target| (1..=MAX_WITHDRAWAL_FEE_CONF_TARGET).contains(&target)),
             "withdrawal_fee_conf_target must be between 1 and {MAX_WITHDRAWAL_FEE_CONF_TARGET} blocks"
@@ -810,6 +841,21 @@ impl Config {
         self.trm_api_key.as_deref()
     }
 
+    pub fn trm_per_caller_burst(&self) -> u32 {
+        self.trm_per_caller_burst
+            .unwrap_or(DEFAULT_TRM_PER_CALLER_BURST)
+    }
+
+    pub fn trm_per_caller_refill_per_sec(&self) -> f64 {
+        self.trm_per_caller_refill_per_sec
+            .unwrap_or(DEFAULT_TRM_PER_CALLER_REFILL_PER_SEC)
+    }
+
+    pub fn trm_verdict_reuse_ms(&self) -> u64 {
+        self.trm_verdict_reuse_ms
+            .unwrap_or(DEFAULT_TRM_VERDICT_REUSE_MS)
+    }
+
     pub fn guardian_endpoint(&self) -> Option<&str> {
         self.guardian_endpoint.as_deref()
     }
@@ -911,6 +957,9 @@ impl Config {
             test_weight_divisor: None,
             test_batch_size_per_weight: None,
             trm_api_key: None,
+            trm_per_caller_burst: None,
+            trm_per_caller_refill_per_sec: None,
+            trm_verdict_reuse_ms: None,
             guardian_endpoint: None,
             grpc_max_decoding_message_size: None,
             grpc_per_peer_inflight_limit: None,
