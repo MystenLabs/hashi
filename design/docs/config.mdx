@@ -164,10 +164,14 @@ value; on Sui Mainnet it refuses one below the default.
 | **Default** | `false` |
 
 When `true`, the contract refuses new deposit and withdrawal requests, and every step
-that advances a queued request aborts. Requests already in the queue resume
+that advances a queued request aborts. Each node also refuses to sign for deposits and
+withdrawals (not in the 1.0 releases). Requests already in the queue resume
 processing when governance unpauses the system, but users can still cancel withdrawal
 requests after the cooldown, and deposit requests can still expire.
-Reconfiguration and governance actions are not affected.
+Reconfiguration and governance actions are not affected. Anyone can still broadcast a
+withdrawal fully signed before the pause, and a committee member can still finish one the
+guardian already signed. The pause doesn't stop the guardian; its operator can stop it
+separately.
 
 ### `reconfig_hold`
 

@@ -3,7 +3,7 @@
 Recommended Prometheus alerts for hashi validator operators. A ready-to-use
 rules file lives at [`monitoring/validator-alerts.example.yml`](../monitoring/validator-alerts.example.yml).
 [`monitoring/validator-alerts.test.yml`](../monitoring/validator-alerts.test.yml) has `promtool`
-tests for the peer, MPC work and MPC refusal alerts.
+tests for the peer, pause, MPC work and MPC refusal alerts.
 
 Two principles shape this list:
 
@@ -35,6 +35,7 @@ Two principles shape this list:
 | Withdrawal check blind  | `hashi_withdrawal_bitcoin_check_blind == 1` for 10m | An hourly probe found that your bitcoind cannot check withdrawals, so your node signs them unchecked. Usually `testmempoolaccept` is not allowed on your RPC endpoint; see the error log. `-1` means no pool UTXO has been probed yet. |
 | Peer shed               | A per-peer shed counter or a `busy` or `shape` withdrawal signing or construction refusal rose in 1h (see the rules file) | For most shed counters, the peer may be misbehaving, or your node may be slow or have its limits set too low: rule your node out first. A `bitcoind` shed or a `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes none of them unless it runs without a guardian (`busy`). |
 | Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
+| Signing requested while paused | A peer's `paused` refusal in the last 15m, with `hashi_paused` at 1 throughout, held 3m (see the rules file) | Your node counts the refusals; the pause flag only gates the rule. Requests in flight when a pause starts finish within about a minute, and an unpause closes the gate. Might not fire for about 18 minutes after a restart. |
 | MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
 | MPC peer refused        | A peer's MPC requests or responses were refused in 1h (see the rules file) | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch can also come from an honest signer that lost its stored copy. |
 | MPC peers refused at once | 3 or more peers, and more than half of `hashi_mpc_committee_members`, were refused in 10m (see the rules file) | That many at once usually means your node's checks and its peers' messages disagree, which a build mismatch causes: compare builds first. A fixed count alone would page whenever 3 members are broken. |

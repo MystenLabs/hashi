@@ -158,9 +158,12 @@ the same proposal type with the flag cleared re-admits it.
 
 Pauses or unpauses the bridge by setting the `paused` config flag. While
 paused, the chain refuses new deposit and withdrawal requests and every
-committee step that processes them; users can still cancel withdrawal
-requests, and reconfiguration and governance keep running. The two directions
-use different vote thresholds:
+committee step that processes them, and each node refuses to sign for
+deposits and withdrawals (not in the 1.0 releases). Users can still cancel
+withdrawal requests, and reconfiguration and governance keep running. Anyone can
+still broadcast a withdrawal fully signed before the pause, and a committee member
+can still finish one the guardian already signed. The pause doesn't stop the
+guardian. The two directions use different vote thresholds:
 
 - **Pause:** `governance_emergency_pause_threshold_bps`, default 5% of committee
   weight. Pausing is deliberately cheap so a small fraction of the committee

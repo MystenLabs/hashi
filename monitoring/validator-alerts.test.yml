@@ -541,3 +541,123 @@ tests:
       - eval_time: 200m
         alertname: HashiMpcStoredRowsRefused
         exp_alerts: []
+
+  - name: pause-refusals-in-the-first-minute-never-fire
+    interval: 1m
+    input_series:
+      - series: 'hashi_paused{instance="n1",job="hashi"}'
+        values: '0x9 1x50'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x60'
+      - series: 'hashi_withdrawal_signing_refused_total{peer="A",reason="paused",instance="n1",job="hashi"}'
+        values: '0x10 2x49'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+
+  - name: pause-refusals-that-keep-coming-fire-and-stop-at-the-unpause
+    interval: 1m
+    input_series:
+      - series: 'hashi_paused{instance="n1",job="hashi"}'
+        values: '0x9 1x40 0x20'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x71'
+      - series: 'hashi_withdrawal_signing_refused_total{peer="A",reason="paused",instance="n1",job="hashi"}'
+        values: '0x9 1+1x40 41x20'
+    alert_rule_test:
+      - eval_time: 26m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts:
+          - exp_labels: {peer: A, reason: paused, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: peer A asked this node to sign while Hashi is paused
+              description: >-
+                An honest leader stops at a pause. Unless a Sui view lags or a 1.0 node
+                polls during a rollout, look the peer up with
+                `hashi committee -c hashi-cli.toml view A` and tell the operator channel.
+      - eval_time: 55m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+
+  - name: pause-shorter-than-the-hold-never-fires
+    interval: 1m
+    input_series:
+      - series: 'hashi_paused{instance="n1",job="hashi"}'
+        values: '0x9 1x15 0x30'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x56'
+      - series: 'hashi_withdrawal_signing_refused_total{peer="A",reason="paused",instance="n1",job="hashi"}'
+        values: '0x9 1+1x15 16x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+
+  - name: pause-refusals-while-this-node-lags-the-unpause-never-fire
+    interval: 1m
+    input_series:
+      - series: 'hashi_paused{instance="n1",job="hashi"}'
+        values: '0x9 1x51 0x20'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="A",instance="n1",job="hashi"}'
+        values: '60x82'
+      - series: 'hashi_withdrawal_signing_refused_total{peer="A",reason="paused",instance="n1",job="hashi"}'
+        values: '0x59 3x22'
+    alert_rule_test:
+      - eval_time: 61m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 64m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
+
+  - name: pause-refusal-in-a-new-peers-first-sample-fires
+    interval: 1m
+    input_series:
+      - series: 'hashi_paused{instance="n1",job="hashi"}'
+        values: '0x9 1x70'
+      - series: 'hashi_peer_first_seen_timestamp_seconds{peer="B",instance="n1",job="hashi"}'
+        values: '_x40 2390x40'
+      - series: 'hashi_withdrawal_signing_refused_total{peer="B",reason="paused",instance="n1",job="hashi"}'
+        values: '_x40 1x40'
+    alert_rule_test:
+      - eval_time: 46m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts:
+          - exp_labels: {peer: B, reason: paused, instance: n1, job: hashi, severity: warning}
+            exp_annotations:
+              summary: peer B asked this node to sign while Hashi is paused
+              description: >-
+                An honest leader stops at a pause. Unless a Sui view lags or a 1.0 node
+                polls during a rollout, look the peer up with
+                `hashi committee -c hashi-cli.toml view B` and tell the operator channel.
+      - eval_time: 60m
+        alertname: HashiSigningRequestedWhilePaused
+        exp_alerts: []
