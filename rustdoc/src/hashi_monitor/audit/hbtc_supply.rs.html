@@ -1,0 +1,196 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi-monitor/src/audit/hbtc_supply.rs`."><title>hbtc_supply.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="hashi_monitor" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">hashi_monitor/audit/</div>hbtc_supply.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="doccomment">//! The auditor checks that Bitcoin backs every hBTC on Sui.
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! Why it exists: the other checks follow the events that the monitor reads.
+<a href=#7 id=7 data-nosnippet>7</a>//! A mint path that the monitor does not follow, or a Move bug, changes the
+<a href=#8 id=8 data-nosnippet>8</a>//! hBTC supply without such an event. One comparison of state catches all of
+<a href=#9 id=9 data-nosnippet>9</a>//! them.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! How it works:
+<a href=#12 id=12 data-nosnippet>12</a>//! 1. After the pool update in each maintenance tick, read the hBTC supply and sum the
+<a href=#13 id=13 data-nosnippet>13</a>//!    held UTXO amounts. Export both as gauges.
+<a href=#14 id=14 data-nosnippet>14</a>//! 2. While the supply exceeds the pool value, keep the time it started.
+<a href=#15 id=15 data-nosnippet>15</a>//! 3. Report `HbtcSupplyExceedsPool` at each tick once that lasts
+<a href=#16 id=16 data-nosnippet>16</a>//!    `HBTC_SUPPLY_GRACE`.
+<a href=#17 id=17 data-nosnippet>17</a>//! 4. A failed read skips the check. When no read has succeeded for
+<a href=#18 id=18 data-nosnippet>18</a>//!    `SOURCE_STALE_LIMIT`, counted from the start of the audit loop at the
+<a href=#19 id=19 data-nosnippet>19</a>//!    earliest, the maintenance tick reports `SourceStale` for `hbtc_supply`.
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! Assumptions:
+<a href=#22 id=22 data-nosnippet>22</a>//! - In an honest bridge, the supply never exceeds the pool value. The pool
+<a href=#23 id=23 data-nosnippet>23</a>//!   takes a deposit at its Bitcoin confirmation, and Move mints at least
+<a href=#24 id=24 data-nosnippet>24</a>//!   `deposit_time_delay_ms` after the approval. Move burns a withdrawal at
+<a href=#25 id=25 data-nosnippet>25</a>//!   E1, and the pool drops it at E3. The burned amount includes the miner
+<a href=#26 id=26 data-nosnippet>26</a>//!   fee, so it equals what leaves the pool.
+<a href=#27 id=27 data-nosnippet>27</a>//! - The supply exceeds the pool value only for a short time when the
+<a href=#28 id=28 data-nosnippet>28</a>//!   monitor's Bitcoin side lags. `HBTC_SUPPLY_GRACE` is `SOURCE_STALE_LIMIT`:
+<a href=#29 id=29 data-nosnippet>29</a>//!   a longer lag is a `SourceStale` finding already.
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">use </span><a href="mod.rs.html#118-149"><span class="kw">super</span>::Auditor</a>;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use </span><a href="rpc_pollers.rs.html#43"><span class="kw">super</span>::rpc_pollers::SOURCE_STALE_LIMIT</a>;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">use </span><a href="../findings.rs.html#49-163"><span class="kw">crate</span>::findings::MonitorFinding</a>;
+<a href=#34 id=34 data-nosnippet>34</a><span class="kw">use </span>hashi_types::guardian::time::UnixSeconds;
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">use </span>hashi_types::guardian::time::now_timestamp_secs;
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// How long the hBTC supply may exceed the pool value before a finding, in
+<a href=#38 id=38 data-nosnippet>38</a>/// seconds.
+<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">const </span>HBTC_SUPPLY_GRACE: <a href="https://doc.rust-lang.org/1.96.1/std/primitive.u64.html">u64</a> = <a href="rpc_pollers.rs.html#43">SOURCE_STALE_LIMIT</a>;
+<a href=#40 id=40 data-nosnippet>40</a>
+<a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// The `SourceStale` source name of the hBTC supply read.
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">const </span>SOURCE_HBTC_SUPPLY: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a> = <span class="string">"hbtc_supply"</span>;
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">impl </span><a href="mod.rs.html#118-149">Auditor</a> {
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="doccomment">/// Read the hBTC supply and compare it with the pool value. A failed read
+<a href=#46 id=46 data-nosnippet>46</a>    /// skips the check; see `stale_hbtc_supply`.
+<a href=#47 id=47 data-nosnippet>47</a>    </span><span class="kw">pub async fn </span>check_hbtc_supply(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#48 id=48 data-nosnippet>48</a>        <span class="kw">let </span>supply = <span class="kw">match </span><span class="self">self</span>.read_hbtc_supply().<span class="kw">await </span>{
+<a href=#49 id=49 data-nosnippet>49</a>            <span class="prelude-val">Ok</span>(supply) =&gt; supply,
+<a href=#50 id=50 data-nosnippet>50</a>            <span class="prelude-val">Err</span>(error) =&gt; {
+<a href=#51 id=51 data-nosnippet>51</a>                <span class="macro">tracing::warn!</span>(<span class="question-mark">?</span>error, <span class="string">"hBTC supply read failed; retrying at the next tick"</span>);
+<a href=#52 id=52 data-nosnippet>52</a>                <span class="kw">return</span>;
+<a href=#53 id=53 data-nosnippet>53</a>            }
+<a href=#54 id=54 data-nosnippet>54</a>        };
+<a href=#55 id=55 data-nosnippet>55</a>        <span class="kw">let </span>pool_value = <span class="self">self</span>.utxo_pool.value();
+<a href=#56 id=56 data-nosnippet>56</a>        <span class="kw">let </span>(since, finding) = judge_hbtc_supply(
+<a href=#57 id=57 data-nosnippet>57</a>            <span class="self">self</span>.hbtc_supply_above_pool_since,
+<a href=#58 id=58 data-nosnippet>58</a>            supply,
+<a href=#59 id=59 data-nosnippet>59</a>            pool_value,
+<a href=#60 id=60 data-nosnippet>60</a>            now_timestamp_secs(),
+<a href=#61 id=61 data-nosnippet>61</a>        );
+<a href=#62 id=62 data-nosnippet>62</a>        <span class="comment">// Log only a change, so a steady state adds no line.
+<a href=#63 id=63 data-nosnippet>63</a>        </span><span class="kw">match </span>(<span class="self">self</span>.hbtc_supply_above_pool_since, since) {
+<a href=#64 id=64 data-nosnippet>64</a>            (<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="kw">_</span>)) =&gt; <span class="macro">tracing::info!</span>(
+<a href=#65 id=65 data-nosnippet>65</a>                hbtc_supply = supply,
+<a href=#66 id=66 data-nosnippet>66</a>                pool_value,
+<a href=#67 id=67 data-nosnippet>67</a>                grace_secs = HBTC_SUPPLY_GRACE,
+<a href=#68 id=68 data-nosnippet>68</a>                <span class="string">"the hBTC supply exceeds the pool value; waiting for the grace period"
+<a href=#69 id=69 data-nosnippet>69</a>            </span>),
+<a href=#70 id=70 data-nosnippet>70</a>            (<span class="prelude-val">Some</span>(<span class="kw">_</span>), <span class="prelude-val">None</span>) =&gt; <span class="macro">tracing::info!</span>(
+<a href=#71 id=71 data-nosnippet>71</a>                hbtc_supply = supply,
+<a href=#72 id=72 data-nosnippet>72</a>                pool_value,
+<a href=#73 id=73 data-nosnippet>73</a>                <span class="string">"the pool value backs the hBTC supply again"
+<a href=#74 id=74 data-nosnippet>74</a>            </span>),
+<a href=#75 id=75 data-nosnippet>75</a>            <span class="kw">_ </span>=&gt; {}
+<a href=#76 id=76 data-nosnippet>76</a>        }
+<a href=#77 id=77 data-nosnippet>77</a>        <span class="self">self</span>.hbtc_supply_above_pool_since = since;
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="self">self</span>.report_findings(<span class="string">"hbtc_supply"</span>, finding.as_slice());
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="doccomment">/// Read the hBTC supply and export it with the pool value.
+<a href=#82 id=82 data-nosnippet>82</a>    </span><span class="kw">pub async fn </span>read_hbtc_supply(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; anyhow::Result&lt;u64&gt; {
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw">let </span>supply = <span class="self">self</span>.rpc_pollers.sui_poller.hbtc_supply().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#84 id=84 data-nosnippet>84</a>        <span class="self">self</span>.last_hbtc_supply_read = now_timestamp_secs();
+<a href=#85 id=85 data-nosnippet>85</a>        <span class="self">self</span>.metrics
+<a href=#86 id=86 data-nosnippet>86</a>            .set_hbtc_backing(supply, <span class="self">self</span>.utxo_pool.value());
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="prelude-val">Ok</span>(supply)
+<a href=#88 id=88 data-nosnippet>88</a>    }
+<a href=#89 id=89 data-nosnippet>89</a>}
+<a href=#90 id=90 data-nosnippet>90</a>
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">impl </span><a href="mod.rs.html#118-149">Auditor</a> {
+<a href=#92 id=92 data-nosnippet>92</a>    <span class="doccomment">/// A `SourceStale` finding when no hBTC supply read has succeeded for
+<a href=#93 id=93 data-nosnippet>93</a>    /// `SOURCE_STALE_LIMIT` at `now`. The time counts from the later of the
+<a href=#94 id=94 data-nosnippet>94</a>    /// last read and the start of the audit loop, because the first catch-up
+<a href=#95 id=95 data-nosnippet>95</a>    /// does not read the supply.
+<a href=#96 id=96 data-nosnippet>96</a>    </span><span class="kw">pub fn </span>stale_hbtc_supply(<span class="kw-2">&amp;</span><span class="self">self</span>, now: UnixSeconds) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;<a href="../findings.rs.html#49-163">MonitorFinding</a>&gt; {
+<a href=#97 id=97 data-nosnippet>97</a>        <span class="kw">let </span>checked_through = <a class="self" href="#96">self</a>.last_hbtc_supply_read.<a href="https://doc.rust-lang.org/1.96.1/core/cmp/trait.Ord.html#method.max">max</a>(<a class="self" href="#96">self</a>.started_at);
+<a href=#98 id=98 data-nosnippet>98</a>        (<a href="#96">now</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.num.html#method.saturating_sub">saturating_sub</a>(<a href="#97">checked_through</a>) &gt; <a href="rpc_pollers.rs.html#43">SOURCE_STALE_LIMIT</a>).<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.bool.html#method.then_some">then_some</a>(
+<a href=#99 id=99 data-nosnippet>99</a>            MonitorFinding::<a href="../findings.rs.html#139-143">SourceStale</a> {
+<a href=#100 id=100 data-nosnippet>100</a>                source: <a href="#42">SOURCE_HBTC_SUPPLY</a>,
+<a href=#101 id=101 data-nosnippet>101</a>                <a href="#97">checked_through</a>,
+<a href=#102 id=102 data-nosnippet>102</a>                limit_secs: <a href="rpc_pollers.rs.html#43">SOURCE_STALE_LIMIT</a>,
+<a href=#103 id=103 data-nosnippet>103</a>            },
+<a href=#104 id=104 data-nosnippet>104</a>        )
+<a href=#105 id=105 data-nosnippet>105</a>    }
+<a href=#106 id=106 data-nosnippet>106</a>}
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a><span class="doccomment">/// Judge the hBTC supply against the pool value at `now`. Returns the new
+<a href=#109 id=109 data-nosnippet>109</a>/// time since the supply exceeds the pool, and a finding once that lasts
+<a href=#110 id=110 data-nosnippet>110</a>/// `HBTC_SUPPLY_GRACE`.
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">fn </span>judge_hbtc_supply(
+<a href=#112 id=112 data-nosnippet>112</a>    above_since: <a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;UnixSeconds&gt;,
+<a href=#113 id=113 data-nosnippet>113</a>    hbtc_supply: <a href="https://doc.rust-lang.org/1.96.1/std/primitive.u64.html">u64</a>,
+<a href=#114 id=114 data-nosnippet>114</a>    pool_value: <a href="https://doc.rust-lang.org/1.96.1/std/primitive.u64.html">u64</a>,
+<a href=#115 id=115 data-nosnippet>115</a>    now: UnixSeconds,
+<a href=#116 id=116 data-nosnippet>116</a>) -&gt; (<a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;UnixSeconds&gt;, <a class="prelude-ty" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html">Option</a>&lt;<a href="../findings.rs.html#49-163">MonitorFinding</a>&gt;) {
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">if </span><a href="#113">hbtc_supply</a> &lt;= <a href="#114">pool_value</a> {
+<a href=#118 id=118 data-nosnippet>118</a>        <span class="kw">return </span>(<a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a>, <a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.None">None</a>);
+<a href=#119 id=119 data-nosnippet>119</a>    }
+<a href=#120 id=120 data-nosnippet>120</a>    <span class="kw">let </span>since = <a href="#112">above_since</a>.<a href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<a href="#115">now</a>);
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">let </span>finding = (<a href="#115">now</a>.<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.num.html#method.saturating_sub">saturating_sub</a>(<a href="#120">since</a>) &gt;= <a href="#39">HBTC_SUPPLY_GRACE</a>).<a href="https://doc.rust-lang.org/1.96.1/core/foreigntype.bool.html#method.then_some">then_some</a>(
+<a href=#122 id=122 data-nosnippet>122</a>        MonitorFinding::<a href="../findings.rs.html#132-136">HbtcSupplyExceedsPool</a> {
+<a href=#123 id=123 data-nosnippet>123</a>            <a href="#113">hbtc_supply</a>,
+<a href=#124 id=124 data-nosnippet>124</a>            <a href="#114">pool_value</a>,
+<a href=#125 id=125 data-nosnippet>125</a>            <a href="#120">since</a>,
+<a href=#126 id=126 data-nosnippet>126</a>        },
+<a href=#127 id=127 data-nosnippet>127</a>    );
+<a href=#128 id=128 data-nosnippet>128</a>    (<a class="prelude-val" href="https://doc.rust-lang.org/1.96.1/core/option/enum.Option.html#variant.Some">Some</a>(<a href="#120">since</a>), <a href="#121">finding</a>)
+<a href=#129 id=129 data-nosnippet>129</a>}
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a><span class="attr">#[cfg(test)]
+<a href=#132 id=132 data-nosnippet>132</a></span><span class="kw">mod </span>tests {
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="kw">use </span><span class="kw">crate</span>::audit::tests::auditor_with;
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="kw">use </span><span class="kw">crate</span>::config::Config;
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="kw">use </span><span class="kw">crate</span>::metrics::MonitorMetrics;
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="kw">use </span>std::sync::Arc;
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="attr">#[tokio::test]
+<a href=#140 id=140 data-nosnippet>140</a>    </span><span class="kw">async fn </span>a_supply_read_that_does_not_succeed_is_stale() {
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="kw">let </span>cfg = Config::for_tests();
+<a href=#142 id=142 data-nosnippet>142</a>        <span class="kw">let </span><span class="kw-2">mut </span>auditor = auditor_with(<span class="kw-2">&amp;</span>cfg, Arc::new(MonitorMetrics::new()));
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">let </span>read_at = auditor.last_hbtc_supply_read;
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="macro">assert_eq!</span>(
+<a href=#146 id=146 data-nosnippet>146</a>            auditor.stale_hbtc_supply(read_at + SOURCE_STALE_LIMIT),
+<a href=#147 id=147 data-nosnippet>147</a>            <span class="prelude-val">None
+<a href=#148 id=148 data-nosnippet>148</a>        </span>);
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="macro">assert_eq!</span>(
+<a href=#150 id=150 data-nosnippet>150</a>            auditor.stale_hbtc_supply(read_at + SOURCE_STALE_LIMIT + <span class="number">1</span>),
+<a href=#151 id=151 data-nosnippet>151</a>            <span class="prelude-val">Some</span>(MonitorFinding::SourceStale {
+<a href=#152 id=152 data-nosnippet>152</a>                source: SOURCE_HBTC_SUPPLY,
+<a href=#153 id=153 data-nosnippet>153</a>                checked_through: read_at,
+<a href=#154 id=154 data-nosnippet>154</a>                limit_secs: SOURCE_STALE_LIMIT,
+<a href=#155 id=155 data-nosnippet>155</a>            })
+<a href=#156 id=156 data-nosnippet>156</a>        );
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a>        <span class="comment">// A loop that starts after a long catch-up counts from its start.
+<a href=#159 id=159 data-nosnippet>159</a>        </span>auditor.started_at = read_at + <span class="number">10 </span>* SOURCE_STALE_LIMIT;
+<a href=#160 id=160 data-nosnippet>160</a>        <span class="macro">assert_eq!</span>(
+<a href=#161 id=161 data-nosnippet>161</a>            auditor.stale_hbtc_supply(auditor.started_at + SOURCE_STALE_LIMIT),
+<a href=#162 id=162 data-nosnippet>162</a>            <span class="prelude-val">None
+<a href=#163 id=163 data-nosnippet>163</a>        </span>);
+<a href=#164 id=164 data-nosnippet>164</a>    }
+<a href=#165 id=165 data-nosnippet>165</a>
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="attr">#[test]
+<a href=#167 id=167 data-nosnippet>167</a>    </span><span class="kw">fn </span>a_supply_above_the_pool_is_reported_after_the_grace() {
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="comment">// Below or equal is fine and clears an earlier excess.
+<a href=#169 id=169 data-nosnippet>169</a>        </span><span class="macro">assert_eq!</span>(judge_hbtc_supply(<span class="prelude-val">Some</span>(<span class="number">5</span>), <span class="number">100</span>, <span class="number">100</span>, <span class="number">10</span>), (<span class="prelude-val">None</span>, <span class="prelude-val">None</span>));
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="comment">// The first excess starts the grace.
+<a href=#172 id=172 data-nosnippet>172</a>        </span><span class="macro">assert_eq!</span>(
+<a href=#173 id=173 data-nosnippet>173</a>            judge_hbtc_supply(<span class="prelude-val">None</span>, <span class="number">101</span>, <span class="number">100</span>, <span class="number">1_000</span>),
+<a href=#174 id=174 data-nosnippet>174</a>            (<span class="prelude-val">Some</span>(<span class="number">1_000</span>), <span class="prelude-val">None</span>)
+<a href=#175 id=175 data-nosnippet>175</a>        );
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="kw">let </span>within = <span class="number">1_000 </span>+ HBTC_SUPPLY_GRACE - <span class="number">1</span>;
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="macro">assert_eq!</span>(
+<a href=#178 id=178 data-nosnippet>178</a>            judge_hbtc_supply(<span class="prelude-val">Some</span>(<span class="number">1_000</span>), <span class="number">101</span>, <span class="number">100</span>, within),
+<a href=#179 id=179 data-nosnippet>179</a>            (<span class="prelude-val">Some</span>(<span class="number">1_000</span>), <span class="prelude-val">None</span>)
+<a href=#180 id=180 data-nosnippet>180</a>        );
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">let </span>after = <span class="number">1_000 </span>+ HBTC_SUPPLY_GRACE;
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="macro">assert_eq!</span>(
+<a href=#184 id=184 data-nosnippet>184</a>            judge_hbtc_supply(<span class="prelude-val">Some</span>(<span class="number">1_000</span>), <span class="number">101</span>, <span class="number">100</span>, after),
+<a href=#185 id=185 data-nosnippet>185</a>            (
+<a href=#186 id=186 data-nosnippet>186</a>                <span class="prelude-val">Some</span>(<span class="number">1_000</span>),
+<a href=#187 id=187 data-nosnippet>187</a>                <span class="prelude-val">Some</span>(MonitorFinding::HbtcSupplyExceedsPool {
+<a href=#188 id=188 data-nosnippet>188</a>                    hbtc_supply: <span class="number">101</span>,
+<a href=#189 id=189 data-nosnippet>189</a>                    pool_value: <span class="number">100</span>,
+<a href=#190 id=190 data-nosnippet>190</a>                    since: <span class="number">1_000</span>,
+<a href=#191 id=191 data-nosnippet>191</a>                })
+<a href=#192 id=192 data-nosnippet>192</a>            )
+<a href=#193 id=193 data-nosnippet>193</a>        );
+<a href=#194 id=194 data-nosnippet>194</a>    }
+<a href=#195 id=195 data-nosnippet>195</a>}
+</code></pre></div></section></main></body></html>

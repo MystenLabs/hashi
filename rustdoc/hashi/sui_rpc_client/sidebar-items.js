@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_sui_chain_id","new_sui_rpc_client"]};

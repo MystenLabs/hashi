@@ -1,0 +1,131 @@
+# Monitoring and Alerts
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> The Hashi node Prometheus endpoint, the required metrics push to Mysten, the key metrics to watch, and suggested alerts.
+
+## Prometheus endpoint
+
+The node serves metrics at `http://127.0.0.1:9180/metrics` (configurable through `metrics-http-address`).
+
+```bash
+curl -s http://localhost:9180/metrics | grep hashi_
+```
+
+## Metrics push
+
+Configure the node to push its metrics to the Mysten-operated collection endpoint for your network. The Hashi team relies on this for fleet-wide visibility on both networks, so every operator must include this section in the validator config:
+
+<Tabs groupId="network" queryString>
+<TabItem value="mainnet" label="Mainnet" default>
+
+```toml
+[metrics-push]
+push-url = "https://metrics-proxy.mainnet.sui.io:8443/publish/metrics"
+# How often to push (default: 60)
+# push-interval-seconds = 60
+```
+
+</TabItem>
+<TabItem value="testnet" label="Testnet">
+
+```toml
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+# How often to push (default: 60)
+# push-interval-seconds = 60
+```
+
+</TabItem>
+</Tabs>
+
+Notes:
+
+- `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [Validator config](configuration.mdx#validator-config).
+- **You need no extra credentials.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. The endpoint accepts pushes only from committee members, so until your node is seated (at launch, or at a later committee formation if you register afterwards) the endpoint refuses each push and the node logs `unable to push metrics`. That is expected.
+- The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
+
+## Key metrics
+
+| Metric | Type | What to Watch |
+|--------|------|---------------|
+| `uptime` | counter | Node uptime (s). Labels: `version`, `sui_chain_id`, `bitcoin_chain_id`, `package_id`, `hashi_object_id`. |
+| `hashi_epoch` | gauge | Current Hashi epoch. Should advance with Sui epochs. |
+| `hashi_sui_epoch` | gauge | Current Sui epoch. |
+| `hashi_sui_rpc_info` | gauge | Configured Sui RPC endpoint. The `endpoint` label identifies the fullnode used by this validator. |
+| `hashi_reconfig_in_progress` | gauge | 1 during reconfiguration. Extended periods = problem. |
+| `hashi_reconfig_aborted_total` | counter | Reconfigurations torn down by `abort_reconfig`, whoever submitted it. Each one means a reconfiguration stalled for a whole Sui epoch. |
+| `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. `hashi_reconfig_in_progress`, not this gauge, reflects the separate pause that occurs during reconfiguration. |
+| `hashi_reconfig_hold` | gauge | 1 when the onchain `reconfig_hold` config flag is set: the chain refuses `start_reconfig`, so Hashi stays behind Sui's epoch on its current committee until governance clears it (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). Healthy: `0`. |
+| `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |
+| `hashi_is_leader` | gauge | 1 when this node is the current leader. |
+| `hashi_kyoto_synced` | gauge | 1 when the Bitcoin light client is synced. Healthy: `1` in steady state. |
+| `hashi_kyoto_best_height` | gauge | Bitcoin tip block height. Healthy: tracks your Bitcoin node's `getblockchaininfo` height. |
+| `hashi_kyoto_connected_peers` | gauge | Bitcoin P2P peer count. See the note below on what value is healthy. |
+| `hashi_kyoto_sync_percent` | gauge | Compact block filter sync progress (0 to 100). Healthy: reaches `100`; should climb during initial sync. |
+| `hashi_kyoto_restarts_total` | counter | Light client restarts after connectivity loss. Healthy: flat. |
+| `hashi_kyoto_consecutive_failures` | gauge | Consecutive peer connection failures. Healthy: `0`. |
+| `hashi_deposit_queue_size` | gauge | Pending deposit requests. |
+| `hashi_withdrawal_queue_size` | gauge | Pending withdrawals (by status). |
+| `hashi_utxo_pool_size` | gauge | Managed UTXOs (available / unconfirmed_change / locked); `unconfirmed_change` is a subset of `available`. |
+| `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
+| `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG or rotation duration. |
+| `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
+| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
+| `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
+| `hashi_withdrawal_bitcoin_check_script_failures_total` | counter | Script failures your bitcoind reported. Healthy: stays at 0. |
+| `hashi_withdrawal_bitcoin_check_blind` | gauge | 1 when your bitcoind cannot check withdrawals. Healthy: `0`. It reads `-1` until the pool holds a UTXO to probe; that is expected, not a fault. |
+| `hashi_peer_requests_shed_total`, `hashi_peer_requests_over_byte_budget_total`, `hashi_peer_requests_too_large_total`, `hashi_peer_mpc_work_shed_total`, `hashi_peer_responses_shed_total`, `hashi_peer_requests_over_connection_limit_total`, `hashi_peer_store_reads_shed_total` | counter | Traffic a per-peer limit shed or refused, by `peer`. Healthy: flat. |
+| `hashi_mpc_unguarded_spawn_blocking_total` | counter | MPC work started outside the per-peer budget. Healthy: `0`. |
+| `hashi_peer_first_seen_timestamp_seconds` | gauge | When this node first saw each peer since start. The peer alerts need it. |
+| `hashi_withdrawal_signing_refused_total` | counter | Withdrawal signing and construction calls this node refused as `committee`, `cap`, `busy` or `shape`, by `peer`, and deposit confirmation, withdrawal approval, withdrawal confirmation and guardian request calls refused as `committee`. While Hashi is paused, each of these calls and each partial-signature request counts as `paused`. Healthy: `shape` flat, and `busy` too while the leader has a guardian. `committee` moves at epoch changes, `cap` is noisy, and `paused` rises briefly when a pause starts and ends. |
+| `hashi_peer_bitcoind_places_in_use`, `hashi_peer_bitcoind_calls_in_use`, `hashi_peer_bitcoind_discoveries_in_use` | gauge | Places in this node's Bitcoin monitor held by each peer's deposit confirmation, construction and withdrawal confirmation requests (at most 192; a deposit discovery keeps its starter's place until it ends), the Bitcoin Core RPCs running for them (at most 16), and their deposit discoveries (at most 64). A flat 16 calls means the peer keeps every call busy: a member doing it on purpose, or the leader at a node whose bitcoind is slow; compare across nodes. |
+| `hashi_peer_bitcoind_requests_shed_total` | counter | Requests refused because they got no place in this node's Bitcoin monitor within 45 s of their arrival, by `peer`. Healthy: flat; an honest leader gives up after 40 s. |
+| `hashi_peer_bitcoind_discoveries_refused_total` | counter | Deposit confirmations refused because the peer already had 64 deposit discoveries running here. An honest leader reaches this in a burst of new deposits when this node's discoveries are slow, so it is not alerted. |
+| `hashi_kyoto_block_fetch_seconds` | histogram | Time from asking Kyoto for a block to its answer, queue wait included, for block scans and deposit discoveries. A discovery's fetch is recorded when Kyoto answers or drops it, even after the discovery has timed out; a block scan's fetch abandoned at a timeout, reorg or restart is recorded when it is abandoned. |
+| `hashi_peer_bridge_work_seconds_total` | counter | Seconds this node spent validating and signing each peer's withdrawal signing and construction requests, at most two at a time per peer. A rate near 2 over an hour means the peer keeps both busy, which an honest leader with a guardian does not unless your node is much slower than its peers, or another member's bad partial signatures are slowing aggregation (`hashi_mpc_partial_sig_mismatch_total` names that member when the blame is certain). |
+| `hashi_peer_store_reads_max` | gauge | Each requester's peak store-reading `RetrieveMessages` since start, against the limit of 4. An honest requester rarely holds more than two. |
+| `hashi_mpc_peer_refusals_total` | counter | MPC requests (`side="request"`) and responses (`side="response"`) this node refused from each `peer`. Healthy: flat. `hashi_mpc_peer_refusals_first_timestamp_seconds` dates each series' first refusal, for the alerts. |
+| `hashi_mpc_refusals_total` | counter | The same refusals by `side`, `handler`, `protocol` and `reason`, for finding which check refused. |
+| `hashi_mpc_stored_rows_refused_total` | counter | This node's own stored MPC rows refused as unusable, by `protocol` and `phase` (`load`, `read` or `serve`). Healthy: `0`. `hashi_mpc_stored_rows_refused_first_timestamp_seconds` dates each series' first refusal. |
+| `hashi_mpc_committee_members` | gauge | Members of the committee of the installed MPC manager. The at-once refusal alert compares against it. |
+
+> **Not in the 1.0 releases.** `hashi_withdrawal_bitcoin_check_script_failures_total` and `hashi_withdrawal_bitcoin_check_blind` come with the `testmempoolaccept` withdrawal check, which `testnet-1.0` and `mainnet-1.0` do not have. On 1.0 both metrics are absent and their alerts in [Suggested alerts](#suggested-alerts) never fire.
+
+> **Also not in the 1.0 releases.** Of the `hashi_peer_*` and `hashi_mpc_unguarded_*` metrics, 1.0 has only `hashi_peer_requests_shed_total`, so there the alerts miss a shed in a series' first sample. On 1.0, `hashi_withdrawal_signing_refused_total` counts only `committee` and `cap`, so the pause alert never fires there, and `hashi_kyoto_block_fetch_seconds` is absent. The MPC refusal metrics and `hashi_mpc_committee_members` are absent on 1.0, so their alerts never fire there.
+
+> **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [Bitcoin node](prerequisites.mdx#bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. It keeps a single peer connection, so `1` is the healthy value however many trusted peers you list; extra entries are failover candidates, not extra connections. What matters is that the value is **non-zero and stable**: the alert in [Suggested alerts](#suggested-alerts) fires on `== 0`, not on a low count.
+
+**Checking committee membership and status.** Query committee state through the CLI (note the flag placement from [Global options](../reference/cli.mdx#global-options)):
+
+```bash
+hashi committee -c hashi-cli.toml list            # all members for the current epoch
+hashi committee -c hashi-cli.toml view 0x<addr>   # one validator's details
+hashi committee -c hashi-cli.toml epoch           # current epoch info
+```
+
+See [Committee](../committee.mdx) for what membership means and how Hashi derives the member set from the Sui validator set.
+
+> The **CLI is the status of record** for committee membership. These pages do not link a public explorer view for Hashi committee state, because the team has confirmed none; do not rely on a third-party dashboard to determine whether your node is in the committee.
+
+## Suggested alerts
+
+| Condition | Severity | Action |
+|-----------|----------|--------|
+| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG or rotation errors. Nodes abort and restart it themselves once it overruns its Sui epoch; `hashi committee abort-reconfig` is the manual fallback (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). |
+| `increase(hashi_reconfig_aborted_total[1h]) > 0` | Warning | A reconfiguration stalled for a full Sui epoch and the nodes aborted it; the replacement starts on its own. Find out why the first one stalled (offline stake, bad endpoints or keys, partitions). |
+| `hashi_presig_pool_remaining == 0` for > 10 min on a committee member | Critical | Node cannot sign. Check reconfig status and MPC logs. The gauge also reads 0 right after a restart and on a node that hasn't been in the committee since it started; a node that has left keeps its last value. |
+| `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
+| `hashi_kyoto_connected_peers == 0` for > 5 min | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. Each light-client restart briefly resets it to 0. |
+| `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
+| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
+| `hashi_withdrawal_bitcoin_check_script_failures_total` increasing | Critical | Your bitcoind rejected a signed withdrawal. Tell the operator channel; if only you see it, check your bitcoind. |
+| `hashi_withdrawal_bitcoin_check_blind == 1` for > 10 min | Warning | Your node cannot check withdrawals. Allow `testmempoolaccept`; see the error log. |
+| A per-peer shed counter from [Key metrics](#key-metrics), or a `busy` or `shape` withdrawal signing or construction refusal, counted in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | For a shed counter, the `peer` might be misbehaving, or your node might be slow or have its limits set too low: rule your node out first (`hashi_request_latency`). A `busy` or `shape` refusal points at the peer, however slow your node is: an honest leader causes neither unless it runs without a guardian (`busy`). Then look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
+| 3 or more peers hit the request count or MPC work limits within 10 min | Critical | Usually your node is slow, not the peers, though colluding members can also cause it. Check `hashi_request_latency` and tell the operator channel. |
+| A peer asked your node to sign more than about 3 min into a pause (see `monitoring/validator-alerts.example.yml`) | Warning | Unless a Sui view lags or a 1.0 node polls during a rollout, the `peer` is ignoring the pause. Look it up with `hashi committee -c hashi-cli.toml view <peer>` and tell the operator channel. |
+| `hashi_mpc_unguarded_spawn_blocking_total` increasing | Warning | A node bug. Report it to the hashi team with your version. |
+| A peer's MPC requests or responses refused in the last hour (see `monitoring/validator-alerts.example.yml`) | Warning | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch (`reason="hash"` in `hashi_mpc_refusals_total`) can also come from an honest signer that lost its stored copy. Look the peer up with `hashi committee -c hashi-cli.toml view <peer>`. |
+| MPC messages from 3 or more peers, and more than half of the committee, refused within 10 min | Critical | Usually your node's checks and its peers' messages disagree. Compare your build with the refused peers' first, from each node's `GetServiceInfo` reply: in a staged rollout, nodes on different builds can refuse each other's messages. Tell the operator channel. |
+| Your node refused one of its own stored MPC rows in the last hour | Warning | Its store is damaged or, when several nodes see this right after an upgrade, the new build refuses what an earlier one accepted. A rotation that needs the row can fail. Tell the operator channel with your version and the alert's `phase`. |
+| `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |

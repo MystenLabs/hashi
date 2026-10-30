@@ -1,0 +1,46 @@
+# Service
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> The Hashi node service that committee members run, the gRPC interface it exposes, and the on-Sui state it relies on.
+
+Every committee member is responsible for running a Hashi node service. Each
+Hashi node exposes an HTTP service, secured by Transport Layer Security (TLS)
+using a self-signed cert (the ed25519 public key is available in the Hashi
+System State object), and serves a gRPC `HashiService`.
+
+## Sui contracts
+
+- The Hashi Move packages are published as normal packages. The Hashi packages
+  are not system packages, and are not part of the Sui framework.
+
+## Stateless
+
+A main goal of this design is to make the Hashi service as stateless as
+possible. Outside of any cryptographic material required for participating in
+the protocol, any state critical for the functioning of the service must be
+stored on Sui as part of the live object set. Knowledge of any historical
+transactions or events previously emitted must not be needed for correct
+operation of the service.
+
+The set of data structures and state kept onchain is as follows:
+
+```mermaid
+block-beta
+  columns 1
+
+  block
+    committee
+    config
+  end
+
+  pool["UTXO pool"]
+
+  block
+    gov["Governance Requests"]
+    deposits["Deposit Request Queue"]
+    withdrawals["Withdrawal Request Queue"]
+  end
+
+  broadcast["Ordered broadcast channel"]
+```

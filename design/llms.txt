@@ -1,0 +1,60 @@
+# Hashi Documentation for LLMs
+
+> Design specification for Hashi, the Sui native Bitcoin orchestrator.
+> Hashi secures and manages BTC for use on Sui through threshold cryptography,
+> minting `hBTC` against committee-approved Bitcoin deposits.
+
+> For the complete, unabridged content of every page see [llms-full.txt](https://mystenlabs.github.io/hashi/design/llms-full.txt).
+
+- [Introduction](https://mystenlabs.github.io/hashi/design/index.md): Overview of Hashi, the Sui native Bitcoin orchestrator that secures BTC for use on Sui through threshold cryptography and represents it as hBTC.
+
+## Protocol
+
+- [Service](https://mystenlabs.github.io/hashi/design/service.md): The Hashi node service that committee members run, the gRPC interface it exposes, and the on-Sui state it relies on.
+- [Committee](https://mystenlabs.github.io/hashi/design/committee.md): The Hashi committee is a subset of the Sui validator set that operates the protocol's MPC signing service.
+- [MPC Protocol](https://mystenlabs.github.io/hashi/design/mpc-protocol.md): The Multi-Party Computation protocols that Hashi uses for distributed key generation, key rotation, and threshold Schnorr signing.
+- [Guardian](https://mystenlabs.github.io/hashi/design/guardian.md): The withdrawal Guardian is a second signatory on managed Bitcoin deposits, providing defense in depth against committee compromise.
+- [Bitcoin Address Scheme](https://mystenlabs.github.io/hashi/design/address-scheme.md): Hashi derives a unique Bitcoin Taproot deposit address for every Sui address using a 2-of-2 multisig between the MPC committee and the Guardian, plus a delayed MPC-only recovery path.
+- [Move Model Lifecycle](https://mystenlabs.github.io/hashi/design/move-model-lifecycle.md): How Hashi's key Move data structures transform between onchain Sui state and offchain Bitcoin state during deposit and withdrawal flows.
+- [Deposit](https://mystenlabs.github.io/hashi/design/deposit.md): How Hashi turns BTC sent to a deposit address into hBTC on Sui through the request, approve, confirm, and mint phases.
+- [Withdraw](https://mystenlabs.github.io/hashi/design/withdraw.md): How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
+- [Reconfiguration](https://mystenlabs.github.io/hashi/design/reconfiguration.md): How the Hashi committee transfers MPC key shares between epochs through DKG or key rotation as Sui validators change.
+- [Governance Actions](https://mystenlabs.github.io/hashi/design/governance-actions.md): Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
+- [Move Package Upgrades](https://mystenlabs.github.io/hashi/design/move-upgrades.md): How Hashi classifies Move upgrades as exclusive or non-exclusive, rolls out validator binaries, and retires old package versions safely.
+- [Rate Limiting Withdrawals](https://mystenlabs.github.io/hashi/design/limiter.md): Hashi enforces a token-bucket rate limit on withdrawal outflows through the Guardian to protect against vulnerabilities.
+- [Handling Sanctioned Addresses](https://mystenlabs.github.io/hashi/design/sanctions.md): How Hashi committee members independently apply sanctions checks to deposits and withdrawals with their own TRM Labs accounts.
+- [Fees](https://mystenlabs.github.io/hashi/design/fees.md): How Hashi charges miner fees on withdrawals, enforces fee bounds, and handles stuck transactions.
+
+## hBTC
+
+- [User Flows](https://mystenlabs.github.io/hashi/design/user-flows.md): End-to-end deposit and withdrawal flows for users moving BTC between Bitcoin and Sui through Hashi.
+- [Deposit BTC](https://mystenlabs.github.io/hashi/design/hbtc/deposit.md): How to deposit BTC into Hashi and receive hBTC on Sui using the Hashi CLI or the TypeScript SDK, from deriving your deposit address to tracking the mint.
+- [Withdraw BTC](https://mystenlabs.github.io/hashi/design/hbtc/withdraw.md): How to redeem hBTC on Sui for native BTC using the Hashi CLI or the TypeScript SDK, including destination address rules, the miner fee, and how to track the withdrawal.
+- [Cancel a Withdrawal](https://mystenlabs.github.io/hashi/design/hbtc/cancel.md): When you can cancel a pending Hashi withdrawal and how to do it with the CLI or the TypeScript SDK to get your hBTC back.
+- [hBTC FAQ](https://mystenlabs.github.io/hashi/design/hbtc/faq.md): Answers to common questions about hBTC: backing, timing, minimums, fees, stuck withdrawals, supported addresses, and the HASHI token.
+
+## Integration
+
+- [TypeScript SDK](https://mystenlabs.github.io/hashi/design/ts-sdk.md): TypeScript SDK for the Hashi protocol. Hashi is a decentralized Bitcoin collateralization primitive on Sui. Orchestrate native BTC directly from smart contracts—without centralized balance sheets.
+
+## Validators
+
+- [Run a Hashi Node](https://mystenlabs.github.io/hashi/design/validators/index.md): How Sui validators join the Hashi committee and run a Hashi node, with the onboarding steps, common questions, and links to each operator guide.
+- [Prerequisites](https://mystenlabs.github.io/hashi/design/validators/prerequisites.md): Hardware sizing, the Bitcoin and Sui dependencies, and how to build the Hashi binary before you run a Hashi node.
+- [Keys and Security](https://mystenlabs.github.io/hashi/design/validators/keys.md): The keys a Hashi node uses, which ones you generate, why the validator account key must sign registration, and how to delegate to and revoke an operator key.
+- [Configuration](https://mystenlabs.github.io/hashi/design/validators/configuration.md): The Hashi validator config and CLI config templates for Mainnet and Testnet, the environment variables that override them, and the network ports and TLS the node uses.
+- [Genesis and Joining the Committee](https://mystenlabs.github.io/hashi/design/validators/genesis.md): The Hashi genesis procedure from package publication through registration, launch, and DKG, and how a validator joins the committee after launch.
+- [Governance Participation](https://mystenlabs.github.io/hashi/design/validators/governance.md): How Hashi committee members create, vote on, and execute governance proposals, the proposal types and thresholds, and the configurable protocol parameters.
+- [Monitoring and Alerts](https://mystenlabs.github.io/hashi/design/validators/monitoring.md): The Hashi node Prometheus endpoint, the required metrics push to Mysten, the key metrics to watch, and suggested alerts.
+- [Epoch Changes](https://mystenlabs.github.io/hashi/design/validators/epoch-changes.md): What happens to a Hashi node at each Sui epoch change, what operators must do, and how to recover a stuck reconfiguration.
+- [Backup and Restore](https://mystenlabs.github.io/hashi/design/validators/backup-restore.md): What a Hashi node backup contains, how the node writes one every epoch, and how to restore a node from a backup after machine or disk loss.
+- [Hashi Node Backups](https://mystenlabs.github.io/hashi/design/node-backup.md): How node operators encrypt and restore essential node data with armored PGP backups, including YubiKey restore paths.
+- [Troubleshooting](https://mystenlabs.github.io/hashi/design/validators/troubleshooting.md): Symptoms, causes, and fixes for Hashi node startup failures, CLI configuration errors, registration and offline signing problems, and Bitcoin light client issues.
+
+## Reference
+
+- [Networks](https://mystenlabs.github.io/hashi/design/reference/networks.md): Hashi Testnet and Mainnet parameters: Sui and Bitcoin chain IDs, package and object IDs, endpoints, ports, and release tags.
+- [Configuration](https://mystenlabs.github.io/hashi/design/config.md): Onchain configuration parameters that control Hashi's deposit, withdrawal, fee, and operational behavior.
+- [CLI Reference](https://mystenlabs.github.io/hashi/design/reference/cli.md): Every hashi CLI subcommand with its flags, where the global options go, and the commands for server, register, committee, config, proposals, backup, deposit, withdraw, and validator.
+- [Releases](https://mystenlabs.github.io/hashi/design/reference/releases.md): Where to find Hashi releases, how to verify the binary and container image, and how Mysten rolls its Testnet nodes.
+

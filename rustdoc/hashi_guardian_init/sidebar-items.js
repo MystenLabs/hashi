@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["load_attested_kp_cert","write_dev_attestations"]};
