@@ -252,6 +252,26 @@ groups:
             Usually this node is slow, not the peers, though colluding members
             can also cause it. Check hashi_request_latency.
 
+      - alert: HashiSigningRequestedWhilePaused
+        expr: |
+          (
+            (increase(hashi_withdrawal_signing_refused_total{reason="paused"}[15m]) > 0)
+            or (hashi_withdrawal_signing_refused_total{reason="paused"} > 0
+              and ignoring (reason) time() - hashi_peer_first_seen_timestamp_seconds < 900
+              and timestamp(hashi_withdrawal_signing_refused_total{reason="paused"}) >= ignoring (reason) group_left () hashi_peer_first_seen_timestamp_seconds)
+          )
+          and ignoring (peer, reason) min_over_time(hashi_paused[15m]) == 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "peer {{ $labels.peer }} asked this node to sign while Hashi is paused"
+          description: >-
+            An honest leader stops at a pause. Unless a Sui view lags or a 1.0 node
+            polls during a rollout, look the peer up with
+            `hashi committee -c hashi-cli.toml view {{ $labels.peer }}` and tell the
+            operator channel.
+
       - alert: HashiMpcPeerRefused
         expr: |
           (increase(hashi_mpc_peer_refusals_total[1h]) > 0)
