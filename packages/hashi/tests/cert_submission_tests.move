@@ -10,6 +10,7 @@ use std::bcs;
 const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
 const VOTER3: address = @0x3;
+const VOTER4: address = @0x4;
 const DIGEST: vector<u8> = x"d1d1";
 const OTHER_DIGEST: vector<u8> = x"d2d2";
 const SEED_1: vector<u8> = x"0101";
@@ -22,7 +23,8 @@ fun test_dkg_and_rotation_certs_use_separate_buckets() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let epoch = ctx.epoch();
+    let epoch = ctx.epoch() + 1;
+    set_pending_committee(&mut hashi, epoch, voters);
     let clock = sui::clock::create_for_testing(ctx);
 
     let rot_cert = hashi::committee::new_committee_signature(epoch, vector[], vector[]);
@@ -102,7 +104,8 @@ fun test_dkg_and_rotation_certs_are_stamped_with_clock() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let epoch = ctx.epoch();
+    let epoch = ctx.epoch() + 1;
+    set_pending_committee(&mut hashi, epoch, voters);
     let mut clock = sui::clock::create_for_testing(ctx);
 
     clock.set_for_testing(123);
@@ -136,6 +139,66 @@ fun test_dkg_and_rotation_certs_are_stamped_with_clock() {
     );
     assert!(hashi.epoch_certs_ref(dkg_key).submission_timestamp_ms(VOTER1) == 123);
     assert!(hashi.epoch_certs_ref(rot_key).submission_timestamp_ms(VOTER2) == 456);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_rotation_cert_from_a_departing_dealer_is_accepted() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2, VOTER3],
+        vector[VOTER1, VOTER2, VOTER3, VOTER4],
+        ctx,
+    );
+    let epoch = ctx.epoch() + 2;
+    set_pending_committee(&mut hashi, epoch, vector[VOTER2, VOTER3, VOTER4]);
+    let clock = sui::clock::create_for_testing(ctx);
+
+    hashi::cert_submission::submit_rotation_cert(
+        &mut hashi,
+        epoch,
+        VOTER1,
+        vector[1u8, 2, 3],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        ctx,
+    );
+
+    let rot_key = hashi::tob::tob_key(
+        epoch,
+        option::none(),
+        hashi::tob::protocol_type_key_rotation(),
+    );
+    assert!(hashi.epoch_certs_ref(rot_key).num_certs() == 1);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::cert_submission::EDealerNotInCommittee)]
+fun test_nonce_cert_from_a_member_outside_the_committee_aborts() {
+    let ctx = &mut test_utils::new_tx_context(VOTER4, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2, VOTER3],
+        vector[VOTER1, VOTER2, VOTER3, VOTER4],
+        ctx,
+    );
+    let epoch = ctx.epoch();
+    let clock = sui::clock::create_for_testing(ctx);
+
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER4,
+        vector[1u8, 2, 3],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        ctx,
+    );
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -286,6 +349,25 @@ fun build_cert_message<T: copy + drop + store>(
     bytes.append(bcs::to_bytes(&epoch));
     bytes.append(bcs::to_bytes(message));
     bytes
+}
+
+fun set_pending_committee(hashi: &mut hashi::hashi::Hashi, epoch: u64, voters: vector<address>) {
+    let sk = test_utils::bls_sk_for_testing();
+    let public_key = sui::bls12381::g1_to_uncompressed_g1(
+        &sui::bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk)),
+    );
+    let members = voters.map!(
+        |voter| hashi::committee::new_committee_member(voter, public_key, sk, 1),
+    );
+    hashi
+        .committee_set_mut()
+        .set_pending_reconfig_for_testing(
+            hashi::committee::new_committee(
+                epoch,
+                members,
+                hashi::mpc_config::new_for_testing(800, 3333, 0),
+            ),
+        );
 }
 
 fun nonce_key(epoch: u64): hashi::tob::TobKey {
