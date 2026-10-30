@@ -44,6 +44,7 @@ reqwest = { version = "0.12", default-features = false, features = ["http2", "js
 tokio = { version = "1.46.1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
+parking_lot = "0.12.5"
 prometheus = "0.14"
 tracing = "0.1.41"
 

@@ -65,7 +65,7 @@ pub struct Hashi {
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
+    mpc_manager: OnceLock<Arc<mpc::FairRwLock<mpc::MpcManager>>>,
     shape_params: RwLock<Option<Arc<mpc::shape_params::ShapeParams>>>,
     public_outputs: Arc<mpc::public_outputs::PublicOutputs>,
     mpc_manager_install: Mutex<()>,
@@ -219,7 +219,7 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn mpc_manager(&self) -> Option<Arc<RwLock<mpc::MpcManager>>> {
+    pub fn mpc_manager(&self) -> Option<Arc<mpc::FairRwLock<mpc::MpcManager>>> {
         self.mpc_manager.get().cloned()
     }
 
@@ -243,7 +243,9 @@ impl Hashi {
             None => {
                 // First-time initialization (e.g. new committee member joining mid-rotation).
                 manager.adopt_public_outputs(&self.public_outputs);
-                let _ = self.mpc_manager.set(Arc::new(RwLock::new(manager)));
+                let _ = self
+                    .mpc_manager
+                    .set(Arc::new(mpc::FairRwLock::new(manager)));
             }
         }
     }

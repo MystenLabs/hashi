@@ -8,7 +8,7 @@ use crate::config::ComplaintResponsePolicy;
 use crate::metrics::Metrics;
 
 async fn run_nonce_generation_for_test(
-    mpc_manager: &Arc<RwLock<MpcManager>>,
+    mpc_manager: &Arc<FairRwLock<MpcManager>>,
     batch_index: u32,
     p2p_channel: &impl P2PChannel,
     tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -2299,7 +2299,7 @@ async fn test_run_dkg() {
     let other_certificates_len = other_certificates.len();
     let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
 
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Call run_as_dealer() and run_as_party() for validator 0
     MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
@@ -2426,7 +2426,7 @@ async fn test_run_dkg_with_complaint_recovery() {
     let other_certificates: Vec<_> = certificates.iter().skip(1).cloned().collect();
     let mut mock_tob = MockOrderedBroadcastChannel::new(other_certificates);
 
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
         .await
@@ -2461,7 +2461,7 @@ async fn test_run_dkg_with_complaint_recovery() {
 
 /// Test setup for run() tests. Creates managers and certificates.
 struct RunTestSetup {
-    test_manager: Arc<RwLock<MpcManager>>,
+    test_manager: Arc<FairRwLock<MpcManager>>,
     mock_p2p: MockP2PChannel,
     certificates: Vec<CertificateV1>,
     setup: TestSetup,
@@ -2506,7 +2506,7 @@ fn setup_run_test() -> RunTestSetup {
     }
 
     // Extract test_manager (validator 0)
-    let test_manager = Arc::new(RwLock::new(managers.remove(0)));
+    let test_manager = Arc::new(FairRwLock::new(managers.remove(0)));
 
     // Create mock P2P with remaining managers
     let other_managers: HashMap<_, _> = managers
@@ -2631,7 +2631,7 @@ async fn test_run_as_dealer_success() {
     let setup = TestSetup::new(num_validators);
 
     // Create manager for validator 0
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     // Create managers for other validators
     let other_managers: HashMap<_, _> = (1..num_validators)
@@ -2734,7 +2734,7 @@ async fn test_run_as_party_success() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates.clone());
 
     // Call run_as_party() for validator 0
-    let test_manager = Arc::new(RwLock::new(managers.remove(0)));
+    let test_manager = Arc::new(FairRwLock::new(managers.remove(0)));
     let other_managers: HashMap<_, _> = managers
         .into_iter()
         .enumerate()
@@ -2857,7 +2857,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_1_addr))
     );
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Run as party - should recover shares via complaint
     let output =
@@ -2970,7 +2970,7 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
         .public_key;
 
     // Run as party for validator 0 (test_manager)
-    let test_manager = Arc::new(RwLock::new(managers.remove(0)));
+    let test_manager = Arc::new(FairRwLock::new(managers.remove(0)));
     let other_managers: HashMap<_, _> = managers
         .into_iter()
         .enumerate()
@@ -3039,7 +3039,7 @@ async fn test_run_as_party_requires_different_dealers() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(tob_messages);
 
     // Call run_as_party() for validator 2
-    let test_manager = Arc::new(RwLock::new(managers.remove(2)));
+    let test_manager = Arc::new(FairRwLock::new(managers.remove(2)));
     let other_managers: HashMap<_, _> = managers
         .into_iter()
         .enumerate()
@@ -3066,7 +3066,7 @@ async fn test_run_as_party_requires_different_dealers() {
 #[tracing_test::traced_test]
 async fn test_run_as_dealer_p2p_send_error() {
     let (test_manager, _) = create_manager_with_valid_keys(0, 5);
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let failing_p2p = FailingP2PChannel {
         retrieved_from: Default::default(),
@@ -3099,7 +3099,7 @@ async fn test_run_as_dealer_p2p_send_error() {
 #[tokio::test(start_paused = true)]
 async fn a_dealer_waits_minutes_not_seconds_to_reach_its_quorum() {
     let setup = TestSetup::new(5);
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
@@ -3138,7 +3138,7 @@ async fn a_dealer_waits_minutes_not_seconds_to_reach_its_quorum() {
 #[tokio::test(start_paused = true)]
 async fn a_dealer_stops_waiting_shortly_after_its_quorum_is_met() {
     let setup = TestSetup::new(5);
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
@@ -3167,7 +3167,7 @@ async fn test_run_as_dealer_tob_publish_error() {
     let setup = TestSetup::new(5);
 
     // Create test manager (validator 0)
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     // Create managers for validators 1-4 to respond with valid signatures
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
@@ -3207,7 +3207,7 @@ async fn test_run_as_dealer_partial_failures_still_collects_enough() {
     // Dealer sends to 6 others, fail 1, succeed 5
     let setup = TestSetup::new(7);
 
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
         .map(|i| {
@@ -3243,7 +3243,7 @@ async fn test_run_as_dealer_partial_failures_still_collects_enough() {
 async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
     let setup = TestSetup::new(5);
 
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
         .map(|i| {
@@ -3282,7 +3282,7 @@ async fn test_run_as_dealer_includes_own_signature() {
 
     // Create manager for validator 0 (the dealer)
     let dealer_addr = setup.address(0);
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     // Create managers for other validators
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
@@ -3333,7 +3333,7 @@ async fn test_run_as_dealer_includes_own_signature() {
 #[tokio::test]
 async fn test_run_as_party_tob_receive_error() {
     let setup = TestSetup::new(5);
-    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     let mut failing_tob = FailingOrderedBroadcastChannel {
         error_message: "receive timeout".to_string(),
@@ -3461,7 +3461,7 @@ async fn setup_party_and_run(
 
     // Run party collection
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
     let result =
         MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
             .await;
@@ -3605,7 +3605,7 @@ async fn test_run_as_party_skips_duplicate_dealers() {
 
     // Run party collection
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
     let result =
         MpcManager::run_dkg_as_party(&party_manager, &mock_p2p, &mut mock_tob, &test_metrics())
             .await;
@@ -3703,7 +3703,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     // Verify party doesn't have any dealer messages yet
     assert!(party_manager.current_dkg_messages.is_empty());
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Run as party - should retrieve missing messages via P2P
     let result =
@@ -3820,7 +3820,7 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
     ];
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Run as party - should process dealer1 successfully, then ABORT on dealer2 retrieval failure
     let result =
@@ -3926,7 +3926,7 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
     let certificates = vec![CertificateV1::Dkg(cert0), CertificateV1::Dkg(cert1)];
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Run as party - should ABORT on dealer0 recovery failure
     // With retry logic, failed signers are skipped, so we get ProtocolFailed
@@ -4775,7 +4775,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
     let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
     let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Recover with exactly threshold signers
     // Tests incremental recovery: receiver.recover() returns InputTooShort after first response,
@@ -4858,7 +4858,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
     let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
     let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Recovery should succeed despite first signer failing
     let result = MpcManager::recover_dkg_shares_via_complaint(
@@ -4932,7 +4932,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
         .committee
         .signers(cert.committee_signature())
         .unwrap();
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because no complaint exists
     let result = MpcManager::recover_dkg_shares_via_complaint(
@@ -4982,7 +4982,7 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
     // Create empty mock P2P channel (no responders)
     let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because P2P call fails
     // With retry logic, failed signers are skipped (continue), so we get ProtocolFailed
@@ -5053,7 +5053,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
     let managers_map: HashMap<_, _> = other_managers.into_iter().collect();
     let mock_p2p = MockP2PChannel::new(managers_map, party_addr);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Attempt recovery with insufficient signers
     let result = MpcManager::recover_dkg_shares_via_complaint(
@@ -5160,7 +5160,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
 
     let p2p = PreCollectedP2PChannel::new(responses);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Attempt recovery - parties 3 and 4 are not in the modified config
     let result = MpcManager::recover_dkg_shares_via_complaint(
@@ -5230,7 +5230,7 @@ async fn test_retrieve_dealer_message_success() {
     dealers.insert(dealer_address, dealer_manager);
     let mock_p2p = MockP2PChannel::new(dealers, party_address);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Party requests dealer's share from certificate signers
     let result = MpcManager::retrieve_dealer_message(
@@ -5320,7 +5320,7 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
     managers.insert(dealer_addr, dealer_mgr);
     let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
-    let party_mgr = Arc::new(RwLock::new(party_mgr));
+    let party_mgr = Arc::new(FairRwLock::new(party_mgr));
 
     // Should succeed by trying validator 1 (fails), then dealer (succeeds)
     let result = MpcManager::retrieve_dealer_message(
@@ -5393,7 +5393,7 @@ async fn test_retrieve_dealer_message_all_signers_fail() {
     let managers = HashMap::new();
     let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
-    let party_mgr = Arc::new(RwLock::new(party_mgr));
+    let party_mgr = Arc::new(FairRwLock::new(party_mgr));
 
     // Should fail because all signers are offline
     let result = MpcManager::retrieve_dealer_message(
@@ -5487,7 +5487,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     managers.insert(dealer_a_addr, dealer_a_mgr);
     let mock_p2p = MockP2PChannel::new(managers, party_addr);
 
-    let party_mgr = Arc::new(RwLock::new(party_mgr));
+    let party_mgr = Arc::new(FairRwLock::new(party_mgr));
 
     // Party requests dealer A's message
     // 1. Tries Byzantine signer first -> returns message B
@@ -5628,7 +5628,7 @@ async fn test_retrieve_dealer_message_drops_a_mismatched_response_without_retryi
         ]),
         calls: Default::default(),
     };
-    let party_mgr = Arc::new(RwLock::new(setup.create_manager(2)));
+    let party_mgr = Arc::new(FairRwLock::new(setup.create_manager(2)));
     let metrics = test_metrics();
 
     MpcManager::retrieve_dealer_message(&party_mgr, &dkg_message, &cert, &channel, &metrics)
@@ -6258,7 +6258,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
 
     let mock_p2p = MockP2PChannel::new(other_managers, receiver_addr);
 
-    let receiver_manager = Arc::new(RwLock::new(receiver_manager));
+    let receiver_manager = Arc::new(FairRwLock::new(receiver_manager));
 
     // Retrieve message - should succeed even though shares are invalid for party 0
     let dkg_dealer_hash = DealerMessagesHash {
@@ -6555,7 +6555,7 @@ async fn test_restart_dealer_reuses_stored_message() {
     let mock_p2p = MockP2PChannel::new(other_managers, dealer_address);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
-    let restarted_manager = Arc::new(RwLock::new(restarted_manager));
+    let restarted_manager = Arc::new(FairRwLock::new(restarted_manager));
 
     // Run run_as_dealer - should reuse stored message
     let result = MpcManager::run_dkg_as_dealer(
@@ -6687,7 +6687,7 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
         CertificateV1::Dkg(cert2),
     ]);
 
-    let party_manager = Arc::new(RwLock::new(party_manager));
+    let party_manager = Arc::new(FairRwLock::new(party_manager));
 
     // Run as party
     let result = MpcManager::run_dkg_as_party(
@@ -7363,7 +7363,7 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
 async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
     let rotation_setup = RotationTestSetup::new();
     let (dealer_manager, previous, _) = rotation_setup.create_rotation_dealer_with_memory_store(0);
-    let dealer = Arc::new(RwLock::new(dealer_manager));
+    let dealer = Arc::new(FairRwLock::new(dealer_manager));
 
     let failing_p2p = FailingP2PChannel {
         retrieved_from: Default::default(),
@@ -7429,7 +7429,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
         rotation_setup.rotation_manager_at_target(departing_idx, departing_output, departing_store);
     assert!(!departing.is_committee_member());
     assert!(departing.is_previous_committee_member());
-    let departing = Arc::new(RwLock::new(departing));
+    let departing = Arc::new(FairRwLock::new(departing));
 
     let mock_p2p = MockP2PChannel::new(peers, departing_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
@@ -7485,7 +7485,7 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
         dkg_output,
         Arc::clone(&member_view.public_messages_store),
     );
-    let departing = Arc::new(RwLock::new(departing));
+    let departing = Arc::new(FairRwLock::new(departing));
 
     let mock_p2p = MockP2PChannel::new(HashMap::new(), departing_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
@@ -7538,7 +7538,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
     }
 
     let (departing_output, departing_store) = dkg[departing_idx].clone();
-    let departing = Arc::new(RwLock::new(rotation_setup.rotation_manager_at_target(
+    let departing = Arc::new(FairRwLock::new(rotation_setup.rotation_manager_at_target(
         departing_idx,
         departing_output,
         departing_store,
@@ -7592,7 +7592,7 @@ async fn test_run_key_rotation() {
     // created (100), so override.
     test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.set_previous_output(test_dkg_output.clone());
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Create other managers for MockP2PChannel (validators 1-4)
     let mut other_managers_map = HashMap::new();
@@ -7739,7 +7739,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
     let test_addr = rotation_setup.setup.address(0);
     test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.set_previous_output(test_dkg_output.clone());
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Create other managers for MockP2PChannel (validators 1-4)
     let mut other_managers_map = HashMap::new();
@@ -7953,7 +7953,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
             .current_rotation_messages
             .insert(validator_1_addr, v1_msgs);
     }
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
 
@@ -8192,7 +8192,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
 
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let new_output = MpcManager::run_key_rotation(
         &test_manager,
@@ -8328,7 +8328,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         vec![CertificateV1::Rotation(cert)]
     };
 
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
     let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
 
     // Run key rotation — should detect complaint and recover
@@ -8479,7 +8479,7 @@ async fn test_prepare_previous_output_for_new_member() {
     let mock_p2p = MockP2PChannel::new(existing_managers_map, new_member_addr);
 
     // Call prepare_previous_output for new member
-    let new_member_manager = Arc::new(RwLock::new(new_member_manager));
+    let new_member_manager = Arc::new(FairRwLock::new(new_member_manager));
     let metrics = test_metrics();
     let (previous_output, is_member_of_previous_committee) = MpcManager::prepare_previous_output(
         &new_member_manager,
@@ -8539,7 +8539,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_epoch = epoch;
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Peers have the messages in their in-memory dkg_messages map.
     // create_receiver_with_memory_store clears dkg_messages after completing DKG,
@@ -8620,7 +8620,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
     test_manager
         .persist_and_cache_dkg_message(epoch, diverged_dealer, other_msg)
         .unwrap();
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let mut other_managers_map = HashMap::new();
     for i in 1..5 {
@@ -8760,7 +8760,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     test_manager.previous_epoch = epoch;
     test_manager.previous_reconfig_input = Some(test_manager.shape_params().current().clone());
     test_manager.set_previous_output(test_dkg_output.clone());
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Peers have rotation messages in their in-memory map.
     let mut other_managers_map = HashMap::new();
@@ -8869,7 +8869,7 @@ async fn test_prepare_previous_output_skips_repairs_past_the_reconstruction_pref
                 .unwrap();
         }
     }
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let mut other_managers_map = HashMap::new();
     for (i, mgr, _) in dealers {
@@ -8979,7 +8979,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     test_manager
         .persist_and_cache_rotation_messages(epoch, diverged_dealer, &diverged)
         .unwrap();
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     assert!(
         matches!(
@@ -9106,7 +9106,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
             .persist_and_cache_rotation_messages(epoch, *dealer_addr, msgs)
             .unwrap();
     }
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let mut other_managers_map = HashMap::new();
     for (i, mgr, _) in dealers {
@@ -9209,7 +9209,7 @@ async fn test_prepare_previous_output_adopts_only_the_on_chain_key() {
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = rotation_setup.setup.epoch();
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let rebuilt = PublicMpcOutput::from_mpc_output(&test_dkg_output);
     let onchain = PublicMpcOutput {
@@ -9395,7 +9395,7 @@ async fn test_prepare_previous_output_stops_repairing_at_an_unrepairable_prefix_
     test_manager
         .persist_and_cache_rotation_messages(epoch, repairable, &diverged_later)
         .unwrap();
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     let mut other_managers_map = HashMap::new();
     for (i, mgr, _) in dealers {
@@ -9771,7 +9771,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         "Should not have output before recovery"
     );
 
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
 
     // Call recover_rotation_shares_via_complaints
     let result = MpcManager::recover_rotation_shares_via_complaints(
@@ -11298,7 +11298,9 @@ fn test_recover_current_dkg() {
     let onchain_key = bcs::to_bytes(&expected_public_key).unwrap();
     let req = GetPublicMpcOutputRequest { epoch };
 
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store(
+        &identity,
+    )))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key)
     else {
@@ -11313,7 +11315,9 @@ fn test_recover_current_dkg() {
     // vk mismatch (reconstruction disagrees with on-chain) → Suspicious; never committed.
     let mut wrong_key = onchain_key.clone();
     wrong_key[0] ^= 0xff;
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store(
+        &identity,
+    )))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &wrong_key),
         MpcOutputRecoveryOutcome::Suspicious(_)
@@ -11324,7 +11328,7 @@ fn test_recover_current_dkg() {
     );
 
     let swap0 = |i: usize| if i == 0 { 1 } else { i };
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&swap0)))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store(&swap0)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
         MpcOutputRecoveryOutcome::NotApplicable
@@ -11351,7 +11355,7 @@ fn test_recover_current_dkg() {
     }
 
     // Missing local messages → NotApplicable (fall through to live).
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(
         InMemoryPublicMessagesStore::new(),
     ))));
     assert!(matches!(
@@ -11360,7 +11364,9 @@ fn test_recover_current_dkg() {
     ));
 
     // No authenticated on-chain key yet → NotApplicable.
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store(
+        &identity,
+    )))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &[]),
         MpcOutputRecoveryOutcome::NotApplicable
@@ -11460,7 +11466,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         &test_metrics(),
     )
     .unwrap();
-    let mgr = Arc::new(RwLock::new(manager));
+    let mgr = Arc::new(FairRwLock::new(manager));
 
     let onchain_key = vec![0u8; 33];
     assert!(
@@ -11874,7 +11880,7 @@ fn test_recover_current_rotation() {
 
     // Recovered: both outputs reconstructed (key preserved across the rotation) and
     // committed — current_output for the rotation epoch, previous_output for epoch N-1.
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store()))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -11907,7 +11913,7 @@ fn test_recover_current_rotation() {
     // Wrong on-chain key → Suspicious; neither output committed.
     let mut wrong_key = onchain_key.clone();
     wrong_key[0] ^= 0xff;
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store()))));
     assert!(matches!(
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -11926,7 +11932,7 @@ fn test_recover_current_rotation() {
     );
 
     // No authenticated on-chain key yet → NotApplicable.
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store()))));
     assert!(matches!(
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -11973,7 +11979,7 @@ fn test_recover_current_rotation() {
         VerifiedCertificateV1::new_unchecked(CertificateV1::Rotation(crossing_cert));
     let mut dealers_with_tampered = rotation_messages_by_dealer.clone();
     dealers_with_tampered[crossing_idx] = (crossing_addr, tampered);
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store_from(
         &dealers_with_tampered,
     )))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
@@ -11989,7 +11995,7 @@ fn test_recover_current_rotation() {
     assert_eq!(output.public_key, expected_public_key);
 
     let (_, prefix_dealers) = rotation_messages_by_dealer.split_last().unwrap();
-    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+    let mgr = Arc::new(FairRwLock::new(make_manager(Arc::new(build_store_from(
         prefix_dealers,
     )))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
@@ -12134,7 +12140,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         &test_metrics(),
     )
     .unwrap();
-    let mgr = Arc::new(RwLock::new(manager));
+    let mgr = Arc::new(FairRwLock::new(manager));
 
     // The complaint surfaces during the current-output reconstruction (before previous), so
     // previous certs are unused; a non-empty on-chain key avoids the empty-key early return.
@@ -12858,7 +12864,7 @@ async fn test_avid_nonce_dealer_phase_skips_at_zero_weight() {
         .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
         .collect();
     let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
-    let test_manager = Arc::new(RwLock::new(test_manager));
+    let test_manager = Arc::new(FairRwLock::new(test_manager));
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
     let metrics = test_metrics();
 
@@ -13991,7 +13997,7 @@ async fn test_run_as_avid_nonce_dealer_all_confirm_posts_confirm_cert() {
         .collect();
     let mock_p2p = MockP2PChannel::new(others, dealer_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
@@ -14046,7 +14052,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
         .collect();
     let mock_p2p = MockP2PChannel::new(others, dealer_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
@@ -14196,7 +14202,7 @@ async fn test_run_as_avid_nonce_dealer_bundled_non_signer_completes_the_round() 
         fail_dispersal_to: [setup.address(4)].into_iter().collect(),
     };
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
@@ -14239,7 +14245,7 @@ async fn test_repeat_dealer_round_reuses_the_stored_cert_without_reconfirming() 
             .map(|i| (setup.address(i), setup.create_manager(i)))
             .collect::<HashMap<_, _>>(),
     ));
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     let run1 = BundleScenarioP2PChannel {
         managers: managers.clone(),
@@ -14301,7 +14307,7 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
         .collect();
     let mock_p2p = MockP2PChannel::new(others, dealer_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
 
     let metrics = test_metrics();
     let result = MpcManager::run_as_avid_nonce_dealer(
@@ -14577,7 +14583,7 @@ async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
     let thin_cert = make_cert(&confirm_target, &sigs, 3); // weight 6 + 1 + 6 = 13 < 16
     let second_full_cert = make_cert(&second_target, &second_sigs, 6);
 
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, second_full_cert]);
     let metrics = test_metrics();
@@ -14670,7 +14676,7 @@ async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase()
     party_manager.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
     assert_eq!(party_manager.mpc_config.nodes.weight_of(4).unwrap(), 0);
 
-    let party = Arc::new(RwLock::new(party_manager));
+    let party = Arc::new(FairRwLock::new(party_manager));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
@@ -14741,7 +14747,7 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
         })
         .collect();
 
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
@@ -14834,7 +14840,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
         },
     );
 
-    let party = Arc::new(RwLock::new(party));
+    let party = Arc::new(FairRwLock::new(party));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
     let admitted_101 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -14864,7 +14870,7 @@ async fn test_avid_party_accepts_an_output_it_validated_against_the_cert_without
     let (party, mut managers, full_certs) =
         two_full_certs_fixture(&setup, batch_index, 5, &mut rng);
 
-    let dealer = Arc::new(RwLock::new(managers.remove(&dealer_addr).unwrap()));
+    let dealer = Arc::new(FairRwLock::new(managers.remove(&dealer_addr).unwrap()));
     let dealer_p2p = MockP2PChannel::new(managers, dealer_addr);
     let mut dealer_tob = MockOrderedBroadcastChannel::new(vec![]);
     MpcManager::run_as_avid_nonce_dealer(
@@ -14894,7 +14900,7 @@ async fn test_avid_party_accepts_an_output_it_validated_against_the_cert_without
         panic!("dealer Arc still shared");
     };
     voters.insert(dealer_addr, dealer.into_inner().unwrap());
-    let party = Arc::new(RwLock::new(party));
+    let party = Arc::new(FairRwLock::new(party));
     let expected = HashSet::from([setup.address(0), setup.address(2), dealer_addr]);
 
     let party_p2p = MockP2PChannel::new(voters, party_addr);
@@ -15041,7 +15047,7 @@ async fn test_avid_party_accepts_a_cut_off_confirmers_cached_output_against_the_
         .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &fx.certified_message)
         .unwrap();
 
-    let party = Arc::new(RwLock::new(fx.party));
+    let party = Arc::new(FairRwLock::new(fx.party));
     let party_p2p = MockP2PChannel::new(fx.peers, setup.address(5));
     let mut mock_tob = MockOrderedBroadcastChannel::new(fx.certs);
     let admitted_4 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -15073,7 +15079,7 @@ async fn test_avid_party_rejects_a_cached_output_derived_from_a_different_common
         .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &fx.other_message)
         .unwrap();
 
-    let party = Arc::new(RwLock::new(fx.party));
+    let party = Arc::new(FairRwLock::new(fx.party));
     let party_p2p = MockP2PChannel::new(fx.peers, setup.address(5));
     let mut mock_tob = MockOrderedBroadcastChannel::new(fx.certs);
     let admitted_5 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -15144,7 +15150,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
         },
     );
 
-    let party = Arc::new(RwLock::new(party));
+    let party = Arc::new(FairRwLock::new(party));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
     let admitted_102 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -15399,7 +15405,7 @@ async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_deco
     let (party, mut managers, full_certs) =
         two_full_certs_fixture(&setup, batch_index, 5, &mut rng);
 
-    let dealer = Arc::new(RwLock::new(managers.remove(&dealer_addr).unwrap()));
+    let dealer = Arc::new(FairRwLock::new(managers.remove(&dealer_addr).unwrap()));
     let dealer_p2p = MockP2PChannel::new(managers, dealer_addr);
     let mut dealer_tob = MockOrderedBroadcastChannel::new(vec![]);
     MpcManager::run_as_avid_nonce_dealer(
@@ -15423,7 +15429,7 @@ async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_deco
         panic!("dealer Arc still shared");
     };
     voters.insert(dealer_addr, dealer.into_inner().unwrap());
-    let party = Arc::new(RwLock::new(party));
+    let party = Arc::new(FairRwLock::new(party));
     let party_p2p = MockP2PChannel::new(voters, party_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
     let admitted_6 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -15509,7 +15515,7 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
         })
         .collect();
 
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
 
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
@@ -15649,7 +15655,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let restarted = setup.create_manager_with_store(1, Arc::new(store.clone()));
     assert!(restarted.dealer_avid_nonce_outputs.is_empty());
 
-    let party = Arc::new(RwLock::new(restarted));
+    let party = Arc::new(FairRwLock::new(restarted));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert, second_full_cert]);
     let admitted_10 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -15817,7 +15823,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 }
 
 async fn admitted_avid_dealers(
-    mgr: &Arc<RwLock<MpcManager>>,
+    mgr: &Arc<FairRwLock<MpcManager>>,
     batch_index: u32,
     certs: Vec<CertificateV1>,
     cutoff_ms: Option<u64>,
@@ -15849,7 +15855,7 @@ async fn admitted_avid_dealers(
 
 async fn admitted_from_tob(
     tob: &mut impl OrderedBroadcastChannel<CertificateV1>,
-    mgr: &Arc<RwLock<MpcManager>>,
+    mgr: &Arc<FairRwLock<MpcManager>>,
     batch_index: u32,
     cutoff_ms: Option<u64>,
 ) -> AdmittedNonceDealers {
@@ -15912,7 +15918,7 @@ async fn test_classification_survives_the_carrier_into_sizing() {
         },
     )];
 
-    let mgr = Arc::new(RwLock::new(mgr));
+    let mgr = Arc::new(FairRwLock::new(mgr));
     let verified = MpcManager::verified_nonce_certs(
         &mgr,
         epoch,
@@ -16295,7 +16301,7 @@ async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip(
             kind: CertKind::AvidVote,
         }],
     };
-    let party = Arc::new(RwLock::new(mgr));
+    let party = Arc::new(FairRwLock::new(mgr));
     let p2p = MockP2PChannel::new(HashMap::new(), setup.address(0));
     let admission =
         MpcManager::run_as_avid_nonce_party(&party, 0, &p2p, &admitted, None, &test_metrics())
@@ -16483,7 +16489,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         .collect();
     let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
@@ -16501,7 +16507,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         panic!("dealer Arc still shared");
     };
     voters.insert(dealer_addr, dealer.into_inner().unwrap());
-    let laggard = Arc::new(RwLock::new(setup.create_manager(5)));
+    let laggard = Arc::new(FairRwLock::new(setup.create_manager(5)));
     let laggard_p2p = MockP2PChannel::new(voters, setup.address(5));
     let metrics = test_metrics();
     let admitted_11 = admitted_from_tob(&mut mock_tob, &laggard, batch_index, None).await;
@@ -16547,7 +16553,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
     let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+    let dealer = Arc::new(FairRwLock::new(setup.create_manager(0)));
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
@@ -16561,7 +16567,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
 
     // The second dealer's round needs node 0's weight to reach the vote quorum.
     let mut voters = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
-    let second_dealer = Arc::new(RwLock::new(voters.remove(&second_dealer_addr).unwrap()));
+    let second_dealer = Arc::new(FairRwLock::new(voters.remove(&second_dealer_addr).unwrap()));
     voters.insert(setup.address(0), setup.create_manager(0));
     let second_p2p = MockP2PChannel::new(voters, second_dealer_addr);
     MpcManager::run_as_avid_nonce_dealer(
@@ -16580,7 +16586,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     );
 
     let mut voters = std::mem::take(&mut *second_p2p.managers.lock().unwrap());
-    let party = Arc::new(RwLock::new(voters.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(voters.remove(&setup.address(1)).unwrap()));
     {
         let mgr = party.read().unwrap();
         assert!(
@@ -16642,7 +16648,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let cert = make_full_cert(&confirm_target, sigs);
     let second_cert = make_full_cert(&second_target, second_sigs);
 
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert, second_cert]);
     let outputs = run_nonce_generation_for_test(
@@ -16845,7 +16851,7 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let cert = make_full_cert(&confirm_target, sigs);
     let second_cert = make_full_cert(&second_target, second_sigs);
 
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let party = Arc::new(FairRwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![
         (dealer_addr, cert),
@@ -16896,7 +16902,7 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         .collect();
     let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let dealer = Arc::new(RwLock::new(dealer_mgr));
+    let dealer = Arc::new(FairRwLock::new(dealer_mgr));
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
@@ -16922,7 +16928,7 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         victim_mgr.current_avid_round_state.is_empty(),
         "the victim never verified its optimistic message"
     );
-    let party = Arc::new(RwLock::new(victim_mgr));
+    let party = Arc::new(FairRwLock::new(victim_mgr));
     let party_p2p = MockP2PChannel::new(nodes, victim);
     let metrics = test_metrics();
     let admitted_13 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
@@ -17422,7 +17428,7 @@ fn test_prune_nonce_state_drops_old_avid_round_state() {
     let fake_dealer = setup.address(2);
     let state = crate::db::tests::create_test_avid_round_state();
 
-    let manager = Arc::new(RwLock::new(manager));
+    let manager = Arc::new(FairRwLock::new(manager));
     {
         let mut mgr = manager.write().unwrap();
         for b in [0u32, 1, 2] {
@@ -17703,7 +17709,7 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
         captured: captured.clone(),
     };
 
-    let mgr_arc = Arc::new(RwLock::new(manager));
+    let mgr_arc = Arc::new(FairRwLock::new(manager));
     let _ =
         MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1, &[], &test_metrics())
             .await;
@@ -17789,7 +17795,7 @@ async fn a_public_output_member_that_never_answers_is_timed_out_and_retried_once
     let fetched = tokio::time::timeout(
         Duration::from_secs(120),
         MpcManager::fetch_public_mpc_output_from_quorum(
-            &Arc::new(RwLock::new(manager)),
+            &Arc::new(FairRwLock::new(manager)),
             &channel,
             1,
             &[],
@@ -18140,7 +18146,7 @@ async fn recovery_drops_certs_the_live_path_would_reject() {
         .unwrap(),
     );
 
-    let mgr = Arc::new(RwLock::new(setup.create_manager(1)));
+    let mgr = Arc::new(FairRwLock::new(setup.create_manager(1)));
     let verified = crate::mpc::service::verify_fetched_certificates(
         &mgr,
         vec![self_signed, quorum_signed],
@@ -18875,7 +18881,7 @@ async fn test_publish_outcomes_are_counted_separately() {
     ] {
         let num_validators = 5;
         let setup = TestSetup::new(num_validators);
-        let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+        let test_manager = Arc::new(FairRwLock::new(setup.create_manager(0)));
         let other_managers: HashMap<_, _> = (1..num_validators)
             .map(|i| (setup.address(i), setup.create_manager(i)))
             .collect();
@@ -19539,7 +19545,14 @@ fn a_retrieval_abandoned_while_queued_on_the_manager_lock_never_reads_the_store(
         use proto::mpc_service_server::MpcService;
         service.retrieve_messages(request).await
     });
-    wait_for_refs(idle_refs + 1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !mpc_lock.turnstile_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the retrieval never queued on the manager lock"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     handler.abort();
     assert!(rt.block_on(handler).unwrap_err().is_cancelled());
     drop(held);
@@ -19977,6 +19990,277 @@ fn complain_admits_a_zero_weight_member_and_refuses_a_non_member() {
             .with_label_values(&["complain", &outsider.to_string(), "not_member"])
             .get(),
         1
+    );
+}
+
+#[test]
+fn a_callers_third_concurrent_write_waits_for_one_of_its_two_lock_runs() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let (dealer, _, complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rand::thread_rng());
+    let manager = setup.create_manager(2);
+    let epoch = manager.mpc_config.epoch;
+    let request = ComplainRequest {
+        epoch,
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        dealer,
+        batch_index: None,
+        share_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+    };
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+    let complain = |caller: Address| {
+        let mut proto_request = tonic::Request::new(request.to_proto());
+        proto_request.extensions_mut().insert(caller);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.complain(proto_request).await
+        })
+    };
+    let send_nothing = |caller: Address| {
+        let mut request = tonic::Request::new(proto::SendMessagesRequest {
+            epoch: Some(epoch),
+            messages: None,
+        });
+        request.extensions_mut().insert(caller);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(request).await
+        })
+    };
+    let idle_refs = Arc::strong_count(&mpc_lock);
+    let wait_for_refs = |refs: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&mpc_lock) != refs {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "manager refs never reached {refs}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (flooder, other) = (setup.address(1), setup.address(3));
+
+    let held = mpc_lock.write().unwrap();
+    let mut running: Vec<_> = (0..2).map(|_| complain(flooder)).collect();
+    wait_for_refs(idle_refs + 2);
+    let third = send_nothing(flooder);
+    running[0].abort();
+    std::thread::sleep(Duration::from_millis(200));
+    let third_waited = !third.is_finished() && Arc::strong_count(&mpc_lock) == idle_refs + 2;
+    let other_caller = complain(other);
+    wait_for_refs(idle_refs + 3);
+    drop(held);
+    let aborted = rt.block_on(running.remove(0)).unwrap_err();
+    let complaints: Vec<_> = running
+        .into_iter()
+        .chain([other_caller])
+        .map(|handler| rt.block_on(handler).unwrap())
+        .collect();
+    let third = rt.block_on(third).unwrap();
+    wait_for_refs(idle_refs);
+
+    assert!(
+        third_waited,
+        "a third write ran while its caller's two runs were busy"
+    );
+    assert!(aborted.is_cancelled());
+    assert!(
+        complaints.iter().all(|response| response
+            .as_ref()
+            .is_err_and(|status| status.code() == tonic::Code::NotFound)),
+        "{complaints:?}"
+    );
+    assert_eq!(third.unwrap_err().code(), tonic::Code::InvalidArgument);
+    assert!(
+        metrics
+            .peer_mpc_lock_seconds_total
+            .with_label_values(&[&flooder.to_string()])
+            .get()
+            > 0.0
+    );
+}
+
+#[test]
+fn a_callers_fifth_concurrent_retrieval_waits_for_one_of_its_four_lock_runs() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+    let retrieve = |requester: Address| {
+        let mut request = tonic::Request::new(proto::RetrieveMessagesRequest {
+            epoch: Some(epoch),
+            dealer: Some(setup.address(2).to_string()),
+            protocol_type: Some(proto::MpcProtocolType::Dkg as i32),
+            batch_index: None,
+        });
+        request.extensions_mut().insert(requester);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.retrieve_messages(request).await
+        })
+    };
+    let idle_refs = Arc::strong_count(&mpc_lock);
+    let wait_for_refs = |refs: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&mpc_lock) != refs {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "manager refs never reached {refs}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (requester, other) = (setup.address(1), setup.address(3));
+
+    let held = mpc_lock.write().unwrap();
+    let mut handlers: Vec<_> = (0..4).map(|_| retrieve(requester)).collect();
+    wait_for_refs(idle_refs + 4);
+    handlers.push(retrieve(requester));
+    std::thread::sleep(Duration::from_millis(200));
+    let fifth_waited = Arc::strong_count(&mpc_lock) == idle_refs + 4;
+    handlers.push(retrieve(other));
+    wait_for_refs(idle_refs + 5);
+    drop(held);
+    let responses: Vec<_> = handlers
+        .into_iter()
+        .map(|handler| rt.block_on(handler).unwrap())
+        .collect();
+    wait_for_refs(idle_refs);
+
+    assert!(
+        fifth_waited,
+        "a fifth retrieval ran while its caller's four runs were busy"
+    );
+    assert!(
+        responses.iter().all(|response| response
+            .as_ref()
+            .is_err_and(|status| status.code() == tonic::Code::NotFound)),
+        "{responses:?}"
+    );
+}
+
+#[test]
+fn a_member_flooding_complaints_does_not_starve_the_mpc_loops_reads() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let (dealer, messages, complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rand::thread_rng());
+    let Messages::Dkg(message) = messages else {
+        unreachable!()
+    };
+    let mut manager = setup.create_manager(2);
+    let epoch = manager.mpc_config.epoch;
+    manager
+        .persist_and_cache_dkg_message(epoch, dealer, &message)
+        .unwrap();
+    let request = ComplainRequest {
+        epoch,
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        dealer,
+        batch_index: None,
+        share_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+    }
+    .to_proto();
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+    let flooder = setup.address(1);
+    let flooding = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flood: Vec<_> = (0..64)
+        .map(|_| {
+            let (service, request, flooding) = (service.clone(), request.clone(), flooding.clone());
+            rt.spawn(async move {
+                use proto::mpc_service_server::MpcService;
+                while flooding.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut call = tonic::Request::new(request.clone());
+                    call.extensions_mut().insert(flooder);
+                    let _ = service.complain(call).await;
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (reads_done, reads_finished) = std::sync::mpsc::channel();
+    let reader = {
+        let mpc_lock = mpc_lock.clone();
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                drop(mpc_lock.read().unwrap());
+            }
+            reads_done.send(()).unwrap();
+        })
+    };
+    let reads = reads_finished.recv_timeout(Duration::from_secs(30));
+    flooding.store(false, std::sync::atomic::Ordering::Relaxed);
+    for handler in flood {
+        rt.block_on(handler).unwrap();
+    }
+    reader.join().unwrap();
+
+    assert!(
+        reads.is_ok(),
+        "the MPC loop's reads starved behind the flood"
     );
 }
 

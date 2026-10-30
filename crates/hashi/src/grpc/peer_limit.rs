@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::RwLockWriteGuard;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -26,6 +27,7 @@ use tokio::sync::Semaphore;
 use super::request_body::LimitedBody;
 use super::route_limits::RouteLimits;
 use crate::metrics::Metrics;
+use crate::mpc::FairRwLock;
 
 const REQUEST_BUDGET: &str = "request";
 const RESPONSE_PIECE: usize = 64 * 1024;
@@ -233,6 +235,9 @@ impl PeerInflightLimiter {
                 }
                 metrics
                     .peer_bridge_work_seconds_total
+                    .with_label_values(&[&label]);
+                metrics
+                    .peer_mpc_lock_seconds_total
                     .with_label_values(&[&label]);
                 metrics.peer_store_reads_max.with_label_values(&[&label]);
                 metrics
@@ -713,6 +718,111 @@ async fn run_holding<T: Send + 'static>(
     }
 }
 
+const MPC_WRITE_RUNS: usize = 2;
+const MPC_READ_RUNS: usize = 4;
+
+#[derive(Clone, Default)]
+pub(crate) struct MpcLockLimiter {
+    gate: Arc<parking_lot::Mutex<()>>,
+    callers: Arc<Mutex<HashMap<Address, CallerMpcLock>>>,
+}
+
+#[derive(Clone)]
+struct CallerMpcLock {
+    writes: Arc<Semaphore>,
+    reads: Arc<Semaphore>,
+}
+
+pub(crate) struct MpcWriteRun {
+    gate: Arc<parking_lot::Mutex<()>>,
+    lock_seconds: Counter,
+    _run: OwnedSemaphorePermit,
+}
+
+pub(crate) struct PeerWriteGuard<'a, T> {
+    write: Option<RwLockWriteGuard<'a, T>>,
+    turn: Option<parking_lot::MutexGuard<'a, ()>>,
+    held_since: std::time::Instant,
+    lock_seconds: &'a Counter,
+}
+
+impl MpcLockLimiter {
+    fn caller(&self, caller: Address) -> CallerMpcLock {
+        self.callers
+            .lock()
+            .unwrap()
+            .entry(caller)
+            .or_insert_with(|| CallerMpcLock {
+                writes: Arc::new(Semaphore::new(MPC_WRITE_RUNS)),
+                reads: Arc::new(Semaphore::new(MPC_READ_RUNS)),
+            })
+            .clone()
+    }
+
+    pub(crate) async fn write_run(&self, caller: Address, lock_seconds: Counter) -> MpcWriteRun {
+        let run = self
+            .caller(caller)
+            .writes
+            .acquire_owned()
+            .await
+            .expect("MPC lock run semaphores are never closed");
+        MpcWriteRun {
+            gate: self.gate.clone(),
+            lock_seconds,
+            _run: run,
+        }
+    }
+
+    pub(crate) async fn read_run(&self, caller: Address) -> OwnedSemaphorePermit {
+        self.caller(caller)
+            .reads
+            .acquire_owned()
+            .await
+            .expect("MPC lock run semaphores are never closed")
+    }
+}
+
+impl MpcWriteRun {
+    pub(crate) fn write<'a, T>(&'a self, lock: &'a FairRwLock<T>) -> PeerWriteGuard<'a, T> {
+        let mut guard = PeerWriteGuard {
+            write: None,
+            turn: Some(self.gate.lock()),
+            held_since: std::time::Instant::now(),
+            lock_seconds: &self.lock_seconds,
+        };
+        guard.write = Some(lock.write().unwrap());
+        guard.held_since = std::time::Instant::now();
+        guard
+    }
+}
+
+impl<T> std::ops::Deref for PeerWriteGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.write.as_deref().expect("held until dropped")
+    }
+}
+
+impl<T> std::ops::DerefMut for PeerWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.write.as_deref_mut().expect("held until dropped")
+    }
+}
+
+impl<T> Drop for PeerWriteGuard<'_, T> {
+    fn drop(&mut self) {
+        if let Some(write) = self.write.take() {
+            drop(write);
+            self.lock_seconds
+                .inc_by(self.held_since.elapsed().as_secs_f64());
+        }
+        if let Some(turn) = self.turn.take() {
+            parking_lot::MutexGuard::unlock_fair(turn);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Condvar;
@@ -910,7 +1020,7 @@ mod tests {
         "ok"
     }
 
-    async fn connect(address: std::net::SocketAddr) -> h2::client::SendRequest<bytes::Bytes> {
+    async fn connect(address: std::net::SocketAddr) -> h2::client::SendRequest<Bytes> {
         let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
         let (client, connection) = h2::client::handshake(tcp).await.unwrap();
         tokio::spawn(connection);
@@ -918,11 +1028,11 @@ mod tests {
     }
 
     async fn open(
-        client: &h2::client::SendRequest<bytes::Bytes>,
+        client: &h2::client::SendRequest<Bytes>,
         path: &str,
         id: u8,
         grpc: bool,
-    ) -> (h2::client::ResponseFuture, h2::SendStream<bytes::Bytes>) {
+    ) -> (h2::client::ResponseFuture, h2::SendStream<Bytes>) {
         let mut request = http::Request::post(format!("http://localhost{path}"))
             .header("te", "trailers")
             .header("x-peer", http::HeaderValue::from_bytes(&[id]).unwrap());
@@ -1297,6 +1407,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_node_reader_behind_a_gated_peer_write_gets_the_lock_first() {
+        let limiter = MpcLockLimiter::default();
+        let lock = Arc::new(FairRwLock::new(()));
+        let lock_seconds = Counter::new("lock_seconds", "lock seconds").unwrap();
+        let first = limiter.write_run(peer(b'a'), lock_seconds.clone()).await;
+        let second = limiter.write_run(peer(b'b'), lock_seconds.clone()).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let held = first.write(&lock);
+        let peer_job = {
+            let (lock, order) = (lock.clone(), order.clone());
+            std::thread::spawn(move || {
+                let _guard = second.write(&lock);
+                order.lock().unwrap().push("peer");
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let node_reader = {
+            let (lock, order) = (lock.clone(), order.clone());
+            std::thread::spawn(move || {
+                let _guard = lock.read().unwrap();
+                order.lock().unwrap().push("node");
+            })
+        };
+        until(|| lock.turnstile_held()).await;
+        drop(held);
+        peer_job.join().unwrap();
+        node_reader.join().unwrap();
+
+        assert_eq!(*order.lock().unwrap(), ["node", "peer"]);
+        assert!(lock_seconds.get() > 0.0);
+    }
+
+    #[tokio::test]
     async fn packed_streaming_messages_stay_charged_until_the_next_read() {
         let message = crate::grpc::request_body::PREFIX_LEN + 1000;
         let budget = 2 * message;
@@ -1311,7 +1454,7 @@ mod tests {
             let mut frame = prefix(1000);
             frame.resize(message as usize, 7);
             frame.extend_from_within(..);
-            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(frame))
+            Ok::<_, std::convert::Infallible>(Bytes::from(frame))
         });
         let mut stream = LimitedBody::new(
             axum::body::Body::from_stream(futures::stream::iter(frames)),
