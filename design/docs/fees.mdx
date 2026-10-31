@@ -188,3 +188,7 @@ confirmed within a reasonable time, fee bumping relies on CPFP
   transaction.
 - Hashi can spend the change UTXO that returned to the pool, which also
   bumps the parent.
+
+## Who sets the deposit minimum
+
+Governance sets `bitcoin_deposit_minimum` the same way it sets `bitcoin_withdrawal_minimum`: through an `update_config` proposal that changes the onchain config when it executes. The value starts at 30,000 sats. Whatever value governance chooses, Hashi applies a floor of `DUST_RELAY_MIN_VALUE` (546 sats), so the effective deposit minimum never falls below Bitcoin's dust threshold.
