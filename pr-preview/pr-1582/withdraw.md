@@ -1,0 +1,294 @@
+# Withdraw
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
+
+A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,
+sent to a user-specified address on Bitcoin. The process has five phases:
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
+```
+
+## Who does what in a withdrawal?
+
+1. **User**: calls `hashi::withdraw::request_withdrawal` with the `hBTC` and a
+   Bitcoin destination address. Until the leader commits the request to a
+   withdrawal transaction, the user can call
+   `hashi::withdraw::cancel_withdrawal`, subject to a cooldown period.
+2. **Committee**: approves the request with `hashi::withdraw::approve_request`.
+   The leader then batches approved requests into a Bitcoin transaction and
+   commits it with `hashi::withdraw::commit_withdrawal_tx`.
+3. **Committee and Guardian**: the committee produces MPC signatures
+   (`hashi::withdraw::commit_input_signatures`), the Guardian enclave produces
+   the second signature, and the leader attaches it with
+   `hashi::withdraw::finalize_withdrawal`.
+4. **Leader and committee**: the leader broadcasts the signed transaction and,
+   after the required confirmations, a committee member calls
+   `hashi::withdraw::confirm_withdrawal`.
+
+Beyond the request, the user's only optional actions are canceling and, if
+the transaction gets stuck, fee bumping through child pays for parent (CPFP),
+described in [Broadcast](#broadcast).
+
+## How long does a withdrawal take?
+
+The time from request to settlement depends mainly on these stages:
+
+- **Batching**: the leader waits until a request has been waiting for roughly
+  5 minutes since its submission, a threshold number of approved requests
+  have accumulated, or the rate limiter can't fit the next request, whichever
+  comes first. A request can wait longer if the Guardian's rate limiter is out
+  of capacity, and Hashi never processes a request larger than the bucket's
+  maximum capacity unless the limit increases (see [Build TX](#build-tx)).
+- **One batch at a time**: the leader commits the next batch only after the
+  previous one is fully signed.
+- **Confirmations**: a committee member confirms the withdrawal after the
+  transaction reaches
+  the configured number of Bitcoin block confirmations
+  ([`bitcoin_confirmation_threshold`](config.mdx#bitcoin_confirmation_threshold)).
+
+## Request
+
+```mermaid
+graph LR
+    A[Request]:::active --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+A user submits an onchain Sui transaction to request a withdrawal by calling
+`hashi::withdraw::request_withdrawal`:
+
+```move
+entry fun request_withdrawal(
+    hashi: &mut Hashi,
+    clock: &Clock,
+    btc: Balance<BTC>,
+    bitcoin_address: vector<u8>,
+    ctx: &mut TxContext,
+)
+```
+
+It is a private `entry` function, so you call it directly from a
+programmable transaction block (PTB) rather than from other Move packages. A
+PTB chains several commands in one transaction, and a later command can take
+a value that an earlier one produced, so the `Balance<BTC>` can come from
+earlier commands in the same PTB, such as `0x2::balance::redeem_funds` on the
+sender's address balance.
+
+- `btc`: the `hBTC` to withdraw, passed as a `Balance<BTC>`. Must be at least
+  the [`bitcoin_withdrawal_minimum`](config.mdx#bitcoin_withdrawal_minimum).
+- `bitcoin_address`: the destination witness program, either `P2WPKH` (20
+  bytes) or `P2TR` (32 bytes). Hashi always pays a 32-byte program as `P2TR`.
+  Because a `P2WSH` program is also 32 bytes, `P2WSH` destinations aren't
+  supported.
+
+The protocol enforces a minimum withdrawal amount to guarantee that every
+request can produce a valid Bitcoin transaction even under worst-case fee
+conditions. This minimum covers the worst-case miner fee (which pays for
+both the user's transaction weight and opportunistic UTXO pool
+consolidation) and the dust threshold for the user's output. See
+[Fees](fees.mdx) for the full breakdown.
+
+The contract stores the full `hBTC` amount with the request and places it in a
+queue with a timestamp. The user can cancel their request at any point before
+the leader commits it to a withdrawal transaction, including after approval,
+subject to a cooldown period
+([`withdrawal_cancellation_cooldown_ms`](config.mdx#withdrawal_cancellation_cooldown_ms)).
+To cancel, the requester calls the private `entry` function
+`hashi::withdraw::cancel_withdrawal`, which returns the refunded
+`Balance<BTC>` for a later command in the same PTB, such as
+`0x2::balance::send_funds` back to the sender.
+
+## Approve
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve]:::active --> C[Build TX] --> D[Sign] --> E[Broadcast]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+On Bitcoin Mainnet, each committee member with a TRM Labs API key
+independently screens the Bitcoin destination address and the requesting Sui
+address (see [Handling Sanctioned Addresses](sanctions.mdx)); other members
+approve without screening. A member that rejects the
+request does not vote to approve it. If a quorum still approves, all members
+must assist in completing the withdrawal.
+
+Committee members communicate with each other to collect signatures to approve
+the request. After the signatures reach a quorum, one member submits the certificate
+onchain by calling `hashi::withdraw::approve_request`:
+
+```move
+entry fun approve_request(
+    hashi: &mut Hashi,
+    request_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+)
+```
+
+The function verifies the committee certificate and marks the request as
+approved, so the leader can pick it up for transaction construction.
+
+## Build TX
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve] --> C[Build TX]:::active --> D[Sign] --> E[Broadcast]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+The leader batches multiple approved requests into a single Bitcoin
+transaction to amortize the fixed transaction overhead across users. The
+leader waits for approved requests to buffer up before constructing a
+transaction, until a request has been waiting for roughly 5 minutes since it
+was submitted, a threshold number of approved requests have accumulated, or
+the Guardian's token-bucket rate limiter (described below) can't fit the next
+request, whichever comes first. This
+balances latency for individual users against efficiency for the protocol.
+The leader builds one batch at a time: it commits the next only after the
+previous one is fully signed.
+
+The leader takes approved requests oldest first and stops at the first one
+that doesn't fit the current capacity of the Guardian's token-bucket rate
+limiter, as tracked by the leader's own copy of it. That request and every
+request behind it wait until capacity refills. The leader skips a request
+larger than the bucket's maximum capacity every time, so Hashi never processes
+it unless governance raises the limit; its owner can cancel it.
+
+The leader then constructs an unsigned Bitcoin transaction:
+
+1. **Coin selection**: select UTXOs from the pool to cover the total
+   withdrawal amount (the user's withdrawn amount covers the miner fees).
+   The coin selector might include extra inputs to opportunistically
+   consolidate small UTXOs (see [Fees](fees.mdx)).
+2. **Outputs**: one output per withdrawal request to each user's destination
+   address, plus, when the inputs exceed the requested total, one change
+   output back to a Hashi-controlled address.
+3. **Fee calculation**: the leader estimates the miner fee through Bitcoin
+   Core's `estimatesmartfee` RPC, floored at `3 sat/vB`, and deducts each
+   user's share of the miner fee from their output. Validators independently verify
+   that the fee is within acceptable bounds (at least `1 sat/vB`, at most 3x
+   their own estimate).
+
+The leader commits the resulting unsigned transaction and its txid onchain by
+calling `hashi::withdraw::commit_withdrawal_tx`:
+
+```move
+entry fun commit_withdrawal_tx(
+    hashi: &mut Hashi,
+    request_ids: vector<address>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
+    txid: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+    r: &Random,
+    ctx: &mut TxContext,
+)
+```
+
+The function verifies the committee certificate, burns the `hBTC` from each
+request, locks the selected UTXOs in the pool, adds the change outputs to the
+pool as pending UTXOs, and creates a pending withdrawal record that all
+validators can independently verify.
+
+## Sign
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve] --> C[Build TX] --> D[Sign]:::active --> E[Broadcast]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+Signing is a two-step process matching the 2-of-2 Taproot script, which
+requires both a committee (MPC) signature and a Guardian signature for each
+input (see [Bitcoin Address Scheme](address-scheme.mdx)):
+
+1. **MPC signature**: the committee runs the threshold Schnorr signing
+   protocol (see [MPC Protocol](mpc-protocol.mdx)) to produce a signature for
+   each input.
+2. **Guardian signature**: once every input has an MPC signature, the leader
+   sends the unsigned transaction and metadata, with a committee certificate,
+   to the Guardian enclave, which checks the certificate and the request's
+   timestamp, debits its rate limiter, and produces the second signature for
+   each input.
+
+The leader combines both signatures into the taproot script-path witness for
+each input.
+
+The leader commits the MPC signatures onchain in chunks, each under its own
+committee certificate, by calling `hashi::withdraw::commit_input_signatures`:
+
+```move
+entry fun commit_input_signatures(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    indices: vector<u64>,
+    signatures: vector<vector<u8>>,
+    cert: CommitteeSignature,
+)
+```
+
+If a reconfiguration lands while a withdrawal is part-way through signing,
+its still-unsigned inputs get fresh presignatures (see
+[MPC Protocol](mpc-protocol.mdx)) from the new committee
+(`hashi::withdraw::reallocate_presigs`); signatures already recorded stay.
+
+The leader then attaches the Guardian signatures by calling
+`hashi::withdraw::finalize_withdrawal`:
+
+```move
+entry fun finalize_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    guardian_signatures: vector<vector<u8>>,
+    cert: CommitteeSignature,
+    clock: &Clock,
+)
+```
+
+The function verifies a committee certificate over both signature sets and
+marks the withdrawal fully signed. Each committee member re-checks the
+withdrawal against its own copy of the rate limiter before signing that
+certificate.
+
+## Broadcast
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]:::active
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+The fully signed transaction is broadcast to the Bitcoin network. The
+committee monitors the transaction until it reaches the configured number of
+block confirmations (see
+[`bitcoin_confirmation_threshold`](config.mdx#bitcoin_confirmation_threshold)).
+Once confirmed, a committee member calls
+`hashi::withdraw::confirm_withdrawal`:
+
+```move
+entry fun confirm_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+)
+```
+
+The function verifies the committee certificate, marks the withdrawal
+confirmed and its input UTXOs spent, and promotes its change outputs from
+pending to confirmed UTXOs. The withdrawal record stays in place until the
+leader's garbage collection archives it with
+`hashi::withdraw::archive_confirmed_withdrawals`, or, for a batch too large
+for one transaction, `archive_withdrawal_requests` followed by
+`finish_archive_withdrawal_txns`.
+
+If a transaction gets stuck, CPFP handles fee bumping. Either the
+withdrawal recipient spends their output with a high-fee child, or a later
+withdrawal batch spends the stuck transaction's change UTXO and pays its fee
+shortfall (see [Fees: stuck transactions](fees.mdx#stuck-transactions)).

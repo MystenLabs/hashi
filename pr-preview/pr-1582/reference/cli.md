@@ -1,0 +1,224 @@
+# CLI Reference
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> Every hashi CLI subcommand with its flags, where the global options go, and the commands for server, register, committee, config, proposals, backup, deposit, withdraw, and validator.
+
+## Global options
+
+```
+--config, -c          CLI config file path          (env: HASHI_CLI_CONFIG)
+--sui-rpc-url         Sui gRPC endpoint             (env: SUI_RPC_URL)
+--package-id          Hashi package ID              (env: HASHI_PACKAGE_ID)
+--hashi-object-id     Hashi shared object ID        (env: HASHI_OBJECT_ID)
+--keypair, -k         Signing keypair path          (env: HASHI_KEYPAIR)
+--verbose, -v         Enable verbose output
+--yes, -y             Skip confirmation prompts
+--gas-budget          Gas budget in MIST            (env: HASHI_GAS_BUDGET)
+--gas                 Pin the gas coin (object id)
+--gas-price           Gas price override in MIST per unit
+--dry-run             Simulate without executing
+--serialize-unsigned-transaction
+                      Print the unsigned tx as base64 instead of signing (no keypair needed)
+--sender              Address to build the tx for (for example a multisig)
+--btc-rpc-url, --btc-rpc-user, --btc-rpc-password, --btc-network, --btc-private-key
+                      Bitcoin settings              (env: BTC_RPC_URL, BTC_RPC_USER, ...)
+```
+
+**Where these flags go.** These options belong to the **first-level subcommand** (`committee`, `config`, `proposal`, `validator`, `backup`, `deposit`, `withdraw`, `balance`), not to the `hashi` binary itself. Put them anywhere **after** the first-level subcommand, before or after the sub-subcommand:
+
+```bash
+# Right — flag sits after the first-level subcommand
+hashi committee -c hashi-cli.toml list
+hashi config -c hashi-cli.toml on-chain
+hashi committee list --config hashi-cli.toml
+
+# Wrong — the top-level `hashi` command takes no options of its own
+hashi --config hashi-cli.toml committee list
+```
+
+If you get an `unexpected argument` error, check the flag's position before anything else. Setting the equivalent environment variable from [Environment variables](../validators/configuration.mdx#environment-variables) (for example `HASHI_CLI_CONFIG`) avoids the ordering question entirely.
+
+> `hashi server` and `hashi register` are the exceptions: each takes its **own** `--config` naming the **validator** config, not the CLI config, so `hashi register --config /path/to/validator.toml` is correct. See [Server](#server) and [Register](#register).
+
+If a command instead fails with `package_id is required. Set it via --package-id or in the config file.`, the flag placement is fine but the CLI config was not found or is incomplete; see [Configuration and CLI errors](../validators/troubleshooting.mdx#configuration-and-cli-errors).
+
+## Server
+
+```bash
+hashi server --config <path>
+```
+
+Run the Hashi validator daemon. Uses the validator config.
+
+**Running as a standalone service (systemd).** Operators who run the binary directly rather than a container can manage it with systemd. Install the verified binary at `/usr/local/bin/hashi` (confirm its sha256 first, see [Software dependencies](../validators/prerequisites.mdx#software-dependencies)), place your config at `/etc/hashi/validator.toml`, and run the daemon under a dedicated unprivileged user:
+
+```ini
+# /etc/systemd/system/hashi.service
+[Unit]
+Description=Hashi validator node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hashi
+Group=hashi
+ExecStart=/usr/local/bin/hashi server --config /etc/hashi/validator.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# The node binds to :443 by default (the listen-address field). This grants the
+# non-root process the one privileged-port capability it needs. Drop this line if
+# you set listen-address to a port at or above 1024 and front it with a proxy.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Reload systemd so it picks up the new or changed unit, enable and start it, then follow the logs:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hashi
+journalctl -u hashi -f
+```
+
+Notes:
+
+- The `hashi` user needs read access to the config and key files (keep key files `chmod 600`) and write access to the `db` path and `backup-dir`, both on persistent storage.
+- The node writes structured JSON logs to stderr, so journald captures everything and there is no separate log file to rotate.
+- This is an alternative to containerizing the process (see [Resources](../validators/prerequisites.mdx#resources)), not an addition. Run one or the other.
+
+## Register
+
+```bash
+hashi register --config <path> [--operator-address <addr>] [--serialize-unsigned-transaction | --dry-run] [--sui-rpc-url <url>] [-v] [-y]
+```
+
+Register or update your validator onchain. The validator account key must sign the initial registration; use `--serialize-unsigned-transaction` (deprecated alias `--print-only`) for offline signing. Idempotent.
+
+## Committee
+
+```bash
+hashi committee list [--epoch <N>]     # List committee members (default: current epoch)
+hashi committee view <address>         # View details for a specific validator
+hashi committee epoch                  # Show current epoch info
+hashi committee abort-reconfig         # Tear down a reconfiguration that overran its Sui epoch (see Epoch Changes)
+hashi committee start-reconfig         # Start a reconfiguration by hand (see Epoch Changes)
+```
+
+## Config
+
+```bash
+hashi config template [-o <path>]      # Generate CLI config template (default: hashi-cli.toml)
+hashi config show                      # Show effective CLI configuration
+hashi config on-chain                  # View on-chain protocol configuration
+```
+
+## Proposals (governance)
+
+```bash
+hashi proposal list [--type <type>] [--detailed] [--executed] [--votes] [--json]   # active proposals by default
+hashi proposal view <proposal-id>
+hashi proposal vote <proposal-id> [--execute]
+hashi proposal remove-vote <proposal-id>
+hashi proposal execute <proposal-id>
+hashi proposal execute-upgrade <proposal-id> --package-path <path>   # upgrade proposals only
+```
+
+Create proposals:
+
+```bash
+hashi proposal create update-config <key> <value> [-m key=value]
+hashi proposal create update-mpc-config [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
+hashi proposal create update-epoch-config <key> <value> [-m key=value]
+hashi proposal create add-config <key> <value> [--epoch] [-m key=value]
+hashi proposal create upgrade [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
+hashi proposal create enable-version <version> [-m key=value]
+hashi proposal create disable-version <version> [-m key=value]
+hashi proposal create emergency-pause [--unpause] [-m key=value]
+hashi proposal create ignore-member --validator <address> [--unignore] [-m key=value]
+```
+
+Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
+
+Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([Outbound](../validators/configuration.mdx#outbound)). Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
+
+```bash
+hashi proposal create update-config guardian_node_url string:<url> [-m key=value]
+```
+
+Executing the proposal changes the onchain value, but a running node keeps the guardian client it already resolved and goes on dialing the old endpoint. Restart each node after a `guardian_node_url` change for the new endpoint to take effect; nodes don't dial `guardian_url`.
+
+## Backup
+
+Backups are **OpenPGP (Sequoia)**: Hashi writes `.tar.asc` archives. Local restore picks the format from the suffix and also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`.
+
+```bash
+# Create a backup (uses the required configured cert unless overridden inline/by path).
+# Stop the node first: backup save opens its database and refuses while the node holds it.
+hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .] [--local-only]
+
+# Restore an encrypted .tar.asc — exactly one decryptor is required:
+hashi backup restore <tarball> --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
+hashi backup restore <tarball> --use-gpg-agent [--gpg-homedir <dir>] --output-dir <private-staging-dir>
+
+# Restore a local unencrypted .tar — no key needed
+hashi backup restore <tarball.tar> --output-dir <private-staging-dir>
+
+# Restore an S3 object; optionally pin its version:
+hashi backup restore s3://<bucket>/<key>.tar.asc --region <aws-region> [--version-id <version-id>] --backup-pgp-secret-key <secret-key-file> --output-dir <private-staging-dir>
+```
+
+With `[backup-s3]`, `backup save` uploads after saving locally; `--local-only`
+skips S3. Upload failure retains the local archive but exits nonzero, reporting
+its path and the intended S3 URI.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+
+S3 restore requires `--region`; `--version-id` optionally selects an exact
+version. Neither flag applies to local paths. Use the secret-key flag above or
+`--use-gpg-agent`; you need no original node configuration.
+
+`--use-gpg-agent` supports YubiKeys, including over a forwarded `gpg-agent` socket. Restore only extracts files into the output directory and installs nothing. To put the config, keys, and database back and restart the node, follow [Restoring a node](../validators/backup-restore.mdx#restoring-a-node).
+
+## Deposit, withdraw, and balance
+
+```bash
+# Deposits
+hashi deposit generate-address --recipient <sui-address>
+hashi deposit request --txid <btc-txid> [--outputs <json>] [--recipient <sui-addr>]
+hashi deposit request-single --txid <btc-txid> --vout <n> --amount <sats> [--recipient <sui-addr>]
+hashi deposit status <request-id>
+hashi deposit list [--json]
+
+# Withdrawals
+hashi withdraw request --amount <sats> --btc-address <addr> [--count <N>]   # --count submits N identical requests (default 1)
+hashi withdraw cancel <request-id>
+hashi withdraw status <request-id>
+hashi withdraw list [--json]
+
+# Balance
+hashi balance <sui-address> [--json]
+```
+
+These are primarily for testing or admin use, not routine operator tasks. For what the protocol does with each request, see the [Deposit](../deposit.mdx) flow ([request](../deposit.mdx#request), [approve](../deposit.mdx#approve), [confirm](../deposit.mdx#confirm), and [mint](../deposit.mdx#mint)) and the [Withdraw](../withdraw.mdx) flow ([request](../withdraw.mdx#request), [approve](../withdraw.mdx#approve), [build](../withdraw.mdx#build-tx), [sign](../withdraw.mdx#sign), and [broadcast](../withdraw.mdx#broadcast)).
+
+## Publish (admin only)
+
+```bash
+hashi publish ...
+```
+
+Builds and publishes the Hashi Move package and writes `hashi_ids.json`. The onchain configuration (Bitcoin chain ID, guardian) and the `UpgradeCap` handoff come later with `hashi launch` (see [Step 4: launch (admin)](../validators/genesis.mdx#step-4-launch-admin)). The admin runs both, not individual operators.
+
+## Validator
+
+```bash
+hashi validator resign                       # Leave at the next committee formation (revocable)
+hashi validator withdraw-resignation         # Revoke a pending resignation
+hashi validator remove-inactive <address>    # Remove a member that holds no epoch duties and is resigned or not an active Sui validator (permissionless)
+```
+
+Keep a resigned node running until the next committee forms. No one can remove members that governance ignores.
