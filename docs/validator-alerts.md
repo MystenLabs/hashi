@@ -88,6 +88,11 @@ Dashboard-worthy but **not** alerts:
   slower than its peers, or another member's bad partial signatures are slowing
   aggregation (`hashi_mpc_partial_sig_mismatch_total` names that member when the
   blame is certain).
+- `hashi_peer_mpc_lock_seconds_total` — seconds each peer's `SendMessages` and
+  `Complain` requests held your node's MPC write lock. Those requests take it
+  one at a time across all peers, so a rate near 1 means that peer keeps it
+  busy, which slows your node's own presigning and key rotation; compare across
+  nodes.
 
 ## What NOT to alert on
 
