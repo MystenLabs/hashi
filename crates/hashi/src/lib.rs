@@ -16,7 +16,7 @@ use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
 
 pub mod backup;
-pub mod backup_s3;
+pub mod backup_remote;
 pub mod btc_monitor;
 pub mod cli;
 pub mod communication;

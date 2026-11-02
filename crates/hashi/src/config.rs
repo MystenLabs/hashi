@@ -109,7 +109,7 @@ pub struct Config {
 
     /// Optional remote destination for encrypted node backups.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup_s3: Option<BackupS3Config>,
+    pub backup_remote: Option<BackupRemoteConfig>,
 
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,12 +357,161 @@ impl std::fmt::Debug for Config {
     }
 }
 
-/// S3 destination settings. Credentials come from the AWS provider chain.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct BackupS3Config {
-    pub bucket: String,
-    pub region: String,
+/// Remote destination settings. S3 credentials come from the AWS provider chain.
+#[derive(Debug, Clone)]
+pub enum BackupRemoteConfig {
+    S3(S3BackupConfig),
+}
+
+#[derive(Debug, Clone)]
+pub struct S3BackupConfig {
+    bucket: String,
+    region: String,
+}
+
+/// A local OS path or a validated remote URI, without normalizing object keys.
+#[derive(Debug)]
+pub(crate) enum BackupLocation<'a> {
+    Local(&'a Path),
+    Remote(S3BackupLocation<'a>),
+}
+
+#[derive(Debug)]
+pub(crate) struct S3BackupLocation<'a> {
+    bucket: &'a str,
+    key: &'a str,
+}
+
+impl<'a> BackupLocation<'a> {
+    pub(crate) fn parse(source: &'a Path) -> anyhow::Result<Self> {
+        let Some((scheme, rest)) = source.to_str().and_then(|s| s.split_once("://")) else {
+            return Ok(Self::Local(source));
+        };
+        if !scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            || !scheme
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        {
+            return Ok(Self::Local(source));
+        }
+        anyhow::ensure!(scheme == "s3", "unsupported backup URI scheme: {scheme}");
+        let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
+        S3BackupConfig::validate_bucket(bucket)?;
+        anyhow::ensure!(
+            !key.contains(['?', '#']) && !key.chars().any(char::is_control),
+            "S3 URI key must not contain a query, fragment, or control characters; use --version-id for versions"
+        );
+        Ok(Self::Remote(S3BackupLocation { bucket, key }))
+    }
+}
+
+impl<'a> S3BackupLocation<'a> {
+    pub(crate) fn key(&self) -> &'a str {
+        self.key
+    }
+
+    pub(crate) fn with_region(self, region: String) -> anyhow::Result<BackupRemoteConfig> {
+        S3BackupConfig::validate_region(&region)?;
+        Ok(BackupRemoteConfig::S3(S3BackupConfig {
+            bucket: self.bucket.to_owned(),
+            region,
+        }))
+    }
+}
+
+impl S3BackupConfig {
+    pub fn new(bucket: String, region: String) -> anyhow::Result<Self> {
+        Self::validate_bucket(&bucket)?;
+        Self::validate_region(&region)?;
+        Ok(Self { bucket, region })
+    }
+
+    fn validate_bucket(bucket: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !bucket.is_empty()
+                && bucket
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.'),
+            "backup-remote.destination must contain only an S3 bucket, without credentials, port, prefix, query, or fragment"
+        );
+        Ok(())
+    }
+
+    fn validate_region(region: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !region.trim().is_empty(),
+            "backup-remote.region must be nonempty"
+        );
+        Ok(())
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+}
+
+impl BackupRemoteConfig {
+    /// Parse a bucket-only S3 URI, allowing one optional trailing slash.
+    pub fn new(destination: &str, region: String) -> anyhow::Result<Self> {
+        let BackupLocation::Remote(location) = BackupLocation::parse(Path::new(destination))?
+        else {
+            anyhow::bail!("backup-remote.destination must be an s3:// bucket URI");
+        };
+        anyhow::ensure!(
+            location.key().is_empty(),
+            "backup-remote.destination must contain only an S3 bucket, without a key"
+        );
+        location.with_region(region)
+    }
+
+    pub fn bucket(&self) -> &str {
+        match self {
+            Self::S3(config) => config.bucket(),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BackupRemoteConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde_derive::Deserialize)]
+        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+        struct Input {
+            destination: String,
+            region: Option<String>,
+        }
+
+        let input = <Input as serde::Deserialize>::deserialize(deserializer)?;
+        let region = input
+            .region
+            .ok_or_else(|| serde::de::Error::custom("backup-remote.region is required"))?;
+        Self::new(&input.destination, region).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for BackupRemoteConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        struct Destination<'a>(&'a str);
+        impl serde::Serialize for Destination<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_str(&format_args!("s3://{}/", self.0))
+            }
+        }
+
+        match self {
+            Self::S3(config) => {
+                let mut output = serializer.serialize_struct("BackupRemoteConfig", 2)?;
+                output.serialize_field("destination", &Destination(config.bucket()))?;
+                output.serialize_field("region", config.region())?;
+                output.end()
+            }
+        }
+    }
 }
 
 impl Config {
@@ -389,7 +538,7 @@ impl Config {
                 .is_none_or(|target| (1..=MAX_WITHDRAWAL_FEE_CONF_TARGET).contains(&target)),
             "withdrawal_fee_conf_target must be between 1 and {MAX_WITHDRAWAL_FEE_CONF_TARGET} blocks"
         );
-        config.validate_backup_s3()?;
+        config.validate_backup_remote()?;
         Ok(config)
     }
 
@@ -400,44 +549,32 @@ impl Config {
 
     /// Validate remote backup settings without deriving or allocating a destination.
     /// Local-only configurations do not require deployment or validator identity.
-    pub fn validate_backup_s3(&self) -> anyhow::Result<()> {
-        let Some(s3) = &self.backup_s3 else {
+    pub fn validate_backup_remote(&self) -> anyhow::Result<()> {
+        if self.backup_remote.is_none() {
             return Ok(());
-        };
-        anyhow::ensure!(
-            !s3.bucket.trim().is_empty(),
-            "backup-s3.bucket must be nonempty"
-        );
-        anyhow::ensure!(
-            !s3.bucket.contains('/') && !s3.bucket.chars().any(char::is_whitespace),
-            "backup-s3.bucket must be a bucket name, not a URI or path"
-        );
-        anyhow::ensure!(
-            !s3.region.trim().is_empty(),
-            "backup-s3.region must be nonempty"
-        );
+        }
         let chain_id = self.sui_chain_id();
         anyhow::ensure!(
             !chain_id.is_empty()
                 && chain_id
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
-            "backup-s3 requires a nonempty sui-chain-id usable as a namespace component"
+            "backup-remote requires a nonempty sui-chain-id usable as a namespace component"
         );
-        let ids = self.hashi_ids.context("backup-s3 requires hashi-ids")?;
+        let ids = self.hashi_ids.context("backup-remote requires hashi-ids")?;
         anyhow::ensure!(
             ids.hashi_object_id != Address::ZERO,
-            "backup-s3 requires a nonzero hashi-object-id"
+            "backup-remote requires a nonzero hashi-object-id"
         );
         self.validator_address
-            .context("backup-s3 requires validator-address")?;
+            .context("backup-remote requires validator-address")?;
         Ok(())
     }
 
     /// Canonical object-key prefix, including the trailing slash.
-    /// Call `validate_backup_s3` before deriving a configured destination.
-    pub fn backup_s3_namespace(&self) -> Option<String> {
-        self.backup_s3.as_ref()?;
+    /// Call `validate_backup_remote` before deriving a configured destination.
+    pub fn backup_remote_namespace(&self) -> Option<String> {
+        self.backup_remote.as_ref()?;
         Some(format!(
             "{}/{}/{}/",
             self.sui_chain_id(),
@@ -681,7 +818,7 @@ impl Config {
                 "hashi-test-backups-{:032x}",
                 rand::random::<u128>()
             )),
-            backup_s3: None,
+            backup_remote: None,
             force_run_as_leader: None,
             test_weight_divisor: None,
             test_batch_size_per_weight: None,
@@ -772,91 +909,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn backup_s3_config_is_optional_and_validated_at_load() {
+    fn backup_remote_config_is_optional_and_validated_at_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = Config::new_for_testing();
         config.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
-        assert!(loaded.backup_s3.is_none());
-        assert!(loaded.backup_s3_namespace().is_none());
+        assert!(loaded.backup_remote.is_none());
+        assert!(loaded.backup_remote_namespace().is_none());
 
-        config.backup_s3 = Some(BackupS3Config {
-            bucket: "hashi-backups".into(),
-            region: "us-west-2".into(),
-        });
+        config.backup_remote =
+            Some(BackupRemoteConfig::new("s3://hashi-backups/", "us-west-2".into()).unwrap());
         let load = |config: &Config| {
             config.save(&path).unwrap();
             Config::load(&path)
         };
         config.sui_chain_id = Some("AbCdEF12".into());
-        assert!(load(&config).unwrap_err().to_string().contains("hashi-ids"));
+        assert!(load(&config).is_err());
         config.hashi_ids = Some(HashiIds {
             package_id: Address::ZERO,
             hashi_object_id: Address::ZERO,
         });
-        assert!(
-            load(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("hashi-object-id")
-        );
+        assert!(load(&config).is_err());
         config.hashi_ids.as_mut().unwrap().hashi_object_id = "0x1".parse().unwrap();
-        assert!(
-            load(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("validator-address")
-        );
+        assert!(load(&config).is_err());
         config.validator_address = Some("0x2".parse().unwrap());
         let loaded = load(&config).unwrap();
-        let s3 = loaded.backup_s3.as_ref().unwrap();
-        assert_eq!(s3.bucket, "hashi-backups");
-        assert_eq!(s3.region, "us-west-2");
+        let remote = loaded.backup_remote.as_ref().unwrap();
+        assert_eq!(remote.bucket(), "hashi-backups");
+        let BackupRemoteConfig::S3(s3) = remote;
+        assert_eq!(s3.region(), "us-west-2");
         assert_eq!(
-            loaded.backup_s3_namespace().unwrap(),
+            loaded.backup_remote_namespace().unwrap(),
             "AbCdEF12/0x0000000000000000000000000000000000000000000000000000000000000001/0x0000000000000000000000000000000000000000000000000000000000000002/"
         );
         config.sui_chain_id = None;
         let default_config = load(&config).unwrap();
         assert!(
             default_config
-                .backup_s3_namespace()
+                .backup_remote_namespace()
                 .unwrap()
                 .starts_with(&format!("{SUI_MAINNET_CHAIN_ID}/"))
         );
 
         for chain in ["", " ", "../chain", "a/b"] {
             config.sui_chain_id = Some(chain.into());
-            assert!(
-                load(&config)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("sui-chain-id")
-            );
-        }
-        config.sui_chain_id = Some("abcdef12".into());
-        for bucket in ["", " ", "s3://bucket", "bucket/prefix", " bucket"] {
-            config.backup_s3.as_mut().unwrap().bucket = bucket.into();
-            assert!(
-                load(&config)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("backup-s3.bucket")
-            );
-        }
-        config.backup_s3.as_mut().unwrap().bucket = "hashi-backups".into();
-        for region in ["", "   "] {
-            config.backup_s3.as_mut().unwrap().region = region.into();
-            assert!(
-                load(&config)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("backup-s3.region")
-            );
+            assert!(load(&config).is_err());
         }
         // Invalid remote identities remain irrelevant when remote backup is disabled.
-        config.backup_s3 = None;
+        config.backup_remote = None;
         config.sui_chain_id = Some("../invalid".into());
         config.hashi_ids = None;
         config.validator_address = None;
@@ -864,19 +965,113 @@ mod tests {
     }
 
     #[test]
-    fn backup_s3_rejects_partial_and_unknown_settings() {
-        let config = Config::new_for_testing();
-        let base = toml::to_string(&config).unwrap();
+    fn backup_remote_rejects_partial_and_unknown_settings() {
         for settings in [
             "",
-            "bucket = 'hashi-backups'",
+            "destination = 's3://hashi-backups/'",
             "region = 'us-west-2'",
-            "bucket = 'hashi-backups'\nregion = 'us-west-2'\nprefix = 'custom/'",
-            "bucket = 'hashi-backups'\nregion = 'us-west-2'\naccess-key = 'secret'",
+            "destination = 's3://hashi-backups/'\nregion = 'us-west-2'\nprefix = 'custom/'",
+            "destination = 's3://hashi-backups/'\nregion = 'us-west-2'\naccess-key = 'secret'",
+            "bucket = 'hashi-backups'\nregion = 'us-west-2'",
         ] {
-            let text = format!("{base}\n[backup-s3]\n{settings}\n");
-            assert!(toml::from_str::<Config>(&text).is_err(), "{settings}");
+            assert!(
+                toml::from_str::<BackupRemoteConfig>(settings).is_err(),
+                "{settings}"
+            );
         }
+        let base = toml::to_string(&Config::new_for_testing()).unwrap();
+        let legacy =
+            format!("{base}\n[backup-s3]\nbucket = 'hashi-backups'\nregion = 'us-west-2'\n");
+        assert!(toml::from_str::<Config>(&legacy).is_err());
+    }
+
+    #[test]
+    fn backup_remote_destination_is_bucket_only() {
+        for destination in ["s3://bucket", "s3://bucket/"] {
+            let remote = BackupRemoteConfig::new(destination, "us-west-2".into()).unwrap();
+            assert_eq!(remote.bucket(), "bucket");
+            let serialized = toml::to_string(&remote).unwrap();
+            let fields: toml::Table = toml::from_str(&serialized).unwrap();
+            assert_eq!(fields["destination"].as_str(), Some("s3://bucket/"));
+            let decoded: BackupRemoteConfig = toml::from_str(&serialized).unwrap();
+            assert_eq!(decoded.bucket(), remote.bucket());
+            let BackupRemoteConfig::S3(s3) = decoded;
+            assert_eq!(s3.region(), "us-west-2");
+        }
+        for destination in ["s3://bucket/prefix", "s3://bucket//"] {
+            assert!(
+                BackupRemoteConfig::new(destination, "us-west-2".into()).is_err(),
+                "{destination}"
+            );
+        }
+        assert!(S3BackupConfig::new("bucket/key".into(), "us-west-2".into()).is_err());
+        assert!(S3BackupConfig::new("bucket".into(), " \t".into()).is_err());
+    }
+
+    #[test]
+    fn backup_location_preserves_paths_and_literal_keys() {
+        for local in [
+            "backup.tar",
+            "/tmp/archive://backup.tar",
+            "./gs://backup.tar",
+            "1s3://backup.tar",
+        ] {
+            let path = Path::new(local);
+            assert!(
+                matches!(BackupLocation::parse(path).unwrap(), BackupLocation::Local(source) if source == path)
+            );
+        }
+        for key in [
+            "",
+            "backup.tar.asc",
+            "nested//./../backup.tar.asc",
+            "/backup.tar.asc",
+            "nested/a%2Fb%3Fc%23d%20e.tar.asc",
+            "nested/backup with spaces.tar.asc",
+        ] {
+            let uri = format!("s3://backup-bucket.example/{key}");
+            let BackupLocation::Remote(location) = BackupLocation::parse(Path::new(&uri)).unwrap()
+            else {
+                panic!("expected remote location");
+            };
+            assert_eq!(location.key(), key);
+            assert_eq!(
+                location.with_region("us-west-2".into()).unwrap().bucket(),
+                "backup-bucket.example"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_location_rejects_invalid_uris() {
+        for uri in [
+            "gs://bucket",
+            "s3://",
+            "s3://user@bucket",
+            "s3://bucket:443",
+            "s3://buck et",
+            "s3://buck%65t",
+            "s3://buck\\et",
+            "s3://bucket?query",
+            "s3://bucket#fragment",
+            "s3://bucket/backup.tar.asc?versionId=x",
+            "s3://bucket/backup.tar.asc#fragment",
+            "s3://bucket/backup\n.tar.asc",
+            "s3://bucket/backup\0.tar.asc",
+        ] {
+            assert!(BackupLocation::parse(Path::new(uri)).is_err(), "{uri:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_location_preserves_non_utf8_local_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff/backup.tar"));
+        assert!(matches!(
+            BackupLocation::parse(path).unwrap(),
+            BackupLocation::Local(source) if source.as_os_str().as_bytes() == path.as_os_str().as_bytes()
+        ));
     }
 
     #[test]

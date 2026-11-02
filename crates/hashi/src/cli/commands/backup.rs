@@ -8,7 +8,6 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
@@ -23,8 +22,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::backup;
-use crate::backup_s3::BackupS3Client;
-use crate::backup_s3::parse_s3_uri;
+use crate::backup_remote::BackupRemoteClient;
+use crate::backup_remote::UploadReceipt;
 use crate::cli::client::HashiClient;
 use crate::cli::config::CliConfig;
 use crate::cli::print_info;
@@ -330,14 +329,14 @@ pub async fn save(
     let has_recipient_override = backup_pgp_cert_override.is_some();
     let recipient = resolve_backup_recipient(&node_config, backup_pgp_cert_override)?;
     if has_recipient_override
-        && node_config.backup_s3.is_some()
+        && node_config.backup_remote.is_some()
         && !local_only
         && !recipient.has_same_encryption_recipients(&node_config.backup_pgp_cert)
     {
         anyhow::bail!(
             "--backup-pgp-cert has different usable encryption recipients from the configured \
              backup-pgp-cert. Use --local-only for this backup or update the configured \
-             backup-pgp-cert before uploading to S3."
+             backup-pgp-cert before uploading remotely."
         );
     }
 
@@ -404,12 +403,12 @@ pub async fn save(
     Ok(output_path)
 }
 
-fn print_upload_receipt(uri: &str, receipt: &PutObjectOutput) {
+fn print_upload_receipt(uri: &str, receipt: &UploadReceipt) {
     print_success(&format!("Backup uploaded: {uri}"));
-    if let Some(version_id) = receipt.version_id() {
+    if let Some(version_id) = &receipt.version_id {
         print_info(&format!("Version ID: {version_id}"));
     }
-    if let Some(e_tag) = receipt.e_tag() {
+    if let Some(e_tag) = &receipt.e_tag {
         print_info(&format!("ETag: {e_tag}"));
     }
 }
@@ -436,42 +435,66 @@ pub(crate) fn resolve_pgp_recipient(value: String) -> Result<PgpPublicCert> {
     PgpPublicCert::new(cert)
 }
 
-/// Identify remote input without requiring local paths to be UTF-8.
-pub(crate) fn s3_restore_source(
-    source: &Path,
-    region: Option<&str>,
-    version_id: Option<&str>,
-) -> Result<bool> {
-    let remote = source
-        .to_str()
-        .is_some_and(|source| source.starts_with("s3://"));
-    if remote {
-        anyhow::ensure!(
-            region.is_some_and(|region| !region.trim().is_empty()),
-            "S3 restore requires a nonempty --region"
-        );
-        anyhow::ensure!(
-            version_id.is_none_or(|version| !version.is_empty()),
-            "--version-id must not be empty"
-        );
-    } else {
-        anyhow::ensure!(
-            region.is_none() && version_id.is_none(),
-            "--region and --version-id are only valid for S3 restores"
-        );
-    }
-    Ok(remote)
+/// A restore input parsed once, retaining local OS paths and literal remote keys.
+#[derive(Debug)]
+pub enum RestoreSource<'a> {
+    Local(&'a Path),
+    Remote(RemoteRestoreSource<'a>),
 }
 
-fn remote_restore_archive(uri: &str) -> Result<(&str, &str, &Path)> {
-    let (bucket, key) = parse_s3_uri(uri)?;
-    // S3 key prefixes are never interpreted as local directories.
-    let name = key.rsplit('/').next().unwrap_or_default();
-    anyhow::ensure!(
-        !name.is_empty() && !name.contains(['\\', '\0']),
-        "S3 backup key must end in a safe archive file name"
-    );
-    Ok((bucket, key, Path::new(name)))
+#[derive(Debug)]
+pub struct RemoteRestoreSource<'a> {
+    config: crate::config::BackupRemoteConfig,
+    key: &'a str,
+    version_id: Option<&'a str>,
+}
+
+impl<'a> RestoreSource<'a> {
+    pub fn parse(
+        source: &'a Path,
+        region: Option<&str>,
+        version_id: Option<&'a str>,
+    ) -> Result<Self> {
+        match crate::config::BackupLocation::parse(source)? {
+            crate::config::BackupLocation::Remote(location) => {
+                let key = location.key();
+                anyhow::ensure!(!key.is_empty(), "S3 URI must contain an object key");
+                let config = location.with_region(
+                    region
+                        .context("S3 backup source requires a region")?
+                        .to_owned(),
+                )?;
+                anyhow::ensure!(
+                    version_id.is_none_or(|version| !version.is_empty()),
+                    "--version-id must not be empty"
+                );
+                Ok(Self::Remote(RemoteRestoreSource {
+                    config,
+                    key,
+                    version_id,
+                }))
+            }
+            crate::config::BackupLocation::Local(path) => {
+                anyhow::ensure!(
+                    region.is_none() && version_id.is_none(),
+                    "--region and --version-id are only valid for S3 restores"
+                );
+                Ok(Self::Local(path))
+            }
+        }
+    }
+}
+
+impl RemoteRestoreSource<'_> {
+    fn archive(&self) -> Result<&Path> {
+        // Remote key prefixes are never interpreted as local directories.
+        let name = self.key.rsplit('/').next().unwrap_or_default();
+        anyhow::ensure!(
+            !name.is_empty() && !name.contains(['\\', '\0']),
+            "S3 backup key must end in a safe archive file name"
+        );
+        Ok(Path::new(name))
+    }
 }
 
 fn validate_remote_restore(
@@ -503,29 +526,30 @@ fn validate_remote_restore(
 }
 
 /// Download one S3 object and restore it without needing the original node config.
-pub async fn restore_from_s3(
-    uri: &str,
-    region: &str,
-    version_id: Option<&str>,
+pub async fn restore_from_remote(
+    source: &RemoteRestoreSource<'_>,
     decryptor: RestoreDecryptor,
     output_dir: &Path,
 ) -> Result<()> {
-    s3_restore_source(Path::new(uri), Some(region), version_id)?;
-    let (_, _, archive) = remote_restore_archive(uri)?;
-    validate_remote_restore(archive, &decryptor, output_dir)?;
-    let client = BackupS3Client::connect(region).await?;
-    restore_from_s3_with_client(&client, uri, version_id, decryptor, output_dir).await
+    restore_remote_with_client(None, source, decryptor, output_dir).await
 }
 
-async fn restore_from_s3_with_client(
-    client: &BackupS3Client,
-    uri: &str,
-    version_id: Option<&str>,
+async fn restore_remote_with_client(
+    client: Option<&BackupRemoteClient>,
+    source: &RemoteRestoreSource<'_>,
     decryptor: RestoreDecryptor,
     output_dir: &Path,
 ) -> Result<()> {
-    let (bucket, key, archive) = remote_restore_archive(uri)?;
+    let archive = source.archive()?;
     validate_remote_restore(archive, &decryptor, output_dir)?;
+    let connected;
+    let client = match client {
+        Some(client) => client,
+        None => {
+            connected = BackupRemoteClient::connect(&source.config).await?;
+            &connected
+        }
+    };
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
     // TempDir owns cleanup across download errors, cancellation, and restore errors.
@@ -551,7 +575,14 @@ async fn restore_from_s3_with_client(
         .open(&archive_path)
         .context("Failed to create private backup download file")?;
     let mut file = tokio::fs::File::from_std(file);
-    client.download(bucket, key, version_id, &mut file).await?;
+    client
+        .download(
+            source.config.bucket(),
+            source.key,
+            source.version_id,
+            &mut file,
+        )
+        .await?;
     drop(file);
     restore(&archive_path, decryptor, output_dir)
 }
@@ -882,7 +913,7 @@ mod tests {
         status: &str,
         extra_length: usize,
     ) -> (
-        BackupS3Client,
+        BackupRemoteClient,
         tokio::task::JoinHandle<()>,
         Arc<AtomicUsize>,
     ) {
@@ -910,61 +941,85 @@ mod tests {
             socket.shutdown().await.unwrap();
         });
         (
-            BackupS3Client::for_test_endpoint(&endpoint),
+            BackupRemoteClient::for_test_endpoint(&endpoint),
             server,
             connections,
         )
     }
 
+    fn remote_source<'a>(uri: &'a str, version_id: Option<&'a str>) -> RemoteRestoreSource<'a> {
+        let RestoreSource::Remote(source) =
+            RestoreSource::parse(Path::new(uri), Some("us-east-1"), version_id).unwrap()
+        else {
+            panic!("expected remote source");
+        };
+        source
+    }
+
+    async fn restore_remote(
+        client: Option<&BackupRemoteClient>,
+        uri: &str,
+        version_id: Option<&str>,
+        decryptor: RestoreDecryptor,
+        output_dir: &Path,
+    ) -> Result<()> {
+        restore_remote_with_client(
+            client,
+            &remote_source(uri, version_id),
+            decryptor,
+            output_dir,
+        )
+        .await
+    }
+
+    #[test]
+    fn restore_source_requires_object_key() {
+        for uri in ["s3://bucket", "s3://bucket/"] {
+            assert!(
+                RestoreSource::parse(Path::new(uri), Some("us-east-1"), None).is_err(),
+                "{uri:?}"
+            );
+        }
+    }
+
     #[test]
     fn restore_source_flags_are_remote_only() {
+        assert_eq!(
+            remote_source("s3://bucket/backup.tar.asc", None).version_id,
+            None
+        );
+        let source = remote_source("s3://bucket/backup.tar.asc", Some("version /+%"));
+        assert_eq!(source.version_id, Some("version /+%"));
         let uri = Path::new("s3://bucket/backup.tar.asc");
-        assert!(s3_restore_source(uri, None, None).is_err());
-        assert!(s3_restore_source(uri, Some(" \t"), None).is_err());
-        assert!(s3_restore_source(uri, Some("us-east-1"), Some("")).is_err());
-        assert!(s3_restore_source(uri, Some("us-east-1"), Some("version")).unwrap());
-        for (region, version) in [(Some("us-east-1"), None), (None, Some("version"))] {
-            assert!(s3_restore_source(Path::new("backup.tar"), region, version).is_err());
+        for (region, version) in [(None, None), (Some("us-east-1"), Some(""))] {
+            assert!(RestoreSource::parse(uri, region, version).is_err());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            let path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff/backup.tar"));
-            assert!(!s3_restore_source(path, None, None).unwrap());
+        for (region, version) in [(Some("us-east-1"), None), (None, Some("version"))] {
+            assert!(RestoreSource::parse(Path::new("backup.tar"), region, version).is_err());
         }
     }
 
     #[tokio::test]
-    async fn remote_restore_rejects_invalid_input_before_connecting() {
+    async fn remote_restore_rejects_invalid_policy_before_connecting() {
         let out = tempfile::tempdir().unwrap();
+        let decryptor = RestoreDecryptor::GpgAgent { homedir: None };
         for uri in [
-            "s3://bucket/",
-            "s3://bucket/backup.tar?versionId=x",
+            "s3://bucket/nested/",
             "s3://bucket/backup.zip",
-            "s3://bucket/.tar",
-            "s3://bucket/...tar",
-            "s3://bucket/unsafe\\backup.tar",
+            "s3://bucket/.tar.asc",
+            "s3://bucket/...tar.asc",
+            "s3://bucket/unsafe\\backup.tar.asc",
         ] {
-            assert!(
-                restore_from_s3(
-                    uri,
-                    "us-east-1",
-                    None,
-                    RestoreDecryptor::Unencrypted,
-                    out.path()
-                )
-                .await
-                .is_err(),
-                "{uri}"
-            );
+            let result = remote_source(uri, None)
+                .archive()
+                .and_then(|archive| validate_remote_restore(archive, &decryptor, out.path()));
+            assert!(result.is_err(), "{uri}");
         }
         assert!(
-            restore_from_s3(
-                "s3://bucket/backup.tar.asc",
-                "us-east-1",
-                None,
+            restore_from_remote(
+                &remote_source("s3://bucket/backup.tar.asc", None),
                 RestoreDecryptor::Unencrypted,
-                out.path()
+                out.path(),
             )
             .await
             .is_err()
@@ -981,8 +1036,8 @@ mod tests {
         let (client, server, _) =
             serve_download(fs::read(&backup.tarball).unwrap(), "200 OK", 0).await;
         let out = tempfile::tempdir().unwrap();
-        restore_from_s3_with_client(
-            &client,
+        restore_remote(
+            Some(&client),
             &uri,
             Some("version-1"),
             local_secret_key_decryptor(&backup),
@@ -1013,7 +1068,7 @@ mod tests {
                 serve_download(fs::read(&plaintext).unwrap(), "200 OK", 0).await;
             let out = tempfile::tempdir().unwrap();
             assert!(
-                restore_from_s3_with_client(&client, &uri, None, decryptor, out.path())
+                restore_remote(Some(&client), &uri, None, decryptor, out.path(),)
                     .await
                     .is_err()
             );
@@ -1038,8 +1093,8 @@ mod tests {
             let out = tempfile::tempdir().unwrap();
             fs::write(out.path().join("keep"), b"unchanged").unwrap();
             assert!(
-                restore_from_s3_with_client(
-                    &client,
+                restore_remote(
+                    Some(&client),
                     "s3://bucket/backup.tar.asc",
                     None,
                     local_secret_key_decryptor(&backup),
@@ -1063,15 +1118,10 @@ mod tests {
         let existing = out.path().join("backup");
         fs::create_dir(&existing).unwrap();
         fs::write(existing.join("keep"), b"unchanged").unwrap();
-        let error = restore_from_s3(
-            "s3://bucket/backup.tar.asc",
-            "us-east-1",
-            None,
-            local_secret_key_decryptor(&backup),
-            out.path(),
-        )
-        .await
-        .unwrap_err();
+        let source = remote_source("s3://bucket/backup.tar.asc", None);
+        let error = restore_from_remote(&source, local_secret_key_decryptor(&backup), out.path())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Refusing to overwrite"));
         assert_file_eq(&existing.join("keep"), b"unchanged");
         assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
@@ -1108,9 +1158,9 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let output_dir = out.path().to_path_buf();
         let download = tokio::spawn(async move {
-            let client = BackupS3Client::for_test_endpoint(&endpoint);
-            restore_from_s3_with_client(
-                &client,
+            let client = BackupRemoteClient::for_test_endpoint(&endpoint);
+            restore_remote(
+                Some(&client),
                 "s3://bucket/nested/backup.tar.asc",
                 None,
                 decryptor,
@@ -1371,7 +1421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_rejects_different_s3_recipient_before_creating_archive() {
+    async fn save_rejects_different_remote_recipient_before_creating_archive() {
         let fixture = TestFixture::new();
         let (public_cert, _) = mock_pgp_keypair();
         let dir = tempfile::tempdir().unwrap();
@@ -1384,10 +1434,13 @@ mod tests {
             hashi_object_id: "0x1".parse().unwrap(),
         });
         node_config.validator_address = Some("0x2".parse().unwrap());
-        node_config.backup_s3 = Some(crate::config::BackupS3Config {
-            bucket: "hashi-recipient-mismatch-no-network".into(),
-            region: "us-west-2".into(),
-        });
+        node_config.backup_remote = Some(
+            crate::config::BackupRemoteConfig::new(
+                "s3://hashi-recipient-mismatch-no-network/",
+                "us-west-2".into(),
+            )
+            .unwrap(),
+        );
         node_config.save(&fixture.node_config_path).unwrap();
         let node_config = Config::load(&fixture.node_config_path).unwrap();
         let recipient = PgpPublicCert::new(public_cert.clone()).unwrap();
@@ -1422,7 +1475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_local_only_skips_configured_s3_upload() {
+    async fn save_local_only_skips_configured_remote_upload() {
         let fixture = TestFixture::new();
         let (public_cert, _) = mock_pgp_keypair();
         let mut node_config = Config::load(&fixture.node_config_path).unwrap();
@@ -1432,10 +1485,13 @@ mod tests {
             hashi_object_id: "0x1".parse().unwrap(),
         });
         node_config.validator_address = Some("0x2".parse().unwrap());
-        node_config.backup_s3 = Some(crate::config::BackupS3Config {
-            bucket: "hashi-local-only-no-network".into(),
-            region: "us-west-2".into(),
-        });
+        node_config.backup_remote = Some(
+            crate::config::BackupRemoteConfig::new(
+                "s3://hashi-local-only-no-network/",
+                "us-west-2".into(),
+            )
+            .unwrap(),
+        );
         node_config.save(&fixture.node_config_path).unwrap();
 
         let dir = tempfile::Builder::new().tempdir().unwrap();

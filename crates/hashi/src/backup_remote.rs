@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! One-shot transfers of backup archives.
+//! One-shot remote transfers for backup archives.
 
 use std::path::Path;
 use std::time::Duration;
@@ -12,45 +12,49 @@ use aws_sdk_s3::config::Builder;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use tokio::io::AsyncWriteExt;
+
+use crate::config::BackupRemoteConfig;
 
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+#[derive(Debug)]
+pub struct UploadReceipt {
+    pub version_id: Option<String>,
+    pub e_tag: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UploadError {
+    #[error("remote backup already exists: {0:#}")]
+    AlreadyExists(#[source] anyhow::Error),
+    #[error("{0:#}")]
+    Other(#[from] anyhow::Error),
+}
+
+impl UploadError {
+    pub(crate) fn context(self, message: String) -> Self {
+        match self {
+            Self::AlreadyExists(error) => Self::AlreadyExists(error.context(message)),
+            Self::Other(error) => Self::Other(error.context(message)),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct BackupS3Client {
+pub struct BackupRemoteClient {
     client: aws_sdk_s3::Client,
 }
 
-/// Parse an S3 object URI without decoding or normalizing its literal object key.
-pub fn parse_s3_uri(uri: &str) -> anyhow::Result<(&str, &str)> {
-    let (bucket, key) = uri
-        .strip_prefix("s3://")
-        .and_then(|path| path.split_once('/'))
-        .context("expected s3://bucket/key")?;
-    anyhow::ensure!(
-        !bucket.is_empty()
-            && bucket
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)),
-        "S3 URI must contain a bucket name, not credentials, a port, or an encoded authority"
-    );
-    anyhow::ensure!(!key.is_empty(), "S3 URI must contain an object key");
-    anyhow::ensure!(
-        !key.contains(['?', '#']) && !key.chars().any(char::is_control),
-        "S3 URI key must not contain a query, fragment, or control characters; use --version-id for versions"
-    );
-    Ok((bucket, key))
-}
-
-impl BackupS3Client {
-    pub async fn connect(region: &str) -> anyhow::Result<Self> {
+impl BackupRemoteClient {
+    pub async fn connect(config: &BackupRemoteConfig) -> anyhow::Result<Self> {
+        let BackupRemoteConfig::S3(config) = config;
         tokio::time::timeout(CONFIG_TIMEOUT, async {
             let config = aws_config::defaults(BehaviorVersion::latest())
-                .region(Region::new(region.to_owned()))
+                .region(Region::new(config.region().to_owned()))
                 .retry_config(RetryConfig::standard().with_max_attempts(1))
                 .timeout_config(timeouts())
                 .load()
@@ -74,7 +78,7 @@ impl BackupS3Client {
         bucket: &str,
         key: &str,
         archive: &Path,
-    ) -> anyhow::Result<PutObjectOutput> {
+    ) -> Result<UploadReceipt, UploadError> {
         // The outer deadline also covers credential resolution and opening/streaming
         // the file, not just the SDK's HTTP request. Never remove the local archive.
         tokio::time::timeout(TRANSFER_TIMEOUT, async {
@@ -89,10 +93,25 @@ impl BackupS3Client {
                 .body(body)
                 .send()
                 .await
-                .context("S3 backup PutObject failed")
+                .map(|receipt| UploadReceipt {
+                    version_id: receipt.version_id,
+                    e_tag: receipt.e_tag,
+                })
+                .map_err(|error| {
+                    let already_exists = error
+                        .raw_response()
+                        .is_some_and(|response| response.status().as_u16() == 412);
+                    let error = anyhow::Error::new(error).context("S3 backup PutObject failed");
+                    if already_exists {
+                        UploadError::AlreadyExists(error)
+                    } else {
+                        UploadError::Other(error)
+                    }
+                })
         })
         .await
         .context("S3 backup upload deadline exceeded")
+        .map_err(UploadError::from)
         .and_then(|result| result)
     }
 
@@ -269,7 +288,7 @@ mod tests {
     async fn server(
         fail: bool,
     ) -> (
-        BackupS3Client,
+        BackupRemoteClient,
         Arc<Mutex<ObjectStore>>,
         tokio::task::JoinHandle<()>,
     ) {
@@ -288,7 +307,11 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        (BackupS3Client::for_test_endpoint(&endpoint), store, task)
+        (
+            BackupRemoteClient::for_test_endpoint(&endpoint),
+            store,
+            task,
+        )
     }
 
     #[tokio::test]
@@ -311,8 +334,7 @@ mod tests {
             .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
             .await
             .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("PreconditionFailed"));
+        assert!(matches!(error, UploadError::AlreadyExists(_)));
         assert_eq!(tokio::fs::read(&archive).await.unwrap(), replacement);
         let store = store.lock().await;
         assert_eq!(store.requests, 2);
@@ -331,49 +353,12 @@ mod tests {
             .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
             .await
             .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("SlowDown"));
-        assert!(message.contains("try later"));
+        assert!(matches!(error, UploadError::Other(_)));
         assert_eq!(tokio::fs::read(&archive).await.unwrap(), bytes);
         let store = store.lock().await;
         assert_eq!(store.requests, 1);
         assert!(store.object.is_none());
         server.abort();
-    }
-
-    #[test]
-    fn s3_uri_preserves_literal_keys() {
-        let uri = String::from("s3://backup-bucket/a%2Fb/../archive%20name.tar");
-        let (bucket, key) = parse_s3_uri(&uri).unwrap();
-        assert_eq!(bucket, "backup-bucket");
-        assert_eq!(key, "a%2Fb/../archive%20name.tar");
-        assert_eq!(
-            parse_s3_uri("s3://bucket/key with spaces.tar").unwrap().1,
-            "key with spaces.tar"
-        );
-    }
-
-    #[test]
-    fn s3_uri_rejects_ambiguous_authorities_and_keys() {
-        for uri in [
-            "",
-            "https://bucket/key",
-            "s3://bucket",
-            "s3:///key",
-            "s3://bucket/",
-            "s3://user:password@bucket/key",
-            "s3://user@bucket/key",
-            "s3://bucket:443/key",
-            "s3://bucket%2Fother/key",
-            "s3://bucket\\other/key",
-            "s3://bucket?query/key",
-            "s3://bucket#fragment/key",
-            "s3://bucket/key?versionId=old",
-            "s3://bucket/key#fragment",
-            "s3://bucket/key\n.tar",
-        ] {
-            assert!(parse_s3_uri(uri).is_err(), "{uri:?}");
-        }
     }
 
     #[tokio::test]

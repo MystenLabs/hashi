@@ -557,7 +557,7 @@ pub enum BackupCommands {
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
 
-        /// Keep the archive local without uploading to configured S3 storage
+        /// Keep the archive local without uploading to configured remote storage
         #[clap(long)]
         local_only: bool,
     },
@@ -1457,7 +1457,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 gpg_homedir,
                 output_dir,
             } => {
-                let remote = commands::backup::s3_restore_source(
+                let source = commands::backup::RestoreSource::parse(
                     &backup_tarball,
                     region.as_deref(),
                     version_id.as_deref(),
@@ -1468,17 +1468,14 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     use_gpg_agent,
                     gpg_homedir.as_deref(),
                 )?;
-                if remote {
-                    commands::backup::restore_from_s3(
-                        backup_tarball.to_str().expect("validated S3 URI"),
-                        region.as_deref().expect("validated S3 region"),
-                        version_id.as_deref(),
-                        decryptor,
-                        &output_dir,
-                    )
-                    .await?;
-                } else {
-                    commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
+                match source {
+                    commands::backup::RestoreSource::Local(path) => {
+                        commands::backup::restore(path, decryptor, &output_dir)?;
+                    }
+                    commands::backup::RestoreSource::Remote(source) => {
+                        commands::backup::restore_from_remote(&source, decryptor, &output_dir)
+                            .await?;
+                    }
                 }
             }
             BackupCommands::ExportMpcPublicKey { output } => {

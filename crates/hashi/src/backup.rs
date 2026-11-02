@@ -12,7 +12,6 @@ mod recovery;
 
 use anyhow::Context;
 use anyhow::Result;
-use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::hash::Sha256;
 use fjall::KeyspaceCreateOptions;
@@ -39,7 +38,9 @@ use tracing::info;
 use tracing::warn;
 
 use crate::Hashi;
-use crate::backup_s3::BackupS3Client;
+use crate::backup_remote::BackupRemoteClient;
+use crate::backup_remote::UploadError;
+use crate::backup_remote::UploadReceipt;
 use crate::db::Database;
 
 pub use recovery::MpcRecoveryRecord;
@@ -128,18 +129,18 @@ impl BackupHandle {
 pub struct BackupService {
     inner: Arc<Hashi>,
     receiver: mpsc::UnboundedReceiver<BackupMaintenanceRequest>,
-    s3_client: Option<BackupS3Client>,
+    remote_client: Option<BackupRemoteClient>,
     recovery: Option<Box<MpcRecoveryRecord>>,
 }
 
 impl BackupService {
     pub fn new(hashi: Arc<Hashi>) -> (Self, BackupHandle) {
-        hashi.metrics.record_backup_s3_config(&hashi.config);
+        hashi.metrics.record_backup_remote_config(&hashi.config);
         let (sender, receiver) = mpsc::unbounded_channel();
         let service = Self {
             inner: hashi,
             receiver,
-            s3_client: None,
+            remote_client: None,
             recovery: None,
         };
         let handle = BackupHandle { sender };
@@ -245,13 +246,13 @@ impl BackupService {
         }
         let archive = archive?;
         if let Some(archive) = archive {
-            match upload(&self.inner.config, &mut self.s3_client, &archive).await {
+            match upload(&self.inner.config, &mut self.remote_client, &archive).await {
                 Ok(Some((uri, _receipt))) => {
                     self.inner.metrics.backup_scheduled_remote_successes.inc();
                     info!(epoch, %uri, "Scheduled remote backup completed");
                 }
                 Ok(None) => {}
-                Err(error) if with_recovery && is_precondition_failed(&error) => {
+                Err(UploadError::AlreadyExists(_)) if with_recovery => {
                     info!(
                         epoch,
                         path = %archive.display(),
@@ -260,7 +261,7 @@ impl BackupService {
                 }
                 Err(error) => {
                     self.inner.metrics.backup_scheduled_remote_failures.inc();
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         }
@@ -304,53 +305,46 @@ fn recovery_matches_committee(
             .is_some_and(|committee| committee.index_of(&record.validator_address).is_some())
 }
 
-fn is_precondition_failed(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<
-            aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
-        >()
-        .and_then(|error| error.raw_response())
-        .is_some_and(|response| response.status().as_u16() == 412)
-}
-
-/// Upload a published local archive if S3 is configured. Initialization failures
-/// leave the client empty so the next scheduled backup can try initialization again.
+/// Upload a published local archive if a remote destination is configured.
+/// Initialization failures leave the client empty so the next scheduled backup can try again.
 pub(crate) async fn upload(
     config: &crate::config::Config,
-    client: &mut Option<BackupS3Client>,
+    client: &mut Option<BackupRemoteClient>,
     archive: &Path,
-) -> Result<Option<(String, PutObjectOutput)>> {
-    let Some(s3) = &config.backup_s3 else {
+) -> Result<Option<(String, UploadReceipt)>, UploadError> {
+    let Some(remote) = &config.backup_remote else {
         return Ok(None);
     };
-    let namespace = config.backup_s3_namespace().expect("S3 is configured");
+    let namespace = config
+        .backup_remote_namespace()
+        .expect("remote backup is configured");
     let filename = archive
         .file_name()
         .and_then(|name| name.to_str())
         .context("backup archive must have a UTF-8 filename")?;
     let key = format!("{namespace}{filename}");
-    let uri = format!("s3://{}/{key}", s3.bucket);
+    let uri = format!("s3://{}/{key}", remote.bucket());
     let receipt = async {
         if client.is_none() {
-            *client = Some(BackupS3Client::connect(&s3.region).await?);
+            *client = Some(BackupRemoteClient::connect(remote).await?);
         }
         client
             .as_ref()
-            .expect("S3 client initialized")
-            .upload(&s3.bucket, &key, archive)
+            .expect("remote backup client initialized")
+            .upload(remote.bucket(), &key, archive)
             .await
     }
     .await
-    .with_context(|| {
-        format!(
+    .map_err(|error: UploadError| {
+        error.context(format!(
             "failed to upload backup to {uri}; local archive retained at {}",
             archive.display()
-        )
+        ))
     })?;
     info!(
         %uri,
-        version_id = receipt.version_id(),
-        e_tag = receipt.e_tag(),
+        version_id = receipt.version_id.as_deref(),
+        e_tag = receipt.e_tag.as_deref(),
         "Remote backup uploaded"
     );
     Ok(Some((uri, receipt)))
@@ -1658,10 +1652,13 @@ mod tests {
         config.backup_dir = directory.path().join("backups");
         config.backup_pgp_cert = mock_pgp_cert();
         if remote {
-            config.backup_s3 = Some(crate::config::BackupS3Config {
-                bucket: "backup-bucket".to_owned(),
-                region: "us-east-1".to_owned(),
-            });
+            config.backup_remote = Some(
+                crate::config::BackupRemoteConfig::new(
+                    "s3://backup-bucket/",
+                    "us-east-1".to_owned(),
+                )
+                .unwrap(),
+            );
             config.sui_chain_id = Some("aB12Cd34".to_owned());
             config.hashi_ids = Some(crate::config::HashiIds {
                 package_id: "0x1".parse().unwrap(),
@@ -1785,7 +1782,10 @@ mod tests {
                     "cleanup must not create a replacement archive"
                 );
                 assert!(worker.recovery.is_none());
-                assert!(worker.s3_client.is_none(), "cleanup must not initialize S3");
+                assert!(
+                    worker.remote_client.is_none(),
+                    "cleanup must not initialize remote storage"
+                );
                 assert_eq!(
                     fixture.inner.metrics.backup_scheduled_local_successes.get(),
                     0
@@ -2297,7 +2297,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
         let recovery_action = || BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
         assert!(
             service
@@ -2323,7 +2323,7 @@ mod tests {
         );
 
         service = restart_backup_service(service);
-        service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+        service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
         service
             .process_epoch_change(42, recovery_action())
             .await
@@ -2408,7 +2408,7 @@ mod tests {
             2
         );
         assert!(
-            upload(&service.inner.config, &mut service.s3_client, &archive)
+            upload(&service.inner.config, &mut service.remote_client, &archive)
                 .await
                 .is_err()
         );
@@ -2434,7 +2434,7 @@ mod tests {
             }
             let result = service.process_epoch_change(6, action).await;
             assert_eq!(result.is_err(), remove_config);
-            assert!(service.s3_client.is_none());
+            assert!(service.remote_client.is_none());
             assert_eq!(
                 service.inner.metrics.backup_scheduled_local_successes.get(),
                 0
@@ -2473,7 +2473,7 @@ mod tests {
                 .unwrap()
                 .starts_with("hashi-backup-epoch-6-")
         );
-        assert!(service.s3_client.is_none());
+        assert!(service.remote_client.is_none());
         assert_eq!(
             service.inner.metrics.backup_scheduled_local_successes.get(),
             1
@@ -2550,7 +2550,7 @@ mod tests {
             ));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            service.s3_client = Some(BackupS3Client::for_test_endpoint(&endpoint));
+            service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
             let server = tokio::spawn(async move {
                 axum::serve(listener, router).await.unwrap();
             });
@@ -2585,7 +2585,7 @@ mod tests {
             if fail {
                 let error = format!("{:#}", result.unwrap_err());
                 assert!(error.contains(&archive.display().to_string()), "{error}");
-                let namespace = service.inner.config.backup_s3_namespace().unwrap();
+                let namespace = service.inner.config.backup_remote_namespace().unwrap();
                 let uri = format!(
                     "s3://backup-bucket/{namespace}{}",
                     archive.file_name().unwrap().to_string_lossy()
