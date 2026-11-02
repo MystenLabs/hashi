@@ -606,6 +606,30 @@ pub(crate) fn check_commitment_outflow(
     Ok(())
 }
 
+pub(crate) fn withdrawal_commit_order(
+    requests: Vec<WithdrawalRequest>,
+    max_bucket_capacity: u64,
+    minimum: u64,
+) -> Vec<WithdrawalRequest> {
+    let mut ordered: Vec<_> = requests
+        .into_iter()
+        .filter(|r| {
+            r.awaits_commitment()
+                && r.approved_timestamp_ms.is_some()
+                && r.btc_amount <= max_bucket_capacity
+        })
+        .collect();
+    ordered.sort_by_key(|r| (r.approved_timestamp_ms, r.created_timestamp_ms, r.id));
+    promote_first_at_minimum(&mut ordered, minimum);
+    ordered
+}
+
+pub(crate) fn promote_first_at_minimum(requests: &mut [WithdrawalRequest], minimum: u64) {
+    if let Some(first) = requests.iter().position(|r| r.btc_amount >= minimum) {
+        requests[..=first].rotate_right(1);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitmentItem {
     Request(Address),
@@ -1862,7 +1886,12 @@ impl Hashi {
 
             attempted_request_counts += 1;
 
-            match utxo_pool::select_coins(&candidates, &mapped_requests, &params, fee_rate) {
+            match utxo_pool::select_coins(
+                &candidates,
+                &mapped_requests[..request_count],
+                &params,
+                fee_rate,
+            ) {
                 Ok(selection) => {
                     if request_count < configured_max_requests {
                         tracing::info!(
