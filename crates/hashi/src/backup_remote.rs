@@ -227,9 +227,19 @@ impl BackupRemoteClient {
             }
                 }
                 Self::Gcs(client) => {
-                    // The SDK treats percent escapes as pre-encoded, but Hashi object keys are literal.
+                    // The SDK leaves '%' and '\' unescaped. Protect literal keys from
+                    // server-side percent decoding and URL backslash normalization.
+                    let escapes = key.bytes().filter(|&byte| matches!(byte, b'%' | b'\\')).count();
+                    let mut object = String::with_capacity(key.len() + 2 * escapes);
+                    for character in key.chars() {
+                        match character {
+                            '%' => object.push_str("%25"),
+                            '\\' => object.push_str("%5C"),
+                            other => object.push(other),
+                        }
+                    }
                     let mut request = client
-                        .read_object(format!("projects/_/buckets/{bucket}"), key.replace('%', "%25"))
+                        .read_object(format!("projects/_/buckets/{bucket}"), object)
                         .with_automatic_decompression(false);
                     match version {
                         Some(ObjectVersion::Gcs(generation)) => {
@@ -598,11 +608,11 @@ mod tests {
             )
                 .into_response();
         }
-        // Only these objects exist; decoding the literal %2F in the second key selects a missing object.
+        // Only these objects exist; decoding percent escapes or normalizing backslashes selects a missing object.
         if !matches!(
             uri.path(),
             "/storage/v1/b/backup-bucket/o/testnet%2Fvalidator%2Fepoch-7.tar"
-                | "/storage/v1/b/backup-bucket/o/literal%252Fprefix%2F..%2Farchive.tar.asc"
+                | "/storage/v1/b/backup-bucket/o/literal%252Fprefix%5C..%5Cname%2F..%2Farchive.tar.asc"
         ) {
             return (StatusCode::NOT_FOUND, "object not found").into_response();
         }
@@ -733,7 +743,7 @@ mod tests {
             client
                 .download(
                     "backup-bucket",
-                    "literal%2Fprefix/../archive.tar.asc",
+                    r"literal%2Fprefix\..\name/../archive.tar.asc",
                     version,
                     &mut destination,
                 )
@@ -747,7 +757,7 @@ mod tests {
             assert_eq!(method, axum::http::Method::GET);
             assert_eq!(
                 path,
-                "/storage/v1/b/backup-bucket/o/literal%252Fprefix%2F..%2Farchive.tar.asc"
+                "/storage/v1/b/backup-bucket/o/literal%252Fprefix%5C..%5Cname%2F..%2Farchive.tar.asc"
             );
             assert_eq!(query.get("alt").map(String::as_str), Some("media"));
             assert!(!query.contains_key("ifGenerationMatch"));

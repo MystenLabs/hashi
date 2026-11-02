@@ -514,7 +514,7 @@ impl RemoteRestoreSource<'_> {
         let name = self.key.rsplit('/').next().unwrap_or_default();
         anyhow::ensure!(
             !name.is_empty() && !name.contains(['\\', '\0']),
-            "S3 backup key must end in a safe archive file name"
+            "Remote backup key must end in a safe archive file name"
         );
         Ok(Path::new(name))
     }
@@ -528,7 +528,7 @@ fn validate_remote_restore(
     let format = backup::archive_format(archive)?;
     anyhow::ensure!(
         matches!(format, backup::BackupArchiveFormat::Encrypted),
-        "S3 restore requires an encrypted .tar.asc archive; restore plaintext .tar archives from a local path"
+        "Remote restore requires an encrypted .tar.asc archive; restore plaintext .tar archives from a local path"
     );
     anyhow::ensure!(
         matches!(
@@ -548,7 +548,7 @@ fn validate_remote_restore(
     Ok(())
 }
 
-/// Download one S3 object and restore it without needing the original node config.
+/// Download one remote object and restore it without needing the original node config.
 pub async fn restore_from_remote(
     source: &RemoteRestoreSource<'_>,
     decryptor: RestoreDecryptor,
