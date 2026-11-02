@@ -162,6 +162,15 @@ backup-dir = "/var/lib/hashi/backups"
 # Concurrency for leader job tasks, e.g. deposit processing (default: 32)
 # max-concurrent-leader-job-tasks = 32
 
+# Per-caller TRM call burst at each endpoint (default and minimum: 200)
+# trm-per-caller-burst = 200
+
+# Per-caller TRM calls regained per second at each endpoint (default: 1.0)
+# trm-per-caller-refill-per-sec = 1.0
+
+# Milliseconds a TRM verdict is reused for the same addresses (default: 300000; 0 disables; max: 3600000)
+# trm-verdict-reuse-ms = 300000
+
 # ── Nested tables ─────────────────────────────────────────────────────
 # TOML table headers apply to every following key until the next table,
 # so keep all root-level settings above this section.
