@@ -688,7 +688,7 @@ impl Config {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
             "backup-remote requires a nonempty sui-chain-id usable as a namespace component"
         );
-        let ids = self.hashi_ids.context("backup-remote requires hashi-ids")?;
+        let ids = self.hashi_ids();
         anyhow::ensure!(
             ids.hashi_object_id != Address::ZERO,
             "backup-remote requires a nonzero hashi-object-id"
@@ -705,7 +705,7 @@ impl Config {
         Some(format!(
             "{}/{}/{}/",
             self.sui_chain_id(),
-            self.hashi_ids?.hashi_object_id,
+            self.hashi_ids().hashi_object_id,
             self.validator_address?,
         ))
     }
@@ -1069,7 +1069,6 @@ mod tests {
             Config::load(&path)
         };
         config.sui_chain_id = Some("AbCdEF12".into());
-        assert!(load(&config).is_err());
         config.hashi_ids = Some(HashiIds {
             package_id: Address::ZERO,
             hashi_object_id: Address::ZERO,
@@ -1108,6 +1107,29 @@ mod tests {
         config.hashi_ids = None;
         config.validator_address = None;
         assert!(load(&config).is_ok());
+    }
+
+    #[test]
+    fn backup_remote_uses_mainnet_ids_when_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::new_for_testing();
+        config.backup_remote =
+            Some(BackupRemoteConfig::new("s3://hashi-backups/", Some("us-west-2".into())).unwrap());
+        config.validator_address = Some("0x2".parse().unwrap());
+
+        for chain_id in [None, Some(SUI_MAINNET_CHAIN_ID.to_string())] {
+            config.sui_chain_id = chain_id;
+            config.save(&path).unwrap();
+            let loaded = Config::load(&path).unwrap();
+            assert!(loaded.hashi_ids.is_none());
+            assert_eq!(
+                loaded.backup_remote_namespace().unwrap(),
+                format!(
+                    "{SUI_MAINNET_CHAIN_ID}/{HASHI_MAINNET_OBJECT_ID}/0x0000000000000000000000000000000000000000000000000000000000000002/"
+                )
+            );
+        }
     }
 
     #[test]
