@@ -10,6 +10,8 @@ use anyhow::Context as _;
 use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 
+use crate::constants::HASHI_MAINNET_OBJECT_ID;
+use crate::constants::HASHI_MAINNET_PACKAGE_ID;
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
@@ -78,6 +80,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitcoin_chain_id: Option<String>,
 
+    /// Defaults to the published mainnet ids, matching the `sui_chain_id`
+    /// default. Every other chain must set this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hashi_ids: Option<HashiIds>,
 
@@ -785,10 +789,9 @@ impl Config {
     }
 
     pub fn hashi_ids(&self) -> HashiIds {
-        // TODO fill in mainnet values once published
         self.hashi_ids.unwrap_or(HashiIds {
-            package_id: Address::ZERO,
-            hashi_object_id: Address::ZERO,
+            package_id: HASHI_MAINNET_PACKAGE_ID,
+            hashi_object_id: HASHI_MAINNET_OBJECT_ID,
         })
     }
 
@@ -1052,6 +1055,41 @@ mod tests {
         config.hashi_ids = None;
         config.validator_address = None;
         assert!(load(&config).is_ok());
+    }
+
+    #[test]
+    fn hashi_ids_default_to_the_mainnet_ids() {
+        let mut config = Config::new_for_testing();
+
+        for chain_id in [
+            None,
+            Some(SUI_MAINNET_CHAIN_ID),
+            Some(crate::constants::SUI_TESTNET_CHAIN_ID),
+            Some("AbCdEF12"),
+        ] {
+            config.sui_chain_id = chain_id.map(str::to_string);
+            let ids = config.hashi_ids();
+            assert_eq!(ids.package_id, HASHI_MAINNET_PACKAGE_ID, "{chain_id:?}");
+            assert_eq!(ids.hashi_object_id, HASHI_MAINNET_OBJECT_ID, "{chain_id:?}");
+        }
+    }
+
+    #[test]
+    fn configured_hashi_ids_override_the_mainnet_default() {
+        let package_id: Address = "0x1".parse().unwrap();
+        let hashi_object_id: Address = "0x2".parse().unwrap();
+        let mut config = Config::new_for_testing();
+        config.hashi_ids = Some(HashiIds {
+            package_id,
+            hashi_object_id,
+        });
+
+        for chain_id in [None, Some("AbCdEF12".to_string())] {
+            config.sui_chain_id = chain_id;
+            let ids = config.hashi_ids();
+            assert_eq!(ids.package_id, package_id);
+            assert_eq!(ids.hashi_object_id, hashi_object_id);
+        }
     }
 
     #[test]
