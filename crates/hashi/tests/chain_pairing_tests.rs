@@ -5,6 +5,9 @@
 //! mainnet if and only if Sui mainnet. Enforced by the launch transaction
 //! builder before any network I/O, and by the node from its local config at
 //! startup.
+//!
+//! The node also refuses Hashi ids from another chain: the pinned mainnet ids
+//! if and only if Sui mainnet.
 
 use std::time::Duration;
 
@@ -16,8 +19,11 @@ use hashi::constants::BITCOIN_MAINNET_CHAIN_ID;
 use hashi::constants::BITCOIN_REGTEST_CHAIN_ID;
 use hashi::constants::BITCOIN_SIGNET_CHAIN_ID;
 use hashi::constants::BITCOIN_TESTNET4_CHAIN_ID;
+use hashi::constants::HASHI_MAINNET_OBJECT_ID;
+use hashi::constants::HASHI_MAINNET_PACKAGE_ID;
 use hashi::constants::SUI_MAINNET_CHAIN_ID;
 use hashi::constants::SUI_TESTNET_CHAIN_ID;
+use hashi::constants::check_hashi_ids_for_sui_chain;
 use hashi::constants::check_sui_bitcoin_chain_pairing;
 use hashi::publish::BitcoinConfigOverrides;
 use hashi::publish::GuardianConfig;
@@ -33,6 +39,19 @@ const NON_MAINNET_BITCOIN: [&str; 3] = [
     BITCOIN_REGTEST_CHAIN_ID,
 ];
 const NON_MAINNET_SUI: [&str; 2] = [SUI_TESTNET_CHAIN_ID, SUI_LOCALNET_CHAIN_ID];
+
+/// Stand in for the ids of a deployment on another chain.
+const OTHER_PACKAGE_ID: Address = Address::from_static("0x1");
+const OTHER_OBJECT_ID: Address = Address::from_static("0x2");
+
+const MAINNET_IDS: HashiIds = HashiIds {
+    package_id: HASHI_MAINNET_PACKAGE_ID,
+    hashi_object_id: HASHI_MAINNET_OBJECT_ID,
+};
+const OTHER_IDS: HashiIds = HashiIds {
+    package_id: OTHER_PACKAGE_ID,
+    hashi_object_id: OTHER_OBJECT_ID,
+};
 
 #[test]
 fn bitcoin_mainnet_pairs_with_sui_mainnet_only() {
@@ -97,6 +116,72 @@ fn an_empty_sui_chain_id_fails_closed() {
     for btc in [BITCOIN_MAINNET_CHAIN_ID, BITCOIN_SIGNET_CHAIN_ID] {
         let err = check_sui_bitcoin_chain_pairing("", btc).unwrap_err();
         assert!(err.to_string().contains("empty"), "{btc}: {err}");
+    }
+}
+
+#[test]
+fn sui_mainnet_accepts_the_pinned_ids() {
+    check_hashi_ids_for_sui_chain(SUI_MAINNET_CHAIN_ID, MAINNET_IDS).unwrap();
+}
+
+#[test]
+fn sui_mainnet_refuses_any_other_package_id() {
+    for package_id in [OTHER_PACKAGE_ID, Address::ZERO] {
+        let ids = HashiIds {
+            package_id,
+            hashi_object_id: HASHI_MAINNET_OBJECT_ID,
+        };
+        let err = check_hashi_ids_for_sui_chain(SUI_MAINNET_CHAIN_ID, ids).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("refusing package-id {package_id}")),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn sui_mainnet_refuses_any_other_hashi_object_id() {
+    for hashi_object_id in [OTHER_OBJECT_ID, Address::ZERO] {
+        let ids = HashiIds {
+            package_id: HASHI_MAINNET_PACKAGE_ID,
+            hashi_object_id,
+        };
+        let err = check_hashi_ids_for_sui_chain(SUI_MAINNET_CHAIN_ID, ids).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("refusing hashi-object-id {hashi_object_id}")),
+            "{err}"
+        );
+    }
+}
+
+/// Either pinned id alone marks a config as mainnet.
+#[test]
+fn other_sui_chains_refuse_either_pinned_id() {
+    let package_only = HashiIds {
+        package_id: HASHI_MAINNET_PACKAGE_ID,
+        hashi_object_id: OTHER_OBJECT_ID,
+    };
+    let object_only = HashiIds {
+        package_id: OTHER_PACKAGE_ID,
+        hashi_object_id: HASHI_MAINNET_OBJECT_ID,
+    };
+    for sui in NON_MAINNET_SUI {
+        for ids in [MAINNET_IDS, package_only, object_only] {
+            let err = check_hashi_ids_for_sui_chain(sui, ids).unwrap_err();
+            assert!(
+                err.to_string().contains("allowed on Sui mainnet only"),
+                "{sui}: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn other_sui_chains_accept_their_own_ids() {
+    for sui in NON_MAINNET_SUI {
+        check_hashi_ids_for_sui_chain(sui, OTHER_IDS).unwrap();
     }
 }
 
@@ -179,11 +264,23 @@ fn node_with(
     sui_chain_id: Option<&str>,
     bitcoin_chain_id: Option<&str>,
 ) -> (std::sync::Arc<Hashi>, tempfile::TempDir) {
+    node_with_ids(sui_chain_id, bitcoin_chain_id, None)
+}
+
+/// The Sui RPC is a closed port, so `Hashi::start` can only get as far as
+/// its first network call.
+fn node_with_ids(
+    sui_chain_id: Option<&str>,
+    bitcoin_chain_id: Option<&str>,
+    hashi_ids: Option<HashiIds>,
+) -> (std::sync::Arc<Hashi>, tempfile::TempDir) {
     let tmpdir = tempfile::tempdir().unwrap();
     let mut config = Config::new_for_testing();
     config.db = Some(tmpdir.path().into());
     config.sui_chain_id = sui_chain_id.map(str::to_owned);
     config.bitcoin_chain_id = bitcoin_chain_id.map(str::to_owned);
+    config.hashi_ids = hashi_ids;
+    config.sui_rpc = Some("http://127.0.0.1:1".to_owned());
     let hashi = Hashi::new_with_registry(
         ServerVersion::new("test", "test"),
         None,
@@ -236,4 +333,147 @@ fn node_accepts_the_deployed_pairs() {
         let (hashi, _dir) = node_with(sui, btc);
         hashi.verify_chain_pairing().unwrap();
     }
+}
+
+#[test]
+fn node_on_sui_mainnet_refuses_other_ids() {
+    let (hashi, _dir) = node_with_ids(None, None, Some(OTHER_IDS));
+    let err = hashi.verify_hashi_ids().unwrap_err();
+    assert!(err.to_string().contains("on Sui mainnet"), "{err}");
+}
+
+/// `hashi-ids` defaults to mainnet, so a Sui testnet config that omits it
+/// presents as testnet plus the mainnet ids and is refused at boot.
+#[test]
+fn node_on_sui_testnet_must_set_hashi_ids() {
+    let (hashi, _dir) = node_with(Some(SUI_TESTNET_CHAIN_ID), Some(BITCOIN_SIGNET_CHAIN_ID));
+    let err = hashi.verify_hashi_ids().unwrap_err();
+    assert!(
+        err.to_string().contains("default to mainnet when unset"),
+        "{err}"
+    );
+}
+
+#[test]
+fn node_accepts_the_ids_of_its_chain() {
+    for (sui, btc, ids) in [
+        (None, None, None),
+        (
+            Some(SUI_MAINNET_CHAIN_ID),
+            Some(BITCOIN_MAINNET_CHAIN_ID),
+            Some(MAINNET_IDS),
+        ),
+        (
+            Some(SUI_TESTNET_CHAIN_ID),
+            Some(BITCOIN_SIGNET_CHAIN_ID),
+            Some(OTHER_IDS),
+        ),
+        (
+            Some(SUI_LOCALNET_CHAIN_ID),
+            Some(BITCOIN_REGTEST_CHAIN_ID),
+            Some(OTHER_IDS),
+        ),
+    ] {
+        let (hashi, _dir) = node_with_ids(sui, btc, ids);
+        hashi.verify_hashi_ids().unwrap();
+    }
+}
+
+/// Run `Hashi::start`, which must fail: nothing in these tests serves the RPC.
+async fn start_error(hashi: std::sync::Arc<Hashi>) -> String {
+    let start = tokio::time::timeout(Duration::from_secs(30), hashi.start());
+    let Err(err) = start
+        .await
+        .expect("a closed loopback port refuses immediately")
+    else {
+        panic!("start succeeded without a Sui RPC");
+    };
+    err.to_string()
+}
+
+/// Every way a config can mix mainnet with another network stops `start`
+/// before its first network call.
+#[tokio::test]
+async fn start_refuses_a_partly_mainnet_config() {
+    for (sui, btc, ids, expected) in [
+        (
+            None,
+            Some(BITCOIN_SIGNET_CHAIN_ID),
+            None,
+            "Sui mainnet requires",
+        ),
+        (None, None, Some(OTHER_IDS), "refusing package-id"),
+        (
+            Some(SUI_TESTNET_CHAIN_ID),
+            None,
+            Some(OTHER_IDS),
+            "Bitcoin mainnet is allowed on Sui mainnet only",
+        ),
+        (
+            Some(SUI_TESTNET_CHAIN_ID),
+            Some(BITCOIN_SIGNET_CHAIN_ID),
+            None,
+            "default to mainnet when unset",
+        ),
+        (
+            Some(SUI_TESTNET_CHAIN_ID),
+            Some(BITCOIN_SIGNET_CHAIN_ID),
+            Some(MAINNET_IDS),
+            "allowed on Sui mainnet only",
+        ),
+    ] {
+        let (hashi, _dir) = node_with_ids(sui, btc, ids);
+        let err = start_error(hashi).await;
+        assert!(err.contains(expected), "{sui:?}/{btc:?}: {err}");
+    }
+}
+
+/// A consistent config gets past the checks and on to the network: the only
+/// error left is the closed port.
+#[tokio::test]
+async fn start_with_a_consistent_config_reaches_the_network() {
+    for (sui, btc, ids) in [
+        (None, None, None),
+        (
+            Some(SUI_MAINNET_CHAIN_ID),
+            Some(BITCOIN_MAINNET_CHAIN_ID),
+            Some(MAINNET_IDS),
+        ),
+        (
+            Some(SUI_TESTNET_CHAIN_ID),
+            Some(BITCOIN_SIGNET_CHAIN_ID),
+            Some(OTHER_IDS),
+        ),
+    ] {
+        let (hashi, _dir) = node_with_ids(sui, btc, ids);
+        let err = start_error(hashi).await;
+        assert!(
+            !err.contains("refusing"),
+            "a check fired on a consistent config, {sui:?}/{btc:?}: {err}"
+        );
+    }
+}
+
+/// `hashi register` signs against the configured ids, so it refuses what the
+/// node refuses. The Sui RPC is never contacted.
+#[tokio::test]
+async fn register_refuses_other_ids_on_sui_mainnet() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let config_path = tmpdir.path().join("config.toml");
+    let mut config = Config::new_for_testing();
+    config.hashi_ids = Some(OTHER_IDS);
+    config.save(&config_path).unwrap();
+
+    let err = hashi::cli::run_register(hashi::cli::RegisterOpts {
+        config: config_path,
+        sui_rpc_url: Some("http://127.0.0.1:1".to_owned()),
+        operator_address: None,
+        serialize_unsigned: false,
+        dry_run: true,
+        verbose: false,
+        yes: true,
+    })
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("refusing package-id"), "{err}");
 }

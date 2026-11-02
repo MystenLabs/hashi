@@ -97,9 +97,17 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 ---
 
+**Symptom:** startup fails with `refusing package-id ... on Sui mainnet: ...`, `refusing hashi-object-id ... on Sui mainnet: ...`, or `refusing the mainnet hashi-ids (...) on Sui chain ...: they are allowed on Sui mainnet only ...`.
+
+**Likely cause:** the `[hashi-ids]` section does not match the Sui network. Sui Mainnet accepts only the published Mainnet IDs, and no other network accepts them. On Sui Testnet the usual case is a missing `[hashi-ids]` section, which defaults to the Mainnet IDs. `hashi register` reports the same error for the same config.
+
+**Fix:** set both IDs from the [Networks](../reference/networks.mdx) table for your Sui network. On Mainnet you can instead remove the section to use the default.
+
+---
+
 **Symptom:** startup fails, after the Sui chain-ID check, with the fullnode's error for a missing object.
 
-**Likely cause:** the `[hashi-ids]` section is missing on a network other than Mainnet. When it is absent the node uses the Mainnet `package_id` and `hashi_object_id`. Those objects do not exist on any other network, so its first onchain read fails.
+**Likely cause:** `package-id` or `hashi-object-id` in `[hashi-ids]` is wrong for a network other than Mainnet, so the node's first onchain read fails.
 
 **Fix:** set both IDs from the [Networks](../reference/networks.mdx) table.
 

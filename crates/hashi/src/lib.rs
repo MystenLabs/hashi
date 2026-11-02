@@ -889,9 +889,9 @@ impl Hashi {
 
     /// Refuse to run on a Sui chain / Bitcoin chain pairing the protocol
     /// never deploys (`constants::check_sui_bitcoin_chain_pairing`). Reads
-    /// only the local config (whose `sui_chain_id` `verify_sui_chain_id` has
-    /// just confirmed against the RPC) and no on-chain state, so it runs on
-    /// every boot including the pre-launch key-registration boots.
+    /// only the local config (whose `sui_chain_id` `verify_sui_chain_id` then
+    /// confirms against the RPC) and no on-chain state, so it runs on every
+    /// boot including the pre-launch key-registration boots.
     /// Deliberately separate from `verify_bitcoin_chain_id`, which skips
     /// before the launch tx: this is the check that keeps a signet-configured
     /// node from ever joining a mainnet committee.
@@ -900,6 +900,23 @@ impl Hashi {
         let bitcoin_chain_id = self.config.bitcoin_chain_id();
         constants::check_sui_bitcoin_chain_pairing(sui_chain_id, bitcoin_chain_id)?;
         tracing::info!("Sui/Bitcoin chain pairing verified: {sui_chain_id} / {bitcoin_chain_id}");
+        Ok(())
+    }
+
+    /// Refuse to run on Hashi ids that do not belong to the configured Sui
+    /// chain (`constants::check_hashi_ids_for_sui_chain`). With
+    /// `verify_chain_pairing`, this makes mainnet all or nothing: the Sui
+    /// chain, the Bitcoin chain, and the Hashi ids. Reads only the local
+    /// config, so it runs on every boot.
+    pub fn verify_hashi_ids(&self) -> anyhow::Result<()> {
+        let sui_chain_id = self.config.sui_chain_id();
+        let ids = self.config.hashi_ids();
+        constants::check_hashi_ids_for_sui_chain(sui_chain_id, ids)?;
+        tracing::info!(
+            "Hashi ids verified for Sui chain {sui_chain_id}: package {}, object {}",
+            ids.package_id,
+            ids.hashi_object_id
+        );
         Ok(())
     }
 
@@ -992,10 +1009,11 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
-        // Verify Sui RPC is on the expected chain before loading any state,
-        // then that the chain pair is one the protocol deploys.
-        self.verify_sui_chain_id().await?;
+        // Refuse a config that mixes networks before any network I/O, then
+        // verify Sui RPC is on the expected chain before loading any state.
         self.verify_chain_pairing()?;
+        self.verify_hashi_ids()?;
+        self.verify_sui_chain_id().await?;
 
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;
