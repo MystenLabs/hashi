@@ -2212,13 +2212,14 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     init_tracing(opts.verbose);
 
     // Load the validator config and refuse a chain pairing the protocol
-    // never deploys. The config's Sui chain ID is confirmed against the RPC
-    // below, as the node does at startup.
+    // never deploys, or Hashi ids from another chain. The config's Sui chain
+    // ID is confirmed against the RPC below, as the node does at startup.
     let config = crate::config::Config::load(&opts.config)?;
     crate::constants::check_sui_bitcoin_chain_pairing(
         config.sui_chain_id(),
         config.bitcoin_chain_id(),
     )?;
+    crate::constants::check_hashi_ids_for_sui_chain(config.sui_chain_id(), config.hashi_ids())?;
 
     // Resolve Sui RPC URL: CLI flag > config file
     let sui_rpc_url = opts

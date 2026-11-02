@@ -86,7 +86,8 @@ pub struct Config {
     pub bitcoin_chain_id: Option<String>,
 
     /// Defaults to the published mainnet ids, matching the `sui_chain_id`
-    /// default. Every other chain must set this.
+    /// default. Startup refuses any other ids on Sui mainnet, and the mainnet
+    /// ids on every other chain, so every other chain must set this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hashi_ids: Option<HashiIds>,
 

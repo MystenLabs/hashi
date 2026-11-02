@@ -3,6 +3,8 @@
 
 use sui_sdk_types::Address;
 
+use crate::config::HashiIds;
+
 /// Sui mainnet genesis checkpoint digest (Base58).
 pub const SUI_MAINNET_CHAIN_ID: &str = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
 /// Sui testnet genesis checkpoint digest (Base58).
@@ -111,6 +113,44 @@ pub fn check_sui_bitcoin_chain_pairing(
              needs a non-mainnet bitcoin_chain_id, which defaults to mainnet when unset"
         ),
     }
+}
+
+/// Refuse Hashi ids that do not belong to the Sui chain: the pinned mainnet ids
+/// if and only if Sui mainnet. On Sui mainnet, any other id would point the
+/// node's keys and signatures at a package that is not the deployed Hashi. On
+/// any other Sui network, the mainnet ids name no object, and they are what an
+/// unset `hashi-ids` defaults to, so this names the cause where the fullnode
+/// would only report a missing object.
+///
+/// This applies to a node joining a deployment. `hashi publish` and
+/// `hashi launch` create the ids, so they check the chain pairing alone, and
+/// nodes will refuse a new mainnet publish until these constants name it.
+pub fn check_hashi_ids_for_sui_chain(sui_chain_id: &str, ids: HashiIds) -> anyhow::Result<()> {
+    if sui_chain_id == SUI_MAINNET_CHAIN_ID {
+        anyhow::ensure!(
+            ids.package_id == HASHI_MAINNET_PACKAGE_ID,
+            "refusing package-id {} on Sui mainnet: the mainnet package-id is \
+             {HASHI_MAINNET_PACKAGE_ID}; correct it or remove hashi-ids to use the default",
+            ids.package_id
+        );
+        anyhow::ensure!(
+            ids.hashi_object_id == HASHI_MAINNET_OBJECT_ID,
+            "refusing hashi-object-id {} on Sui mainnet: the mainnet hashi-object-id is \
+             {HASHI_MAINNET_OBJECT_ID}; correct it or remove hashi-ids to use the default",
+            ids.hashi_object_id
+        );
+    } else {
+        anyhow::ensure!(
+            ids.package_id != HASHI_MAINNET_PACKAGE_ID
+                && ids.hashi_object_id != HASHI_MAINNET_OBJECT_ID,
+            "refusing the mainnet hashi-ids (package-id {}, hashi-object-id {}) on Sui chain \
+             {sui_chain_id}: they are allowed on Sui mainnet only; every other Sui network \
+             must set its own hashi-ids, which default to mainnet when unset",
+            ids.package_id,
+            ids.hashi_object_id
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
