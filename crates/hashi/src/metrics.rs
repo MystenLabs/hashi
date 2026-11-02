@@ -678,13 +678,13 @@ impl Metrics {
             .unwrap(),
             backup_scheduled_remote_successes: register_int_counter_with_registry!(
                 "hashi_backup_scheduled_remote_successes_total",
-                "Scheduled backup archives successfully uploaded to S3",
+                "Scheduled backup archives successfully uploaded to remote storage",
                 registry,
             )
             .unwrap(),
             backup_scheduled_remote_failures: register_int_counter_with_registry!(
                 "hashi_backup_scheduled_remote_failures_total",
-                "Scheduled S3 backup stages that failed after local publication",
+                "Scheduled remote backup stages that failed after local publication",
                 registry,
             )
             .unwrap(),
