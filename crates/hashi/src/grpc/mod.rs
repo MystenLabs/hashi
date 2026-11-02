@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sui_futures::service::Service;
 use sui_http::ServerHandle;
+use sui_sdk_types::Address;
 use tower::ServiceBuilder;
 
 use crate::Hashi;
@@ -59,6 +60,7 @@ pub struct HttpService {
     signing_work: peer_limit::SigningWorkLimiter,
     bitcoind: crate::btc_monitor::limits::BitcoindLimiter,
     store_reads: peer_limit::CallerTaskLimiter,
+    mpc_lock_runs: peer_limit::MpcLockLimiter,
 }
 
 impl HttpService {
@@ -74,11 +76,24 @@ impl HttpService {
             signing_work: Default::default(),
             bitcoind,
             store_reads,
+            mpc_lock_runs: Default::default(),
         }
     }
 
     pub(crate) fn store_reads(&self) -> peer_limit::CallerTaskLimiter {
         self.store_reads.clone()
+    }
+
+    pub(crate) async fn mpc_write_run(&self, caller: Address) -> peer_limit::MpcWriteRun {
+        let lock_seconds = self
+            .metrics()
+            .peer_mpc_lock_seconds_total
+            .with_label_values(&[caller.to_string().as_str()]);
+        self.mpc_lock_runs.write_run(caller, lock_seconds).await
+    }
+
+    pub(crate) async fn mpc_read_run(&self, caller: Address) -> tokio::sync::OwnedSemaphorePermit {
+        self.mpc_lock_runs.read_run(caller).await
     }
 
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
@@ -249,7 +264,7 @@ impl HttpService {
 
     pub fn mpc_manager(
         &self,
-    ) -> Result<Arc<std::sync::RwLock<crate::mpc::MpcManager>>, tonic::Status> {
+    ) -> Result<Arc<crate::mpc::FairRwLock<crate::mpc::MpcManager>>, tonic::Status> {
         self.inner
             .mpc_manager()
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))

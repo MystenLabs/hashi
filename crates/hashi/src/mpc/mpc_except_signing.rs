@@ -18,6 +18,7 @@ use crate::metrics::Metrics;
 use crate::metrics::RefusalCounters;
 use crate::metrics::STORED_ROW_LOAD;
 use crate::metrics::STORED_ROW_READ;
+use crate::mpc::fair_rwlock::FairRwLock;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
 use crate::mpc::public_outputs::MpcOutputs;
@@ -124,7 +125,6 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
@@ -1005,7 +1005,7 @@ impl MpcManager {
 
     // TODO: Consider making dealer and party flows concurrent
     pub async fn run_dkg(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -1034,7 +1034,7 @@ impl MpcManager {
     /// Calls `on_previous_output` synchronously, outside the manager lock, once
     /// predecessor preparation succeeds and before any subsequent protocol await.
     pub async fn run_key_rotation(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
@@ -1197,7 +1197,7 @@ impl MpcManager {
     }
 
     pub async fn run_nonce_dealer_phase(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -1237,7 +1237,7 @@ impl MpcManager {
     }
 
     pub(crate) async fn run_avid_nonce_party_phase(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         admitted: &AdmittedNonceDealers,
@@ -1472,7 +1472,7 @@ impl MpcManager {
     }
 
     pub(crate) async fn verified_nonce_certs<T>(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         epoch: u64,
         certs: Vec<(Address, T)>,
         batch_index: u32,
@@ -1552,7 +1552,7 @@ impl MpcManager {
     }
 
     async fn run_dkg_as_dealer(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -1637,7 +1637,7 @@ impl MpcManager {
     }
 
     async fn run_dkg_as_party(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -1852,7 +1852,7 @@ impl MpcManager {
     }
 
     async fn run_key_rotation_as_dealer(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous: &MpcOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -1943,7 +1943,7 @@ impl MpcManager {
     }
 
     async fn run_key_rotation_as_party(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous: &MpcOutput,
         onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
@@ -2971,7 +2971,7 @@ impl MpcManager {
     }
 
     async fn run_as_avid_nonce_dealer(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
@@ -3394,7 +3394,7 @@ impl MpcManager {
     }
 
     async fn verified_dealer_weight_blocking(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         certified: Vec<(Address, CertificateV1)>,
         metrics: &Metrics,
     ) -> BTreeMap<Address, u32> {
@@ -3539,7 +3539,7 @@ impl MpcManager {
     }
 
     async fn avid_local_material_retrying(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         batch_index: u32,
         dealer: &Address,
         kind: CertKind,
@@ -3563,7 +3563,7 @@ impl MpcManager {
     }
 
     async fn pull_and_resolve_avid_cert(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         dealer: Address,
         batch_index: u32,
         nonce_cert: &DealerCertificate,
@@ -3791,7 +3791,7 @@ impl MpcManager {
 
     #[allow(clippy::too_many_arguments)]
     async fn recover_avid_nonce_shares_via_complaint(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         dealer: Address,
         batch_index: u32,
         verified_common: batch_avss_avid::VerifiedAvssCommonMessage,
@@ -3916,7 +3916,7 @@ impl MpcManager {
     }
 
     async fn run_as_avid_nonce_party(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         admitted: &AdmittedNonceDealers,
@@ -4180,7 +4180,7 @@ impl MpcManager {
         Ok((outcome, verified_common))
     }
 
-    fn prune_nonce_state(mpc_manager: &Arc<RwLock<Self>>, batch_index: u32) {
+    fn prune_nonce_state(mpc_manager: &Arc<FairRwLock<Self>>, batch_index: u32) {
         let cutoff = batch_index.saturating_sub(PRUNE_KEEP_RECENT_BATCHES - 1);
         if cutoff == 0 {
             return;
@@ -4451,7 +4451,7 @@ impl MpcManager {
     }
 
     async fn retrieve_dealer_message(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
@@ -4590,7 +4590,7 @@ impl MpcManager {
     }
 
     async fn retrieve_rotation_messages(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
@@ -4647,7 +4647,7 @@ impl MpcManager {
     }
 
     async fn recover_dkg_shares_via_complaint(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         dealer: &Address,
         message: &avss::Message,
         signers: Vec<Address>,
@@ -4766,7 +4766,7 @@ impl MpcManager {
     }
 
     async fn recover_rotation_shares_via_complaints(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         dealer: &Address,
         rotation_messages: &RotationMessages,
         signers: Vec<Address>,
@@ -5294,7 +5294,7 @@ impl MpcManager {
     }
 
     pub fn reconstruct_current_dkg_output(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
     ) -> MpcOutputRecoveryOutcome {
@@ -5341,7 +5341,7 @@ impl MpcManager {
     }
 
     pub fn reconstruct_current_rotation_output(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         current_certificates: &[VerifiedCertificateV1],
         previous_certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
@@ -5765,7 +5765,7 @@ impl MpcManager {
     }
 
     pub async fn fetch_public_mpc_output_from_quorum(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
         onchain_mpc_key: &[u8],
@@ -5875,7 +5875,7 @@ impl MpcManager {
     }
 
     async fn prepare_previous_output(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
         p2p_channel: &impl P2PChannel,
@@ -5976,7 +5976,7 @@ impl MpcManager {
     }
 
     async fn fetch_and_build_public_output(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         threshold_opt: Option<u16>,
         onchain_mpc_key: &[u8],
@@ -6004,7 +6004,7 @@ impl MpcManager {
     /// Reconstruct the previous epoch's output, recovering via Complain RPCs
     /// if cheating dealers' corrupted messages are encountered in DB.
     async fn reconstruct_with_complaint_recovery(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
@@ -6179,7 +6179,7 @@ impl MpcManager {
     }
 
     async fn retrieve_missing_previous_messages(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
@@ -6343,7 +6343,7 @@ impl MpcManager {
     }
 
     async fn retrieve_message_using_previous_committee(
-        mpc_manager: &Arc<RwLock<Self>>,
+        mpc_manager: &Arc<FairRwLock<Self>>,
         message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         protocol_type: ProtocolTypeIndicator,
@@ -7239,13 +7239,13 @@ fn publish_outcome_label(e: &ChannelError) -> &'static str {
 }
 
 struct AvidPartyPhaseMark {
-    mpc_manager: Arc<RwLock<MpcManager>>,
+    mpc_manager: Arc<FairRwLock<MpcManager>>,
     batch_index: u32,
     armed: bool,
 }
 
 impl AvidPartyPhaseMark {
-    fn new(mpc_manager: &Arc<RwLock<MpcManager>>, batch_index: u32) -> Self {
+    fn new(mpc_manager: &Arc<FairRwLock<MpcManager>>, batch_index: u32) -> Self {
         mpc_manager
             .write()
             .unwrap()

@@ -53,6 +53,7 @@ impl MpcService for HttpService {
     ) -> Result<tonic::Response<SendMessagesResponse>, Status> {
         let sender = authenticate_caller(&request)?;
         let external_request = request.into_inner();
+        let lock_run = self.mpc_write_run(sender).await;
         let mpc_manager = self.mpc_manager()?;
         let service = self.clone();
         let process_duration = self
@@ -89,7 +90,7 @@ impl MpcService for HttpService {
             };
             let _timer = process_duration.with_label_values(&[label]).start_timer();
             let signed = {
-                let mut mgr = mpc_manager.write().unwrap();
+                let mut mgr = lock_run.write(&mpc_manager);
                 validate_epoch(mgr.mpc_config.epoch, epoch)?;
                 mgr.handle_prepared_messages(sender, prepared)
                     .map_err(|e| send_messages_error(sender, e))?
@@ -109,13 +110,14 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let _abandon_on_drop = SetOnDrop(Arc::clone(&abandoned));
+        let lock_run = self.mpc_read_run(requester).await;
         let mpc_manager = self.mpc_manager()?;
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
         let store_reads = self.store_reads();
         let store_reads_shed = self.metrics().peer_store_reads_shed_total.clone();
         let stored_rows = self.metrics().stored_row_refusals();
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let _abandon_on_drop = SetOnDrop(Arc::clone(&abandoned));
         let response = spawn_blocking(move || -> Result<_, Status> {
             let to_status = |e: MpcError| match e {
                 MpcError::StoredRowRefused { dealer, reason } => {
@@ -139,11 +141,17 @@ impl MpcService for HttpService {
                     mpc_error_to_status(e)
                 }
             };
+            let check_abandoned = || {
+                if abandoned.load(Ordering::Relaxed) {
+                    Err(Status::cancelled("the caller abandoned this retrieval"))
+                } else {
+                    Ok(())
+                }
+            };
+            check_abandoned()?;
             let (outcome, store, shape) = {
                 let mgr = mpc_manager.read().unwrap();
-                if abandoned.load(Ordering::Relaxed) {
-                    return Err(Status::cancelled("the caller abandoned this retrieval"));
-                }
+                check_abandoned()?;
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
@@ -174,6 +182,7 @@ impl MpcService for HttpService {
                     mgr.shape_params(),
                 )
             };
+            drop(lock_run);
             let _permit = outcome
                 .reads_store()
                 .then(|| {
@@ -213,6 +222,7 @@ impl MpcService for HttpService {
         let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let protocol = proto_protocol_label(external_request.protocol_type);
+        let lock_run = self.mpc_write_run(caller).await;
         let mpc_manager = self.mpc_manager()?;
         let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
@@ -240,7 +250,7 @@ impl MpcService for HttpService {
             let internal_request = types::ComplainRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             drop(external_request);
-            let mut mgr = mpc_manager.write().unwrap();
+            let mut mgr = lock_run.write(&mpc_manager);
             validate_epoch_current_or_previous(
                 mgr.mpc_config.epoch,
                 mgr.previous_epoch,

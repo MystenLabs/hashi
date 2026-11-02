@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod count_check;
+pub mod fair_rwlock;
 pub mod message_cache;
 mod mpc_except_signing;
 mod presig_seal;
@@ -13,6 +14,7 @@ pub mod signing;
 pub(crate) mod stored_rows;
 pub mod types;
 
+pub use fair_rwlock::FairRwLock;
 pub use mpc_except_signing::*;
 pub use service::MpcHandle;
 pub use service::MpcService;

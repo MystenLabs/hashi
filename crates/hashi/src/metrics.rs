@@ -52,6 +52,7 @@ pub struct Metrics {
     pub(crate) peer_store_reads_max: IntGaugeVec,
     pub peer_store_reads_shed_total: IntCounterVec,
     pub(crate) peer_bridge_work_seconds_total: CounterVec,
+    pub(crate) peer_mpc_lock_seconds_total: CounterVec,
     pub(crate) peer_bitcoind_places_in_use: IntGaugeVec,
     pub(crate) peer_bitcoind_calls_in_use: IntGaugeVec,
     pub(crate) peer_bitcoind_discoveries_in_use: IntGaugeVec,
@@ -588,6 +589,13 @@ impl Metrics {
             peer_bridge_work_seconds_total: register_counter_vec_with_registry!(
                 "hashi_peer_bridge_work_seconds_total",
                 "Seconds withdrawal signing and construction jobs ran on the blocking pool, by caller",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_mpc_lock_seconds_total: register_counter_vec_with_registry!(
+                "hashi_peer_mpc_lock_seconds_total",
+                "Seconds SendMessages and Complain jobs held the MPC manager's write lock, by caller",
                 &["peer"],
                 registry,
             )

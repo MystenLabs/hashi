@@ -31,6 +31,7 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::FairRwLock;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::RefillRequest;
@@ -1241,7 +1242,7 @@ impl MpcService {
 
     async fn nonce_batch_size_from_certs(
         &self,
-        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        mpc_manager: &Arc<FairRwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
         params: Parameters,
@@ -1698,7 +1699,7 @@ impl MpcService {
 
     async fn fetch_final_nonce_certs(
         onchain_state: &crate::onchain::OnchainState,
-        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        mpc_manager: &Arc<FairRwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
         wait_for_floor: bool,
@@ -1827,7 +1828,7 @@ impl MpcService {
 
     async fn recover_presignatures_from_certs(
         &self,
-        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        mpc_manager: &Arc<FairRwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
         batch_size_per_weight: u16,
@@ -2619,7 +2620,7 @@ pub(crate) fn presig_count(
 }
 
 pub(crate) async fn verify_fetched_certificates(
-    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    mpc_manager: &Arc<FairRwLock<MpcManager>>,
     certs: Vec<CertificateV1>,
     metrics: &Metrics,
 ) -> Vec<VerifiedCertificateV1> {

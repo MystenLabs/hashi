@@ -53,6 +53,7 @@ tower.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+parking_lot.workspace = true
 prometheus.workspace = true
 tracing.workspace = true
 
