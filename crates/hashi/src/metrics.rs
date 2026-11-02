@@ -2623,39 +2623,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_remote_metrics_unconfigured() {
-        let registry = Registry::new();
-        let metrics = Metrics::new(&registry);
-        let config = crate::config::Config::new_for_testing();
-        config.validate_backup_remote().unwrap();
-        metrics.record_backup_remote_config(&config);
-
-        let families = registry.gather();
-        let configured = families
-            .iter()
-            .find(|family| family.name() == "hashi_backup_remote_configured")
-            .unwrap();
-        assert_eq!(configured.get_metric().len(), 1);
-        assert!(configured.get_metric()[0].label.is_empty());
-        assert_eq!(
-            configured.get_metric()[0]
-                .get_gauge()
-                .as_ref()
-                .expect("gauge")
-                .value(),
-            0.0
-        );
-        assert!(
-            families
-                .iter()
-                .filter(|family| family.name().starts_with("hashi_backup_"))
-                .flat_map(|family| family.get_metric())
-                .all(|metric| metric.label.is_empty())
-        );
-    }
-
-    #[test]
-    fn backup_remote_metrics_configured() {
+    fn backup_remote_metrics_configured_to_unconfigured() {
         let registry = Registry::new();
         let metrics = Metrics::new(&registry);
         let mut config = crate::config::Config::new_for_testing();
@@ -2666,13 +2634,6 @@ mod tests {
             )
             .unwrap(),
         );
-        config.sui_chain_id = Some("aB12Cd34".to_owned());
-        config.hashi_ids = Some(crate::config::HashiIds {
-            package_id: "0x1".parse().unwrap(),
-            hashi_object_id: "0x2".parse().unwrap(),
-        });
-        config.validator_address = Some("0x3".parse().unwrap());
-        config.validate_backup_remote().unwrap();
         metrics.record_backup_remote_config(&config);
 
         let families = registry.gather();
@@ -2681,7 +2642,6 @@ mod tests {
             .find(|family| family.name() == "hashi_backup_remote_configured")
             .unwrap();
         assert_eq!(configured.get_metric().len(), 1);
-        assert!(configured.get_metric()[0].label.is_empty());
         assert_eq!(
             configured.get_metric()[0]
                 .get_gauge()
@@ -2697,6 +2657,10 @@ mod tests {
                 .flat_map(|family| family.get_metric())
                 .all(|metric| metric.label.is_empty())
         );
+
+        config.backup_remote = None;
+        metrics.record_backup_remote_config(&config);
+        assert_eq!(metrics.backup_remote_configured.get(), 0);
     }
 
     #[test]

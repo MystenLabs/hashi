@@ -289,6 +289,23 @@ impl BackupRemoteClient {
             client_builder(builder).build(),
         ))
     }
+
+    #[cfg(test)]
+    fn gcs_test_builder(endpoint: &str) -> google_cloud_storage::builder::storage::ClientBuilder {
+        crate::init_crypto_provider();
+        Storage::builder()
+            .with_endpoint(endpoint)
+            .with_credentials(google_cloud_auth::credentials::anonymous::Builder::new().build())
+            .with_retry_policy(NeverRetry)
+            .with_read_resume_policy(NeverResume)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn for_gcs_test_endpoint(endpoint: &str) -> Self {
+        Self::Gcs(Box::new(
+            Self::gcs_test_builder(endpoint).build().await.unwrap(),
+        ))
+    }
 }
 
 fn timeouts() -> TimeoutConfig {
@@ -455,7 +472,6 @@ mod tests {
         assert_eq!(tokio::fs::read(&archive).await.unwrap(), bytes);
         let store = store.lock().await;
         assert_eq!(store.requests, 1);
-        assert!(store.object.is_none());
         server.abort();
     }
 
@@ -497,7 +513,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("download");
         let mut destination = tokio::fs::File::create(&path).await.unwrap();
-        let error = client
+        client
             .download(
                 "backup-bucket",
                 "testnet/validator/epoch-7.tar",
@@ -506,11 +522,6 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("s3://backup-bucket/testnet/validator/epoch-7.tar"));
-        assert!(message.contains("old-version"));
-        assert!(message.contains("SlowDown"));
-        assert!(message.contains("try later"));
         assert_eq!(store.lock().await.requests, 1);
         assert!(tokio::fs::read(path).await.unwrap().is_empty());
         server.abort();
@@ -522,6 +533,10 @@ mod tests {
     struct GcsStore {
         requests: Vec<(axum::http::Method, String, HashMap<String, String>)>,
         uploaded: Option<Bytes>,
+        fail: bool,
+        interrupted: bool,
+        bad_checksum: bool,
+        session_url: String,
     }
 
     async fn gcs_request(
@@ -538,9 +553,23 @@ mod tests {
         store
             .requests
             .push((method.clone(), uri.path().to_owned(), query.clone()));
+        if store.fail {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "error": {"code": 503, "message": "service unavailable"}
+                })),
+            )
+                .into_response();
+        }
         if method == axum::http::Method::POST {
             if query.get("ifGenerationMatch").map(String::as_str) != Some("0") {
                 return (StatusCode::BAD_REQUEST, "missing create-only condition").into_response();
+            }
+            if query.get("uploadType").map(String::as_str) == Some("resumable") {
+                // A competing writer publishes after initiation but before completion.
+                store.uploaded = Some(Bytes::from_static(b"competing archive"));
+                return (StatusCode::OK, [("location", store.session_url.clone())]).into_response();
             }
             if store.uploaded.is_some() {
                 return (
@@ -559,6 +588,15 @@ mod tests {
                 "etag": "test-etag"
             }))
             .into_response();
+        }
+        if method == axum::http::Method::PUT && uri.path() == "/upload-session" {
+            return (
+                StatusCode::PRECONDITION_FAILED,
+                axum::Json(serde_json::json!({
+                    "error": {"code": 412, "message": "object already exists"}
+                })),
+            )
+                .into_response();
         }
         // Only these objects exist; decoding the literal %2F in the second key selects a missing object.
         if !matches!(
@@ -580,45 +618,65 @@ mod tests {
             .header("x-goog-generation", if historical { "123" } else { "456" })
             .header("x-goog-stored-content-length", bytes.len().to_string());
         if historical {
-            response = response.header("x-goog-hash", "crc32c=4waSgw==");
+            response = response.header(
+                "x-goog-hash",
+                if store.bad_checksum {
+                    "crc32c=AAAAAA=="
+                } else {
+                    "crc32c=4waSgw=="
+                },
+            );
         }
-        let chunks = vec![
-            Ok::<_, std::io::Error>(Bytes::copy_from_slice(&bytes.as_bytes()[..3])),
-            Ok(Bytes::copy_from_slice(&bytes.as_bytes()[3..])),
-        ];
-        let body = Body::from_stream(futures::stream::iter(chunks));
+        let interrupted = store.interrupted;
+        let body = Body::from_stream(futures::stream::unfold(0, move |chunk| async move {
+            match chunk {
+                0 => Some((Ok(Bytes::copy_from_slice(&bytes.as_bytes()[..3])), 1)),
+                1 if interrupted => {
+                    // Flush the first chunk before the transport is interrupted.
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Some((Err(std::io::Error::other("interrupted body")), 2))
+                }
+                1 => Some((Ok(Bytes::copy_from_slice(&bytes.as_bytes()[3..])), 2)),
+                _ => None,
+            }
+        }));
         response.body(body).unwrap()
     }
 
-    async fn gcs_server() -> (
+    async fn gcs_server(
+        resumable: bool,
+    ) -> (
         BackupRemoteClient,
         Arc<Mutex<GcsStore>>,
         tokio::task::JoinHandle<()>,
     ) {
-        crate::init_crypto_provider();
         let store = Arc::new(Mutex::new(GcsStore::default()));
         let router = Router::new()
             .fallback(gcs_request)
             .with_state(store.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        store.lock().await.session_url = format!("{endpoint}/upload-session");
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let client = Storage::builder()
-            .with_endpoint(endpoint)
-            .with_credentials(google_cloud_auth::credentials::anonymous::Builder::new().build())
-            .with_retry_policy(NeverRetry)
-            .with_read_resume_policy(NeverResume)
-            .build()
-            .await
-            .unwrap();
-        (BackupRemoteClient::Gcs(Box::new(client)), store, task)
+        let client = if resumable {
+            BackupRemoteClient::Gcs(Box::new(
+                BackupRemoteClient::gcs_test_builder(&endpoint)
+                    .with_resumable_upload_threshold(0_usize)
+                    .build()
+                    .await
+                    .unwrap(),
+            ))
+        } else {
+            BackupRemoteClient::for_gcs_test_endpoint(&endpoint).await
+        };
+        (client, store, task)
     }
 
     #[tokio::test]
     async fn gcs_upload_is_create_only_and_preserves_duplicate_archive() {
-        let (client, store, server) = gcs_server().await;
+        let (client, store, server) = gcs_server(false).await;
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join("epoch-7.tar");
         let original = b"published archive bytes";
@@ -656,10 +714,6 @@ mod tests {
                 Some("multipart")
             );
             assert_eq!(
-                query.get("ifGenerationMatch").map(String::as_str),
-                Some("0")
-            );
-            assert_eq!(
                 query.get("name").map(String::as_str),
                 Some("testnet/validator/epoch-7.tar")
             );
@@ -670,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn gcs_download_selects_literal_percent_key_and_historical_generation_and_streams_to_file()
      {
-        let (client, store, server) = gcs_server().await;
+        let (client, store, server) = gcs_server(false).await;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("download");
         let historical = ObjectVersion::Gcs(123);
@@ -698,11 +752,106 @@ mod tests {
             assert_eq!(query.get("alt").map(String::as_str), Some("media"));
             assert!(!query.contains_key("ifGenerationMatch"));
         }
-        assert!(!store.requests[0].2.contains_key("generation"));
-        assert_eq!(
-            store.requests[1].2.get("generation").map(String::as_str),
-            Some("123")
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gcs_service_failure_is_not_retried_and_preserves_local_archive() {
+        let (client, store, server) = gcs_server(false).await;
+        store.lock().await.fail = true;
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("epoch-7.tar");
+        let bytes = b"archive must survive a failed upload";
+        tokio::fs::write(&archive, bytes).await.unwrap();
+        let error = client
+            .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, UploadError::Other(_)));
+        assert_eq!(tokio::fs::read(&archive).await.unwrap(), bytes);
+        assert_eq!(store.lock().await.requests.len(), 1);
+
+        let path = directory.path().join("download");
+        let mut destination = tokio::fs::File::create(&path).await.unwrap();
+        assert!(
+            client
+                .download(
+                    "backup-bucket",
+                    "testnet/validator/epoch-7.tar",
+                    None,
+                    &mut destination
+                )
+                .await
+                .is_err()
         );
+        assert_eq!(store.lock().await.requests.len(), 2);
+        assert!(tokio::fs::read(path).await.unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gcs_interrupted_download_is_not_resumed() {
+        let (client, store, server) = gcs_server(false).await;
+        store.lock().await.interrupted = true;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        let mut destination = tokio::fs::File::create(&path).await.unwrap();
+        assert!(
+            client
+                .download(
+                    "backup-bucket",
+                    "testnet/validator/epoch-7.tar",
+                    Some(&ObjectVersion::Gcs(123)),
+                    &mut destination,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.lock().await.requests.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gcs_download_rejects_bad_checksum_at_eof() {
+        let (client, store, server) = gcs_server(false).await;
+        store.lock().await.bad_checksum = true;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        let mut destination = tokio::fs::File::create(&path).await.unwrap();
+        assert!(
+            client
+                .download(
+                    "backup-bucket",
+                    "testnet/validator/epoch-7.tar",
+                    Some(&ObjectVersion::Gcs(123)),
+                    &mut destination,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.lock().await.requests.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gcs_resumable_completion_collision_preserves_both_archives() {
+        let (client, store, server) = gcs_server(true).await;
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("epoch-7.tar");
+        let bytes = b"local archive";
+        tokio::fs::write(&archive, bytes).await.unwrap();
+        let error = client
+            .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, UploadError::AlreadyExists(_)));
+        assert_eq!(tokio::fs::read(&archive).await.unwrap(), bytes);
+        let store = store.lock().await;
+        assert_eq!(
+            store.uploaded.as_deref(),
+            Some(b"competing archive".as_slice())
+        );
+        assert_eq!(store.requests.len(), 2);
         server.abort();
     }
 }

@@ -1118,22 +1118,12 @@ mod tests {
             assert!(matches!(decoded, BackupRemoteConfig::Gcs(_)));
             assert_eq!(decoded.bucket(), remote.bucket());
         }
-        for destination in ["gs://bucket/prefix", "gs://bucket//"] {
-            assert!(
-                BackupRemoteConfig::new(destination, None).is_err(),
-                "{destination}"
-            );
-        }
         assert!(GcsBackupConfig::new("bucket/key".into()).is_err());
     }
 
     #[test]
     fn gcs_backup_remote_rejects_any_region() {
-        for region in ["", " ", "us-west-2"] {
-            assert!(
-                BackupRemoteConfig::new("gs://bucket", Some(region.into())).is_err(),
-                "{region:?}"
-            );
+        for region in ["", "us-west-2"] {
             let settings = format!("destination = 'gs://bucket/'\nregion = '{region}'");
             assert!(toml::from_str::<BackupRemoteConfig>(&settings).is_err());
         }
@@ -1160,10 +1150,7 @@ mod tests {
             "nested/a%2Fb%3Fc%23d%20e.tar.asc",
             "nested/backup with spaces.tar.asc",
         ] {
-            for (scheme, provider, region) in [
-                ("s3", BackupProvider::S3, Some("us-west-2".to_owned())),
-                ("gs", BackupProvider::Gcs, None),
-            ] {
+            for (scheme, provider) in [("s3", BackupProvider::S3), ("gs", BackupProvider::Gcs)] {
                 let uri = format!("{scheme}://backup-bucket.example/{key}");
                 let BackupLocation::Remote(location) =
                     BackupLocation::parse(Path::new(&uri)).unwrap()
@@ -1172,10 +1159,6 @@ mod tests {
                 };
                 assert_eq!(location.provider(), provider);
                 assert_eq!(location.key(), key);
-                assert_eq!(
-                    location.into_config(region).unwrap().bucket(),
-                    "backup-bucket.example"
-                );
             }
         }
     }

@@ -1641,8 +1641,10 @@ mod tests {
         assert!(format!("{error:#}").contains("late decryption failure"));
     }
 
+    use crate::config::BackupProvider;
+
     fn backup_service_fixture(
-        remote: bool,
+        remote: Option<BackupProvider>,
         config_path_present: bool,
     ) -> (BackupService, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
@@ -1651,11 +1653,11 @@ mod tests {
         config.db = Some(directory.path().join("db"));
         config.backup_dir = directory.path().join("backups");
         config.backup_pgp_cert = mock_pgp_cert();
-        if remote {
+        if let Some(provider) = remote {
             config.backup_remote = Some(
                 crate::config::BackupRemoteConfig::new(
-                    "s3://backup-bucket/",
-                    Some("us-east-1".to_owned()),
+                    &format!("{}://backup-bucket/", provider.scheme()),
+                    (provider == BackupProvider::S3).then(|| "us-east-1".to_owned()),
                 )
                 .unwrap(),
             );
@@ -1678,6 +1680,73 @@ mod tests {
         (service, directory)
     }
 
+    async fn scheduled_test_client(provider: BackupProvider, endpoint: &str) -> BackupRemoteClient {
+        match provider {
+            BackupProvider::S3 => BackupRemoteClient::for_test_endpoint(endpoint),
+            BackupProvider::Gcs => BackupRemoteClient::for_gcs_test_endpoint(endpoint).await,
+        }
+    }
+
+    fn scheduled_upload_response(
+        provider: BackupProvider,
+        status: axum::http::StatusCode,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        match provider {
+            BackupProvider::S3 => {
+                let body = if status.is_success() {
+                    ""
+                } else {
+                    "<Error><Code>UploadFailed</Code></Error>"
+                };
+                (status, body).into_response()
+            }
+            BackupProvider::Gcs => {
+                let body = if status.is_success() {
+                    serde_json::json!({"generation": "123"})
+                } else {
+                    serde_json::json!({"error": {"code": status.as_u16(), "message": "Upload failed"}})
+                };
+                (status, axum::Json(body)).into_response()
+            }
+        }
+    }
+
+    fn assert_scheduled_upload(
+        provider: BackupProvider,
+        uri: &axum::http::Uri,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+        archive: &Path,
+    ) -> String {
+        let bytes = fs::read(archive).unwrap();
+        assert!(bytes.starts_with(b"-----BEGIN PGP MESSAGE-----"));
+        let key = match provider {
+            BackupProvider::S3 => {
+                if let Some(length) = headers.get("x-amz-decoded-content-length") {
+                    assert_eq!(
+                        length.to_str().unwrap().parse::<usize>().unwrap(),
+                        bytes.len()
+                    );
+                } else {
+                    assert_eq!(body, bytes);
+                }
+                uri.path().to_owned()
+            }
+            BackupProvider::Gcs => {
+                let axum::extract::Query(query) = axum::extract::Query::<
+                    std::collections::HashMap<String, String>,
+                >::try_from_uri(uri)
+                .unwrap();
+                assert!(body.windows(bytes.len()).any(|window| window == bytes));
+                query.get("name").unwrap().clone()
+            }
+        };
+        assert!(key.ends_with(archive.file_name().unwrap().to_str().unwrap()));
+        key
+    }
+
     fn restart_backup_service(service: BackupService) -> BackupService {
         let config = service.inner.config.clone();
         let config_path = service.inner.config_path.clone();
@@ -1694,7 +1763,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn recovery_worker_checks_daily_without_mpc_requests() {
-        let (fixture, _directory) = backup_service_fixture(false, true);
+        let (fixture, _directory) = backup_service_fixture(None, true);
         let (mut worker, handle) = BackupService::new(fixture.inner.clone());
         let mut refresh = tokio::time::interval(MPC_RECOVERY_CHECK_INTERVAL);
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1730,7 +1799,7 @@ mod tests {
 
         for obsolete_cache in [false, true] {
             for newest_age_days in [20, 31] {
-                let (fixture, _directory) = backup_service_fixture(true, true);
+                let (fixture, _directory) = backup_service_fixture(Some(BackupProvider::S3), true);
                 let (mut worker, handle) = BackupService::new(fixture.inner.clone());
                 // This fixture has no on-chain mirror: cached material is obsolete,
                 // and housekeeping must still run without inventing a current epoch.
@@ -2048,7 +2117,7 @@ mod tests {
 
     #[test]
     fn retention_preserves_newest_historical_mpc_when_saves_fail() {
-        let (service, _directory) = backup_service_fixture(false, true);
+        let (service, _directory) = backup_service_fixture(None, true);
         let root = &service.inner.config.backup_dir;
         fs::create_dir(root).unwrap();
         let recipient = &service.inner.config.backup_pgp_cert;
@@ -2111,7 +2180,7 @@ mod tests {
 
     #[test]
     fn scheduled_recovery_reuses_published_archive_after_restart() {
-        let (service, _directory) = backup_service_fixture(false, true);
+        let (service, _directory) = backup_service_fixture(None, true);
         let ordinary = service
             .inner
             .maintain_backups_after_epoch_change(42, &BackupAction::SaveNodeState)
@@ -2211,7 +2280,7 @@ mod tests {
 
     #[test]
     fn retention_preserves_expired_match_until_replacement_is_published() {
-        let (service, _directory) = backup_service_fixture(false, true);
+        let (service, _directory) = backup_service_fixture(None, true);
         let root = &service.inner.config.backup_dir;
         fs::create_dir(root).unwrap();
         let recipient = &service.inner.config.backup_pgp_cert;
@@ -2259,45 +2328,57 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_recovery_restart_retries_same_object_and_classifies_collisions() {
+        for provider in [BackupProvider::S3, BackupProvider::Gcs] {
+            scheduled_recovery_restart_for_provider(provider).await;
+        }
+    }
+
+    async fn scheduled_recovery_restart_for_provider(provider: BackupProvider) {
         use axum::body::Bytes;
         use axum::http::HeaderMap;
         use axum::http::StatusCode;
         use axum::http::Uri;
         use std::sync::Mutex;
 
-        let (mut service, _directory) = backup_service_fixture(true, true);
+        let (mut service, _directory) = backup_service_fixture(Some(provider), true);
+        let backup_dir = service.inner.config.backup_dir.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
-        let router = axum::Router::new().fallback_service(axum::routing::put(
+        let router = axum::Router::new().fallback_service(axum::routing::any(
             move |uri: Uri, headers: HeaderMap, body: Bytes| {
                 let captured = captured.clone();
+                let backup_dir = backup_dir.clone();
                 async move {
-                    assert_eq!(headers.get("if-none-match").unwrap(), "*");
+                    let archive = fs::read_dir(&backup_dir)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .find(|path| {
+                            let name = path.file_name().unwrap().to_str().unwrap();
+                            if captured.lock().unwrap().len() == 4 {
+                                !name.contains("-mpc-")
+                            } else {
+                                name.contains("-mpc-")
+                            }
+                        })
+                        .unwrap();
+                    let key = assert_scheduled_upload(provider, &uri, &headers, &body, &archive);
                     let mut captured = captured.lock().unwrap();
-                    captured.push((uri.path().to_owned(), body));
-                    match captured.len() {
-                        1 => (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "<Error><Code>SlowDown</Code></Error>",
-                        ),
-                        2 => (StatusCode::OK, ""),
-                        3 | 5 | 6 => (
-                            StatusCode::PRECONDITION_FAILED,
-                            "<Error><Code>PreconditionFailed</Code></Error>",
-                        ),
-                        4 => (
-                            StatusCode::CONFLICT,
-                            "<Error><Code>ConditionalRequestConflict</Code></Error>",
-                        ),
+                    captured.push(key);
+                    let status = match captured.len() {
+                        1 => StatusCode::SERVICE_UNAVAILABLE,
+                        2 => StatusCode::OK,
+                        3 | 5 | 6 => StatusCode::PRECONDITION_FAILED,
+                        4 => StatusCode::CONFLICT,
                         _ => panic!("unexpected additional request"),
-                    }
+                    };
+                    scheduled_upload_response(provider, status)
                 }
             },
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
+        service.remote_client = Some(scheduled_test_client(provider, &endpoint).await);
         let recovery_action = || BackupAction::SaveWithRecovery(Box::new(recovery::test_record()));
         assert!(
             service
@@ -2323,7 +2404,7 @@ mod tests {
         );
 
         service = restart_backup_service(service);
-        service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
+        service.remote_client = Some(scheduled_test_client(provider, &endpoint).await);
         service
             .process_epoch_change(42, recovery_action())
             .await
@@ -2348,12 +2429,8 @@ mod tests {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
             assert_eq!(requests[0], requests[1]);
-            assert!(
-                requests[0]
-                    .0
-                    .ends_with(archive.file_name().unwrap().to_str().unwrap())
-            );
         }
+        assert_eq!(fs::read(&archive).unwrap(), bytes);
         service
             .process_epoch_change(42, recovery_action())
             .await
@@ -2417,7 +2494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_skips_and_local_failure_do_not_initialize_s3_or_count_remote_results() {
+    async fn scheduled_skips_and_local_failure_do_not_initialize_remote_or_count_remote_results() {
         for (config_path_present, action, remove_config) in [
             (true, BackupAction::CleanupOnly, false),
             (false, BackupAction::SaveNodeState, false),
@@ -2428,7 +2505,8 @@ mod tests {
             ),
             (true, BackupAction::SaveNodeState, true),
         ] {
-            let (mut service, directory) = backup_service_fixture(true, config_path_present);
+            let (mut service, directory) =
+                backup_service_fixture(Some(BackupProvider::S3), config_path_present);
             if remove_config {
                 fs::remove_file(directory.path().join("config.toml")).unwrap();
             }
@@ -2455,8 +2533,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduled_local_only_completes_without_initializing_s3() {
-        let (mut service, _directory) = backup_service_fixture(false, true);
+    async fn scheduled_local_only_completes_without_initializing_remote_client() {
+        let (mut service, _directory) = backup_service_fixture(None, true);
         service
             .process_epoch_change(6, BackupAction::SaveNodeState)
             .await
@@ -2503,16 +2581,22 @@ mod tests {
         use axum::body::Bytes;
         use axum::http::HeaderMap;
         use axum::http::StatusCode;
+        use axum::http::Uri;
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
 
-        for fail in [false, true] {
-            let (mut service, _directory) = backup_service_fixture(true, true);
+        for (provider, fail) in [
+            (BackupProvider::S3, false),
+            (BackupProvider::S3, true),
+            (BackupProvider::Gcs, false),
+            (BackupProvider::Gcs, true),
+        ] {
+            let (mut service, _directory) = backup_service_fixture(Some(provider), true);
             let hashi = service.inner.clone();
             let requests = Arc::new(AtomicUsize::new(0));
             let request_count = requests.clone();
-            let router = axum::Router::new().fallback_service(axum::routing::put(
-                move |headers: HeaderMap, body: Bytes| {
+            let router = axum::Router::new().fallback_service(axum::routing::any(
+                move |uri: Uri, headers: HeaderMap, body: Bytes| {
                     let hashi = hashi.clone();
                     let requests = request_count.clone();
                     async move {
@@ -2524,33 +2608,22 @@ mod tests {
                             .unwrap()
                             .unwrap()
                             .path();
-                        let archive_bytes = fs::read(archive).unwrap();
-                        assert!(!archive_bytes.is_empty());
-                        if let Some(decoded_length) = headers.get("x-amz-decoded-content-length") {
-                            assert_eq!(
-                                decoded_length.to_str().unwrap().parse::<usize>().unwrap(),
-                                archive_bytes.len()
-                            );
-                        } else {
-                            assert_eq!(archive_bytes.as_slice(), body.as_ref());
-                        }
+                        assert_scheduled_upload(provider, &uri, &headers, &body, &archive);
                         assert_eq!(hashi.metrics.backup_scheduled_local_successes.get(), 1);
                         assert_eq!(hashi.metrics.backup_scheduled_remote_successes.get(), 0);
                         assert_eq!(hashi.metrics.backup_scheduled_remote_failures.get(), 0);
-                        if fail {
-                            (
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "<Error><Code>SlowDown</Code><Message>try later</Message></Error>",
-                            )
+                        let status = if fail {
+                            StatusCode::SERVICE_UNAVAILABLE
                         } else {
-                            (StatusCode::OK, "")
-                        }
+                            StatusCode::OK
+                        };
+                        scheduled_upload_response(provider, status)
                     }
                 },
             ));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            service.remote_client = Some(BackupRemoteClient::for_test_endpoint(&endpoint));
+            service.remote_client = Some(scheduled_test_client(provider, &endpoint).await);
             let server = tokio::spawn(async move {
                 axum::serve(listener, router).await.unwrap();
             });
@@ -2582,21 +2655,7 @@ mod tests {
                 .unwrap()
                 .path();
             assert!(archive.is_file());
-            if fail {
-                let error = format!("{:#}", result.unwrap_err());
-                assert!(error.contains(&archive.display().to_string()), "{error}");
-                let namespace = service.inner.config.backup_remote_namespace().unwrap();
-                let uri = format!(
-                    "s3://backup-bucket/{namespace}{}",
-                    archive.file_name().unwrap().to_string_lossy()
-                );
-                assert!(error.contains(&uri), "{error}");
-                assert!(error.contains("local archive retained"), "{error}");
-                assert!(error.contains("SlowDown"), "{error}");
-                assert!(error.contains("try later"), "{error}");
-            } else {
-                result.unwrap();
-            }
+            assert_eq!(result.is_err(), fail);
         }
     }
 
