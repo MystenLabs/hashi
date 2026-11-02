@@ -92,6 +92,13 @@ block. Timeouts, rate limits and TRM server errors are also retried, and the
 node does not vote in the meantime. TRM can still alert on a transfer after
 the committee approves the deposit; hashi does not revisit an approval.
 
+A node reuses TRM's answer for the same set of addresses for 5 minutes by
+default (`trm-verdict-reuse-ms`, at most an hour) instead of asking TRM again,
+so a vote can rest on a verdict that old. Each committee member, and the node
+itself, may also spend only a limited number of TRM calls at a node
+(`trm-per-caller-burst`, `trm-per-caller-refill-per-sec`); past that limit the
+node declines for now and the request is retried, as during a TRM outage.
+
 ## When sanctions checks apply
 
 **Deposits**: When a user submits a deposit request, their request sits in a

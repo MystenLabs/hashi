@@ -696,7 +696,7 @@ impl Metrics {
             .unwrap(),
             trm_screenings_total: register_int_counter_vec_with_registry!(
                 "hashi_trm_screenings_total",
-                "TRM screenings by flow and outcome \
+                "TRM screenings by flow and outcome, reused verdicts and budget refusals included \
                  (outcomes: approved, rejected, pending, transient_error, permanent_error)",
                 &["flow", "outcome"],
                 registry,
@@ -704,7 +704,7 @@ impl Metrics {
             .unwrap(),
             trm_screening_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_trm_screening_duration_seconds",
-                "Latency of TRM screenings by flow and outcome",
+                "Latency of TRM screenings by flow and outcome, reused verdicts included",
                 &["flow", "outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,

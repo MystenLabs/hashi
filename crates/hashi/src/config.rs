@@ -23,7 +23,8 @@ pub(crate) const DEFAULT_GRPC_PER_PEER_CONNECTION_LIMIT: usize = 4;
 const DEFAULT_TRM_PER_CALLER_BURST: u32 = 200;
 const DEFAULT_TRM_PER_CALLER_REFILL_PER_SEC: f64 = 1.0;
 const DEFAULT_TRM_VERDICT_REUSE_MS: u64 = 300_000;
-const MIN_TRM_PER_CALLER_BURST: u32 = 64;
+const MIN_TRM_PER_CALLER_BURST: u32 = 200;
+const MAX_TRM_VERDICT_REUSE_MS: u64 = 3_600_000;
 /// Core's short fee-estimation horizon. Longer targets are answered from
 /// horizons that lag the fee market by hours to days.
 const MAX_WITHDRAWAL_FEE_CONF_TARGET: u16 = 12;
@@ -134,20 +135,16 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_api_key: Option<String>,
 
-    /// Per-caller TRM call budget at each screening endpoint: token-bucket
-    /// burst capacity. Defaults to 200; at least 64 (a leader's concurrent
-    /// burst). Bounds one committee member's TRM spend per node (MF-52).
+    /// Per-caller TRM call burst at each endpoint. Defaults to 200, also the minimum.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_per_caller_burst: Option<u32>,
 
-    /// Per-caller TRM call budget refill, calls per second. Defaults to 1.0.
-    /// A cap on one caller's sustained TRM spend; size it above the real
-    /// sustained screening-plus-retry rate.
+    /// Per-caller TRM calls regained per second at each endpoint. Defaults to 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_per_caller_refill_per_sec: Option<f64>,
 
-    /// How long a terminal TRM address verdict is reused for the same
-    /// addresses without re-screening, in milliseconds. Defaults to 300000.
+    /// Milliseconds a TRM verdict is reused for the same addresses. Defaults to
+    /// 300000; 0 disables reuse; at most 3600000.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trm_verdict_reuse_ms: Option<u64>,
 
@@ -413,6 +410,12 @@ impl Config {
         anyhow::ensure!(
             config.trm_per_caller_refill_per_sec.is_none_or(|r| r > 0.0),
             "trm_per_caller_refill_per_sec must be a positive number of calls per second"
+        );
+        anyhow::ensure!(
+            config
+                .trm_verdict_reuse_ms
+                .is_none_or(|ms| ms <= MAX_TRM_VERDICT_REUSE_MS),
+            "trm_verdict_reuse_ms must be at most {MAX_TRM_VERDICT_REUSE_MS}"
         );
         anyhow::ensure!(
             config
