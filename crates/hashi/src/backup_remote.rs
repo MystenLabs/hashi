@@ -13,17 +13,27 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::primitives::ByteStream;
+use google_cloud_gax::retry_policy::NeverRetry;
+use google_cloud_storage::client::Storage;
+use google_cloud_storage::read_resume_policy::NeverResume;
 use tokio::io::AsyncWriteExt;
 
+use crate::config::BackupProvider;
 use crate::config::BackupRemoteConfig;
 
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectVersion {
+    S3(String),
+    Gcs(i64),
+}
+
 #[derive(Debug)]
 pub struct UploadReceipt {
-    pub version_id: Option<String>,
+    pub version: Option<ObjectVersion>,
     pub e_tag: Option<String>,
 }
 
@@ -45,32 +55,50 @@ impl UploadError {
 }
 
 #[derive(Clone)]
-pub struct BackupRemoteClient {
-    client: aws_sdk_s3::Client,
+pub enum BackupRemoteClient {
+    S3(aws_sdk_s3::Client),
+    Gcs(Box<Storage>),
 }
 
 impl BackupRemoteClient {
+    fn provider(&self) -> BackupProvider {
+        match self {
+            Self::S3(_) => BackupProvider::S3,
+            Self::Gcs(_) => BackupProvider::Gcs,
+        }
+    }
+
     pub async fn connect(config: &BackupRemoteConfig) -> anyhow::Result<Self> {
-        let BackupRemoteConfig::S3(config) = config;
         tokio::time::timeout(CONFIG_TIMEOUT, async {
-            let config = aws_config::defaults(BehaviorVersion::latest())
-                .region(Region::new(config.region().to_owned()))
-                .retry_config(RetryConfig::standard().with_max_attempts(1))
-                .timeout_config(timeouts())
-                .load()
-                .await;
-            let mut builder = client_builder(Builder::from(&config));
-            // Match the existing S3-compatible endpoint convention. Production AWS
-            // uses the SDK's normal endpoint resolution and virtual-host addressing.
-            if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
-                builder = builder.force_path_style(true);
-            }
-            Self {
-                client: aws_sdk_s3::Client::from_conf(builder.build()),
+            match config {
+                BackupRemoteConfig::S3(config) => {
+                    let config = aws_config::defaults(BehaviorVersion::latest())
+                        .region(Region::new(config.region().to_owned()))
+                        .retry_config(RetryConfig::standard().with_max_attempts(1))
+                        .timeout_config(timeouts())
+                        .load()
+                        .await;
+                    let mut builder = client_builder(Builder::from(&config));
+                    // Preserve the existing S3-compatible endpoint convention.
+                    if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
+                        builder = builder.force_path_style(true);
+                    }
+                    Ok(Self::S3(aws_sdk_s3::Client::from_conf(builder.build())))
+                }
+                BackupRemoteConfig::Gcs(_) => {
+                    crate::init_crypto_provider();
+                    let client = Storage::builder()
+                        .with_retry_policy(NeverRetry)
+                        .with_read_resume_policy(NeverResume)
+                        .build()
+                        .await
+                        .context("failed to load GCS backup configuration")?;
+                    Ok(Self::Gcs(Box::new(client)))
+                }
             }
         })
         .await
-        .context("timed out loading S3 backup configuration")
+        .context("timed out loading remote backup configuration")?
     }
 
     pub async fn upload(
@@ -82,35 +110,70 @@ impl BackupRemoteClient {
         // The outer deadline also covers credential resolution and opening/streaming
         // the file, not just the SDK's HTTP request. Never remove the local archive.
         tokio::time::timeout(TRANSFER_TIMEOUT, async {
-            let body = ByteStream::from_path(archive)
-                .await
-                .context("failed to open backup archive for upload")?;
-            self.client
-                .put_object()
-                .bucket(bucket)
-                .key(key)
-                .if_none_match("*")
-                .body(body)
-                .send()
-                .await
-                .map(|receipt| UploadReceipt {
-                    version_id: receipt.version_id,
-                    e_tag: receipt.e_tag,
-                })
-                .map_err(|error| {
-                    let already_exists = error
-                        .raw_response()
-                        .is_some_and(|response| response.status().as_u16() == 412);
-                    let error = anyhow::Error::new(error).context("S3 backup PutObject failed");
-                    if already_exists {
-                        UploadError::AlreadyExists(error)
-                    } else {
-                        UploadError::Other(error)
+            match self {
+                Self::S3(client) => {
+                    let body = ByteStream::from_path(archive)
+                        .await
+                        .context("failed to open backup archive for upload")?;
+                    client
+                        .put_object()
+                        .bucket(bucket)
+                        .key(key)
+                        .if_none_match("*")
+                        .body(body)
+                        .send()
+                        .await
+                        .map(|receipt| UploadReceipt {
+                            version: receipt.version_id.map(ObjectVersion::S3),
+                            e_tag: receipt.e_tag,
+                        })
+                        .map_err(|error| {
+                            let already_exists = error
+                                .raw_response()
+                                .is_some_and(|response| response.status().as_u16() == 412);
+                            let error =
+                                anyhow::Error::new(error).context("S3 backup PutObject failed");
+                            if already_exists {
+                                UploadError::AlreadyExists(error)
+                            } else {
+                                UploadError::Other(error)
+                            }
+                        })
+                }
+                Self::Gcs(client) => {
+                    let file = tokio::fs::File::open(archive)
+                        .await
+                        .context("failed to open backup archive for upload")?;
+                    let receipt = client
+                        .write_object(format!("projects/_/buckets/{bucket}"), key, file)
+                        .set_if_generation_match(0_i64)
+                        .send_unbuffered()
+                        .await
+                        .map_err(|error| {
+                            let already_exists = error.http_status_code() == Some(412);
+                            let error =
+                                anyhow::Error::new(error).context("GCS backup upload failed");
+                            if already_exists {
+                                UploadError::AlreadyExists(error)
+                            } else {
+                                UploadError::Other(error)
+                            }
+                        })?;
+                    if receipt.generation <= 0 {
+                        return Err(anyhow::anyhow!(
+                            "GCS upload returned a nonpositive generation"
+                        )
+                        .into());
                     }
-                })
+                    Ok(UploadReceipt {
+                        version: Some(ObjectVersion::Gcs(receipt.generation)),
+                        e_tag: (!receipt.etag.is_empty()).then_some(receipt.etag),
+                    })
+                }
+            }
         })
         .await
-        .context("S3 backup upload deadline exceeded")
+        .context("remote backup upload deadline exceeded")
         .map_err(UploadError::from)
         .and_then(|result| result)
     }
@@ -121,18 +184,24 @@ impl BackupRemoteClient {
         &self,
         bucket: &str,
         key: &str,
-        version_id: Option<&str>,
+        version: Option<&ObjectVersion>,
         destination: &mut tokio::fs::File,
     ) -> anyhow::Result<()> {
         // Include credentials, response body consumption, and file writes in the
         // deadline: SDK operation timeouts alone only cover the response headers.
         tokio::time::timeout(TRANSFER_TIMEOUT, async {
-            let mut response = self
-                .client
+            match self {
+                Self::S3(client) => {
+                    let version_id = match version {
+                        Some(ObjectVersion::S3(value)) => Some(value.clone()),
+                        Some(ObjectVersion::Gcs(_)) => anyhow::bail!("GCS generation cannot select an S3 object"),
+                        None => None,
+                    };
+            let mut response = client
                 .get_object()
                 .bucket(bucket)
                 .key(key)
-                .set_version_id(version_id.map(str::to_owned))
+                .set_version_id(version_id)
                 .send()
                 .await
                 .context("S3 backup GetObject failed")?;
@@ -156,6 +225,37 @@ impl BackupRemoteClient {
                     "incomplete S3 backup body: expected {expected} bytes, received {downloaded}"
                 );
             }
+                }
+                Self::Gcs(client) => {
+                    // The SDK treats percent escapes as pre-encoded, but Hashi object keys are literal.
+                    let mut request = client
+                        .read_object(format!("projects/_/buckets/{bucket}"), key.replace('%', "%25"))
+                        .with_automatic_decompression(false);
+                    match version {
+                        Some(ObjectVersion::Gcs(generation)) => {
+                            anyhow::ensure!(*generation > 0, "GCS generation must be positive");
+                            request = request.set_generation(*generation);
+                        }
+                        Some(ObjectVersion::S3(_)) => anyhow::bail!("S3 version ID cannot select a GCS object"),
+                        None => {}
+                    }
+                    let mut response = request.send().await.context("GCS backup download failed")?;
+                    let expected = response.object().size;
+                    let mut downloaded = 0_u64;
+                    // Read through EOF: checksum validation can fail after the last data chunk.
+                    while let Some(chunk) = response.next().await.transpose()
+                        .context("failed to read GCS backup body")?
+                    {
+                        destination.write_all(&chunk).await
+                            .context("failed to write downloaded backup")?;
+                        downloaded += chunk.len() as u64;
+                    }
+                    anyhow::ensure!(
+                        u64::try_from(expected).ok() == Some(downloaded),
+                        "incomplete GCS backup body: expected {expected} bytes, received {downloaded}"
+                    );
+                }
+            }
             destination
                 .flush()
                 .await
@@ -163,13 +263,11 @@ impl BackupRemoteClient {
             Ok::<(), anyhow::Error>(())
         })
         .await
-        .context("S3 backup download deadline exceeded")
+        .context("remote backup download deadline exceeded")
         .and_then(|result| result)
-        .with_context(|| match version_id {
-            Some(version) => {
-                format!("failed to download backup from s3://{bucket}/{key} (version {version})")
-            }
-            None => format!("failed to download backup from s3://{bucket}/{key}"),
+        .with_context(|| {
+            let scheme = self.provider().scheme();
+            format!("failed to download backup from {scheme}://{bucket}/{key} (revision {version:?})")
         })
     }
 
@@ -187,9 +285,9 @@ impl BackupRemoteClient {
             ))
             .endpoint_url(endpoint)
             .force_path_style(true);
-        Self {
-            client: aws_sdk_s3::Client::from_conf(client_builder(builder).build()),
-        }
+        Self::S3(aws_sdk_s3::Client::from_conf(
+            client_builder(builder).build(),
+        ))
     }
 }
 
@@ -374,7 +472,8 @@ mod tests {
             store.object = Some(latest.clone());
         }
         let directory = tempfile::tempdir().unwrap();
-        for (version, expected) in [(None, latest), (Some("old+/version"), older)] {
+        let historical_version = ObjectVersion::S3("old+/version".to_owned());
+        for (version, expected) in [(None, latest), (Some(&historical_version), older)] {
             let path = directory.path().join("download");
             let mut destination = tokio::fs::File::create(&path).await.unwrap();
             client
@@ -402,7 +501,7 @@ mod tests {
             .download(
                 "backup-bucket",
                 "testnet/validator/epoch-7.tar",
-                Some("old-version"),
+                Some(&ObjectVersion::S3("old-version".to_owned())),
                 &mut destination,
             )
             .await
@@ -414,6 +513,196 @@ mod tests {
         assert!(message.contains("try later"));
         assert_eq!(store.lock().await.requests, 1);
         assert!(tokio::fs::read(path).await.unwrap().is_empty());
+        server.abort();
+    }
+
+    // This fixture exercises the real SDK's JSON HTTP transport without changing
+    // production endpoint or credential discovery.
+    #[derive(Default)]
+    struct GcsStore {
+        requests: Vec<(axum::http::Method, String, HashMap<String, String>)>,
+        uploaded: Option<Bytes>,
+    }
+
+    async fn gcs_request(
+        State(store): State<Arc<Mutex<GcsStore>>>,
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        Query(query): Query<HashMap<String, String>>,
+        body: Bytes,
+    ) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::response::IntoResponse;
+
+        let mut store = store.lock().await;
+        store
+            .requests
+            .push((method.clone(), uri.path().to_owned(), query.clone()));
+        if method == axum::http::Method::POST {
+            if query.get("ifGenerationMatch").map(String::as_str) != Some("0") {
+                return (StatusCode::BAD_REQUEST, "missing create-only condition").into_response();
+            }
+            if store.uploaded.is_some() {
+                return (
+                    StatusCode::PRECONDITION_FAILED,
+                    axum::Json(serde_json::json!({
+                        "error": {"code": 412, "message": "object already exists"}
+                    })),
+                )
+                    .into_response();
+            }
+            store.uploaded = Some(body);
+            return axum::Json(serde_json::json!({
+                "bucket": "backup-bucket",
+                "name": "testnet/validator/epoch-7.tar",
+                "generation": "123",
+                "etag": "test-etag"
+            }))
+            .into_response();
+        }
+        // Only these objects exist; decoding the literal %2F in the second key selects a missing object.
+        if !matches!(
+            uri.path(),
+            "/storage/v1/b/backup-bucket/o/testnet%2Fvalidator%2Fepoch-7.tar"
+                | "/storage/v1/b/backup-bucket/o/literal%252Fprefix%2F..%2Farchive.tar.asc"
+        ) {
+            return (StatusCode::NOT_FOUND, "object not found").into_response();
+        }
+
+        // CRC32C("123456789") = 0xe3069283, encoded big-endian as base64.
+        let historical = query.get("generation").map(String::as_str) == Some("123");
+        let bytes = if historical {
+            "123456789"
+        } else {
+            "latest archive"
+        };
+        let mut response = axum::http::Response::builder()
+            .header("x-goog-generation", if historical { "123" } else { "456" })
+            .header("x-goog-stored-content-length", bytes.len().to_string());
+        if historical {
+            response = response.header("x-goog-hash", "crc32c=4waSgw==");
+        }
+        let chunks = vec![
+            Ok::<_, std::io::Error>(Bytes::copy_from_slice(&bytes.as_bytes()[..3])),
+            Ok(Bytes::copy_from_slice(&bytes.as_bytes()[3..])),
+        ];
+        let body = Body::from_stream(futures::stream::iter(chunks));
+        response.body(body).unwrap()
+    }
+
+    async fn gcs_server() -> (
+        BackupRemoteClient,
+        Arc<Mutex<GcsStore>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        crate::init_crypto_provider();
+        let store = Arc::new(Mutex::new(GcsStore::default()));
+        let router = Router::new()
+            .fallback(gcs_request)
+            .with_state(store.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = Storage::builder()
+            .with_endpoint(endpoint)
+            .with_credentials(google_cloud_auth::credentials::anonymous::Builder::new().build())
+            .with_retry_policy(NeverRetry)
+            .with_read_resume_policy(NeverResume)
+            .build()
+            .await
+            .unwrap();
+        (BackupRemoteClient::Gcs(Box::new(client)), store, task)
+    }
+
+    #[tokio::test]
+    async fn gcs_upload_is_create_only_and_preserves_duplicate_archive() {
+        let (client, store, server) = gcs_server().await;
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("epoch-7.tar");
+        let original = b"published archive bytes";
+        tokio::fs::write(&archive, original).await.unwrap();
+        let receipt = client
+            .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
+            .await
+            .unwrap();
+        assert_eq!(receipt.version, Some(ObjectVersion::Gcs(123)));
+        assert_eq!(receipt.e_tag.as_deref(), Some("test-etag"));
+        assert_eq!(tokio::fs::read(&archive).await.unwrap(), original);
+        let remote = store.lock().await.uploaded.clone().unwrap();
+        assert!(
+            remote
+                .windows(original.len())
+                .any(|window| window == original)
+        );
+
+        let replacement = b"different local archive";
+        tokio::fs::write(&archive, replacement).await.unwrap();
+        let error = client
+            .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, UploadError::AlreadyExists(_)));
+        assert_eq!(tokio::fs::read(&archive).await.unwrap(), replacement);
+        let store = store.lock().await;
+        assert_eq!(store.uploaded.as_ref(), Some(&remote));
+        assert_eq!(store.requests.len(), 2);
+        for (method, path, query) in &store.requests {
+            assert_eq!(method, axum::http::Method::POST);
+            assert_eq!(path, "/upload/storage/v1/b/backup-bucket/o");
+            assert_eq!(
+                query.get("uploadType").map(String::as_str),
+                Some("multipart")
+            );
+            assert_eq!(
+                query.get("ifGenerationMatch").map(String::as_str),
+                Some("0")
+            );
+            assert_eq!(
+                query.get("name").map(String::as_str),
+                Some("testnet/validator/epoch-7.tar")
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn gcs_download_selects_literal_percent_key_and_historical_generation_and_streams_to_file()
+     {
+        let (client, store, server) = gcs_server().await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("download");
+        let historical = ObjectVersion::Gcs(123);
+        for (version, expected) in [(None, "latest archive"), (Some(&historical), "123456789")] {
+            let mut destination = tokio::fs::File::create(&path).await.unwrap();
+            client
+                .download(
+                    "backup-bucket",
+                    "literal%2Fprefix/../archive.tar.asc",
+                    version,
+                    &mut destination,
+                )
+                .await
+                .unwrap();
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), expected.as_bytes());
+        }
+        let store = store.lock().await;
+        assert_eq!(store.requests.len(), 2);
+        for (method, path, query) in &store.requests {
+            assert_eq!(method, axum::http::Method::GET);
+            assert_eq!(
+                path,
+                "/storage/v1/b/backup-bucket/o/literal%252Fprefix%2F..%2Farchive.tar.asc"
+            );
+            assert_eq!(query.get("alt").map(String::as_str), Some("media"));
+            assert!(!query.contains_key("ifGenerationMatch"));
+        }
+        assert!(!store.requests[0].2.contains_key("generation"));
+        assert_eq!(
+            store.requests[1].2.get("generation").map(String::as_str),
+            Some("123")
+        );
         server.abort();
     }
 }

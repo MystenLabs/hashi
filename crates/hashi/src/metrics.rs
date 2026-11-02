@@ -2662,7 +2662,7 @@ mod tests {
         config.backup_remote = Some(
             crate::config::BackupRemoteConfig::new(
                 "s3://hashi-test-backups/",
-                "us-west-2".to_owned(),
+                Some("us-west-2".to_owned()),
             )
             .unwrap(),
         );

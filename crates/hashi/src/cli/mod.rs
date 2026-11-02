@@ -631,16 +631,20 @@ pub enum BackupCommands {
     /// Files are extracted only into the selected output directory. Original
     /// paths recorded in the manifest are metadata, not restore destinations.
     Restore {
-        /// Local .tar or .tar.asc path, or s3://bucket/key (.tar.asc only)
+        /// Local .tar or .tar.asc path, or s3://bucket/key or gs://bucket/key (.tar.asc only)
         backup_tarball: std::path::PathBuf,
 
-        /// AWS region (required for S3 restores; not accepted for local files)
+        /// AWS region (required for S3 restores; not accepted for GCS or local files)
         #[clap(long)]
         region: Option<String>,
 
         /// Restore a specific S3 object version (S3 restores only)
         #[clap(long)]
         version_id: Option<String>,
+
+        /// Restore a specific positive GCS object generation (GCS restores only)
+        #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
+        generation: Option<i64>,
 
         /// OpenPGP secret key file used to decrypt encrypted .tar.asc backups locally
         #[clap(long)]
@@ -1452,6 +1456,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 backup_tarball,
                 region,
                 version_id,
+                generation,
                 backup_pgp_secret_key,
                 use_gpg_agent,
                 gpg_homedir,
@@ -1461,6 +1466,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     &backup_tarball,
                     region.as_deref(),
                     version_id.as_deref(),
+                    generation,
                 )?;
                 let decryptor = commands::backup::select_restore_decryptor(
                     &backup_tarball,

@@ -795,9 +795,12 @@ mod tests {
         decryptor: RestoreDecryptor,
         output_dir: &Path,
     ) -> Result<()> {
-        let BackupRemoteConfig::S3(config) = config;
+        let region = match config {
+            BackupRemoteConfig::S3(config) => Some(config.region()),
+            BackupRemoteConfig::Gcs(_) => None,
+        };
         let RestoreSource::Remote(source) =
-            RestoreSource::parse(Path::new(uri), Some(config.region()), None)?
+            RestoreSource::parse(Path::new(uri), region, None, None)?
         else {
             anyhow::bail!("Expected a remote restore source");
         };

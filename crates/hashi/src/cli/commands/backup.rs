@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 use crate::backup;
 use crate::backup_remote::BackupRemoteClient;
+use crate::backup_remote::ObjectVersion;
 use crate::backup_remote::UploadReceipt;
 use crate::cli::client::HashiClient;
 use crate::cli::config::CliConfig;
@@ -168,6 +169,17 @@ pub async fn export_mpc_public_key(config: &CliConfig, output: &Path) -> Result<
     Ok(())
 }
 
+fn require_local_mpc_input(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            crate::config::BackupLocation::parse(path)?,
+            crate::config::BackupLocation::Local(_)
+        ),
+        "MPC recovery accepts local inputs only; restore remote backups locally first"
+    );
+    Ok(())
+}
+
 /// Export only the recovery record, encrypted directly to the coordinator.
 pub fn export_mpc_recovery_record(
     archive: &Path,
@@ -175,12 +187,7 @@ pub fn export_mpc_recovery_record(
     output: &Path,
     output_recipient: &PgpPublicCert,
 ) -> Result<()> {
-    anyhow::ensure!(
-        !archive
-            .to_str()
-            .is_some_and(|path| path.starts_with("s3://")),
-        "MPC recovery accepts local inputs only; restore S3 backups locally first"
-    );
+    require_local_mpc_input(archive)?;
     let record = backup::read_mpc_recovery_record(open_backup_stream(archive, &decryptor)?)?;
     write_encrypted_bcs(output, &record, output_recipient)?;
     print_success(&format!(
@@ -216,10 +223,7 @@ pub fn recover_mpc_key(
     .map_err(|_| anyhow::anyhow!("Invalid trusted MPC public-key BCS"))?;
     let mut records = Vec::with_capacity(inputs.len());
     for input in inputs {
-        anyhow::ensure!(
-            !input.to_str().is_some_and(|path| path.starts_with("s3://")),
-            "MPC recovery accepts local inputs only; restore S3 backups locally first"
-        );
+        require_local_mpc_input(input)?;
         let record = (|| -> Result<backup::MpcRecoveryRecord> {
             let encrypted_record = input
                 .file_name()
@@ -405,8 +409,10 @@ pub async fn save(
 
 fn print_upload_receipt(uri: &str, receipt: &UploadReceipt) {
     print_success(&format!("Backup uploaded: {uri}"));
-    if let Some(version_id) = &receipt.version_id {
-        print_info(&format!("Version ID: {version_id}"));
+    match &receipt.version {
+        Some(ObjectVersion::S3(version_id)) => print_info(&format!("Version ID: {version_id}")),
+        Some(ObjectVersion::Gcs(generation)) => print_info(&format!("Generation: {generation}")),
+        None => {}
     }
     if let Some(e_tag) = &receipt.e_tag {
         print_info(&format!("ETag: {e_tag}"));
@@ -446,38 +452,55 @@ pub enum RestoreSource<'a> {
 pub struct RemoteRestoreSource<'a> {
     config: crate::config::BackupRemoteConfig,
     key: &'a str,
-    version_id: Option<&'a str>,
+    version: Option<ObjectVersion>,
 }
 
 impl<'a> RestoreSource<'a> {
     pub fn parse(
         source: &'a Path,
         region: Option<&str>,
-        version_id: Option<&'a str>,
+        version_id: Option<&str>,
+        generation: Option<i64>,
     ) -> Result<Self> {
         match crate::config::BackupLocation::parse(source)? {
             crate::config::BackupLocation::Remote(location) => {
                 let key = location.key();
-                anyhow::ensure!(!key.is_empty(), "S3 URI must contain an object key");
-                let config = location.with_region(
-                    region
-                        .context("S3 backup source requires a region")?
-                        .to_owned(),
-                )?;
-                anyhow::ensure!(
-                    version_id.is_none_or(|version| !version.is_empty()),
-                    "--version-id must not be empty"
-                );
+                anyhow::ensure!(!key.is_empty(), "Remote URI must contain an object key");
+                let version = match location.provider() {
+                    crate::config::BackupProvider::S3 => {
+                        anyhow::ensure!(
+                            generation.is_none(),
+                            "--generation is only valid for GCS restores"
+                        );
+                        anyhow::ensure!(
+                            version_id.is_none_or(|version| !version.is_empty()),
+                            "--version-id must not be empty"
+                        );
+                        version_id.map(|version| ObjectVersion::S3(version.to_owned()))
+                    }
+                    crate::config::BackupProvider::Gcs => {
+                        anyhow::ensure!(
+                            version_id.is_none(),
+                            "--version-id is only valid for S3 restores"
+                        );
+                        anyhow::ensure!(
+                            generation.is_none_or(|generation| generation > 0),
+                            "--generation must be a positive integer"
+                        );
+                        generation.map(ObjectVersion::Gcs)
+                    }
+                };
+                let config = location.into_config(region.map(str::to_owned))?;
                 Ok(Self::Remote(RemoteRestoreSource {
                     config,
                     key,
-                    version_id,
+                    version,
                 }))
             }
             crate::config::BackupLocation::Local(path) => {
                 anyhow::ensure!(
-                    region.is_none() && version_id.is_none(),
-                    "--region and --version-id are only valid for S3 restores"
+                    region.is_none() && version_id.is_none() && generation.is_none(),
+                    "--region, --version-id and --generation are not valid for local restores"
                 );
                 Ok(Self::Local(path))
             }
@@ -579,7 +602,7 @@ async fn restore_remote_with_client(
         .download(
             source.config.bucket(),
             source.key,
-            source.version_id,
+            source.version.as_ref(),
             &mut file,
         )
         .await?;
@@ -949,7 +972,7 @@ mod tests {
 
     fn remote_source<'a>(uri: &'a str, version_id: Option<&'a str>) -> RemoteRestoreSource<'a> {
         let RestoreSource::Remote(source) =
-            RestoreSource::parse(Path::new(uri), Some("us-east-1"), version_id).unwrap()
+            RestoreSource::parse(Path::new(uri), Some("us-east-1"), version_id, None).unwrap()
         else {
             panic!("expected remote source");
         };
@@ -976,7 +999,7 @@ mod tests {
     fn restore_source_requires_object_key() {
         for uri in ["s3://bucket", "s3://bucket/"] {
             assert!(
-                RestoreSource::parse(Path::new(uri), Some("us-east-1"), None).is_err(),
+                RestoreSource::parse(Path::new(uri), Some("us-east-1"), None, None).is_err(),
                 "{uri:?}"
             );
         }
@@ -985,17 +1008,52 @@ mod tests {
     #[test]
     fn restore_source_flags_are_remote_only() {
         assert_eq!(
-            remote_source("s3://bucket/backup.tar.asc", None).version_id,
+            remote_source("s3://bucket/backup.tar.asc", None).version,
             None
         );
         let source = remote_source("s3://bucket/backup.tar.asc", Some("version /+%"));
-        assert_eq!(source.version_id, Some("version /+%"));
+        assert_eq!(
+            source.version,
+            Some(ObjectVersion::S3("version /+%".to_owned()))
+        );
         let uri = Path::new("s3://bucket/backup.tar.asc");
         for (region, version) in [(None, None), (Some("us-east-1"), Some(""))] {
-            assert!(RestoreSource::parse(uri, region, version).is_err());
+            assert!(RestoreSource::parse(uri, region, version, None).is_err());
         }
         for (region, version) in [(Some("us-east-1"), None), (None, Some("version"))] {
-            assert!(RestoreSource::parse(Path::new("backup.tar"), region, version).is_err());
+            assert!(RestoreSource::parse(Path::new("backup.tar"), region, version, None).is_err());
+        }
+    }
+
+    #[test]
+    fn restore_source_gcs_generation_and_options() {
+        let uri = Path::new("gs://bucket/backup.tar.asc");
+        for generation in [None, Some(1), Some(i64::MAX)] {
+            let RestoreSource::Remote(source) =
+                RestoreSource::parse(uri, None, None, generation).unwrap()
+            else {
+                panic!("expected remote source");
+            };
+            assert_eq!(source.version, generation.map(ObjectVersion::Gcs));
+        }
+        for generation in [0, -1, i64::MIN] {
+            assert!(RestoreSource::parse(uri, None, None, Some(generation)).is_err());
+        }
+        for (region, version) in [
+            (Some("us-east-1"), None),
+            (Some(""), None),
+            (None, Some("v1")),
+        ] {
+            assert!(RestoreSource::parse(uri, region, version, None).is_err());
+        }
+        for (uri, region) in [
+            ("backup.tar", None),
+            ("s3://bucket/backup.tar.asc", Some("us-east-1")),
+        ] {
+            assert!(RestoreSource::parse(Path::new(uri), region, None, Some(1)).is_err());
+        }
+        for uri in ["gs://bucket", "gs://bucket/"] {
+            assert!(RestoreSource::parse(Path::new(uri), None, None, None).is_err());
         }
     }
 
@@ -1437,7 +1495,7 @@ mod tests {
         node_config.backup_remote = Some(
             crate::config::BackupRemoteConfig::new(
                 "s3://hashi-recipient-mismatch-no-network/",
-                "us-west-2".into(),
+                Some("us-west-2".into()),
             )
             .unwrap(),
         );
@@ -1488,7 +1546,7 @@ mod tests {
         node_config.backup_remote = Some(
             crate::config::BackupRemoteConfig::new(
                 "s3://hashi-local-only-no-network/",
-                "us-west-2".into(),
+                Some("us-west-2".into()),
             )
             .unwrap(),
         );

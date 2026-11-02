@@ -323,7 +323,7 @@ pub(crate) async fn upload(
         .and_then(|name| name.to_str())
         .context("backup archive must have a UTF-8 filename")?;
     let key = format!("{namespace}{filename}");
-    let uri = format!("s3://{}/{key}", remote.bucket());
+    let uri = format!("{}://{}/{key}", remote.scheme(), remote.bucket());
     let receipt = async {
         if client.is_none() {
             *client = Some(BackupRemoteClient::connect(remote).await?);
@@ -343,7 +343,7 @@ pub(crate) async fn upload(
     })?;
     info!(
         %uri,
-        version_id = receipt.version_id.as_deref(),
+        version = ?receipt.version,
         e_tag = receipt.e_tag.as_deref(),
         "Remote backup uploaded"
     );
@@ -1655,7 +1655,7 @@ mod tests {
             config.backup_remote = Some(
                 crate::config::BackupRemoteConfig::new(
                     "s3://backup-bucket/",
-                    "us-east-1".to_owned(),
+                    Some("us-east-1".to_owned()),
                 )
                 .unwrap(),
             );

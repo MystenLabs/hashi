@@ -357,10 +357,11 @@ impl std::fmt::Debug for Config {
     }
 }
 
-/// Remote destination settings. S3 credentials come from the AWS provider chain.
+/// Remote destination settings. Credentials come from the provider's default chain.
 #[derive(Debug, Clone)]
 pub enum BackupRemoteConfig {
     S3(S3BackupConfig),
+    Gcs(GcsBackupConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -369,15 +370,36 @@ pub struct S3BackupConfig {
     region: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct GcsBackupConfig {
+    bucket: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupProvider {
+    S3,
+    Gcs,
+}
+
+impl BackupProvider {
+    pub(crate) fn scheme(self) -> &'static str {
+        match self {
+            Self::S3 => "s3",
+            Self::Gcs => "gs",
+        }
+    }
+}
+
 /// A local OS path or a validated remote URI, without normalizing object keys.
 #[derive(Debug)]
 pub(crate) enum BackupLocation<'a> {
     Local(&'a Path),
-    Remote(S3BackupLocation<'a>),
+    Remote(RemoteBackupLocation<'a>),
 }
 
 #[derive(Debug)]
-pub(crate) struct S3BackupLocation<'a> {
+pub(crate) struct RemoteBackupLocation<'a> {
+    provider: BackupProvider,
     bucket: &'a str,
     key: &'a str,
 }
@@ -394,28 +416,58 @@ impl<'a> BackupLocation<'a> {
         {
             return Ok(Self::Local(source));
         }
-        anyhow::ensure!(scheme == "s3", "unsupported backup URI scheme: {scheme}");
+        let provider = match scheme {
+            "s3" => BackupProvider::S3,
+            "gs" => BackupProvider::Gcs,
+            _ => anyhow::bail!("unsupported backup URI scheme: {scheme}"),
+        };
         let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
-        S3BackupConfig::validate_bucket(bucket)?;
+        match provider {
+            BackupProvider::S3 => S3BackupConfig::validate_bucket(bucket)?,
+            BackupProvider::Gcs => GcsBackupConfig::validate_bucket(bucket)?,
+        }
         anyhow::ensure!(
             !key.contains(['?', '#']) && !key.chars().any(char::is_control),
-            "S3 URI key must not contain a query, fragment, or control characters; use --version-id for versions"
+            "backup URI key must not contain a query, fragment, or control characters"
         );
-        Ok(Self::Remote(S3BackupLocation { bucket, key }))
+        Ok(Self::Remote(RemoteBackupLocation {
+            provider,
+            bucket,
+            key,
+        }))
     }
 }
 
-impl<'a> S3BackupLocation<'a> {
+impl<'a> RemoteBackupLocation<'a> {
+    pub(crate) fn provider(&self) -> BackupProvider {
+        self.provider
+    }
+
     pub(crate) fn key(&self) -> &'a str {
         self.key
     }
 
-    pub(crate) fn with_region(self, region: String) -> anyhow::Result<BackupRemoteConfig> {
-        S3BackupConfig::validate_region(&region)?;
-        Ok(BackupRemoteConfig::S3(S3BackupConfig {
-            bucket: self.bucket.to_owned(),
-            region,
-        }))
+    pub(crate) fn into_config(self, region: Option<String>) -> anyhow::Result<BackupRemoteConfig> {
+        match self.provider {
+            BackupProvider::S3 => {
+                let region = region
+                    .ok_or_else(|| anyhow::anyhow!("backup-remote.region is required for S3"))?;
+                S3BackupConfig::validate_region(&region)?;
+                Ok(BackupRemoteConfig::S3(S3BackupConfig {
+                    bucket: self.bucket.to_owned(),
+                    region,
+                }))
+            }
+            BackupProvider::Gcs => {
+                anyhow::ensure!(
+                    region.is_none(),
+                    "backup-remote.region is forbidden for GCS"
+                );
+                Ok(BackupRemoteConfig::Gcs(GcsBackupConfig {
+                    bucket: self.bucket.to_owned(),
+                }))
+            }
+        }
     }
 }
 
@@ -454,23 +506,57 @@ impl S3BackupConfig {
     }
 }
 
+impl GcsBackupConfig {
+    pub fn new(bucket: String) -> anyhow::Result<Self> {
+        Self::validate_bucket(&bucket)?;
+        Ok(Self { bucket })
+    }
+
+    fn validate_bucket(bucket: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !bucket.is_empty()
+                && bucket.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_')
+                }),
+            "backup-remote.destination must contain only a GCS bucket, without credentials, port, prefix, query, or fragment"
+        );
+        Ok(())
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+}
+
 impl BackupRemoteConfig {
-    /// Parse a bucket-only S3 URI, allowing one optional trailing slash.
-    pub fn new(destination: &str, region: String) -> anyhow::Result<Self> {
+    /// Parse a bucket-only S3 or GCS URI, allowing one optional trailing slash.
+    pub fn new(destination: &str, region: Option<String>) -> anyhow::Result<Self> {
         let BackupLocation::Remote(location) = BackupLocation::parse(Path::new(destination))?
         else {
-            anyhow::bail!("backup-remote.destination must be an s3:// bucket URI");
+            anyhow::bail!("backup-remote.destination must be an s3:// or gs:// bucket URI");
         };
         anyhow::ensure!(
             location.key().is_empty(),
-            "backup-remote.destination must contain only an S3 bucket, without a key"
+            "backup-remote.destination must contain only a bucket, without a key"
         );
-        location.with_region(region)
+        location.into_config(region)
     }
 
     pub fn bucket(&self) -> &str {
         match self {
             Self::S3(config) => config.bucket(),
+            Self::Gcs(config) => config.bucket(),
+        }
+    }
+
+    pub fn scheme(&self) -> &'static str {
+        self.provider().scheme()
+    }
+
+    pub(crate) fn provider(&self) -> BackupProvider {
+        match self {
+            Self::S3(_) => BackupProvider::S3,
+            Self::Gcs(_) => BackupProvider::Gcs,
         }
     }
 }
@@ -485,10 +571,7 @@ impl<'de> serde::Deserialize<'de> for BackupRemoteConfig {
         }
 
         let input = <Input as serde::Deserialize>::deserialize(deserializer)?;
-        let region = input
-            .region
-            .ok_or_else(|| serde::de::Error::custom("backup-remote.region is required"))?;
-        Self::new(&input.destination, region).map_err(serde::de::Error::custom)
+        Self::new(&input.destination, input.region).map_err(serde::de::Error::custom)
     }
 }
 
@@ -496,18 +579,23 @@ impl serde::Serialize for BackupRemoteConfig {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        struct Destination<'a>(&'a str);
+        struct Destination<'a>(&'a BackupRemoteConfig);
         impl serde::Serialize for Destination<'_> {
             fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.collect_str(&format_args!("s3://{}/", self.0))
+                serializer.collect_str(&format_args!("{}://{}/", self.0.scheme(), self.0.bucket()))
             }
         }
 
         match self {
             Self::S3(config) => {
                 let mut output = serializer.serialize_struct("BackupRemoteConfig", 2)?;
-                output.serialize_field("destination", &Destination(config.bucket()))?;
+                output.serialize_field("destination", &Destination(self))?;
                 output.serialize_field("region", config.region())?;
+                output.end()
+            }
+            Self::Gcs(_) => {
+                let mut output = serializer.serialize_struct("BackupRemoteConfig", 1)?;
+                output.serialize_field("destination", &Destination(self))?;
                 output.end()
             }
         }
@@ -919,7 +1007,7 @@ mod tests {
         assert!(loaded.backup_remote_namespace().is_none());
 
         config.backup_remote =
-            Some(BackupRemoteConfig::new("s3://hashi-backups/", "us-west-2".into()).unwrap());
+            Some(BackupRemoteConfig::new("s3://hashi-backups/", Some("us-west-2".into())).unwrap());
         let load = |config: &Config| {
             config.save(&path).unwrap();
             Config::load(&path)
@@ -937,7 +1025,9 @@ mod tests {
         let loaded = load(&config).unwrap();
         let remote = loaded.backup_remote.as_ref().unwrap();
         assert_eq!(remote.bucket(), "hashi-backups");
-        let BackupRemoteConfig::S3(s3) = remote;
+        let BackupRemoteConfig::S3(s3) = remote else {
+            panic!("expected S3 config");
+        };
         assert_eq!(s3.region(), "us-west-2");
         assert_eq!(
             loaded.backup_remote_namespace().unwrap(),
@@ -972,6 +1062,7 @@ mod tests {
             "region = 'us-west-2'",
             "destination = 's3://hashi-backups/'\nregion = 'us-west-2'\nprefix = 'custom/'",
             "destination = 's3://hashi-backups/'\nregion = 'us-west-2'\naccess-key = 'secret'",
+            "destination = 'gs://hashi-backups/'\ncredentials = 'secret'",
             "bucket = 'hashi-backups'\nregion = 'us-west-2'",
         ] {
             assert!(
@@ -988,24 +1079,64 @@ mod tests {
     #[test]
     fn backup_remote_destination_is_bucket_only() {
         for destination in ["s3://bucket", "s3://bucket/"] {
-            let remote = BackupRemoteConfig::new(destination, "us-west-2".into()).unwrap();
+            let remote = BackupRemoteConfig::new(destination, Some("us-west-2".into())).unwrap();
             assert_eq!(remote.bucket(), "bucket");
             let serialized = toml::to_string(&remote).unwrap();
             let fields: toml::Table = toml::from_str(&serialized).unwrap();
             assert_eq!(fields["destination"].as_str(), Some("s3://bucket/"));
             let decoded: BackupRemoteConfig = toml::from_str(&serialized).unwrap();
             assert_eq!(decoded.bucket(), remote.bucket());
-            let BackupRemoteConfig::S3(s3) = decoded;
+            let BackupRemoteConfig::S3(s3) = decoded else {
+                panic!("expected S3 config");
+            };
             assert_eq!(s3.region(), "us-west-2");
         }
         for destination in ["s3://bucket/prefix", "s3://bucket//"] {
             assert!(
-                BackupRemoteConfig::new(destination, "us-west-2".into()).is_err(),
+                BackupRemoteConfig::new(destination, Some("us-west-2".into())).is_err(),
                 "{destination}"
             );
         }
         assert!(S3BackupConfig::new("bucket/key".into(), "us-west-2".into()).is_err());
         assert!(S3BackupConfig::new("bucket".into(), " \t".into()).is_err());
+    }
+
+    #[test]
+    fn gcs_backup_remote_roundtrips_without_region() {
+        for destination in ["gs://backup_bucket.example", "gs://backup_bucket.example/"] {
+            let remote = BackupRemoteConfig::new(destination, None).unwrap();
+            assert_eq!(remote.scheme(), "gs");
+            assert_eq!(remote.bucket(), "backup_bucket.example");
+            let serialized = toml::to_string(&remote).unwrap();
+            let fields: toml::Table = toml::from_str(&serialized).unwrap();
+            assert_eq!(
+                fields["destination"].as_str(),
+                Some("gs://backup_bucket.example/")
+            );
+            assert!(!fields.contains_key("region"));
+            let decoded: BackupRemoteConfig = toml::from_str(&serialized).unwrap();
+            assert!(matches!(decoded, BackupRemoteConfig::Gcs(_)));
+            assert_eq!(decoded.bucket(), remote.bucket());
+        }
+        for destination in ["gs://bucket/prefix", "gs://bucket//"] {
+            assert!(
+                BackupRemoteConfig::new(destination, None).is_err(),
+                "{destination}"
+            );
+        }
+        assert!(GcsBackupConfig::new("bucket/key".into()).is_err());
+    }
+
+    #[test]
+    fn gcs_backup_remote_rejects_any_region() {
+        for region in ["", " ", "us-west-2"] {
+            assert!(
+                BackupRemoteConfig::new("gs://bucket", Some(region.into())).is_err(),
+                "{region:?}"
+            );
+            let settings = format!("destination = 'gs://bucket/'\nregion = '{region}'");
+            assert!(toml::from_str::<BackupRemoteConfig>(&settings).is_err());
+        }
     }
 
     #[test]
@@ -1029,23 +1160,39 @@ mod tests {
             "nested/a%2Fb%3Fc%23d%20e.tar.asc",
             "nested/backup with spaces.tar.asc",
         ] {
-            let uri = format!("s3://backup-bucket.example/{key}");
-            let BackupLocation::Remote(location) = BackupLocation::parse(Path::new(&uri)).unwrap()
-            else {
-                panic!("expected remote location");
-            };
-            assert_eq!(location.key(), key);
-            assert_eq!(
-                location.with_region("us-west-2".into()).unwrap().bucket(),
-                "backup-bucket.example"
-            );
+            for (scheme, provider, region) in [
+                ("s3", BackupProvider::S3, Some("us-west-2".to_owned())),
+                ("gs", BackupProvider::Gcs, None),
+            ] {
+                let uri = format!("{scheme}://backup-bucket.example/{key}");
+                let BackupLocation::Remote(location) =
+                    BackupLocation::parse(Path::new(&uri)).unwrap()
+                else {
+                    panic!("expected remote location");
+                };
+                assert_eq!(location.provider(), provider);
+                assert_eq!(location.key(), key);
+                assert_eq!(
+                    location.into_config(region).unwrap().bucket(),
+                    "backup-bucket.example"
+                );
+            }
         }
     }
 
     #[test]
     fn backup_location_rejects_invalid_uris() {
         for uri in [
-            "gs://bucket",
+            "https://bucket",
+            "gcs://bucket",
+            "gs://",
+            "gs://user@bucket",
+            "gs://bucket:443",
+            "gs://bucket?query",
+            "gs://bucket#fragment",
+            "gs://bucket/key?generation=1",
+            "gs://bucket/key#fragment",
+            "gs://bucket/key\n",
             "s3://",
             "s3://user@bucket",
             "s3://bucket:443",
