@@ -25,6 +25,8 @@ use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
+use crate::withdrawals::promote_first_at_minimum;
+use crate::withdrawals::withdrawal_commit_order;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
@@ -401,7 +403,11 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    pub(super) fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    pub(super) fn process_approved_withdrawal_requests(
+        &mut self,
+        checkpoint_height: u64,
+        checkpoint_timestamp_ms: u64,
+    ) {
         debug!("Entering process_approved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal commitment processing");
@@ -420,14 +426,18 @@ impl LeaderService {
             return;
         }
 
-        let mut approved: Vec<_> = self
+        if !super::turn_has_room(checkpoint_height) {
+            debug!("Too close to the end of this leader turn to start a withdrawal batch");
+            return;
+        }
+
+        let approved: Vec<_> = self
             .inner
             .onchain_state()
             .withdrawal_requests()
             .into_iter()
             .filter(|r| r.awaits_commitment())
             .collect();
-        approved.sort_by_key(|r| r.created_timestamp_ms);
 
         // Prune stuck-warn entries so a re-stuck request warns again.
         let pending_ids: HashSet<Address> = approved.iter().map(|r| r.id).collect();
@@ -472,25 +482,26 @@ impl LeaderService {
             let max_bucket = view.config.max_bucket_capacity;
             let capacity = view.capacity_at(timestamp_secs);
 
+            for req in approved.iter().filter(|r| r.btc_amount > max_bucket) {
+                if self.stuck_withdrawal_warned.insert(req.id) {
+                    warn!(
+                        request_id = %req.id,
+                        btc_amount = req.btc_amount,
+                        max_bucket_capacity = max_bucket,
+                        "Withdrawal exceeds limiter max bucket; skipping"
+                    );
+                    self.inner
+                        .metrics
+                        .guardian_limiter_stuck_oversize_skipped_total
+                        .inc();
+                }
+            }
+            let minimum = self.inner.onchain_state().bitcoin_withdrawal_minimum();
+
             let mut batch: Vec<WithdrawalRequest> = Vec::new();
             let mut cumulative = 0u64;
             let mut at_capacity = false;
-            for req in approved {
-                if req.btc_amount > max_bucket {
-                    if self.stuck_withdrawal_warned.insert(req.id) {
-                        warn!(
-                            request_id = %req.id,
-                            btc_amount = req.btc_amount,
-                            max_bucket_capacity = max_bucket,
-                            "Withdrawal exceeds limiter max bucket; skipping"
-                        );
-                        self.inner
-                            .metrics
-                            .guardian_limiter_stuck_oversize_skipped_total
-                            .inc();
-                    }
-                    continue;
-                }
+            for req in withdrawal_commit_order(approved, max_bucket, minimum) {
                 let Some(next) = cumulative.checked_add(req.btc_amount) else {
                     at_capacity = true;
                     break;
@@ -527,16 +538,16 @@ impl LeaderService {
         let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
 
         let batch_is_full = batch.len() >= max_batch;
-        let oldest_has_waited = batch
-            .first()
-            .is_some_and(|r| checkpoint_timestamp_ms >= r.created_timestamp_ms + delay_ms);
+        let oldest_created_ms = batch.iter().map(|r| r.created_timestamp_ms).min();
+        let oldest_has_waited =
+            oldest_created_ms.is_some_and(|ms| checkpoint_timestamp_ms >= ms + delay_ms);
 
         if !batch_is_full && !oldest_has_waited && !at_capacity {
             debug!(
                 "Holding {} approved request(s): oldest is {}ms old, \
                  waiting for {}ms delay or {} requests",
                 batch.len(),
-                checkpoint_timestamp_ms.saturating_sub(batch[0].created_timestamp_ms),
+                oldest_created_ms.map_or(0, |ms| checkpoint_timestamp_ms.saturating_sub(ms)),
                 delay_ms,
                 max_batch,
             );
@@ -617,6 +628,16 @@ impl LeaderService {
                 return Ok(());
             }
         };
+
+        if !Self::node_is_leader(&inner, inner.onchain_state().latest_checkpoint_height()) {
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_commitment", "NotLeader"])
+                .inc();
+            info!("No longer acting as leader; leaving this withdrawal batch to the next one");
+            return Ok(());
+        }
 
         // Fan out to committee for BLS signatures over the commitment message
         let members = inner
@@ -828,6 +849,7 @@ async fn build_checked_commitment(
     mut requests: Vec<WithdrawalRequest>,
 ) -> Result<Option<WithdrawalTxCommitment>, WithdrawalCommitmentError> {
     let commit_gate_open = || !inner.onchain_state().has_unsigned_withdrawal_txn();
+    let minimum = inner.onchain_state().bitcoin_withdrawal_minimum();
     let mut excluded_inputs = BTreeSet::new();
     for _ in 0..COMMITMENT_CHECK_ROUNDS {
         let approval = match inner
@@ -868,7 +890,7 @@ async fn build_checked_commitment(
                 .with_label_values(&[item.item.label(), item.reason])
                 .inc();
         }
-        leave_out(refused, &mut requests, &mut excluded_inputs);
+        leave_out(refused, &mut requests, &mut excluded_inputs, minimum);
         if requests.is_empty() {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(
                 anyhow::anyhow!("the commit check refused every request in the batch"),
@@ -886,6 +908,7 @@ fn leave_out(
     refused: &RefusedItems,
     requests: &mut Vec<WithdrawalRequest>,
     excluded_inputs: &mut BTreeSet<UtxoId>,
+    minimum: u64,
 ) {
     for item in &refused.0 {
         match item.item {
@@ -895,6 +918,7 @@ fn leave_out(
             }
         }
     }
+    promote_first_at_minimum(requests, minimum);
 }
 
 #[cfg(test)]
@@ -918,6 +942,75 @@ mod checked_commitment_tests {
         }
     }
 
+    fn approved(id: u8, btc_amount: u64, approved_timestamp_ms: u64) -> WithdrawalRequest {
+        WithdrawalRequest {
+            btc_amount,
+            approval_cert: Some(hashi_types::move_types::CommitteeSignature {
+                epoch: 0,
+                signature: Vec::new(),
+                signers_bitmap: Vec::new(),
+            }),
+            approved_timestamp_ms: Some(approved_timestamp_ms),
+            ..request(id)
+        }
+    }
+
+    fn ids(requests: &[WithdrawalRequest]) -> Vec<u8> {
+        requests.iter().map(|r| r.id.as_bytes()[0]).collect()
+    }
+
+    #[test]
+    fn commit_order_follows_approval_with_the_oldest_at_minimum_first() {
+        let order = withdrawal_commit_order(
+            vec![
+                WithdrawalRequest {
+                    created_timestamp_ms: 1,
+                    ..approved(1, 50_000, 300)
+                },
+                WithdrawalRequest {
+                    created_timestamp_ms: 2,
+                    ..approved(2, 10_000, 100)
+                },
+                WithdrawalRequest {
+                    created_timestamp_ms: 3,
+                    ..approved(3, 30_000, 200)
+                },
+                approved(4, 200_000, 10),
+                request(5),
+                WithdrawalRequest {
+                    withdrawal_txn_id: Some(Address::new([9; 32])),
+                    ..approved(6, 50_000, 50)
+                },
+            ],
+            100_000,
+            30_000,
+        );
+
+        assert_eq!(ids(&order), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn leaving_out_the_oldest_at_minimum_promotes_the_next() {
+        let mut requests = vec![
+            approved(1, 50_000, 300),
+            approved(2, 10_000, 100),
+            approved(3, 10_000, 150),
+            approved(4, 50_000, 400),
+        ];
+        leave_out(
+            &RefusedItems(vec![RefusedItem::new(
+                CommitmentItem::Request(Address::new([1; 32])),
+                "request_missing",
+                String::new(),
+            )]),
+            &mut requests,
+            &mut BTreeSet::new(),
+            30_000,
+        );
+
+        assert_eq!(ids(&requests), vec![4, 2, 3]);
+    }
+
     #[test]
     fn leaves_out_what_the_commit_check_refuses() {
         let input = UtxoId {
@@ -937,6 +1030,7 @@ mod checked_commitment_tests {
             ]),
             &mut requests,
             &mut excluded_inputs,
+            0,
         );
 
         assert_eq!(

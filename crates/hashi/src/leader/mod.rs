@@ -50,7 +50,13 @@ use tracing::warn;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
+const TURN_EDGE_CHECKPOINTS: u64 = 10;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn turn_has_room(checkpoint_height: u64) -> bool {
+    NUM_CONSECUTIVE_LEADER_CHECKPOINTS - checkpoint_height % NUM_CONSECUTIVE_LEADER_CHECKPOINTS
+        > TURN_EDGE_CHECKPOINTS
+}
 
 /// Throttle for the "binary unsupported for the on-chain version" leader
 /// warning. `node_is_leader` runs every checkpoint (and from re-checking
@@ -322,7 +328,10 @@ impl LeaderService {
                         self.process_approved_deposit_requests();
                         self.check_reconcile_guardian_committee();
                         self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                        self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                        self.process_approved_withdrawal_requests(
+                            checkpoint_height,
+                            checkpoint_timestamp_ms,
+                        );
                         self.process_unsigned_withdrawal_txns();
                         self.process_signed_withdrawal_txns();
                         self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
@@ -747,6 +756,7 @@ mod tests {
     use super::is_already_approved_refusal;
     use super::is_retriable_transport;
     use super::retry_peer_call;
+    use super::turn_has_room;
     use crate::withdrawals::WithdrawalAlreadyFinalized;
     use crate::withdrawals::WithdrawalApprovalError;
     use crate::withdrawals::WithdrawalRequestApproval;
@@ -761,6 +771,15 @@ mod tests {
     use tonic::Code;
     use tonic::Response;
     use tonic::Status;
+
+    #[test]
+    fn a_turn_has_room_until_its_last_edge_checkpoints() {
+        assert!(turn_has_room(0));
+        assert!(turn_has_room(189));
+        assert!(!turn_has_room(190));
+        assert!(!turn_has_room(199));
+        assert!(turn_has_room(200));
+    }
 
     #[test]
     fn tells_withdrawal_already_approved_refusals_from_other_refusals() {
