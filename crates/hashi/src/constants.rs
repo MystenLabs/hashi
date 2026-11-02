@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use sui_sdk_types::Address;
+
 /// Sui mainnet genesis checkpoint digest (Base58).
 pub const SUI_MAINNET_CHAIN_ID: &str = "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S";
 /// Sui testnet genesis checkpoint digest (Base58).
@@ -18,6 +20,17 @@ pub const BITCOIN_SIGNET_CHAIN_ID: &str =
 /// Bitcoin regtest genesis block hash.
 pub const BITCOIN_REGTEST_CHAIN_ID: &str =
     "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
+
+/// The original package id of the `hashi` package on Sui mainnet.
+pub const HASHI_MAINNET_PACKAGE_ID: Address =
+    Address::from_static("0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06");
+/// The id of the `Hashi` shared object on Sui mainnet.
+pub const HASHI_MAINNET_OBJECT_ID: Address =
+    Address::from_static("0x8d110642d9b5133bd661cda4873edf135ab6b91ff6918601015880874b950e5d");
+/// The coin type of hBTC on Sui mainnet. Types are named by the original
+/// package id, so package upgrades do not change it.
+pub const HBTC_MAINNET_TYPE: &str =
+    "0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06::btc::BTC";
 
 /// Trigger presignature refill when remaining presignatures drop to
 /// `initial_pool_size / PRESIG_REFILL_DIVISOR`.
@@ -105,6 +118,28 @@ mod tests {
     use super::*;
     use crate::btc_monitor::config::Network;
     use crate::btc_monitor::config::network_from_chain_id;
+    use sui_sdk_types::StructTag;
+
+    #[test]
+    fn hashi_mainnet_ids_keep_their_published_values() {
+        assert_eq!(
+            HASHI_MAINNET_PACKAGE_ID.to_string(),
+            "0xd30fb3f8914efdbeb7b8e85fae1d65dc584b44a1281f66737b92bb9f03a59d06",
+        );
+        assert_eq!(
+            HASHI_MAINNET_OBJECT_ID.to_string(),
+            "0x8d110642d9b5133bd661cda4873edf135ab6b91ff6918601015880874b950e5d",
+        );
+    }
+
+    #[test]
+    fn hbtc_mainnet_type_is_btc_in_the_mainnet_package() {
+        let tag: StructTag = HBTC_MAINNET_TYPE.parse().unwrap();
+        assert_eq!(*tag.address(), HASHI_MAINNET_PACKAGE_ID);
+        assert_eq!(tag.module().as_str(), "btc");
+        assert_eq!(tag.name().as_str(), "BTC");
+        assert!(tag.type_params().is_empty());
+    }
 
     #[test]
     fn mainnet_chain_id_matches_network() {

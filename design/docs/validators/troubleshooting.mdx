@@ -99,7 +99,7 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 **Symptom:** startup fails, after the Sui chain-ID check, with the fullnode's error for a missing object.
 
-**Likely cause:** the `[hashi-ids]` section is missing. When it is absent the node uses the zero address (`0x0`) for both `package_id` and `hashi_object_id`, and its first onchain read fails.
+**Likely cause:** the `[hashi-ids]` section is missing on a network other than Mainnet. When it is absent the node uses the Mainnet `package_id` and `hashi_object_id`. Those objects do not exist on any other network, so its first onchain read fails.
 
 **Fix:** set both IDs from the [Networks](../reference/networks.mdx) table.
 
