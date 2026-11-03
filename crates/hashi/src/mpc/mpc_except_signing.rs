@@ -1811,8 +1811,11 @@ impl MpcManager {
                     .dealer_outputs
                     .contains_key(&DealerOutputsKey::Dkg(dealer))
                 {
-                    tracing::warn!("No dealer output for {:?} after processing", dealer);
-                    continue;
+                    // Skipping the dealer here would let this party accept a later
+                    // certificate from it, or none, while other parties accept this one.
+                    return Err(MpcError::ProtocolFailed(format!(
+                        "No dealer output for {dealer:?} after processing"
+                    )));
                 }
                 match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
                     mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
