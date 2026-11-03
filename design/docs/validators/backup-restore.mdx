@@ -9,6 +9,7 @@ keywords:
   - OpenPGP
   - database snapshot
   - S3
+  - GCS
   - compromise
 goal:
   description: >-
@@ -38,7 +39,9 @@ Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node
 
 ## What a backup holds
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 restore accepts only `.tar.asc`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](../node-backup.mdx#configure-hashi-backups). Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach; see [Monthly off-machine copy](../node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it. Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: a tar archive wrapped as an ASCII-armored OpenPGP (Sequoia) message, named `hashi-backup-epoch-<epoch>-<timestamp>.tar.asc`. Local restore also accepts a `.tar` you decrypted yourself; S3 and GCS restore accept only encrypted `.tar.asc` archives. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](../node-backup.mdx#configure-hashi-backups). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+
+Once a month, also copy one `-mpc-` archive to storage none of your nodes can reach. This is separate from scheduled remote uploads; see [Monthly off-machine copy](../node-backup.mdx#monthly-off-machine-copy) for which one, how to test it, and how long to keep it.
 
 Each archive holds:
 
@@ -50,14 +53,19 @@ Each archive holds:
 
 It does **not** hold the public certificate that `backup-pgp-cert` points to, the `hashi` binary, or your service unit. Keep those with your deployment files.
 
-The optional `[backup-s3]` table in the [config template](configuration.mdx#validator-config)
-enables uploads using the AWS default credential chain. Without it, backups
-remain local-only. Each scheduled backup saves locally before one upload
-attempt; failed uploads retain the local archive and are not queued or retried.
-See [Back up to S3](../node-backup.mdx#back-up-to-s3) for the server-side
-missing-`If-None-Match` deny policy, independent bucket-scoped CloudTrail
-read/write data events, and Mainnet recovery-reader restrictions. Mysten Testnet
-read access is unchanged; Mysten still has to provision per-node AWS credentials.
+The `[backup-remote]` table in the [config template](configuration.mdx#validator-config)
+enables uploads to one S3 or GCS bucket. The destination URI selects the provider:
+`s3://bucket/` requires a region and uses the AWS default credential chain;
+`gs://bucket/` has no region and uses native Application Default Credentials (ADC).
+Each scheduled backup saves locally before attempting a create-only upload;
+failure retains the local archive, with no failed-request retry or queue.
+GCS may use its native resumable upload protocol; this is not a promise of a single HTTP request.
+
+Keep the node's write credentials separate from recovery-reader credentials;
+do not grant node writers recovery read or delete access. See
+[Remote backups](../node-backup.mdx#remote-backups) for provider-specific
+create-only policies, retention, independent audit history and receipts, and
+Mainnet/Testnet recovery-access requirements.
 
 ```bash
 # Manual backup (stop the node first; backup save refuses while it holds the database)
@@ -89,7 +97,7 @@ resharing preserves the global key and cannot repair a stolen global private key
 The backup selection and restore steps below apply only to **accidental machine
 or disk loss without suspected compromise**, not to compromise recovery.
 
-**Which backup to use.** Use the newest trusted backup. For S3, use independently retained receipts and audit history to select an exact version, then pin it with `--version-id`; neither the newest object nor successful decryption proves its origin. To take part in the current epoch, the restored database must hold the encryption and signing keys recorded for your node in the current committee, and the backup the node wrote at the most recent epoch change does. An older backup, or an empty database, still gives you a working node: it registers replacement keys by itself and rejoins at the next reconfiguration, without taking part in MPC until then. There is no fixed age limit: what matters is whether the backup holds those keys, and if it does not, the cost is that wait.
+**Which backup to use.** Use the newest trusted backup. For remote archives, use independently retained receipts and audit history to select an exact S3 version ID or GCS generation, then pin it with `--version-id` or `--generation`; neither the newest object nor successful decryption proves its origin. To take part in the current epoch, the restored database must hold the encryption and signing keys recorded for your node in the current committee, and the backup the node wrote at the most recent epoch change does. An older backup, or an empty database, still gives you a working node: it registers replacement keys by itself and rejoins at the next reconfiguration, without taking part in MPC until then. There is no fixed age limit: what matters is whether the backup holds those keys, and if it does not, the cost is that wait.
 
 **What to restore.** The database is the part you cannot recreate, so always restore it. Restore the config and key files too when the copies on the host are gone, such as on a new host or after a lost disk. If they are intact, keep them: the copies in the archive date from when the node wrote the backup.
 
@@ -117,6 +125,8 @@ or disk loss without suspected compromise**, not to compromise recovery.
    ```
 
    Because backups use OpenPGP, the YubiKey can stay plugged into your laptop: forward your `gpg-agent` to the server and decrypt there. The private key never leaves the YubiKey. Restore also accepts a `.tar` you decrypted yourself, with no key.
+
+   For an S3 or GCS archive, follow the [remote restore instructions](../node-backup.mdx#restore-and-infrastructure-limits), then continue below.
 
    The command creates one directory named after the archive and refuses to run if it already exists:
 

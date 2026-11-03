@@ -44,7 +44,7 @@ Hashi uses two configuration files:
 
 All fields use kebab-case. Optional fields show their defaults in comments.
 
-> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]`, `[bitcoin-rpc-auth]`, and `[metrics-push]` sections (as in the template below). The node rejects a top-level key placed after a section header at startup: under `[hashi-ids]` or `[metrics-push]` as an unknown field, under `[bitcoin-rpc-auth]` as `wanted exactly 1 element`.
+> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]`, `[bitcoin-rpc-auth]`, `[metrics-push]`, and `[backup-remote]` sections (as in the template below). The node rejects a top-level key placed after a section header at startup: under `[hashi-ids]` or `[metrics-push]` as an unknown field, under `[bitcoin-rpc-auth]` as `wanted exactly 1 element`.
 
 {/* The two templates differ only in their network values. Change both together. */}
 
@@ -179,6 +179,16 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # Push metrics to the Mysten collection endpoint (see Monitoring and Alerts)
 [metrics-push]
 push-url = "https://metrics-proxy.mainnet.sui.io:8443/publish/metrics"
+
+# Remote backups: uncomment ONE alternative.
+# S3 (region required):
+# [backup-remote]
+# destination = "s3://my-hashi-backups/"
+# region = "us-east-1"
+#
+# GCS (no region):
+# [backup-remote]
+# destination = "gs://my-hashi-backups/"
 ```
 
 </TabItem>
@@ -312,10 +322,15 @@ UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 [metrics-push]
 push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 
-# Optional S3 backups (uncomment all three lines; both fields required)
-# [backup-s3]
-# bucket = "my-hashi-backups"
+# Remote backups: uncomment ONE alternative.
+# S3 (region required):
+# [backup-remote]
+# destination = "s3://my-hashi-backups/"
 # region = "us-east-1"
+#
+# GCS (no region):
+# [backup-remote]
+# destination = "gs://my-hashi-backups/"
 ```
 
 </TabItem>

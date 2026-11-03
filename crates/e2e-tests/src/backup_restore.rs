@@ -31,8 +31,9 @@ mod tests {
     use hashi::backup::extract_dir_name;
     use hashi::cli::commands;
     use hashi::cli::commands::backup::RestoreDecryptor;
+    use hashi::cli::commands::backup::RestoreSource;
     use hashi::cli::config::CliConfig;
-    use hashi::config::BackupS3Config;
+    use hashi::config::BackupRemoteConfig;
     use hashi::config::Config as HashiConfig;
     use hashi::config::HashiIds;
     use hashi::db::Database;
@@ -116,13 +117,13 @@ mod tests {
                     scheduled_successes(node, "hashi_backup_scheduled_remote_successes_total");
                 if local >= expected && remote >= expected {
                     assert_eq!(local, expected, "Unexpected scheduled local backup count");
-                    assert_eq!(remote, expected, "Unexpected scheduled S3 upload count");
+                    assert_eq!(remote, expected, "Unexpected scheduled remote upload count");
                     return;
                 }
             }
         })
         .await
-        .context("Scheduled local backup and S3 upload did not both complete")
+        .context("Scheduled local backup and remote upload did not both complete")
     }
 
     fn scheduled_archives(config: &HashiConfig) -> Result<Vec<PathBuf>> {
@@ -177,8 +178,8 @@ mod tests {
             .threshold;
         node.shutdown().await;
         node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient)?;
-        // Keep this test local even when the surrounding environment has S3 credentials.
-        node.config_mut().backup_s3 = None;
+        // Keep this test local even when the surrounding environment has cloud credentials.
+        node.config_mut().backup_remote = None;
         node.config_path = Some(write_node_config_to_disk(
             node.config(),
             recovery_dir.path(),
@@ -511,7 +512,7 @@ mod tests {
         {
             node.shutdown().await;
             node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient.clone())?;
-            node.config_mut().backup_s3 = None;
+            node.config_mut().backup_remote = None;
             let directory = config_dir.path().join(index.to_string());
             std::fs::create_dir(&directory)?;
             node.config_path = Some(write_node_config_to_disk(node.config(), &directory));
@@ -778,27 +779,63 @@ mod tests {
         Ok(())
     }
 
-    fn live_s3_config() -> Result<BackupS3Config> {
-        Ok(BackupS3Config {
-            bucket: std::env::var("HASHI_BACKUP_S3_BUCKET")
-                .context("Set HASHI_BACKUP_S3_BUCKET to an existing writable bucket")?,
-            region: std::env::var("HASHI_BACKUP_S3_REGION")
+    fn live_s3_config() -> Result<BackupRemoteConfig> {
+        let bucket = std::env::var("HASHI_BACKUP_S3_BUCKET")
+            .context("Set HASHI_BACKUP_S3_BUCKET to an existing writable bucket")?;
+        Ok(BackupRemoteConfig::S3(hashi::config::S3BackupConfig::new(
+            bucket,
+            std::env::var("HASHI_BACKUP_S3_REGION")
                 .context("Set HASHI_BACKUP_S3_REGION to the bucket region")?,
-        })
+        )?))
+    }
+
+    fn live_gcs_config() -> Result<BackupRemoteConfig> {
+        let bucket = std::env::var("HASHI_BACKUP_GCS_BUCKET")
+            .context("Set HASHI_BACKUP_GCS_BUCKET to an existing writable bucket")?;
+        Ok(BackupRemoteConfig::Gcs(
+            hashi::config::GcsBackupConfig::new(bucket)?,
+        ))
+    }
+
+    async fn restore_remote(
+        config: &BackupRemoteConfig,
+        uri: &str,
+        decryptor: RestoreDecryptor,
+        output_dir: &Path,
+    ) -> Result<()> {
+        let region = match config {
+            BackupRemoteConfig::S3(config) => Some(config.region()),
+            BackupRemoteConfig::Gcs(_) => None,
+        };
+        let RestoreSource::Remote(source) =
+            RestoreSource::parse(Path::new(uri), region, None, None)?
+        else {
+            anyhow::bail!("Expected a remote restore source");
+        };
+        commands::backup::restore_from_remote(&source, decryptor, output_dir).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires live S3 bucket, HASHI_BACKUP_S3_BUCKET, HASHI_BACKUP_S3_REGION, AWS credentials"]
     async fn test_manual_backup_to_s3_and_restore() -> Result<()> {
+        manual_backup_and_restore(live_s3_config()?).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live GCS bucket, HASHI_BACKUP_GCS_BUCKET, Google Application Default Credentials"]
+    async fn test_manual_backup_to_gcs_and_restore() -> Result<()> {
+        manual_backup_and_restore(live_gcs_config()?).await
+    }
+
+    async fn manual_backup_and_restore(remote: BackupRemoteConfig) -> Result<()> {
         const EPOCH: u64 = 42;
-        let s3 = live_s3_config()?;
         let node_dir = tempfile::tempdir()?;
         let recovery_dir = tempfile::tempdir()?;
         let (recipient, secret_key_path) = generate_pgp_keypair(recovery_dir.path());
         // Armor headers do not change the configured encryption recipients.
         let recipient_override = recipient.replacen(
             "-----BEGIN PGP PUBLIC KEY BLOCK-----",
-            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: Manual S3 backup override",
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: Manual remote backup override",
             1,
         );
         assert_ne!(recipient_override, recipient);
@@ -808,7 +845,7 @@ mod tests {
         config.db = Some(db_path.clone());
         config.backup_dir = archive_dir.clone();
         config.backup_pgp_cert = PgpPublicCert::new(recipient)?;
-        config.backup_s3 = Some(s3.clone());
+        config.backup_remote = Some(remote.clone());
         config.sui_chain_id = Some("hashi-backup-e2e".into());
         config.hashi_ids = Some(HashiIds {
             package_id: Address::new(rand::random()),
@@ -827,9 +864,10 @@ mod tests {
             commands::backup::save(&config_path, Some(recipient_override), &archive_dir, false)
                 .await?;
         let uri = format!(
-            "s3://{}/{}{}",
-            s3.bucket,
-            config.backup_s3_namespace().expect("S3 configured"),
+            "{}://{}/{}{}",
+            remote.scheme(),
+            remote.bucket(),
+            config.backup_remote_namespace().expect("remote configured"),
             archive.file_name().unwrap().to_str().unwrap(),
         );
         assert!(archive.is_file(), "Manual save must retain a local archive");
@@ -839,10 +877,9 @@ mod tests {
         assert!(!db_path.exists());
 
         let restore_dir = tempfile::tempdir()?;
-        commands::backup::restore_from_s3(
+        restore_remote(
+            &remote,
             &uri,
-            &s3.region,
-            None,
             RestoreDecryptor::LocalSecretKey { secret_key_path },
             restore_dir.path(),
         )
@@ -870,11 +907,17 @@ mod tests {
         backup_restore_round_trip_and_rejoin(Some(live_s3_config()?)).await
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires live GCS bucket, HASHI_BACKUP_GCS_BUCKET, Google Application Default Credentials, sui and bitcoind"]
+    async fn test_backup_restore_from_gcs_and_rejoin() -> Result<()> {
+        backup_restore_round_trip_and_rejoin(Some(live_gcs_config()?)).await
+    }
+
     /// Full round-trip test:
     ///
     /// 1. DKG on 4 nodes + one key rotation so node 0's DB contains entries
     ///    across multiple keyspaces.
-    /// 2. Use either a scheduled S3 archive or stop node 0 and manually save
+    /// 2. Use either a scheduled remote archive or stop node 0 and manually save
     ///    an encrypted archive using an externally held OpenPGP keypair.
     /// 3. Delete node 0's on-disk state entirely (simulating "machine lost,
     ///    only the backup remains").
@@ -890,7 +933,9 @@ mod tests {
         backup_restore_round_trip_and_rejoin(None).await
     }
 
-    async fn backup_restore_round_trip_and_rejoin(s3: Option<BackupS3Config>) -> Result<()> {
+    async fn backup_restore_round_trip_and_rejoin(
+        remote: Option<BackupRemoteConfig>,
+    ) -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
         tracing_subscriber::fmt()
@@ -933,10 +978,10 @@ mod tests {
         let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
         let node_config_path = config_dir.path().join("node-config.toml");
         let mut startup_archive = None;
-        if let Some(s3) = &s3 {
+        if let Some(remote) = &remote {
             let node = &mut test_networks.hashi_network_mut().nodes_mut()[0];
             node.shutdown().await;
-            node.config_mut().backup_s3 = Some(s3.clone());
+            node.config_mut().backup_remote = Some(remote.clone());
             node.config_mut().backup_pgp_cert = PgpPublicCert::new(recipient.clone())?;
             node.config().save(&node_config_path)?;
             node.config_path = Some(node_config_path.clone());
@@ -956,7 +1001,7 @@ mod tests {
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
         assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
-        if s3.is_some() {
+        if remote.is_some() {
             // Observe the real epoch-change worker, not a direct backup call.
             wait_for_scheduled_backup(&test_networks.hashi_network().nodes()[0], 2.0).await?;
         }
@@ -1021,7 +1066,7 @@ mod tests {
             .expect("node 0 must have a db path")
             .clone();
 
-        let (tarball, remote_uri) = if let Some(s3) = &s3 {
+        let (tarball, remote_uri) = if let Some(remote) = &remote {
             let archives = scheduled_archives(&node0_config)?;
             assert_eq!(archives.len(), 2, "Expected startup and rotation archives");
             let tarball = archives
@@ -1030,9 +1075,12 @@ mod tests {
                 .expect("Rotation must produce a distinct archive");
             assert!(tarball.to_string_lossy().ends_with(".tar.asc"));
             let uri = format!(
-                "s3://{}/{}{}",
-                s3.bucket,
-                node0_config.backup_s3_namespace().expect("S3 configured"),
+                "{}://{}/{}{}",
+                remote.scheme(),
+                remote.bucket(),
+                node0_config
+                    .backup_remote_namespace()
+                    .expect("remote configured"),
                 tarball.file_name().unwrap().to_str().unwrap(),
             );
             (tarball, Some(uri))
@@ -1081,10 +1129,9 @@ mod tests {
             .tempdir_in(original_db_path.parent().expect("DB must have a parent"))?;
         let decryptor = RestoreDecryptor::LocalSecretKey { secret_key_path };
         if let Some(uri) = remote_uri {
-            commands::backup::restore_from_s3(
+            restore_remote(
+                remote.as_ref().unwrap(),
                 &uri,
-                &s3.as_ref().unwrap().region,
-                None,
                 decryptor,
                 restore_out_dir.path(),
             )

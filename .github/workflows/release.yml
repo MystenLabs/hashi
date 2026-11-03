@@ -289,6 +289,10 @@ jobs:
           | Image build | [sui-operations workflow](${operations_run_url}) |
           | Workflow run | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |
 
+          Runtime requirement: HTTPS Sui RPC endpoints require a readable system CA
+          certificate store (e.g. \`ca-certificates\` on Debian/Ubuntu), even when
+          remote backups are disabled. The published container image includes it.
+
           Verify the downloaded binary:
 
           \`\`\`sh

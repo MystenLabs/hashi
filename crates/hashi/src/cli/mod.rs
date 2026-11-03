@@ -557,7 +557,7 @@ pub enum BackupCommands {
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
 
-        /// Keep the archive local without uploading to configured S3 storage
+        /// Keep the archive local without uploading to configured remote storage
         #[clap(long)]
         local_only: bool,
     },
@@ -631,16 +631,20 @@ pub enum BackupCommands {
     /// Files are extracted only into the selected output directory. Original
     /// paths recorded in the manifest are metadata, not restore destinations.
     Restore {
-        /// Local .tar or .tar.asc path, or s3://bucket/key (.tar.asc only)
+        /// Local .tar or .tar.asc path, or s3://bucket/key or gs://bucket/key (.tar.asc only)
         backup_tarball: std::path::PathBuf,
 
-        /// AWS region (required for S3 restores; not accepted for local files)
+        /// AWS region (required for S3 restores; not accepted for GCS or local files)
         #[clap(long)]
         region: Option<String>,
 
         /// Restore a specific S3 object version (S3 restores only)
         #[clap(long)]
         version_id: Option<String>,
+
+        /// Restore a specific positive GCS object generation (GCS restores only)
+        #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
+        generation: Option<i64>,
 
         /// OpenPGP secret key file used to decrypt encrypted .tar.asc backups locally
         #[clap(long)]
@@ -1452,15 +1456,17 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 backup_tarball,
                 region,
                 version_id,
+                generation,
                 backup_pgp_secret_key,
                 use_gpg_agent,
                 gpg_homedir,
                 output_dir,
             } => {
-                let remote = commands::backup::s3_restore_source(
+                let source = commands::backup::RestoreSource::parse(
                     &backup_tarball,
                     region.as_deref(),
                     version_id.as_deref(),
+                    generation,
                 )?;
                 let decryptor = commands::backup::select_restore_decryptor(
                     &backup_tarball,
@@ -1468,17 +1474,14 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     use_gpg_agent,
                     gpg_homedir.as_deref(),
                 )?;
-                if remote {
-                    commands::backup::restore_from_s3(
-                        backup_tarball.to_str().expect("validated S3 URI"),
-                        region.as_deref().expect("validated S3 region"),
-                        version_id.as_deref(),
-                        decryptor,
-                        &output_dir,
-                    )
-                    .await?;
-                } else {
-                    commands::backup::restore(&backup_tarball, decryptor, &output_dir)?;
+                match source {
+                    commands::backup::RestoreSource::Local(path) => {
+                        commands::backup::restore(path, decryptor, &output_dir)?;
+                    }
+                    commands::backup::RestoreSource::Remote(source) => {
+                        commands::backup::restore_from_remote(&source, decryptor, &output_dir)
+                            .await?;
+                    }
                 }
             }
             BackupCommands::ExportMpcPublicKey { output } => {

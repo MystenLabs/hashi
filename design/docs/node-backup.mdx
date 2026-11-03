@@ -63,11 +63,9 @@ The section that uses each item describes it in detail:
   [YubiKey Manager](https://docs.yubico.com/software/yubikey/tools/ykman/), [jq](https://jqlang.org/),
   and a checkout of the [Hashi repository](https://github.com/MystenLabs/hashi).
 - For a local backup key file: [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq).
-- For S3 backups: AWS credentials from the default credential chain, a node role
-  restricted to `s3:PutObject` within its prefix, and recovery credentials with
-  `s3:GetObject` (or `s3:GetObjectVersion` for a pinned version, plus
-  `s3:ListBucketVersions` to inspect version history). See [Back up to S3](#back-up-to-s3)
-  for the full Mainnet baseline.
+- For remote backups: a private S3 or GCS bucket, write-only node credentials,
+  and separate recovery credentials kept off-node. See [Remote backups](#remote-backups)
+  for provider-specific authentication and safeguards.
 
 ## Create a backup key
 
@@ -328,9 +326,10 @@ Automatic cleanup does not cover the following; handle them yourself:
 
 Use a **14-day retention target**, measured from the archive's original creation,
 for every backup copy except the [monthly off-machine copies](#monthly-off-machine-copy):
-local archives (including the newest), other off-machine copies, and all versions of
-the node's S3 uploads. Copying or re-uploading must not reset this target; the
-[Back up to S3](#back-up-to-s3) section describes S3's versioning and deletion timing.
+local archives (including the newest), other off-machine copies, and all versions
+or generations of remote uploads. Copying or re-uploading must not
+reset this target; [Remote backups](#remote-backups) describes provider-specific
+versioning and deletion timing.
 
 Active nodes check daily and refresh their current-epoch MPC recovery backup once
 it is 3 days old, even during stalled reconfiguration. This intentionally preserves
@@ -348,11 +347,11 @@ attacker wipes every node.
 Operators must configure deletion in each storage location, leaving out only the
 [monthly copies](#monthly-off-machine-copy), which you destroy by hand under their
 own rule; Hashi's newest-backup exception alone does not enforce this policy.
-Account for Object Lock and monitor deletion failures or delays. Remove temporary
-decrypted copies immediately after use.
+Account for retention locks and holds, and monitor deletion failures or delays.
+Remove temporary decrypted copies immediately after use.
 
 During an incident, pause expiry for backups needed for recovery: disable the
-applicable S3 lifecycle rules and other off-machine deletion jobs, and stop
+applicable cloud lifecycle rules and other off-machine deletion jobs, and stop
 destroying monthly copies. Hashi's local cleanup still runs, so preserve encrypted
 copies outside `backup-dir` in a restricted location exempt from deletion. Confirm
 the copies are accessible; changing lifecycle rules is not instantaneous. Resume
@@ -362,11 +361,11 @@ expiry and remove incident copies when recovery no longer needs them.
 
 Once a month, copy the backup from the first epoch that starts in that month (UTC)
 to storage that none of your nodes can reach, since anyone who takes over a node
-can delete what it can reach. Do not put it in the S3 bucket that receives
+can delete what its credentials permit. Do not put it in the remote bucket that receives
 automatic backups. Use that epoch's `-mpc-` archive, which holds the
 node's [recovery record](#catastrophic-mpc-key-recovery). Recovery only combines
 records from the same epoch, so every operator should copy the same epoch. Copy it
-within 14 days, before local cleanup and S3 lifecycle rules remove it.
+within 14 days, before local cleanup and cloud lifecycle rules remove it.
 
 Test each copy when you make it, on a machine outside the validator fleet, by
 exporting its recovery record with
@@ -387,23 +386,36 @@ Keep a way to decrypt every copy you still hold, even after you replace
 choose. It installs nothing. The full procedure, from choosing a backup to
 restarting the node, is in
 [Backup and Restore](validators/backup-restore.mdx#restoring-a-node).
-For S3 restore commands and an on-page recovery checklist, see
+For remote restore commands and an on-page recovery checklist, see
 [Restore and infrastructure limits](#restore-and-infrastructure-limits) and
 [Machine-loss recovery](#machine-loss-recovery) below.
 
-## Back up to S3
+## Remote backups
 
-Enable S3 uploads with this optional node-config table; both values are required.
-Use a bucket name, not an S3 URI. Omit the table for local-only backups.
+Configure one remote destination using a `[backup-remote]` table.
+For S3, `region` is required:
 
 ```toml
-[backup-s3]
-bucket = "my-hashi-backups"
+[backup-remote]
+destination = "s3://my-hashi-backups/"
 region = "us-east-1"
 ```
 
+For GCS, omit `region`:
+
+```toml
+[backup-remote]
+destination = "gs://my-hashi-backups/"
+```
+
+Use a bucket-only URI; Hashi supplies the object prefix. Configure the bucket
+permissions, retention, and audit logging described below. Hashi does not set up
+or verify these controls.
+
+### S3 safeguards
+
 Uploads and restores use the AWS default credential chain (environment, profiles,
-or IAM roles), not credentials in the node config. The secure Mainnet baseline
+or IAM roles), not credentials in the node config. The secure Mainnet S3 baseline
 requires operators to configure:
 
 - A private bucket with S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
@@ -427,27 +439,54 @@ requires operators to configure:
   Apply these rules to the backup prefix (or the whole dedicated backup bucket).
   Current expiry creates a delete marker; the data becomes noncurrent and is
   eligible for deletion 1 day later, not another 14 days later. Lifecycle uses S3
-  upload time, so late uploads need separate expiry tracking. Object Lock can delay
-  deletion, and lifecycle processing is asynchronous: this is not a hard deadline
-  or a guaranteed recovery window.
+  upload time, so late uploads need separate expiry tracking. Align bucket-default
+  Object Lock retention with operator policy and verify it before locking.
+  Object Lock can delay deletion, and lifecycle processing is asynchronous:
+  this is not a hard deadline or a guaranteed recovery window.
 
-Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
-configuration defines the bucket and audit safeguards, but leaves read access
-unchanged. Recovery-only reads remain Mainnet rollout work; node credential
-provisioning is separate.
+### GCS safeguards
 
-The node derives the destination from its identity, with no custom prefix:
+GCS uses [Application Default Credentials (ADC)](https://docs.cloud.google.com/docs/authentication/application-default-credentials).
+Prefer an attached service account or workload identity. Keep recovery credentials
+on a separate trusted host, and never put credentials in node configuration.
+
+- **Bucket:** enable uniform bucket-level access and public access prevention.
+- **Permissions:** grant each node
+  [`roles/storage.objectCreator`](https://docs.cloud.google.com/storage/docs/access-control/iam-roles)
+  within its backup prefix, without read, delete, or administrative access.
+  Recovery identities need `storage.objects.get`, plus `storage.objects.list` to inspect history.
+- **Retention lock:** enable [Object Versioning](https://docs.cloud.google.com/storage/docs/object-versioning)
+  and [Bucket Lock](https://docs.cloud.google.com/storage/docs/bucket-lock).
+  Check the retention period first: locking is irreversible and the period cannot be reduced.
+- **Audit:** enable [Data Access logs](https://docs.cloud.google.com/storage/docs/audit-logging)
+  for `DATA_READ` and `DATA_WRITE` (disabled by default). Use per-node identities
+  and retain logs outside their control. Lifecycle deletions are not logged.
+- **Expiry:** apply these [lifecycle rules](https://docs.cloud.google.com/storage/docs/lifecycle)
+  to the backup prefix or dedicated bucket:
+  - `Delete` with `age: 14` and `isLive: true`.
+  - `Delete` with `daysSinceNoncurrentTime: 1` and `isLive: false`.
+- **Soft delete:** account for its [default 7-day retention](https://docs.cloud.google.com/storage/docs/soft-delete),
+  which extends storage beyond lifecycle deletion. To recover a soft-deleted
+  object, restore it through GCS first, then use its new generation with Hashi.
+
+Cloud age starts at upload, not archive creation; preserve the
+[original expiry target](#backup-expiry) when copying or recovering objects.
+Locks, holds, and asynchronous lifecycle processing can delay deletion.
+
+### Remote archive locations
+
+Both providers use the same identity-derived namespace, with no custom prefix:
 
 ```text
 s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
+gs://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
 ```
 
 If the `-mpc-` marker is present after the epoch number, it identifies backups
 containing MPC key-recovery information.
 
-Scheduled backups upload the completed encrypted local archive once, without
-retries or a queue. Failures preserve local backups and retention, and log the
-local path and S3 URI.
+Failed uploads leave the local backup intact but are not retried automatically;
+check logs for failures.
 
 ### Manual backups
 
@@ -461,52 +500,65 @@ Replace `/path/to/validator.toml` with the path to your node config, and
 `/var/lib/hashi/backups` with the directory to write the archive to (for
 example, your configured `backup-dir`).
 
-This saves locally, then uploads if configured. Add `--local-only` to skip S3.
+This saves locally, then uploads to the configured remote destination.
 Upload failure returns a nonzero exit status while preserving the local archive.
-With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+With a remote destination configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
 
 ### Restore and infrastructure limits
 
-Restore from a full S3 URI without the original node configuration:
+Restore from a full remote URI without the original node configuration.
+Use independently retained receipts to pin an S3 version or GCS generation:
 
 ```bash
-hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc \
-  --region us-east-1 --backup-pgp-secret-key /secure/secret-key.asc \
+hashi backup restore 's3://my-bucket/<namespace>/<archive>.tar.asc' \
+  --region us-east-1 --version-id '<version-id>' \
+  --backup-pgp-secret-key /secure/secret-key.asc \
   --output-dir /private/restore
 ```
 
-Here `<namespace>` is the `<sui-chain-id>/<hashi-object-id>/<validator-address>`
-path from the destination template above, and `<timestamp>` is the timestamp in
-the archive's filename. Take the full URI from the URI and version receipts you keep for each backup.
+```bash
+hashi backup restore 'gs://my-bucket/<namespace>/<archive>.tar.asc' \
+  --generation '<generation>' \
+  --backup-pgp-secret-key /secure/secret-key.asc \
+  --output-dir /private/restore
+```
 
-Use `--version-id '<version-id>'` to select an exact object version. Keys are
-literal object keys, not URL-decoded paths. Recovery credentials need
-`s3:GetObject` for the current object or `s3:GetObjectVersion` for a pinned version;
-inspecting version history also requires `s3:ListBucketVersions`.
+Replace the quoted placeholders with values from your backup receipts:
+`<namespace>` is `<sui-chain-id>/<hashi-object-id>/<validator-address>`, and
+`<archive>` is the full archive basename before `.tar.asc`. Keys are literal
+object keys, not URL-decoded paths. S3 recovery credentials need `s3:GetObject`
+for the current object or `s3:GetObjectVersion` for a pinned version;
+inspecting history also requires `s3:ListBucketVersions`. GCS recovery requires
+`storage.objects.get`, plus `storage.objects.list` to inspect history.
 
-S3 restore accepts only encrypted `.tar.asc` archives. Choose
+Remote restore accepts only encrypted `.tar.asc` archives. Choose
 `--backup-pgp-secret-key` or `--use-gpg-agent` (with optional `--gpg-homedir`).
 Local restores also accept plaintext `.tar` archives, which need neither decryptor.
-`--region` is required for S3; it and `--version-id` are invalid for local restores.
+`--region` is required for S3, and `--version-id` is S3-only. GCS rejects both
+options and accepts `--generation`, a positive signed 64-bit integer.
+S3 rejects `--generation`; all three remote options are invalid for local restores.
+Downloads have no failed-request retry or resume.
 
 Downloads use private temporary storage under `--output-dir`, and the command
 removes them afterward. Restore publishes a complete extraction, refuses an existing
 destination, and does not install files at their original paths.
 
-Keep backup URI and version receipts, the region, and decryption-key access outside
-the node. Use independently retained receipts and audit history to select an
-exact version, then pin it with `--version-id`. Neither the newest object nor
-successful decryption proves its origin: encryption does not authenticate the
-creator. Unexpected versions or delete markers warrant investigation, but
-lifecycle rules and authorized administrators can also create them.
+Keep backup URI and S3 version ID or GCS generation receipts, the S3 region,
+and decryption-key access outside the node. Use independently retained receipts
+and audit history to select an exact version or generation, then pin it with
+`--version-id` or `--generation`. Neither the newest object nor successful
+decryption proves its origin: encryption does not authenticate the creator.
+Unexpected versions, generations, or delete markers warrant investigation,
+but lifecycle rules and authorized administrators can also change object history.
 
 ### Machine-loss recovery
 
 Use this path for accidental machine or disk loss without suspected compromise.
 For suspected compromise, use the separate procedure below, not a snapshot restore.
 
-1. Stop or fence the old node. Restore on a trusted replacement host into a
-   private directory (`umask 077`); you need no original config or database.
+1. Stop or fence the old node. Select a backup using independently kept receipts
+   and restore its pinned version or generation on a trusted replacement host
+   into a private directory (`umask 077`); you need no original config or database.
 2. Verify the restored chain, Hashi object, and validator identity against trusted
    records. Install the config and key files at trusted paths, not paths taken
    blindly from the manifest. Put `hashi-db-snapshot` at the configured `db` path;

@@ -107,8 +107,11 @@ walkdir.workspace = true
 # Remote backup uploads
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+google-cloud-storage.workspace = true
+google-cloud-gax.workspace = true
 
 [dev-dependencies]
+google-cloud-auth.workspace = true
 insta.workspace = true
 ed25519-dalek.workspace = true
 test-strategy.workspace = true
