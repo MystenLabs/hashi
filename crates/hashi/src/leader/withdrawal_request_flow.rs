@@ -25,6 +25,7 @@ use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
+use crate::withdrawals::promote_first_at_minimum;
 use crate::withdrawals::withdrawal_commit_order;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
@@ -495,11 +496,12 @@ impl LeaderService {
                         .inc();
                 }
             }
+            let minimum = self.inner.onchain_state().bitcoin_withdrawal_minimum();
 
             let mut batch: Vec<WithdrawalRequest> = Vec::new();
             let mut cumulative = 0u64;
             let mut at_capacity = false;
-            for req in withdrawal_commit_order(approved, max_bucket) {
+            for req in withdrawal_commit_order(approved, max_bucket, minimum) {
                 let Some(next) = cumulative.checked_add(req.btc_amount) else {
                     at_capacity = true;
                     break;
@@ -847,6 +849,7 @@ async fn build_checked_commitment(
     mut requests: Vec<WithdrawalRequest>,
 ) -> Result<Option<WithdrawalTxCommitment>, WithdrawalCommitmentError> {
     let commit_gate_open = || !inner.onchain_state().has_unsigned_withdrawal_txn();
+    let minimum = inner.onchain_state().bitcoin_withdrawal_minimum();
     let mut excluded_inputs = BTreeSet::new();
     for _ in 0..COMMITMENT_CHECK_ROUNDS {
         let approval = match inner
@@ -887,7 +890,7 @@ async fn build_checked_commitment(
                 .with_label_values(&[item.item.label(), item.reason])
                 .inc();
         }
-        leave_out(refused, &mut requests, &mut excluded_inputs);
+        leave_out(refused, &mut requests, &mut excluded_inputs, minimum);
         if requests.is_empty() {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(
                 anyhow::anyhow!("the commit check refused every request in the batch"),
@@ -905,6 +908,7 @@ fn leave_out(
     refused: &RefusedItems,
     requests: &mut Vec<WithdrawalRequest>,
     excluded_inputs: &mut BTreeSet<UtxoId>,
+    minimum: u64,
 ) {
     for item in &refused.0 {
         match item.item {
@@ -914,6 +918,7 @@ fn leave_out(
             }
         }
     }
+    promote_first_at_minimum(requests, minimum);
 }
 
 #[cfg(test)]
@@ -955,7 +960,7 @@ mod checked_commitment_tests {
     }
 
     #[test]
-    fn commit_order_follows_approval_without_promoting_larger_requests() {
+    fn commit_order_follows_approval_with_the_oldest_at_minimum_first() {
         let order = withdrawal_commit_order(
             vec![
                 WithdrawalRequest {
@@ -978,9 +983,32 @@ mod checked_commitment_tests {
                 },
             ],
             100_000,
+            30_000,
         );
 
-        assert_eq!(ids(&order), vec![2, 3, 1]);
+        assert_eq!(ids(&order), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn leaving_out_the_oldest_at_minimum_promotes_the_next() {
+        let mut requests = vec![
+            approved(1, 50_000, 300),
+            approved(2, 10_000, 100),
+            approved(3, 10_000, 150),
+            approved(4, 50_000, 400),
+        ];
+        leave_out(
+            &RefusedItems(vec![RefusedItem::new(
+                CommitmentItem::Request(Address::new([1; 32])),
+                "request_missing",
+                String::new(),
+            )]),
+            &mut requests,
+            &mut BTreeSet::new(),
+            30_000,
+        );
+
+        assert_eq!(ids(&requests), vec![4, 2, 3]);
     }
 
     #[test]
@@ -1002,6 +1030,7 @@ mod checked_commitment_tests {
             ]),
             &mut requests,
             &mut excluded_inputs,
+            0,
         );
 
         assert_eq!(

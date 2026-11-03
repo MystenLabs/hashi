@@ -418,6 +418,22 @@ fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize)
     }
 }
 
+fn next_request_count(
+    error: &utxo_pool::CoinSelectionError,
+    requests: &mut Vec<utxo_pool::WithdrawalRequest>,
+    request_count: usize,
+) -> usize {
+    match error {
+        utxo_pool::CoinSelectionError::RequestAmountTooSmall { request_id, .. }
+            if requests.iter().any(|request| request.id == *request_id) =>
+        {
+            requests.retain(|request| request.id != *request_id);
+            request_count.min(requests.len())
+        }
+        _ => request_count - 1,
+    }
+}
+
 /// The rate leader and validators price a withdrawal at. The configured floor applies after
 /// the mainnet and signet caps, so it stays the lever for rescuing a stalled withdrawal.
 fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> FeeRate {
@@ -609,6 +625,7 @@ pub(crate) fn check_commitment_outflow(
 pub(crate) fn withdrawal_commit_order(
     requests: Vec<WithdrawalRequest>,
     max_bucket_capacity: u64,
+    minimum: u64,
 ) -> Vec<WithdrawalRequest> {
     let mut ordered: Vec<_> = requests
         .into_iter()
@@ -619,7 +636,14 @@ pub(crate) fn withdrawal_commit_order(
         })
         .collect();
     ordered.sort_by_key(|r| (r.approved_timestamp_ms, r.created_timestamp_ms, r.id));
+    promote_first_at_minimum(&mut ordered, minimum);
     ordered
+}
+
+pub(crate) fn promote_first_at_minimum(requests: &mut [WithdrawalRequest], minimum: u64) {
+    if let Some(first) = requests.iter().position(|r| r.btc_amount >= minimum) {
+        requests[..=first].rotate_right(1);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1917,19 +1941,9 @@ impl Hashi {
                     representative_errors.entry(error_kind).or_insert_with(|| {
                         format!("request_count={request_count}, max_inputs={max_inputs}, error={e}")
                     });
-                    let next_request_count =
-                        if let utxo_pool::CoinSelectionError::RequestAmountTooSmall {
-                            request_id,
-                            ..
-                        } = &e
-                        {
-                            mapped_requests.retain(|request| request.id != *request_id);
-                            request_count.min(mapped_requests.len())
-                        } else {
-                            request_count - 1
-                        };
+                    let next = next_request_count(&e, &mut mapped_requests, request_count);
                     last_selection_error = Some((request_count, max_inputs, e));
-                    request_count = next_request_count;
+                    request_count = next;
                 }
             }
         }
@@ -3179,6 +3193,38 @@ mod tests {
             withdrawal_batch_request_cap(500, 500),
             CONSOLIDATION_MODE_MAX_REQUESTS
         );
+    }
+
+    #[test]
+    fn a_too_small_request_is_skipped_and_other_failures_shrink_the_batch() {
+        let request = |byte: u8| crate::utxo_pool::WithdrawalRequest {
+            id: Address::new([byte; 32]),
+            recipient: vec![byte; 32],
+            amount: 10_000,
+            timestamp_ms: byte.into(),
+        };
+        let too_small = |byte: u8| crate::utxo_pool::CoinSelectionError::RequestAmountTooSmall {
+            request_id: Address::new([byte; 32]),
+            amount: 10_000,
+            fee_per_request: 12_000,
+        };
+        let ids = |requests: &[crate::utxo_pool::WithdrawalRequest]| {
+            requests.iter().map(|r| r.id).collect::<Vec<_>>()
+        };
+        let mut requests = vec![request(1), request(2), request(3), request(4)];
+
+        assert_eq!(next_request_count(&too_small(2), &mut requests, 3), 3);
+        assert_eq!(ids(&requests), ids(&[request(1), request(3), request(4)]));
+
+        assert_eq!(next_request_count(&too_small(4), &mut requests, 3), 2);
+        assert_eq!(ids(&requests), ids(&[request(1), request(3)]));
+
+        let empty_pool = crate::utxo_pool::CoinSelectionError::EmptyPool;
+        assert_eq!(next_request_count(&empty_pool, &mut requests, 2), 1);
+        assert_eq!(ids(&requests), ids(&[request(1), request(3)]));
+
+        assert_eq!(next_request_count(&too_small(9), &mut requests, 2), 1);
+        assert_eq!(ids(&requests), ids(&[request(1), request(3)]));
     }
 
     #[test]
