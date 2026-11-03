@@ -39,9 +39,9 @@ pub struct UploadReceipt {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UploadError {
-    #[error("remote backup already exists: {0:#}")]
+    #[error("remote backup already exists")]
     AlreadyExists(#[source] anyhow::Error),
-    #[error("{0:#}")]
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
@@ -147,6 +147,10 @@ impl BackupRemoteClient {
                     let receipt = client
                         .write_object(format!("projects/_/buckets/{bucket}"), key, file)
                         .set_if_generation_match(0_i64)
+                        // Supply CRC before creation so GCS rejects corrupt data before publishing.
+                        .precompute_checksums()
+                        .await
+                        .context("failed to precompute GCS backup upload checksums")?
                         .send_unbuffered()
                         .await
                         .map_err(|error| {
@@ -590,6 +594,20 @@ mod tests {
                 )
                     .into_response();
             }
+            // Require CRC in the first metadata part, before accepting the object.
+            // CRC32C("123456789") = 0xe3069283, big-endian base64 "4waSgw==".
+            let metadata = std::str::from_utf8(&body)
+                .ok()
+                .and_then(|body| body.split_once("\r\n\r\n"))
+                .and_then(|(_, rest)| rest.split_once("\r\n--"))
+                .and_then(|(metadata, _)| serde_json::from_str::<serde_json::Value>(metadata).ok());
+            if metadata.as_ref().and_then(|value| value["crc32c"].as_str()) != Some("4waSgw==") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "missing or incorrect initial CRC32C",
+                )
+                    .into_response();
+            }
             store.uploaded = Some(body);
             return axum::Json(serde_json::json!({
                 "bucket": "backup-bucket",
@@ -689,7 +707,7 @@ mod tests {
         let (client, store, server) = gcs_server(false).await;
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join("epoch-7.tar");
-        let original = b"published archive bytes";
+        let original = b"123456789";
         tokio::fs::write(&archive, original).await.unwrap();
         let receipt = client
             .upload("backup-bucket", "testnet/validator/epoch-7.tar", &archive)

@@ -88,6 +88,12 @@ The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, an
 sha256sum out/hashi
 ```
 
+**CA certificates.** HTTPS Sui RPC endpoints require a readable system CA
+certificate store, even when remote backups are disabled. For direct binary
+deployments or custom images, install your platform's CA bundle (for example,
+`ca-certificates` on Debian/Ubuntu). The published Hashi image includes it.
+If you set `SSL_CERT_FILE` or `SSL_CERT_DIR`, point them at readable certificates.
+
 **Backup tooling.** Node backups are **OpenPGP** (Sequoia). To generate a backup key and decrypt backups you need an OpenPGP toolchain:
 
 - `gpg` + `gpg-agent`, for decrypting backups, including with a YubiKey (works over a forwarded `gpg-agent` socket so you can restore on a server using a YubiKey plugged into your laptop)
