@@ -1814,7 +1814,7 @@ impl MpcManager {
                     // Skipping the dealer here would let this party accept a later
                     // certificate from it, or none, while other parties accept this one.
                     return Err(MpcError::ProtocolFailed(format!(
-                        "No dealer output for {dealer:?} after processing"
+                        "No dealer output for certified dealer {dealer:?} after processing"
                     )));
                 }
                 match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
