@@ -626,6 +626,20 @@ pub(crate) fn check_commitment_outflow(
     Ok(max_bucket_capacity)
 }
 
+fn eligible_for_commitment(request: &WithdrawalRequest, max_bucket_capacity: u64) -> bool {
+    request.awaits_commitment()
+        && request.approved_timestamp_ms.is_some()
+        && request.btc_amount <= max_bucket_capacity
+}
+
+fn commit_order_key(request: &WithdrawalRequest) -> (Option<u64>, u64, Address) {
+    (
+        request.approved_timestamp_ms,
+        request.created_timestamp_ms,
+        request.id,
+    )
+}
+
 pub(crate) fn withdrawal_commit_order(
     requests: Vec<WithdrawalRequest>,
     max_bucket_capacity: u64,
@@ -633,15 +647,22 @@ pub(crate) fn withdrawal_commit_order(
 ) -> Vec<WithdrawalRequest> {
     let mut ordered: Vec<_> = requests
         .into_iter()
-        .filter(|r| {
-            r.awaits_commitment()
-                && r.approved_timestamp_ms.is_some()
-                && r.btc_amount <= max_bucket_capacity
-        })
+        .filter(|r| eligible_for_commitment(r, max_bucket_capacity))
         .collect();
-    ordered.sort_by_key(|r| (r.approved_timestamp_ms, r.created_timestamp_ms, r.id));
+    ordered.sort_by_key(commit_order_key);
     promote_first_at_minimum(&mut ordered, minimum);
     ordered
+}
+
+fn oldest_at_minimum<'a>(
+    requests: impl IntoIterator<Item = &'a WithdrawalRequest>,
+    max_bucket_capacity: u64,
+    minimum: u64,
+) -> Option<&'a WithdrawalRequest> {
+    requests
+        .into_iter()
+        .filter(|r| eligible_for_commitment(r, max_bucket_capacity) && r.btc_amount >= minimum)
+        .min_by_key(|r| commit_order_key(r))
 }
 
 pub(crate) fn promote_first_at_minimum(requests: &mut [WithdrawalRequest], minimum: u64) {
@@ -666,18 +687,17 @@ fn ensure_awaits_approval(request: &WithdrawalRequest) -> Result<(), WithdrawalA
     Ok(())
 }
 
-pub(crate) fn check_commitment_against_queue(
+pub(crate) fn check_commitment_against_queue<'a>(
     request_ids: &[Address],
     unsigned: bool,
-    requests: Vec<WithdrawalRequest>,
+    requests: impl IntoIterator<Item = &'a WithdrawalRequest>,
     max_bucket_capacity: u64,
     minimum: u64,
 ) -> anyhow::Result<()> {
     if unsigned {
         return Err(WithdrawalStillUnsigned.into());
     }
-    let ordered = withdrawal_commit_order(requests, max_bucket_capacity, minimum);
-    match ordered.first().filter(|r| r.btc_amount >= minimum) {
+    match oldest_at_minimum(requests, max_bucket_capacity, minimum) {
         Some(oldest) if !request_ids.contains(&oldest.id) => {
             Err(OldestRequestMissing(oldest.id).into())
         }
@@ -1079,24 +1099,15 @@ impl Hashi {
             expected_txid
         );
 
-        let minimum = self.onchain_state().bitcoin_withdrawal_minimum();
-        let (unsigned, requests) = {
-            let state = self.onchain_state().state();
-            let queue = &state.hashi().bitcoin().withdrawal_queue;
-            let requests: Vec<_> = queue
-                .requests()
-                .values()
-                .filter(|r| r.awaits_commitment())
-                .cloned()
-                .collect();
-            (queue.has_unsigned_txn(), requests)
-        };
+        let state = self.onchain_state().state();
+        let hashi = state.hashi();
+        let queue = &hashi.bitcoin().withdrawal_queue;
         check_commitment_against_queue(
             &approval.request_ids,
-            unsigned,
-            requests,
+            queue.has_unsigned_txn(),
+            queue.requests().values(),
             prepared.max_bucket_capacity,
-            minimum,
+            hashi.config.bitcoin_withdrawal_minimum(),
         )
     }
 
@@ -3108,7 +3119,7 @@ mod tests {
             approved_request(4, 50_000, 300),
         ];
         let check = |ids: &[Address]| {
-            check_commitment_against_queue(ids, false, requests.clone(), 100_000, 30_000)
+            check_commitment_against_queue(ids, false, &requests, 100_000, 30_000)
         };
         check(&[id(2)]).unwrap();
         let refusal = check(&[id(1), id(4)]).unwrap_err();
@@ -3117,8 +3128,14 @@ mod tests {
             refusal.to_string().contains(NOT_OLDEST_REFUSAL_MSG),
             "{refusal}"
         );
+        assert_eq!(
+            oldest_at_minimum(&requests, 100_000, 30_000).map(|r| r.id),
+            withdrawal_commit_order(requests.clone(), 100_000, 30_000)
+                .first()
+                .map(|r| r.id),
+        );
         let below_minimum = vec![approved_request(1, 10_000, 100)];
-        check_commitment_against_queue(&[id(9)], false, below_minimum, 100_000, 30_000).unwrap();
+        check_commitment_against_queue(&[id(9)], false, &below_minimum, 100_000, 30_000).unwrap();
     }
 
     #[test]
@@ -3127,9 +3144,9 @@ mod tests {
         committed.withdrawal_txn_id = Some(Address::new([9; 32]));
         let requests = vec![committed, approved_request(2, 50_000, 200)];
         let next = [Address::new([2; 32])];
-        check_commitment_against_queue(&next, false, requests.clone(), 100_000, 30_000).unwrap();
+        check_commitment_against_queue(&next, false, &requests, 100_000, 30_000).unwrap();
         let refusal =
-            check_commitment_against_queue(&next, true, requests, 100_000, 30_000).unwrap_err();
+            check_commitment_against_queue(&next, true, &requests, 100_000, 30_000).unwrap_err();
         assert!(refusal.is::<WithdrawalStillUnsigned>(), "{refusal}");
         assert!(
             refusal.to_string().contains(UNSIGNED_REFUSAL_MSG),
