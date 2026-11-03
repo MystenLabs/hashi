@@ -196,6 +196,11 @@ request behind it wait until capacity refills. The leader skips a request
 larger than the bucket's maximum capacity every time, so Hashi never processes
 it unless governance raises the limit; its owner can cancel it.
 
+After governance raises the minimum withdrawal amount, the leader puts the
+oldest request at or above the new minimum first. A request below it that
+can't cover its share of the miner fee waits until it can; its owner can
+cancel it.
+
 The leader then constructs an unsigned Bitcoin transaction:
 
 1. **Coin selection**: select UTXOs from the pool to cover the total

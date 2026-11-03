@@ -53,11 +53,6 @@ const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const TURN_EDGE_CHECKPOINTS: u64 = 10;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn turn_has_room(checkpoint_height: u64) -> bool {
-    NUM_CONSECUTIVE_LEADER_CHECKPOINTS - checkpoint_height % NUM_CONSECUTIVE_LEADER_CHECKPOINTS
-        > TURN_EDGE_CHECKPOINTS
-}
-
 /// Throttle for the "binary unsupported for the on-chain version" leader
 /// warning. `node_is_leader` runs every checkpoint (and from re-checking
 /// tasks), so an unthrottled `warn!` would flood logs for the whole time the
@@ -746,6 +741,11 @@ pub(crate) fn is_retriable_transport(status: &tonic::Status) -> bool {
             | tonic::Code::Cancelled
             | tonic::Code::DeadlineExceeded
     )
+}
+
+fn turn_has_room(checkpoint_height: u64) -> bool {
+    NUM_CONSECUTIVE_LEADER_CHECKPOINTS - checkpoint_height % NUM_CONSECUTIVE_LEADER_CHECKPOINTS
+        > TURN_EDGE_CHECKPOINTS
 }
 
 #[cfg(test)]
