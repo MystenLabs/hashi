@@ -1811,8 +1811,9 @@ impl MpcManager {
                     .dealer_outputs
                     .contains_key(&DealerOutputsKey::Dkg(dealer))
                 {
-                    // Skipping the dealer here would let this party accept a later
-                    // certificate from it, or none, while other parties accept this one.
+                    // A certified dealer always gives an output, directly or via complaint
+                    // recovery, so a missing one is a bug. Skipping it could make the parties
+                    // disagree on the set of dealers.
                     return Err(MpcError::ProtocolFailed(format!(
                         "No dealer output for certified dealer {dealer:?} after processing"
                     )));
