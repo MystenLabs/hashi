@@ -609,7 +609,6 @@ pub(crate) fn check_commitment_outflow(
 pub(crate) fn withdrawal_commit_order(
     requests: Vec<WithdrawalRequest>,
     max_bucket_capacity: u64,
-    minimum: u64,
 ) -> Vec<WithdrawalRequest> {
     let mut ordered: Vec<_> = requests
         .into_iter()
@@ -620,14 +619,7 @@ pub(crate) fn withdrawal_commit_order(
         })
         .collect();
     ordered.sort_by_key(|r| (r.approved_timestamp_ms, r.created_timestamp_ms, r.id));
-    promote_first_at_minimum(&mut ordered, minimum);
     ordered
-}
-
-pub(crate) fn promote_first_at_minimum(requests: &mut [WithdrawalRequest], minimum: u64) {
-    if let Some(first) = requests.iter().position(|r| r.btc_amount >= minimum) {
-        requests[..=first].rotate_right(1);
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1853,7 +1845,7 @@ impl Hashi {
 
         // Map on-chain WithdrawalRequests to the coin-selector view.
         // btc_amount is the full withdrawal amount.
-        let mapped_requests: Vec<utxo_pool::WithdrawalRequest> = requests
+        let mut mapped_requests: Vec<utxo_pool::WithdrawalRequest> = requests
             .iter()
             .map(|r| utxo_pool::WithdrawalRequest {
                 id: r.id,
@@ -1868,9 +1860,11 @@ impl Hashi {
         let mut attempt_error_counts = BTreeMap::<&'static str, usize>::new();
         let mut representative_errors = BTreeMap::<&'static str, String>::new();
         let mut attempted_request_counts = 0usize;
-        for request_count in (1..=configured_max_requests).rev() {
+        let mut request_count = configured_max_requests;
+        while request_count > 0 {
             let max_inputs = safe_withdrawal_flow_max_inputs(request_count, configured_max_inputs);
             if max_inputs == 0 {
+                request_count -= 1;
                 continue;
             }
 
@@ -1923,7 +1917,19 @@ impl Hashi {
                     representative_errors.entry(error_kind).or_insert_with(|| {
                         format!("request_count={request_count}, max_inputs={max_inputs}, error={e}")
                     });
+                    let next_request_count =
+                        if let utxo_pool::CoinSelectionError::RequestAmountTooSmall {
+                            request_id,
+                            ..
+                        } = &e
+                        {
+                            mapped_requests.retain(|request| request.id != *request_id);
+                            request_count.min(mapped_requests.len())
+                        } else {
+                            request_count - 1
+                        };
                     last_selection_error = Some((request_count, max_inputs, e));
+                    request_count = next_request_count;
                 }
             }
         }
