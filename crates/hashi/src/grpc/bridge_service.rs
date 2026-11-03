@@ -14,8 +14,11 @@ use crate::deposits::UnapprovedDepositError;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
 use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
+use crate::metrics::SIGNING_REFUSAL_NOT_LEADER;
+use crate::metrics::SIGNING_REFUSAL_NOT_OLDEST;
 use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::SIGNING_REFUSAL_SHAPE;
+use crate::metrics::SIGNING_REFUSAL_UNSIGNED;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -23,9 +26,12 @@ use crate::onchain::types::UtxoId;
 use crate::trm;
 use crate::withdrawals::MalformedSigningRequest;
 use crate::withdrawals::MpcInputSignaturesMessage;
+use crate::withdrawals::OldestRequestMissing;
+use crate::withdrawals::OutsideLeaderTurn;
 use crate::withdrawals::WithdrawalAlreadyFinalized;
 use crate::withdrawals::WithdrawalApprovalError;
 use crate::withdrawals::WithdrawalRequestApproval;
+use crate::withdrawals::WithdrawalStillUnsigned;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
 use crate::withdrawals::check_commitment_shape;
@@ -54,7 +60,9 @@ use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
 use super::HttpService;
+use super::NOT_LEADER_REFUSAL_MSG;
 use super::PAUSED_REFUSAL_MSG;
+use super::UNSIGNED_REFUSAL_MSG;
 use super::peer_limit::CallerTaskSlot;
 use super::peer_limit::SigningPlace;
 
@@ -152,6 +160,7 @@ impl BridgeService for HttpService {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         let member = self.admit_committee_member(caller)?;
+        self.admit_proposer(&member)?;
         let approval = parse_withdrawal_tx_commitment(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&approval.txid));
@@ -189,11 +198,14 @@ impl BridgeService for HttpService {
         let job_approval = approval.clone();
         let member_signature = run
             .run_blocking(move || {
+                if !inner.caller_may_propose(&caller) {
+                    return Err(OutsideLeaderTurn.into());
+                }
                 inner.finish_withdrawal_tx_commitment(&job_approval, &prepared, fee_rate)?;
                 inner.sign_withdrawal_tx_commitment(&job_approval)
             })
             .await
-            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            .map_err(|e| self.construction_refusal(caller, e))?;
         tracing::info!(
             requests = approval.request_ids.len(),
             "Signed withdrawal tx construction",
@@ -516,6 +528,18 @@ impl HttpService {
         Ok(Member(caller))
     }
 
+    fn admit_proposer(&self, member: &Member) -> Result<(), Status> {
+        if !self.inner.caller_may_propose(&member.0) {
+            self.count_signing_refusal(member.0, SIGNING_REFUSAL_NOT_LEADER);
+            return Err(Status::failed_precondition(NOT_LEADER_REFUSAL_MSG));
+        }
+        if self.inner.onchain_state().has_unsigned_withdrawal_txn() {
+            self.count_signing_refusal(member.0, SIGNING_REFUSAL_UNSIGNED);
+            return Err(Status::failed_precondition(UNSIGNED_REFUSAL_MSG));
+        }
+        Ok(())
+    }
+
     fn admit_withdrawal_signing(&self, member: &Member) -> Result<CallerTaskSlot, Status> {
         let limit = self.inner.config.withdrawal_signing_per_caller_limit();
         self.signing_tasks
@@ -550,6 +574,17 @@ impl HttpService {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_SHAPE);
         }
         withdrawal_signing_refusal_status(err)
+    }
+
+    fn construction_refusal(&self, caller: Address, err: anyhow::Error) -> Status {
+        if err.is::<OutsideLeaderTurn>() {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_LEADER);
+        } else if err.is::<WithdrawalStillUnsigned>() {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_UNSIGNED);
+        } else if err.is::<OldestRequestMissing>() {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_OLDEST);
+        }
+        Status::failed_precondition(err.to_string())
     }
 }
 

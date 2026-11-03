@@ -19,11 +19,13 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use crate::trm;
 use crate::withdrawals::CommitmentItem;
 use crate::withdrawals::FeeEstimateUnavailable;
+use crate::withdrawals::OldestRequestMissing;
 use crate::withdrawals::RefusedItems;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
 use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
+use crate::withdrawals::WithdrawalStillUnsigned;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::promote_first_at_minimum;
 use crate::withdrawals::withdrawal_commit_order;
@@ -616,6 +618,9 @@ impl LeaderService {
                     WithdrawalCommitmentErrorKind::CommitmentCheckFailed => {
                         error!("Withdrawal batch not proposed: {e}")
                     }
+                    WithdrawalCommitmentErrorKind::NotOldest => {
+                        info!("Withdrawal batch not proposed: {e}")
+                    }
                     WithdrawalCommitmentErrorKind::UtxoSelectionFailed => {}
                     _ => warn!("Withdrawal commitment attempt failed: {e}"),
                 }
@@ -865,7 +870,7 @@ async fn build_checked_commitment(
         };
         let refusal = match inner.validate_withdrawal_tx_commitment(&approval).await {
             Ok(()) => return Ok(commit_gate_open().then_some(approval)),
-            Err(e) if !commit_gate_open() => {
+            Err(e) if e.is::<WithdrawalStillUnsigned>() || !commit_gate_open() => {
                 debug!(
                     "Commit check refused the batch, and an unsigned withdrawal has appeared: {e:#}"
                 );
@@ -875,6 +880,9 @@ async fn build_checked_commitment(
         };
         if refusal.downcast_ref::<FeeEstimateUnavailable>().is_some() {
             return Err(WithdrawalCommitmentError::FeeEstimateFailed(refusal));
+        }
+        if refusal.is::<OldestRequestMissing>() {
+            return Err(WithdrawalCommitmentError::NotOldest(refusal));
         }
         let Some(refused) = refusal.downcast_ref::<RefusedItems>() else {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(refusal));

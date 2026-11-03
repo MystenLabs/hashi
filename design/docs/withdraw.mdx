@@ -197,9 +197,9 @@ larger than the bucket's maximum capacity every time, so Hashi never processes
 it unless governance raises the limit; its owner can cancel it.
 
 After governance raises the minimum withdrawal amount, the leader puts the
-oldest request at or above the new minimum first. A request below it that
-can't cover its share of the miner fee waits until it can; its owner can
-cancel it.
+earliest-approved request at or above the new minimum first. A request below
+the new minimum that can't cover its share of the miner fee waits until it
+can; its owner can cancel it.
 
 The leader then constructs an unsigned Bitcoin transaction:
 
@@ -215,6 +215,13 @@ The leader then constructs an unsigned Bitcoin transaction:
    user's share of the miner fee from their output. Validators independently verify
    that the fee is within acceptable bounds (at least `1 sat/vB`, at most 3x
    their own estimate).
+
+Leadership rotates among validators every 100 Sui checkpoints. A validator
+signs an unsigned withdrawal transaction only if it comes from the current
+leader, or from the previous or next leader within 10 checkpoints of their
+shared turn edge; only while no earlier withdrawal transaction awaits
+signatures; and only if it includes the earliest-approved request at or above
+the minimum and within the bucket's maximum capacity, when there is one.
 
 The leader commits the resulting unsigned transaction and its txid onchain by
 calling `hashi::withdraw::commit_withdrawal_tx`:

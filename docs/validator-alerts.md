@@ -113,6 +113,12 @@ Dashboard-worthy but **not** alerts:
 - **`hashi_withdrawal_signing_refused_total{reason="committee"}`.** Moves at
   epoch changes, while the leader and your node briefly disagree about the
   committee.
+- **`hashi_withdrawal_signing_refused_total{reason=~"not_leader|unsigned|not_oldest"}`.**
+  Honest leaders hit these at times: all three while your node lags the
+  leader, `not_leader` at turn edges, and `not_oldest` around a change of the
+  minimum or while your node's maximum bucket capacity exceeds the leader's.
+  Leaders on the older release add to `not_leader` and `not_oldest` during an
+  upgrade. Counted, not alerted.
 - **`hashi_peer_bitcoind_discoveries_refused_total`.** An honest leader reaches
   the limit in a burst of new deposits when your node's discoveries are slow.
 - **`increase()` alone on a per-peer counter.** It misses a shed in a series'

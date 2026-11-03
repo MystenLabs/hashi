@@ -654,6 +654,8 @@ fn is_expected_refusal(status: &tonic::Status) -> bool {
         && [
             crate::grpc::PAUSED_REFUSAL_MSG,
             crate::grpc::NOT_READY_TO_FINALIZE_MSG,
+            crate::grpc::NOT_LEADER_REFUSAL_MSG,
+            crate::grpc::UNSIGNED_REFUSAL_MSG,
         ]
         .iter()
         .any(|marker| status.message().contains(marker))
@@ -748,6 +750,16 @@ fn turn_has_room(checkpoint_height: u64) -> bool {
         > TURN_EDGE_CHECKPOINTS
 }
 
+pub(crate) fn may_propose(member_index: u64, num_members: u64, checkpoint_height: u64) -> bool {
+    let turn = checkpoint_height / NUM_CONSECUTIVE_LEADER_CHECKPOINTS;
+    let leads = |turn: u64| turn.checked_rem(num_members) == Some(member_index);
+    let turn_started_recently =
+        checkpoint_height % NUM_CONSECUTIVE_LEADER_CHECKPOINTS < TURN_EDGE_CHECKPOINTS;
+    leads(turn)
+        || (turn_started_recently && turn.checked_sub(1).is_some_and(leads))
+        || (!turn_has_room(checkpoint_height) && turn.checked_add(1).is_some_and(leads))
+}
+
 #[cfg(test)]
 mod tests {
     use super::NoQuorum;
@@ -755,6 +767,7 @@ mod tests {
     use super::collect_signatures;
     use super::is_already_approved_refusal;
     use super::is_retriable_transport;
+    use super::may_propose;
     use super::retry_peer_call;
     use super::turn_has_room;
     use crate::withdrawals::WithdrawalAlreadyFinalized;
@@ -779,6 +792,22 @@ mod tests {
         assert!(!turn_has_room(190));
         assert!(!turn_has_room(199));
         assert!(turn_has_room(200));
+    }
+
+    #[test]
+    fn only_the_leader_and_its_neighbours_at_the_turn_edges_may_propose() {
+        for height in [500, 550, 599] {
+            assert!(may_propose(1, 4, height));
+            assert!(!may_propose(3, 4, height));
+        }
+        assert!(may_propose(0, 4, 500));
+        assert!(may_propose(0, 4, 509));
+        assert!(!may_propose(0, 4, 510));
+        assert!(!may_propose(2, 4, 589));
+        assert!(may_propose(2, 4, 590));
+        assert!(may_propose(2, 4, 599));
+        assert!(may_propose(0, 1, 550));
+        assert!(!may_propose(0, 0, 550));
     }
 
     #[test]

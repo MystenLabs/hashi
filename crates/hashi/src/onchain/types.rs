@@ -924,6 +924,10 @@ impl WithdrawalRequestQueue {
         &self.withdrawal_txns
     }
 
+    pub fn has_unsigned_txn(&self) -> bool {
+        self.withdrawal_txns.values().any(|t| !t.is_fully_signed())
+    }
+
     pub fn confirmed_txns_id(&self) -> &Address {
         &self.confirmed_txns_id
     }
