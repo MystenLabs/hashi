@@ -31,8 +31,11 @@ use crate::btc_monitor::limits::BitcoindCharge;
 use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
+use crate::grpc::NOT_LEADER_REFUSAL_MSG;
+use crate::grpc::NOT_OLDEST_REFUSAL_MSG;
 use crate::grpc::NOT_READY_TO_FINALIZE_MSG;
 use crate::grpc::RunGate;
+use crate::grpc::UNSIGNED_REFUSAL_MSG;
 use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
@@ -597,6 +600,7 @@ fn check_selected_inputs(
 pub(crate) struct PreparedCommitment {
     selected_utxos: Vec<Utxo>,
     fee: u64,
+    max_bucket_capacity: u64,
     tx_weight: Weight,
     ancestor_weight: Weight,
     ancestor_fee: u64,
@@ -610,7 +614,7 @@ pub(crate) fn check_commitment_outflow(
     input_total: u64,
     change_outputs: &[OutputUtxo],
     max_bucket_capacity: Option<u64>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<u64> {
     let max_bucket_capacity = max_bucket_capacity
         .ok_or_else(|| anyhow!("No local guardian limiter to check the commitment against"))?;
     let outflow = limiter_outflow(input_total, change_outputs);
@@ -619,7 +623,7 @@ pub(crate) fn check_commitment_outflow(
         "Commitment spends {outflow} sats from the pool, above the limiter's max bucket \
          capacity of {max_bucket_capacity} sats",
     );
-    Ok(())
+    Ok(max_bucket_capacity)
 }
 
 pub(crate) fn withdrawal_commit_order(
@@ -643,6 +647,41 @@ pub(crate) fn withdrawal_commit_order(
 pub(crate) fn promote_first_at_minimum(requests: &mut [WithdrawalRequest], minimum: u64) {
     if let Some(first) = requests.iter().position(|r| r.btc_amount >= minimum) {
         requests[..=first].rotate_right(1);
+    }
+}
+
+fn ensure_awaits_approval(request: &WithdrawalRequest) -> Result<(), WithdrawalApprovalError> {
+    if request.is_committed() {
+        return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
+            "Withdrawal request {} is already committed to a withdrawal transaction",
+            request.id
+        )));
+    }
+    if request.is_approved() {
+        return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
+            "Withdrawal request {} is already approved",
+            request.id
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_commitment_against_queue(
+    request_ids: &[Address],
+    unsigned: bool,
+    requests: Vec<WithdrawalRequest>,
+    max_bucket_capacity: u64,
+    minimum: u64,
+) -> anyhow::Result<()> {
+    if unsigned {
+        return Err(WithdrawalStillUnsigned.into());
+    }
+    let ordered = withdrawal_commit_order(requests, max_bucket_capacity, minimum);
+    match ordered.first().filter(|r| r.btc_amount >= minimum) {
+        Some(oldest) if !request_ids.contains(&oldest.id) => {
+            Err(OldestRequestMissing(oldest.id).into())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -684,6 +723,18 @@ pub struct RefusedItems(pub Vec<RefusedItem>);
 #[derive(Debug, Error)]
 #[error(transparent)]
 pub struct FeeEstimateUnavailable(anyhow::Error);
+
+#[derive(Debug, Error)]
+#[error("{marker}", marker = NOT_LEADER_REFUSAL_MSG)]
+pub struct OutsideLeaderTurn;
+
+#[derive(Debug, Error)]
+#[error("{marker}", marker = UNSIGNED_REFUSAL_MSG)]
+pub struct WithdrawalStillUnsigned;
+
+#[derive(Debug, Error)]
+#[error("{marker}: {0}", marker = NOT_OLDEST_REFUSAL_MSG)]
+pub struct OldestRequestMissing(Address);
 
 impl std::fmt::Display for RefusedItems {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -786,18 +837,7 @@ impl Hashi {
                     approval.request_id
                 ))
             })?;
-        if request.is_committed() {
-            return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
-                "Withdrawal request {} is already committed to a withdrawal transaction",
-                approval.request_id
-            )));
-        }
-        if request.is_approved() {
-            return Err(WithdrawalApprovalError::AlreadyApproved(anyhow!(
-                "Withdrawal request {} is already approved",
-                approval.request_id
-            )));
-        }
+        ensure_awaits_approval(&request)?;
 
         self.screen_withdrawal(&request, caller).await?;
 
@@ -940,7 +980,7 @@ impl Hashi {
         }
 
         // 5b. Verify the batch fits the guardian limiter's max bucket capacity.
-        check_commitment_outflow(
+        let max_bucket_capacity = check_commitment_outflow(
             input_total,
             &approval.outputs[request_count..],
             self.local_limiter()
@@ -962,6 +1002,7 @@ impl Hashi {
         Ok(PreparedCommitment {
             selected_utxos,
             fee,
+            max_bucket_capacity,
             tx_weight,
             ancestor_weight,
             ancestor_fee,
@@ -978,6 +1019,24 @@ impl Hashi {
             .await
             .map_err(FeeEstimateUnavailable)?;
         Ok(withdrawal_fee_rate(&self.config, kyoto_fee_rate))
+    }
+
+    pub(crate) fn caller_may_propose(&self, caller: &Address) -> bool {
+        let checkpoint_height = self.onchain_state().latest_checkpoint_height();
+        let state = self.onchain_state().state();
+        state
+            .hashi()
+            .committees
+            .current_committee()
+            .is_some_and(|committee| {
+                committee.index_of(caller).is_some_and(|index| {
+                    crate::leader::may_propose(
+                        index as u64,
+                        committee.members().len() as u64,
+                        checkpoint_height,
+                    )
+                })
+            })
     }
 
     pub(crate) fn finish_withdrawal_tx_commitment(
@@ -1020,7 +1079,25 @@ impl Hashi {
             expected_txid
         );
 
-        Ok(())
+        let minimum = self.onchain_state().bitcoin_withdrawal_minimum();
+        let (unsigned, requests) = {
+            let state = self.onchain_state().state();
+            let queue = &state.hashi().bitcoin().withdrawal_queue;
+            let requests: Vec<_> = queue
+                .requests()
+                .values()
+                .filter(|r| r.awaits_commitment())
+                .cloned()
+                .collect();
+            (queue.has_unsigned_txn(), requests)
+        };
+        check_commitment_against_queue(
+            &approval.request_ids,
+            unsigned,
+            requests,
+            prepared.max_bucket_capacity,
+            minimum,
+        )
     }
 
     fn commitment_request(&self, id: &Address) -> Result<WithdrawalRequest, RefusedItem> {
@@ -2222,6 +2299,7 @@ pub(crate) struct LocalWithdrawalSigning {
 pub enum WithdrawalCommitmentErrorKind {
     BtcTxBuildFailed,
     CommitmentCheckFailed,
+    NotOldest,
     FailedQuorum,
     FeeEstimateFailed,
     UtxoSelectionFailed,
@@ -2256,6 +2334,9 @@ pub enum WithdrawalCommitmentError {
 
     #[error("Commitment check failed: {0}")]
     CommitmentCheckFailed(#[source] anyhow::Error),
+
+    #[error("Commitment check refused the batch: {0}")]
+    NotOldest(#[source] anyhow::Error),
 }
 
 impl WithdrawalCommitmentError {
@@ -2265,6 +2346,7 @@ impl WithdrawalCommitmentError {
             Self::FeeEstimateFailed(_) => WithdrawalCommitmentErrorKind::FeeEstimateFailed,
             Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
             Self::CommitmentCheckFailed(_) => WithdrawalCommitmentErrorKind::CommitmentCheckFailed,
+            Self::NotOldest(_) => WithdrawalCommitmentErrorKind::NotOldest,
         }
     }
 }
@@ -2995,6 +3077,76 @@ mod tests {
         assert!(check_commitment_outflow(100_000, &change, Some(70_000)).is_ok());
         assert!(check_commitment_outflow(100_000, &change, Some(69_999)).is_err());
         assert!(check_commitment_outflow(100_000, &change, None).is_err());
+    }
+
+    fn approved_request(id: u8, btc_amount: u64, approved_timestamp_ms: u64) -> WithdrawalRequest {
+        WithdrawalRequest {
+            id: Address::new([id; 32]),
+            sender: Address::new([0; 32]),
+            btc_amount,
+            bitcoin_address: vec![0; 20],
+            created_timestamp_ms: 0,
+            approval_cert: Some(hashi_types::move_types::CommitteeSignature {
+                epoch: 0,
+                signature: Vec::new(),
+                signers_bitmap: Vec::new(),
+            }),
+            approved_timestamp_ms: Some(approved_timestamp_ms),
+            withdrawal_txn_id: None,
+            sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
+            btc: btc_amount,
+        }
+    }
+
+    #[test]
+    fn a_construction_must_hold_the_oldest_request_at_or_above_the_minimum() {
+        let id = |i: u8| Address::new([i; 32]);
+        let requests = vec![
+            approved_request(1, 10_000, 100),
+            approved_request(2, 30_000, 200),
+            approved_request(3, 200_000, 50),
+            approved_request(4, 50_000, 300),
+        ];
+        let check = |ids: &[Address]| {
+            check_commitment_against_queue(ids, false, requests.clone(), 100_000, 30_000)
+        };
+        check(&[id(2)]).unwrap();
+        let refusal = check(&[id(1), id(4)]).unwrap_err();
+        assert!(refusal.is::<OldestRequestMissing>(), "{refusal}");
+        assert!(
+            refusal.to_string().contains(NOT_OLDEST_REFUSAL_MSG),
+            "{refusal}"
+        );
+        let below_minimum = vec![approved_request(1, 10_000, 100)];
+        check_commitment_against_queue(&[id(9)], false, below_minimum, 100_000, 30_000).unwrap();
+    }
+
+    #[test]
+    fn a_construction_is_refused_while_a_withdrawal_is_unsigned() {
+        let mut committed = approved_request(1, 50_000, 100);
+        committed.withdrawal_txn_id = Some(Address::new([9; 32]));
+        let requests = vec![committed, approved_request(2, 50_000, 200)];
+        let next = [Address::new([2; 32])];
+        check_commitment_against_queue(&next, false, requests.clone(), 100_000, 30_000).unwrap();
+        let refusal =
+            check_commitment_against_queue(&next, true, requests, 100_000, 30_000).unwrap_err();
+        assert!(refusal.is::<WithdrawalStillUnsigned>(), "{refusal}");
+        assert!(
+            refusal.to_string().contains(UNSIGNED_REFUSAL_MSG),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn members_refuse_to_approve_an_approved_withdrawal() {
+        let mut request = approved_request(1, 50_000, 100);
+        assert!(matches!(
+            ensure_awaits_approval(&request),
+            Err(WithdrawalApprovalError::AlreadyApproved(_))
+        ));
+        request.approval_cert = None;
+        request.approved_timestamp_ms = None;
+        ensure_awaits_approval(&request).unwrap();
     }
 
     fn make_txn(

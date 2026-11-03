@@ -873,9 +873,7 @@ impl OnchainState {
             .hashi()
             .bitcoin()
             .withdrawal_queue
-            .withdrawal_txns()
-            .values()
-            .any(|t| !t.is_fully_signed())
+            .has_unsigned_txn()
     }
 
     pub fn active_utxos(&self) -> Vec<types::Utxo> {
