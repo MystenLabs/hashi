@@ -98,10 +98,10 @@ impl Mirror {
         Self {
             routing: seed.routing,
             index: seed.index,
-            watermark_checkpoint: seed.floor,
+            watermark_checkpoint: seed.heights.floor,
             // The scrape reflects everything through the floor; skip any
             // replayed transaction at or before it.
-            applied_position: (seed.floor, u64::MAX),
+            applied_position: (seed.heights.floor, u64::MAX),
             watermark_cursor: None,
         }
     }
@@ -173,9 +173,12 @@ async fn ensure_bootstrapped(
         state.metrics().map(|m| m.as_ref()),
     )
     .await?;
-    let seed = seed.context("a full scrape must produce a mirror seed")?;
+    let mut seed = seed.context("a full scrape must produce a mirror seed")?;
+    seed.heights
+        .raise_ceiling(super::executed_checkpoint(client).await?);
     tracing::info!(
-        floor = seed.floor,
+        floor = seed.heights.floor,
+        ceiling = seed.heights.ceiling,
         objects = seed.index.len(),
         "object mirror re-bootstrapped from scrape"
     );
@@ -187,6 +190,7 @@ async fn ensure_bootstrapped(
         .upgrade_cap
         .as_ref()
         .map(|cap| (cap.version, cap.package));
+    state.close_scrape_gate();
     state.replace_package_versions(package_versions);
     state.replace_hashi_state(hashi);
     state.reconcile_deposit_tracker();
@@ -196,7 +200,8 @@ async fn ensure_bootstrapped(
     // A reset, not an advance: the scrape replaced the state wholesale,
     // so the watermark must say exactly what the scrape covers — even
     // if that is below where the mirror was before the replay failure.
-    state.reset_state_watermark(seed.floor);
+    state.reset_state_watermark(seed.heights.floor);
+    state.set_scrape_ceiling(seed.heights.ceiling);
     *mirror = Some(Mirror::from_seed(seed));
     state.request_limiter_reconcile();
     if let Some(metrics) = state.metrics() {
@@ -252,6 +257,7 @@ async fn run_transactions(
     if let Err(e) = replay_transactions(&mut client, &filter, state, mirror, metrics, target).await
     {
         // A failed replay leaves an unknowable gap; rebuild.
+        state.close_scrape_gate();
         *mirror = None;
         return Err(e).context("transaction replay failed; object mirror reset");
     }

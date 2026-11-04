@@ -19,6 +19,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use crate::trm;
 use crate::withdrawals::CommitmentItem;
 use crate::withdrawals::FeeEstimateUnavailable;
+use crate::withdrawals::MirrorCatchingUp;
 use crate::withdrawals::OldestRequestMissing;
 use crate::withdrawals::RefusedItems;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
@@ -428,6 +429,11 @@ impl LeaderService {
             return;
         }
 
+        if !self.inner.onchain_state().caught_up_with_scrape() {
+            debug!("Mirror is still replaying its last scrape, skipping commitment");
+            return;
+        }
+
         if !super::turn_has_room(checkpoint_height) {
             debug!("Too close to the end of this leader turn to start a withdrawal batch");
             return;
@@ -608,7 +614,9 @@ impl LeaderService {
                 approval
             }
             Ok(None) => {
-                info!("An unsigned withdrawal appeared; skipping this batch");
+                info!(
+                    "An unsigned withdrawal appeared or the mirror is catching up; skipping this batch"
+                );
                 retry_tracker.clear();
                 return Ok(());
             }
@@ -853,7 +861,10 @@ async fn build_checked_commitment(
     inner: &Hashi,
     mut requests: Vec<WithdrawalRequest>,
 ) -> Result<Option<WithdrawalTxCommitment>, WithdrawalCommitmentError> {
-    let commit_gate_open = || !inner.onchain_state().has_unsigned_withdrawal_txn();
+    let commit_gate_open = || {
+        let onchain = inner.onchain_state();
+        !onchain.has_unsigned_withdrawal_txn() && onchain.caught_up_with_scrape()
+    };
     let minimum = inner.onchain_state().bitcoin_withdrawal_minimum();
     let mut excluded_inputs = BTreeSet::new();
     for _ in 0..COMMITMENT_CHECK_ROUNDS {
@@ -863,16 +874,22 @@ async fn build_checked_commitment(
         {
             Ok(approval) => approval,
             Err(e) if !commit_gate_open() => {
-                debug!("Batch build failed, and an unsigned withdrawal has appeared: {e}");
+                debug!(
+                    "Batch build failed, and an unsigned withdrawal has appeared or the mirror is catching up: {e}"
+                );
                 return Ok(None);
             }
             Err(e) => return Err(e),
         };
         let refusal = match inner.validate_withdrawal_tx_commitment(&approval).await {
             Ok(()) => return Ok(commit_gate_open().then_some(approval)),
-            Err(e) if e.is::<WithdrawalStillUnsigned>() || !commit_gate_open() => {
+            Err(e)
+                if e.is::<WithdrawalStillUnsigned>()
+                    || e.is::<MirrorCatchingUp>()
+                    || !commit_gate_open() =>
+            {
                 debug!(
-                    "Commit check refused the batch, and an unsigned withdrawal has appeared: {e:#}"
+                    "Commit check refused the batch, and an unsigned withdrawal has appeared or the mirror is catching up: {e:#}"
                 );
                 return Ok(None);
             }

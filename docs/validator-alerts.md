@@ -118,11 +118,14 @@ Dashboard-worthy but **not** alerts:
 - **`hashi_withdrawal_signing_refused_total{reason="committee"}`.** Moves at
   epoch changes, while the leader and your node briefly disagree about the
   committee.
-- **`hashi_withdrawal_signing_refused_total{reason=~"unsigned|not_oldest"}`.**
-  Honest leaders hit these at times: both while your node lags the leader, and
-  `not_oldest` around a change of the minimum or while your node's maximum
-  bucket capacity exceeds the leader's. Leaders on the older release add to
-  both during an upgrade. Counted, not alerted.
+- **`hashi_withdrawal_signing_refused_total{reason=~"unsigned|not_oldest|catching_up"}`.**
+  Honest leaders hit these at times: `unsigned` and `not_oldest` while your
+  node lags the leader, `not_oldest` also around a change of the minimum or
+  while your node's maximum bucket capacity exceeds the leader's, and
+  `catching_up` for a short while after your node starts or reloads its chain
+  state; if it keeps rising, your node's mirror has stopped replaying. Leaders on
+  the older release add to `unsigned` and `not_oldest` during an upgrade.
+  Counted, not alerted.
 - **`hashi_peer_bitcoind_discoveries_refused_total`.** An honest leader reaches
   the limit in a burst of new deposits when your node's discoveries are slow.
 - **`increase()` alone on a per-peer counter.** It misses a shed in a series'

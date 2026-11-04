@@ -656,6 +656,7 @@ fn is_expected_refusal(status: &tonic::Status) -> bool {
             crate::grpc::NOT_READY_TO_FINALIZE_MSG,
             crate::grpc::UNSIGNED_REFUSAL_MSG,
             crate::grpc::NOT_OLDEST_REFUSAL_MSG,
+            crate::grpc::CATCHING_UP_REFUSAL_MSG,
         ]
         .iter()
         .any(|marker| status.message().contains(marker))

@@ -13,6 +13,7 @@ use crate::btc_monitor::limits::BitcoindBusy;
 use crate::deposits::UnapprovedDepositError;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
+use crate::metrics::SIGNING_REFUSAL_CATCHING_UP;
 use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
 use crate::metrics::SIGNING_REFUSAL_NOT_OLDEST;
 use crate::metrics::SIGNING_REFUSAL_PAUSED;
@@ -24,6 +25,7 @@ use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::trm;
 use crate::withdrawals::MalformedSigningRequest;
+use crate::withdrawals::MirrorCatchingUp;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::OldestRequestMissing;
 use crate::withdrawals::WithdrawalAlreadyFinalized;
@@ -57,6 +59,7 @@ use hashi_types::proto::SignWithdrawalTxSigningResponse;
 use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
+use super::CATCHING_UP_REFUSAL_MSG;
 use super::HttpService;
 use super::PAUSED_REFUSAL_MSG;
 use super::UNSIGNED_REFUSAL_MSG;
@@ -523,6 +526,10 @@ impl HttpService {
     }
 
     fn admit_construction(&self, member: &Member) -> Result<(), Status> {
+        if !self.inner.onchain_state().caught_up_with_scrape() {
+            self.count_signing_refusal(member.0, SIGNING_REFUSAL_CATCHING_UP);
+            return Err(Status::failed_precondition(CATCHING_UP_REFUSAL_MSG));
+        }
         if self.inner.onchain_state().has_unsigned_withdrawal_txn() {
             self.count_signing_refusal(member.0, SIGNING_REFUSAL_UNSIGNED);
             return Err(Status::failed_precondition(UNSIGNED_REFUSAL_MSG));
@@ -567,7 +574,9 @@ impl HttpService {
     }
 
     fn construction_refusal(&self, caller: Address, err: anyhow::Error) -> Status {
-        if err.is::<WithdrawalStillUnsigned>() {
+        if err.is::<MirrorCatchingUp>() {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_CATCHING_UP);
+        } else if err.is::<WithdrawalStillUnsigned>() {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_UNSIGNED);
         } else if err.is::<OldestRequestMissing>() {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_OLDEST);
