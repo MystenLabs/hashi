@@ -168,8 +168,10 @@ the fee against three bounds:
 - **Floor**: the fee must be at least `1 sat/vB` (the minimum relay fee),
   or the Bitcoin network does not propagate the transaction.
 - **Ceiling**: the fee must not exceed 3x the validator's own fee
-  estimate for the same transaction weight, including any CPFP deficit
-  its unconfirmed ancestors owe (see
+  estimate for the same transaction weight. If the transaction spends
+  outputs of earlier transactions that are still unconfirmed (its
+  ancestors), the ceiling also includes the fee those ancestors still
+  owe, which this transaction pays for them through CPFP (see
   [Stuck transactions](#stuck-transactions)). This prevents a malicious leader from
   overpaying fees to extract value from users.
 - **Per-user cap**: the per-user share of the miner fee must not exceed
