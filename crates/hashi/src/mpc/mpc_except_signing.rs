@@ -19,6 +19,7 @@ use crate::metrics::RefusalCounters;
 use crate::metrics::STORED_ROW_LOAD;
 use crate::metrics::STORED_ROW_READ;
 use crate::mpc::fair_rwlock::FairRwLock;
+use crate::mpc::identified_bad_nodes::IdentifiedBadNodes;
 use crate::mpc::message_cache::Cached;
 use crate::mpc::message_cache::MessageCache;
 use crate::mpc::public_outputs::MpcOutputs;
@@ -40,9 +41,11 @@ use crate::mpc::types::AvidNonceRetrievalMessage;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::AvidVoteMessagesHash;
 use crate::mpc::types::AvssVoteMessagesHash;
+use crate::mpc::types::BadComplaint;
 use crate::mpc::types::CertKind;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
+use crate::mpc::types::ComplaintRefusal;
 pub use crate::mpc::types::ComplaintResponse;
 pub use crate::mpc::types::ComplaintResponsesKey;
 pub use crate::mpc::types::ComplaintsToProcessKey;
@@ -245,6 +248,7 @@ pub struct MpcManager {
     test_corrupt_shares_for: Option<Address>,
     /// Which valid complaints `handle_complain_request` answers.
     complaint_response_policy: ComplaintResponsePolicy,
+    identified_bad_nodes: Arc<IdentifiedBadNodes>,
 }
 
 impl AdmittedNonceDealers {
@@ -578,6 +582,7 @@ impl MpcManager {
             avid_party_phases: HashMap::new(),
             test_corrupt_shares_for,
             complaint_response_policy,
+            identified_bad_nodes: Arc::default(),
         };
         manager.load_stored_messages(metrics)?;
         Ok(manager)
@@ -789,6 +794,14 @@ impl MpcManager {
         caller: Address,
         request: &ComplainRequest,
     ) -> MpcResult<ComplaintResponse> {
+        if let Some(refusal) = self.identified_bad_nodes.complaint_refusal(
+            request.protocol_type,
+            request.epoch,
+            &caller,
+            &request.dealer,
+        ) {
+            return Err(MpcError::ComplaintRefused(refusal));
+        }
         if request.epoch == self.mpc_config.epoch && !self.is_committee_member() {
             return Err(MpcError::InvalidMessage {
                 sender: caller,
@@ -2637,59 +2650,84 @@ impl MpcManager {
                     sender: caller,
                     reason: "complainer not in committee".into(),
                 })? as PartyId;
-        let state = self
-            .get_avid_round_state(batch_index, &request.dealer)?
-            .ok_or_else(|| {
-                MpcError::NotFound("no AVID round state for the complained round".into())
-            })?;
-        let receiver = self.create_avid_nonce_receiver(request.dealer, batch_index)?;
-        let verified_common = self.avid_round_verified_common(request.dealer, batch_index)?;
+        let dealer = request.dealer;
         let mut rng = rand::thread_rng();
-        let response = match &request.complaint {
-            ProtocolComplaint::AvidReveal(complaint) => receiver
-                .handle_avss_complaint(
-                    complaint,
-                    accuser_id,
-                    &verified_common,
-                    state.own_ciphertext.clone(),
-                    &mut rng,
-                )
-                .map_err(|e| MpcError::CryptoError(e.to_string()))?,
+        let (response, state) = match &request.complaint {
+            ProtocolComplaint::AvidReveal(complaint) => {
+                let vote = self.held_avid_vote(batch_index, &dealer)?;
+                let state = self.round_state_pinned_by(batch_index, &dealer, &vote)?;
+                let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
+                let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
+                let response = receiver
+                    .handle_avss_complaint(
+                        complaint,
+                        accuser_id,
+                        &verified_common,
+                        state.own_ciphertext.clone(),
+                        &mut rng,
+                    )
+                    .map_err(|e| match e {
+                        FastCryptoError::InvalidProof => self.flag_bad_complaint(
+                            caller,
+                            dealer,
+                            batch_index,
+                            BadComplaint::RevealInvalid,
+                            e,
+                        ),
+                        e => MpcError::CryptoError(e.to_string()),
+                    })?;
+                (response, state)
+            }
             ProtocolComplaint::AvidBlame {
                 complaint,
                 vote_cert,
             } => {
-                let held_vote = self
-                    .try_get_avid_held_echoes(batch_index, &request.dealer)?
-                    .map(|held| held.0.clone())
-                    .ok_or_else(|| {
-                        MpcError::NotFound("no held vote for the complained round".into())
-                    })?;
+                let certified = vote_cert.message();
                 if vote_cert.epoch() != self.mpc_config.epoch {
-                    return Err(MpcError::InvalidCertificate(format!(
-                        "vote cert epoch {} is not the current epoch {}",
-                        vote_cert.epoch(),
-                        self.mpc_config.epoch,
-                    )));
+                    return Err(MpcError::ComplaintRefused(
+                        ComplaintRefusal::CertificateEpoch,
+                    ));
                 }
-                let unclassified = UnclassifiedNonceCert::from_signed(vote_cert, batch_index);
-                match self.verify_and_classify_nonce_cert(&unclassified)? {
-                    (Some(CertKind::AvidVote), _) => {}
-                    (kind, _) => {
-                        return Err(MpcError::InvalidCertificate(format!(
-                            "blame carried a {kind:?} cert; only an AvidVote cert can back a blame"
-                        )));
-                    }
+                if certified.dealer_address != dealer || certified.batch_index != batch_index {
+                    return Err(self.flag_bad_complaint(
+                        caller,
+                        dealer,
+                        batch_index,
+                        BadComplaint::CertificateMismatch,
+                        format!(
+                            "it names dealer {:?}, batch_index={}",
+                            certified.dealer_address, certified.batch_index,
+                        ),
+                    ));
                 }
-                let cert = AvidCertificate::vote(
-                    self.hashi_object_id,
-                    vote_cert.clone(),
-                    held_vote,
-                    Arc::new(self.committee.clone()),
-                )?
-                .to_verified()
-                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-                receiver
+                let vote = self.held_avid_vote(batch_index, &dealer)?;
+                if hash_avid_vote(&vote) != certified.messages_hash {
+                    return Err(MpcError::ComplaintRefused(
+                        ComplaintRefusal::VoteNotCertified,
+                    ));
+                }
+                let state = self.round_state_pinned_by(batch_index, &dealer, &vote)?;
+                let cert = self.verified_avid_vote_cert(vote_cert, vote).map_err(|e| {
+                    self.flag_bad_complaint(
+                        caller,
+                        dealer,
+                        batch_index,
+                        BadComplaint::CertificateInvalid,
+                        e,
+                    )
+                })?;
+                if !cert.payload().vote.recipients.contains(&accuser_id) {
+                    return Err(self.flag_bad_complaint(
+                        caller,
+                        dealer,
+                        batch_index,
+                        BadComplaint::NotPendingRecipient,
+                        format!("accuser {accuser_id}"),
+                    ));
+                }
+                let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
+                let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
+                let response = receiver
                     .handle_avid_complaint(
                         complaint,
                         accuser_id,
@@ -2698,7 +2736,16 @@ impl MpcManager {
                         state.own_ciphertext.clone(),
                         &mut rng,
                     )
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?
+                    .map_err(|e| {
+                        self.flag_bad_complaint(
+                            caller,
+                            dealer,
+                            batch_index,
+                            BadComplaint::BlameInvalid,
+                            e,
+                        )
+                    })?;
+                (response, state)
             }
             ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
         };
@@ -2715,6 +2762,73 @@ impl MpcManager {
             }
         );
         Ok(ComplaintResponse::NonceGenerationAvid(response))
+    }
+
+    fn held_avid_vote(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<batch_avss_avid::AvidVote> {
+        self.try_get_avid_held_echoes(batch_index, dealer)?
+            .map(|held| held.0.clone())
+            .ok_or(MpcError::ComplaintRefused(ComplaintRefusal::NoHeldVote))
+    }
+
+    fn round_state_pinned_by(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+        vote: &batch_avss_avid::AvidVote,
+    ) -> MpcResult<Arc<AvidRoundState>> {
+        self.get_avid_round_state(batch_index, dealer)?
+            .filter(|state| state.common.hash() == vote.common_message_hash)
+            .ok_or(MpcError::ComplaintRefused(ComplaintRefusal::CommonNotHeld))
+    }
+
+    fn verified_avid_vote_cert(
+        &self,
+        vote_cert: &SignedMessage<AvidVoteMessagesHash>,
+        vote: batch_avss_avid::AvidVote,
+    ) -> MpcResult<VerifiedAvidVoteCert> {
+        let nodes = &self.mpc_config.nodes;
+        let weight = self
+            .committee
+            .reduced_signed_weight(vote_cert.committee_signature(), nodes)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+        let quorum = Self::avid_vote_quorum(nodes, self.mpc_config.max_faulty);
+        if weight < quorum {
+            return Err(MpcError::InvalidCertificate(format!(
+                "reduced weight {weight} below the AvidVote bar {quorum}"
+            )));
+        }
+        AvidCertificate::vote(
+            self.hashi_object_id,
+            vote_cert.clone(),
+            vote,
+            Arc::new(self.committee.clone()),
+        )?
+        .to_verified()
+        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+    }
+
+    fn flag_bad_complaint(
+        &self,
+        caller: Address,
+        dealer: Address,
+        batch_index: u32,
+        reason: BadComplaint,
+        detail: impl std::fmt::Display,
+    ) -> MpcError {
+        let epoch = self.mpc_config.epoch;
+        self.identified_bad_nodes.insert(epoch, caller);
+        tracing::warn!(
+            "Flagged {caller:?} for epoch {epoch}: its complaint about dealer {dealer:?}, \
+             batch_index={batch_index}, is provably bad: {reason}: {detail}"
+        );
+        MpcError::BadComplaint {
+            reason,
+            detail: detail.to_string(),
+        }
     }
 
     fn ensure_avid_nonce_output(
@@ -3604,6 +3718,7 @@ impl MpcManager {
         }))
         .await;
         let mgr = Arc::clone(mpc_manager);
+        let cert_epoch = nonce_cert.epoch();
         let nonce_cert = nonce_cert.clone();
         let refusals = metrics.refusal_counters();
         let outcome = spawn_blocking(move || {
@@ -3770,6 +3885,7 @@ impl MpcManager {
             && let Err(e) = Self::recover_avid_nonce_shares_via_complaint(
                 mpc_manager,
                 dealer,
+                cert_epoch,
                 batch_index,
                 verified_common,
                 complaint,
@@ -3793,6 +3909,7 @@ impl MpcManager {
     async fn recover_avid_nonce_shares_via_complaint(
         mpc_manager: &Arc<FairRwLock<Self>>,
         dealer: Address,
+        epoch: u64,
         batch_index: u32,
         verified_common: batch_avss_avid::VerifiedAvssCommonMessage,
         complaint: ProtocolComplaint,
@@ -3801,10 +3918,6 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let epoch = {
-            let mgr = mpc_manager.read().unwrap();
-            mgr.mpc_config.epoch
-        };
         let request = ComplainRequest {
             dealer,
             share_index: None,
@@ -6785,6 +6898,10 @@ impl MpcManager {
         let previous_epoch = self.published_previous_epoch();
         self.outputs
             .adopt(public, self.mpc_config.epoch, previous_epoch);
+    }
+
+    pub(crate) fn adopt_identified_bad_nodes(&mut self, identified: &Arc<IdentifiedBadNodes>) {
+        self.identified_bad_nodes = Arc::clone(identified);
     }
 }
 

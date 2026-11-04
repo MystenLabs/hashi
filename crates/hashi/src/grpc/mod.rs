@@ -282,6 +282,12 @@ impl HttpService {
         self.inner.public_outputs()
     }
 
+    pub(crate) fn identified_bad_nodes(
+        &self,
+    ) -> &crate::mpc::identified_bad_nodes::IdentifiedBadNodes {
+        self.inner.identified_bad_nodes()
+    }
+
     pub fn signing_manager_for(
         &self,
         epoch: u64,

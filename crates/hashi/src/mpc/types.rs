@@ -1178,6 +1178,70 @@ pub enum MpcError {
 
     #[error("Complaint about dealer {dealer} in epoch {epoch} withheld")]
     ComplaintWithheld { epoch: u64, dealer: Address },
+
+    #[error("Complaint refused: {0}")]
+    ComplaintRefused(ComplaintRefusal),
+
+    #[error("Provably bad complaint: {reason}: {detail}")]
+    BadComplaint {
+        reason: BadComplaint,
+        detail: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ComplaintRefusal {
+    #[error("the caller complained about its own dealing")]
+    OwnDealing,
+    #[error("the caller sent a provably bad complaint earlier this epoch")]
+    Flagged,
+    #[error("this node holds no vote for the complained round")]
+    NoHeldVote,
+    #[error("this node's vote does not hash to the certificate")]
+    VoteNotCertified,
+    #[error("this node's round state does not hold the common its vote pins")]
+    CommonNotHeld,
+    #[error("the certificate is from another epoch")]
+    CertificateEpoch,
+}
+
+impl ComplaintRefusal {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::OwnDealing => "own_dealing",
+            Self::Flagged => "flagged",
+            Self::NoHeldVote => "no_held_vote",
+            Self::VoteNotCertified => "vote_not_certified",
+            Self::CommonNotHeld => "common_not_held",
+            Self::CertificateEpoch => "certificate_epoch",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BadComplaint {
+    #[error("the certificate names another dealer or batch")]
+    CertificateMismatch,
+    #[error("the certificate does not verify at the W - f bar")]
+    CertificateInvalid,
+    #[error("the accuser is not one of the vote's pending recipients")]
+    NotPendingRecipient,
+    #[error("the reveal does not prove a bad share")]
+    RevealInvalid,
+    #[error("the blame does not prove an inconsistent dispersal")]
+    BlameInvalid,
+}
+
+impl BadComplaint {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::CertificateMismatch => "certificate_mismatch",
+            Self::CertificateInvalid => "certificate_invalid",
+            Self::NotPendingRecipient => "not_pending_recipient",
+            Self::RevealInvalid => "reveal_invalid",
+            Self::BlameInvalid => "blame_invalid",
+        }
+    }
 }
 
 impl From<FastCryptoError> for MpcError {
