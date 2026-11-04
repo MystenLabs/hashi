@@ -23,6 +23,7 @@ use crate::domain::BtcConfirmedDeposit;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::SuiDepositApprovedEvent;
+use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
@@ -42,6 +43,7 @@ use hashi_types::guardian::unix_millis_to_seconds;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
+use sui_sdk_types::Address;
 
 /// The findings that alert: an ERROR log line, and the finding metric. A
 /// finding that does not alert is a WARN log line.
@@ -97,6 +99,28 @@ impl UnapprovedCause {
     }
 }
 
+/// Why two events of one deposit request disagree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DepositMismatchReason {
+    /// E2 and E3: the Bitcoin payment and the approval differ in amount or
+    /// script.
+    PaymentDiffers {
+        sui: SuiDepositApprovedEvent,
+        btc: BtcConfirmedDeposit,
+    },
+    /// E1 and E3: the approval differs from its request. Move copies the
+    /// request, so Move has a fault or the Sui answer is wrong.
+    ApprovalDiffers {
+        request: SuiDepositRequestedEvent,
+        approval: SuiDepositApprovedEvent,
+    },
+    /// E1 and E1: a request came again with other contents.
+    RequestDiffers {
+        held: SuiDepositRequestedEvent,
+        new: SuiDepositRequestedEvent,
+    },
+}
+
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorFinding {
@@ -137,10 +161,8 @@ pub enum MonitorFinding {
         sui: WithdrawalTx,
         guardian: WithdrawalTx,
     },
-    /// E3 (`SuiDepositApprovedEvent`) without E2 (`BtcConfirmedDeposit`).
-    ///
-    /// Hashi approved a deposit for minting that Bitcoin shows no matching
-    /// deposit for.
+    /// E3 without E2: Hashi approved a deposit, but its outpoint holds no
+    /// unspent Bitcoin output.
     DepositUnbacked {
         sui: SuiDepositApprovedEvent,
     },
@@ -154,13 +176,11 @@ pub enum MonitorFinding {
         deadline: UnixSeconds,
         block_time: UnixSeconds,
     },
-    /// E3 and E2 differ in amount or script.
-    ///
-    /// The deposit Bitcoin confirmed differs in amount or script from the
-    /// one Hashi approved.
+    /// Two events of one deposit request disagree. See
+    /// `DepositMismatchReason`.
     DepositMismatch {
-        sui: SuiDepositApprovedEvent,
-        btc: BtcConfirmedDeposit,
+        request_id: Address,
+        reason: DepositMismatchReason,
     },
     /// E2 found, but no E3 `DEPOSIT_REQUEST_WATCH` after the latest request.
     /// `causes` gives what the monitor can infer. The daily pool check
@@ -421,6 +441,30 @@ impl fmt::Display for BtcRpcInconsistency {
     }
 }
 
+impl fmt::Display for DepositMismatchReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PaymentDiffers { sui, btc } => write!(
+                f,
+                "PaymentDiffers(deposit_id={}, hashi_amount={}, btc_amount={}, hashi_script={:x}, btc_script={:x})",
+                sui.deposit_id, sui.amount, btc.amount, sui.script_pubkey, btc.script_pubkey,
+            ),
+            Self::ApprovalDiffers { request, approval } => write!(
+                f,
+                "ApprovalDiffers(request={}, approval={})",
+                MonitorEvent::DepositRequested(request.clone()),
+                MonitorEvent::DepositApproved(approval.clone()),
+            ),
+            Self::RequestDiffers { held, new } => write!(
+                f,
+                "RequestDiffers(held={}, new={})",
+                MonitorEvent::DepositRequested(held.clone()),
+                MonitorEvent::DepositRequested(new.clone()),
+            ),
+        }
+    }
+}
+
 impl fmt::Display for MonitorFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -488,16 +532,9 @@ impl fmt::Display for MonitorFinding {
                 utc_timestamp(*deadline),
                 utc_timestamp(*block_time),
             ),
-            Self::DepositMismatch { sui, btc } => write!(
-                f,
-                "DepositMismatch(request_id={}, deposit_id={}, hashi_amount={}, btc_amount={}, hashi_script={:x}, btc_script={:x})",
-                sui.request_id,
-                sui.deposit_id,
-                sui.amount,
-                btc.amount,
-                sui.script_pubkey,
-                btc.script_pubkey,
-            ),
+            Self::DepositMismatch { request_id, reason } => {
+                write!(f, "DepositMismatch(request_id={request_id}, {reason})")
+            }
             Self::DepositNotApproved {
                 outpoint,
                 requested_amount,

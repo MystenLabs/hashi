@@ -368,6 +368,7 @@ impl UtxoPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::findings::DepositMismatchReason;
 
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
@@ -745,9 +746,10 @@ mod tests {
             sui_approval(1, 1_000, ScriptBuf::from_bytes(vec![0x52])),
         ] {
             let findings = pool.check_sui_approval(&sui, SKEW);
-            assert!(
-                matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, .. }] if *claimed == sui)
-            );
+            assert!(matches!(&findings[..], [MonitorFinding::DepositMismatch {
+                    reason: DepositMismatchReason::PaymentDiffers { sui: claimed, .. },
+                    ..
+                }] if *claimed == sui));
         }
     }
 
