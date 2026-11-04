@@ -43,8 +43,9 @@ use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::domain::ConfirmedDeposit;
-use crate::domain::ConfirmedWithdrawal;
+use crate::domain::BtcConfirmedDeposit;
+use crate::domain::FinishedDeposit;
+use crate::domain::FinishedWithdrawal;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::UtxoOrigin;
 use crate::findings::BtcRpcInconsistency;
@@ -140,17 +141,9 @@ impl UtxoPool {
         self.utxos.keys().copied().collect()
     }
 
-    /// Add a deposit Bitcoin confirmed.
-    pub fn add_deposit(&mut self, deposit: &ConfirmedDeposit) -> Option<MonitorFinding> {
-        self.add(
-            deposit.deposit_id.into(),
-            Utxo {
-                amount: deposit.amount,
-                script_pubkey: deposit.script_pubkey.clone(),
-                origin: UtxoOrigin::Deposit,
-                first_seen: deposit.block_time,
-            },
-        )
+    /// Add the UTXO of a closed deposit machine.
+    pub fn add_deposit(&mut self, deposit: &FinishedDeposit) -> Option<MonitorFinding> {
+        self.add(OutPoint::from(deposit.deposit_id), deposit.utxo.clone())
     }
 
     /// Check the Sui `DepositApproved` against the pool: the UTXO must be a
@@ -165,7 +158,7 @@ impl UtxoPool {
             .utxos
             .get(&outpoint)
             .filter(|utxo| utxo.origin == UtxoOrigin::Deposit)
-            .map(|utxo| ConfirmedDeposit {
+            .map(|utxo| BtcConfirmedDeposit {
                 deposit_id: sui.deposit_id,
                 amount: utxo.amount,
                 script_pubkey: utxo.script_pubkey.clone(),
@@ -176,7 +169,7 @@ impl UtxoPool {
 
     /// Apply withdrawals Bitcoin confirmed: every change output enters,
     /// then every input is spent. See the module doc for why in that order.
-    pub fn add_withdrawals(&mut self, withdrawals: &[ConfirmedWithdrawal]) -> Vec<MonitorFinding> {
+    pub fn add_withdrawals(&mut self, withdrawals: &[FinishedWithdrawal]) -> Vec<MonitorFinding> {
         let mut findings = Vec::new();
         for withdrawal in withdrawals {
             findings.extend(self.add_change_outputs(withdrawal));
@@ -191,7 +184,7 @@ impl UtxoPool {
 
     /// Add a withdrawal's change outputs: every output from the first
     /// change vout on.
-    fn add_change_outputs(&mut self, withdrawal: &ConfirmedWithdrawal) -> Vec<MonitorFinding> {
+    fn add_change_outputs(&mut self, withdrawal: &FinishedWithdrawal) -> Vec<MonitorFinding> {
         let outputs = &withdrawal.confirmation.outputs;
         (withdrawal.first_change_vout..outputs.len())
             .filter_map(|vout| {
@@ -305,6 +298,7 @@ mod tests {
     use crate::domain::DepositId;
     use crate::domain::SuiDepositRequestedEvent;
     use crate::test_utils::approval_of;
+    use crate::test_utils::approved;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
 
@@ -324,8 +318,8 @@ mod tests {
     }
 
     /// A deposit at `outpoint(fill)`, confirmed in the block at `block_time`.
-    fn deposit(fill: u8, amount: u64, block_time: UnixSeconds) -> ConfirmedDeposit {
-        ConfirmedDeposit {
+    fn deposit(fill: u8, amount: u64, block_time: UnixSeconds) -> BtcConfirmedDeposit {
+        BtcConfirmedDeposit {
             deposit_id: DepositId::new(txid(fill), 0),
             amount,
             script_pubkey: script(),
@@ -342,8 +336,8 @@ mod tests {
 
     /// A withdrawal `txid(fill)` with one user payout and one change output
     /// of 550 at vout 1, spending `inputs`.
-    fn withdrawal(fill: u8, inputs: Vec<OutPoint>) -> ConfirmedWithdrawal {
-        ConfirmedWithdrawal {
+    fn withdrawal(fill: u8, inputs: Vec<OutPoint>) -> FinishedWithdrawal {
+        FinishedWithdrawal {
             txid: txid(fill),
             confirmation: BtcConfirmation {
                 block_time: 700,
@@ -370,7 +364,10 @@ mod tests {
     /// A pool holding `outpoint(1)` of 1_000, first seen at `first_seen`.
     fn pool_seen_at(first_seen: UnixSeconds) -> UtxoPool {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&deposit(1, 1_000, first_seen)).is_none());
+        assert!(
+            pool.add_deposit(&approved(deposit(1, 1_000, first_seen)))
+                .is_none()
+        );
         pool
     }
 
@@ -401,7 +398,10 @@ mod tests {
     #[test]
     fn a_confirmed_withdrawal_spends_its_inputs_and_adds_its_change() {
         let mut pool = pool_with_one();
-        assert!(pool.add_deposit(&deposit(2, 2_000, 500)).is_none());
+        assert!(
+            pool.add_deposit(&approved(deposit(2, 2_000, 500)))
+                .is_none()
+        );
 
         let findings = pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
@@ -433,10 +433,13 @@ mod tests {
     fn a_repeated_add_keeps_the_utxo_and_another_amount_is_a_finding() {
         let mut pool = pool_with_one();
 
-        assert!(pool.add_deposit(&deposit(1, 1_000, 900)).is_none());
+        assert!(
+            pool.add_deposit(&approved(deposit(1, 1_000, 900)))
+                .is_none()
+        );
         assert_eq!(pool.get(&outpoint(1)).unwrap().first_seen, 500);
 
-        let finding = pool.add_deposit(&deposit(1, 1_001, 900)).unwrap();
+        let finding = pool.add_deposit(&approved(deposit(1, 1_001, 900))).unwrap();
         assert_eq!(
             finding,
             MonitorFinding::BtcRpcInconsistency(BtcRpcInconsistency::UtxoMismatch {
@@ -455,7 +458,7 @@ mod tests {
         let mut deposit = deposit(1, 1_000, 900);
         deposit.script_pubkey = ScriptBuf::from_bytes(vec![0x52]);
 
-        let finding = pool.add_deposit(&deposit).unwrap();
+        let finding = pool.add_deposit(&approved(deposit)).unwrap();
 
         assert_eq!(
             finding,
@@ -675,7 +678,7 @@ mod tests {
     #[test]
     fn a_pool_round_trips_through_its_stored_parts() {
         let mut pool = pool_with_one();
-        pool.add_deposit(&deposit(2, 2_000, 1_500));
+        pool.add_deposit(&approved(deposit(2, 2_000, 1_500)));
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
         let loaded = UtxoPool::from_wire(pool.held_to_wire());

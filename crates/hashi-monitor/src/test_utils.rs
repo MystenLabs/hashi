@@ -23,9 +23,12 @@ use hashi_types::guardian::time::UnixSeconds;
 use sui_sdk_types::Address;
 
 use crate::domain::BtcConfirmation;
+use crate::domain::BtcConfirmedDeposit;
 use crate::domain::DepositId;
+use crate::domain::FinishedDeposit;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
+use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalTx;
 use crate::keys::HashiBTCKeys;
 
@@ -122,4 +125,9 @@ pub fn withdrawal_tx(change_address: Vec<u8>) -> WithdrawalTx {
             bitcoin_address: change_address,
         }],
     )
+}
+
+/// The UTXO of `btc`, as an approved deposit.
+pub fn approved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
+    FinishedDeposit::new(btc, UtxoOrigin::Deposit)
 }

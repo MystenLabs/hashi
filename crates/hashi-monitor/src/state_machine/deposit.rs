@@ -17,11 +17,13 @@ use serde::Serialize;
 use sui_sdk_types::Address;
 
 use crate::domain::BtcConfirmation;
-use crate::domain::ConfirmedDeposit;
+use crate::domain::BtcConfirmedDeposit;
 use crate::domain::DepositId;
+use crate::domain::FinishedDeposit;
 use crate::domain::MonitorEvent;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
+use crate::domain::UtxoOrigin;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::timing::Timing;
@@ -40,7 +42,7 @@ enum BtcAnswer {
     Pending,
     /// Confirmed, and the claimed vout pays the claimed script.
     /// The amount may differ from E1's: the judge later checks it against E3.
-    Paid(ConfirmedDeposit),
+    Paid(BtcConfirmedDeposit),
     /// Confirmed, but the claimed vout is missing or pays another script.
     NotPaid,
     /// Not confirmed by the end of the watch.
@@ -117,17 +119,18 @@ impl DepositStateMachine {
     }
 
     /// The deposit, once Bitcoin confirmed it at the claimed script.
-    pub fn confirmed(&self) -> Option<&ConfirmedDeposit> {
+    pub fn confirmed(&self) -> Option<&BtcConfirmedDeposit> {
         match &self.btc_answer {
             BtcAnswer::Paid(deposit) => Some(deposit),
             BtcAnswer::Pending | BtcAnswer::NotPaid | BtcAnswer::Lapsed => None,
         }
     }
 
-    /// The deposit Bitcoin confirmed, if any.
-    pub fn into_confirmed(self) -> Option<ConfirmedDeposit> {
+    /// The UTXO Bitcoin paid, if any. The auditor calls it when it takes the
+    /// closed machine.
+    pub fn into_finished(self) -> Option<FinishedDeposit> {
         match self.btc_answer {
-            BtcAnswer::Paid(deposit) => Some(deposit),
+            BtcAnswer::Paid(deposit) => Some(FinishedDeposit::new(deposit, UtxoOrigin::Deposit)),
             BtcAnswer::Pending | BtcAnswer::NotPaid | BtcAnswer::Lapsed => None,
         }
     }
@@ -251,7 +254,7 @@ impl DepositStateMachine {
     /// Bitcoin's confirmation of the transaction, read against the claim.
     fn answer_from(&self, confirmation: &BtcConfirmation) -> BtcAnswer {
         let request = &self.sui_request;
-        let Some(deposit) = ConfirmedDeposit::from_confirmation(request, confirmation) else {
+        let Some(deposit) = BtcConfirmedDeposit::from_confirmation(request, confirmation) else {
             tracing::debug!(
                 request_id = %request.request_id,
                 deposit_id = %request.deposit_id,
@@ -435,7 +438,7 @@ mod tests {
 
         assert_eq!(
             sm.confirmed(),
-            Some(&ConfirmedDeposit {
+            Some(&BtcConfirmedDeposit {
                 deposit_id: DepositId::new(txid(9), 1),
                 amount: 50_000,
                 script_pubkey: script,

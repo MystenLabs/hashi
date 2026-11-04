@@ -538,11 +538,12 @@ fn this_deployments(cfg: &Config, snapshot: Option<Snapshot>) -> anyhow::Result<
 mod tests {
     use super::*;
     use crate::domain::BtcConfirmation;
-    use crate::domain::ConfirmedDeposit;
+    use crate::domain::BtcConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::rpc::sui::tests::hashi_approval;
     use crate::test_utils::approval_of;
+    use crate::test_utils::approved;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
@@ -647,12 +648,12 @@ mod tests {
         assert!(
             auditor
                 .utxo_pool
-                .add_deposit(&ConfirmedDeposit {
+                .add_deposit(&approved(BtcConfirmedDeposit {
                     deposit_id: sui.deposit_id,
                     amount: 50_000,
                     script_pubkey: sui.script_pubkey.clone(),
                     block_time: 150,
-                })
+                }))
                 .is_none()
         );
         assert!(
@@ -785,13 +786,13 @@ mod tests {
     async fn a_restart_resumes_the_open_flows_and_the_pool() {
         let cfg = Config::for_tests();
         let mut auditor = auditor_with(&cfg, Arc::new(MonitorMetrics::new()));
-        let deposit = ConfirmedDeposit {
+        let deposit = BtcConfirmedDeposit {
             deposit_id: DepositId::new(txid(1), 0),
             amount: 1_000,
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_700_000_000,
         };
-        assert!(auditor.utxo_pool.add_deposit(&deposit).is_none());
+        assert!(auditor.utxo_pool.add_deposit(&approved(deposit)).is_none());
         // An approval the guardian never signed: its E2 is overdue.
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(hashi_approval())]);
         auditor.save_snapshot().await;

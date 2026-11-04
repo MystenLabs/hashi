@@ -140,10 +140,11 @@ mod tests {
     use crate::audit::tests::auditor_with_pool;
     use crate::audit::tests::complete_withdrawal;
     use crate::config::Config;
-    use crate::domain::ConfirmedDeposit;
+    use crate::domain::BtcConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::utxo_pool::SuspectSpend;
     use crate::metrics::MonitorMetrics;
+    use crate::test_utils::approved;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
     use hashi_types::guardian::WithdrawalID;
@@ -187,12 +188,12 @@ mod tests {
         assert!(
             auditor
                 .utxo_pool
-                .add_deposit(&ConfirmedDeposit {
+                .add_deposit(&approved(BtcConfirmedDeposit {
                     deposit_id: DepositId::new(txid(9), 1),
                     amount: 5_000,
                     script_pubkey: p2wpkh(0x54),
                     block_time: 900,
-                })
+                }))
                 .is_none()
         );
 
@@ -256,16 +257,16 @@ mod tests {
         let withdrawal = complete_withdrawal(7, 7, vec![outpoint], &timing);
         let pool = &mut auditor.utxo_pool;
         assert!(
-            pool.add_deposit(&ConfirmedDeposit {
+            pool.add_deposit(&approved(BtcConfirmedDeposit {
                 deposit_id: DepositId::new(txid(0x51), 1),
                 amount: 5_000,
                 script_pubkey: p2wpkh(0x55),
                 block_time: 900,
-            })
+            }))
             .is_none()
         );
         assert!(
-            pool.add_withdrawals(&[withdrawal.confirmed().cloned().unwrap()])
+            pool.add_withdrawals(&[withdrawal.finished().cloned().unwrap()])
                 .is_empty()
         );
 

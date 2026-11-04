@@ -17,7 +17,7 @@
 //!   cannot write. The guardian is the cause. The inner enum names the rule
 //!   it breaks.
 
-use crate::domain::ConfirmedDeposit;
+use crate::domain::BtcConfirmedDeposit;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::SuiDepositApprovedEvent;
@@ -101,7 +101,7 @@ pub enum MonitorFinding {
     /// one Hashi approved.
     DepositMismatch {
         sui: SuiDepositApprovedEvent,
-        btc: ConfirmedDeposit,
+        btc: BtcConfirmedDeposit,
     },
     /// A Bitcoin RPC answer contradicts one the monitor already holds. See
     /// `BtcRpcInconsistency`.

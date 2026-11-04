@@ -5,6 +5,8 @@
 //! the deposit a request yields.
 
 use crate::domain::BtcConfirmation;
+use crate::domain::UtxoOrigin;
+use crate::domain::utxo_pool::Utxo;
 use std::fmt;
 
 use bitcoin::OutPoint;
@@ -128,7 +130,7 @@ impl SuiDepositApprovedEvent {
     /// and script, and be in a block no later than the approval plus `skew`.
     pub fn judge(
         &self,
-        btc_deposit_info: Option<&ConfirmedDeposit>,
+        btc_deposit_info: Option<&BtcConfirmedDeposit>,
         skew: u64,
     ) -> Vec<MonitorFinding> {
         let Some(paid) = btc_deposit_info else {
@@ -153,9 +155,9 @@ impl SuiDepositApprovedEvent {
     }
 }
 
-/// A deposit Bitcoin confirmed at a bridge address. The UTXO pool records it.
+/// A deposit Bitcoin confirmed at a bridge address.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct ConfirmedDeposit {
+pub struct BtcConfirmedDeposit {
     pub deposit_id: DepositId,
     /// Satoshis Bitcoin paid.
     pub amount: u64,
@@ -166,7 +168,7 @@ pub struct ConfirmedDeposit {
     pub block_time: UnixSeconds,
 }
 
-impl ConfirmedDeposit {
+impl BtcConfirmedDeposit {
     /// The deposit `request` claims, from Bitcoin's `confirmation` of its
     /// transaction. `None` when the transaction has no output at the claimed
     /// vout, or that output pays another script. The amount is Bitcoin's.
@@ -186,5 +188,28 @@ impl ConfirmedDeposit {
             script_pubkey: output.script_pubkey.clone(),
             block_time: confirmation.block_time,
         })
+    }
+}
+
+/// The result of a closed deposit machine: the UTXO Bitcoin paid, as the
+/// pool holds it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinishedDeposit {
+    pub deposit_id: DepositId,
+    pub utxo: Utxo,
+}
+
+impl FinishedDeposit {
+    /// The UTXO of the payment `btc`, which enters the pool with `origin`.
+    pub fn new(btc: BtcConfirmedDeposit, origin: UtxoOrigin) -> Self {
+        Self {
+            deposit_id: btc.deposit_id,
+            utxo: Utxo {
+                amount: btc.amount,
+                script_pubkey: btc.script_pubkey,
+                origin,
+                first_seen: btc.block_time,
+            },
+        }
     }
 }
