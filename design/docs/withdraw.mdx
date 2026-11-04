@@ -216,12 +216,10 @@ The leader then constructs an unsigned Bitcoin transaction:
    that the fee is within acceptable bounds (at least `1 sat/vB`, at most 3x
    their own estimate).
 
-Leadership rotates among validators every 100 Sui checkpoints. A validator
-signs an unsigned withdrawal transaction only if it comes from the current
-leader, or from the previous or next leader within 10 checkpoints of their
-shared turn edge; only while no earlier withdrawal transaction awaits
-signatures; and only if it includes the earliest-approved request at or above
-the minimum and within the bucket's maximum capacity, when there is one.
+A validator signs an unsigned withdrawal transaction only while no earlier
+withdrawal transaction awaits signatures, and only if it includes the
+earliest-approved request at or above the minimum and within the bucket's
+maximum capacity, when there is one.
 
 The leader commits the resulting unsigned transaction and its txid onchain by
 calling `hashi::withdraw::commit_withdrawal_tx`:
