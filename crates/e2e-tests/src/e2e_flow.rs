@@ -2034,7 +2034,7 @@ mod tests {
         .await
     }
 
-    fn signing_refusals(node: &crate::HashiNodeHandle, caller: Address, reason: &str) -> f64 {
+    fn paused_refusals(node: &crate::HashiNodeHandle, caller: Address) -> f64 {
         let caller = caller.to_string();
         node.metrics_registry()
             .gather()
@@ -2048,7 +2048,7 @@ mod tests {
                     .any(|label| label.name() == "peer" && label.value() == caller)
                     && labels
                         .iter()
-                        .any(|label| label.name() == "reason" && label.value() == reason)
+                        .any(|label| label.name() == "reason" && label.value() == "paused")
             })
             .map(|metric| metric.get_counter().value())
             .sum()
@@ -2110,7 +2110,7 @@ mod tests {
         peer.wait_for_mpc_key(Duration::from_secs(60)).await?;
 
         set_paused(&networks, true).await?;
-        let refused_before = signing_refusals(peer, caller.validator_address(), "paused");
+        let refused_before = paused_refusals(peer, caller.validator_address());
         let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
         for refusal in &refusals {
             assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
@@ -2123,7 +2123,7 @@ mod tests {
             "SigningManager not available: Hashi is paused"
         );
         assert_eq!(
-            signing_refusals(peer, caller.validator_address(), "paused"),
+            paused_refusals(peer, caller.validator_address()),
             refused_before + 3.0
         );
 
@@ -2138,57 +2138,8 @@ mod tests {
         }
         assert!(partials?.into_inner().partial_sigs.is_empty());
         assert_eq!(
-            signing_refusals(peer, caller.validator_address(), "paused"),
+            paused_refusals(peer, caller.validator_address()),
             refused_before + 3.0
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_construction_from_outside_the_leader_turn_is_refused() -> Result<()> {
-        use hashi_types::proto::SignWithdrawalTxConstructionRequest;
-
-        init_test_logging();
-
-        let networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
-        let nodes = networks.hashi_network.nodes();
-        for node in nodes {
-            node.wait_for_mpc_key(Duration::from_secs(60)).await?;
-        }
-
-        let onchain_state = nodes[0].hashi().onchain_state();
-        let committee = onchain_state
-            .current_committee()
-            .context("no current committee")?;
-        let members = committee.members();
-        let turn = onchain_state.latest_checkpoint_height() / 100;
-        let outsider = members[((turn + 2) % members.len() as u64) as usize].validator_address();
-        let caller = nodes
-            .iter()
-            .find(|node| node.validator_address() == outsider)
-            .context("no node is the outsider")?;
-        let peer = nodes
-            .iter()
-            .find(|node| node.validator_address() != outsider)
-            .context("no peer")?;
-
-        let refused_before = signing_refusals(peer, outsider, "not_leader");
-        let mut bridge = caller
-            .hashi()
-            .onchain_state()
-            .bridge_service_client(&peer.validator_address())
-            .context("no bridge service client for the peer")?;
-        let refusal = bridge
-            .sign_withdrawal_tx_construction(SignWithdrawalTxConstructionRequest::default())
-            .await
-            .err()
-            .context("the peer signed a construction from outside the leader's turn")?;
-        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
-        assert_eq!(refusal.message(), "the caller is not the current leader");
-        assert_eq!(
-            signing_refusals(peer, outsider, "not_leader"),
-            refused_before + 1.0
         );
 
         Ok(())

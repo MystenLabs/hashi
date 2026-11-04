@@ -14,7 +14,6 @@ use crate::deposits::UnapprovedDepositError;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
 use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
-use crate::metrics::SIGNING_REFUSAL_NOT_LEADER;
 use crate::metrics::SIGNING_REFUSAL_NOT_OLDEST;
 use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::SIGNING_REFUSAL_SHAPE;
@@ -27,7 +26,6 @@ use crate::trm;
 use crate::withdrawals::MalformedSigningRequest;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::OldestRequestMissing;
-use crate::withdrawals::OutsideLeaderTurn;
 use crate::withdrawals::WithdrawalAlreadyFinalized;
 use crate::withdrawals::WithdrawalApprovalError;
 use crate::withdrawals::WithdrawalRequestApproval;
@@ -60,7 +58,6 @@ use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
 use super::HttpService;
-use super::NOT_LEADER_REFUSAL_MSG;
 use super::PAUSED_REFUSAL_MSG;
 use super::UNSIGNED_REFUSAL_MSG;
 use super::peer_limit::CallerTaskSlot;
@@ -160,7 +157,7 @@ impl BridgeService for HttpService {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         let member = self.admit_committee_member(caller)?;
-        self.admit_proposer(&member)?;
+        self.admit_construction(&member)?;
         let approval = parse_withdrawal_tx_commitment(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&approval.txid));
@@ -198,9 +195,6 @@ impl BridgeService for HttpService {
         let job_approval = approval.clone();
         let member_signature = run
             .run_blocking(move || {
-                if !inner.caller_may_propose(&caller) {
-                    return Err(OutsideLeaderTurn.into());
-                }
                 inner.finish_withdrawal_tx_commitment(&job_approval, &prepared, fee_rate)?;
                 inner.sign_withdrawal_tx_commitment(&job_approval)
             })
@@ -528,11 +522,7 @@ impl HttpService {
         Ok(Member(caller))
     }
 
-    fn admit_proposer(&self, member: &Member) -> Result<(), Status> {
-        if !self.inner.caller_may_propose(&member.0) {
-            self.count_signing_refusal(member.0, SIGNING_REFUSAL_NOT_LEADER);
-            return Err(Status::failed_precondition(NOT_LEADER_REFUSAL_MSG));
-        }
+    fn admit_construction(&self, member: &Member) -> Result<(), Status> {
         if self.inner.onchain_state().has_unsigned_withdrawal_txn() {
             self.count_signing_refusal(member.0, SIGNING_REFUSAL_UNSIGNED);
             return Err(Status::failed_precondition(UNSIGNED_REFUSAL_MSG));
@@ -577,9 +567,7 @@ impl HttpService {
     }
 
     fn construction_refusal(&self, caller: Address, err: anyhow::Error) -> Status {
-        if err.is::<OutsideLeaderTurn>() {
-            self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_LEADER);
-        } else if err.is::<WithdrawalStillUnsigned>() {
+        if err.is::<WithdrawalStillUnsigned>() {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_UNSIGNED);
         } else if err.is::<OldestRequestMissing>() {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_OLDEST);

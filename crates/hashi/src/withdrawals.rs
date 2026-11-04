@@ -31,7 +31,6 @@ use crate::btc_monitor::limits::BitcoindCharge;
 use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
-use crate::grpc::NOT_LEADER_REFUSAL_MSG;
 use crate::grpc::NOT_OLDEST_REFUSAL_MSG;
 use crate::grpc::NOT_READY_TO_FINALIZE_MSG;
 use crate::grpc::RunGate;
@@ -745,10 +744,6 @@ pub struct RefusedItems(pub Vec<RefusedItem>);
 pub struct FeeEstimateUnavailable(anyhow::Error);
 
 #[derive(Debug, Error)]
-#[error("{marker}", marker = NOT_LEADER_REFUSAL_MSG)]
-pub struct OutsideLeaderTurn;
-
-#[derive(Debug, Error)]
 #[error("{marker}", marker = UNSIGNED_REFUSAL_MSG)]
 pub struct WithdrawalStillUnsigned;
 
@@ -1039,24 +1034,6 @@ impl Hashi {
             .await
             .map_err(FeeEstimateUnavailable)?;
         Ok(withdrawal_fee_rate(&self.config, kyoto_fee_rate))
-    }
-
-    pub(crate) fn caller_may_propose(&self, caller: &Address) -> bool {
-        let checkpoint_height = self.onchain_state().latest_checkpoint_height();
-        let state = self.onchain_state().state();
-        state
-            .hashi()
-            .committees
-            .current_committee()
-            .is_some_and(|committee| {
-                committee.index_of(caller).is_some_and(|index| {
-                    crate::leader::may_propose(
-                        index as u64,
-                        committee.members().len() as u64,
-                        checkpoint_height,
-                    )
-                })
-            })
     }
 
     pub(crate) fn finish_withdrawal_tx_commitment(
