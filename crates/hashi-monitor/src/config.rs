@@ -28,6 +28,7 @@ use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::S3Credentials;
 use serde::Deserialize;
 
+use crate::findings::AlertMode;
 use crate::timing::Timing;
 
 /// Configuration of the continuous monitor.
@@ -44,6 +45,9 @@ pub struct Config {
     pub s3_credentials: Option<S3Credentials>,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
+    /// The findings that alert. Omit for `strict`, where every finding alerts.
+    #[serde(default)]
+    pub alert_mode: AlertMode,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -150,6 +154,7 @@ impl Config {
                 rpc_url: "http://btc".to_string(),
                 http_headers: BTreeMap::new(),
             },
+            alert_mode: AlertMode::Strict,
         }
     }
 }
@@ -174,6 +179,16 @@ mod tests {
         assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
         assert!(config.s3_credentials.is_none());
         assert_eq!(config.btc.rpc_url, env!("CARGO_PKG_NAME"));
+    }
+
+    #[test]
+    fn the_alert_mode_is_strict_unless_set() {
+        let config = Config::from_yaml(&sample_config_yaml()).unwrap();
+        assert_eq!(config.alert_mode, AlertMode::Strict);
+
+        let yaml = format!("{}\nalert_mode: essential\n", sample_config_yaml());
+        let config = Config::from_yaml(&yaml).unwrap();
+        assert_eq!(config.alert_mode, AlertMode::Essential);
     }
 
     #[test]

@@ -154,7 +154,11 @@ impl MonitorMetrics {
         }
     }
 
-    pub fn record_findings(&self, findings: &[MonitorFinding], now: UnixSeconds) {
+    pub fn record_findings<'a>(
+        &self,
+        findings: impl IntoIterator<Item = &'a MonitorFinding>,
+        now: UnixSeconds,
+    ) {
         for finding in findings {
             self.last_finding_timestamp_seconds
                 .with_label_values(&[finding.kind()])
@@ -190,7 +194,7 @@ impl MonitorMetrics {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let mut buf = Vec::new();
         TextEncoder::new()
             .encode(&self.registry.gather(), &mut buf)

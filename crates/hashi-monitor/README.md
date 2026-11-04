@@ -30,28 +30,37 @@ The module headers in `src/` give the details of each check.
 
 ## Findings
 
-Every finding needs an operator action, so all findings have one level. Each
-finding is an ERROR log line `monitor finding`, and it sets the metric
-`hashi_monitor_last_finding_timestamp_seconds{kind="<kind>"}`.
+Every finding needs an operator action. A finding that alerts is an ERROR
+log line `monitor finding`, and it sets the metric
+`hashi_monitor_last_finding_timestamp_seconds{kind="<kind>"}`. The config
+key `alert_mode` picks the findings that alert:
 
-| Kind | Meaning |
-|---|---|
-| `WithdrawalEventLate`, `WithdrawalEventMissing` | A withdrawal event is late or missing past its bound. |
-| `WithdrawalTxidMismatch`, `WithdrawalTxUnbuildable` | A Hashi approval's txid does not match its inputs and outputs. |
-| `WithdrawalMismatch` | Sui and the guardian state different inputs, payouts, or change. |
-| `InvalidEventAdded` | An event contradicts its withdrawal. |
-| `DepositUnbacked`, `DepositMismatch`, `DepositLate` | An approved deposit has no matching, timely Bitcoin output. |
-| `DepositNotApproved` | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
-| `UtxoUnexpectedSpend` | A pool UTXO was spent outside a Hashi withdrawal. |
-| `UtxoOutsideMovePoolSpent` | A withdrawal spent a UTXO that is not in Move's pool: the pool never held it, or held it as a deposit with no approval. The monitor missed an event, or Move has a fault. |
-| `UtxoOriginConflict` | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
-| `UtxoTooOld` | A pool UTXO is older than 40 days, approved or not. The committee can spend it alone at 60. |
-| `HbtcSupplyExceedsPool` | The hBTC supply has exceeded the pool value for 3 hours. |
-| `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
-| `GuardianClockSkew` | A guardian log's signed time differs from S3's time by more than 30 s. |
-| `BtcRpcInconsistency` | A Bitcoin answer contradicts an earlier one: a lying node or a reorg. |
-| `SourceStale` | Sui, the guardian, or Bitcoin is checked more than 3 hours behind, no daily pool check succeeded for 27 hours, or no hBTC supply read succeeded for 3 hours. |
-| `SnapshotStale` | No snapshot save has succeeded for 12 hours. |
+- `strict`, the default: every finding alerts.
+- `essential`: only the essential findings alert. The other findings are
+  WARN log lines `monitor finding`, and they do not set the metric.
+
+Every operator must act on an essential finding. The other findings show no
+loss of Bitcoin backing.
+
+| Kind | Essential | Meaning |
+|---|---|---|
+| `WithdrawalEventLate`, `WithdrawalEventMissing` | Yes | A withdrawal event is late or missing past its bound. |
+| `WithdrawalTxidMismatch`, `WithdrawalTxUnbuildable` | Yes | A Hashi approval's txid does not match its inputs and outputs. |
+| `WithdrawalMismatch` | Yes | Sui and the guardian state different inputs, payouts, or change. |
+| `InvalidEventAdded` | Yes | An event contradicts its withdrawal. |
+| `DepositUnbacked`, `DepositMismatch` | Yes | An approved deposit has no matching Bitcoin output. |
+| `DepositLate` | No | An approved deposit's Bitcoin block is more than 2 hours after the approval. Hashi approved before Bitcoin confirmed the payment, or a miner dated the block late. The payment came, so Bitcoin now backs the hBTC. |
+| `DepositNotApproved` | No | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
+| `UtxoUnexpectedSpend` | Yes | A pool UTXO was spent outside a Hashi withdrawal. |
+| `UtxoOutsideMovePoolSpent` | Yes | A withdrawal spent a UTXO that is not in Move's pool: the pool never held it, or held it as a deposit with no approval. The monitor missed an event, or Move has a fault. |
+| `UtxoOriginConflict` | Yes | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
+| `UtxoTooOld` | Yes | A pool UTXO is older than 40 days, approved or not. The committee can spend it alone at 60. |
+| `HbtcSupplyExceedsPool` | Yes | The hBTC supply has exceeded the pool value for 3 hours. |
+| `GuardianInconsistency` | Yes | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
+| `GuardianClockSkew` | No | A guardian log's signed time differs from S3's time by more than 30 s. The cause is the guardian's clock or a slow S3 write. |
+| `BtcRpcInconsistency` | Yes | A Bitcoin answer contradicts an earlier one: a lying node or a reorg. |
+| `SourceStale` | Yes | Sui, the guardian, or Bitcoin is checked more than 3 hours behind, no daily pool check succeeded for 27 hours, or no hBTC supply read succeeded for 3 hours. |
+| `SnapshotStale` | Yes | No snapshot save has succeeded for 12 hours. |
 
 ## Running the monitor
 
@@ -111,6 +120,8 @@ complete example.
 - `sui.rpc_url` and `sui.package_id` name the Sui node and the Hashi package.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
   hosted providers.
+- `alert_mode` is optional. It picks the findings that alert: `strict`, the
+  default, or `essential`. See [Findings](#findings).
 - Any string value may be `env:NAME`. The monitor replaces it with the
   environment variable `NAME` at startup.
 - An unknown key is an error.
@@ -129,7 +140,8 @@ The monitor decides what is wrong. An alerting system needs only these rules:
 
 1. `time() - hashi_monitor_last_finding_timestamp_seconds < 3600`: a finding
    in the last hour. Each `kind` fires on its own. The details are in the
-   `monitor finding` ERROR lines.
+   `monitor finding` ERROR lines. With `alert_mode: essential`, only the
+   essential findings set this metric.
 2. `up < 1`: the monitor cannot be scraped.
 3. `absent(up)`: no monitor runs.
 
@@ -139,7 +151,7 @@ last save again, so their findings come again.
 ## Metrics
 
 - `hashi_monitor_last_finding_timestamp_seconds{kind}`: the time of the last
-  finding of each kind.
+  finding of each kind that alerts. See `alert_mode`.
 - `hashi_monitor_checked_through_timestamp_seconds{source}`: how far each
   source is checked, for `sui`, `guardian`, `btc`, `utxo`, and `snapshot`.
 - `hashi_monitor_pool_utxo_count` and
