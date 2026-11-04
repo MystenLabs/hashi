@@ -201,7 +201,7 @@ mod tests {
                     script_pubkey: p2wpkh(0x54),
                     block_time: 900,
                 }))
-                .is_none()
+                .is_empty()
         );
 
         let findings = auditor.check_suspect_spends();
@@ -270,7 +270,7 @@ mod tests {
                 script_pubkey: p2wpkh(0x55),
                 block_time: 900,
             }))
-            .is_none()
+            .is_empty()
         );
         assert!(
             pool.add_withdrawals(&[withdrawal.finished().cloned().unwrap()])

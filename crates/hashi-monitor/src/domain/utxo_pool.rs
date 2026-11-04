@@ -20,8 +20,9 @@
 //! 4. In one pass, every add comes before every spend.
 //! 5. A second add of a held UTXO is a repeat. It can approve a held
 //!    unapproved deposit, or give it a later request. A second amount or
-//!    script is a `BtcRpcInconsistency`. A spend of a UTXO the pool does not
-//!    hold is `UtxoUnknownInputSpent`, and of an unapproved deposit is
+//!    script is a `BtcRpcInconsistency`. A deposit against change is a
+//!    `UtxoOriginConflict`. A spend of a UTXO the pool does not hold is
+//!    `UtxoUnknownInputSpent`, and of an unapproved deposit is
 //!    `UtxoUnapprovedInputSpent`.
 //! 6. A `DepositApproved` must match a held deposit's amount and script. It
 //!    marks the deposit approved, also when it does not match: Move mints on
@@ -167,7 +168,7 @@ impl UtxoPool {
     }
 
     /// Add the UTXO of a closed deposit machine.
-    pub fn add_deposit(&mut self, deposit: &FinishedDeposit) -> Option<MonitorFinding> {
+    pub fn add_deposit(&mut self, deposit: &FinishedDeposit) -> Vec<MonitorFinding> {
         self.add(OutPoint::from(deposit.deposit_id), deposit.utxo.clone())
     }
 
@@ -255,7 +256,7 @@ impl UtxoPool {
     fn add_change_outputs(&mut self, withdrawal: &FinishedWithdrawal) -> Vec<MonitorFinding> {
         let outputs = &withdrawal.confirmation.outputs;
         (withdrawal.first_change_vout..outputs.len())
-            .filter_map(|vout| {
+            .flat_map(|vout| {
                 let outpoint = OutPoint {
                     txid: withdrawal.txid,
                     vout: vout as u32,
@@ -276,22 +277,32 @@ impl UtxoPool {
     /// Add a UTXO. A held one is a repeat: it keeps its entry, and its origin
     /// follows `UtxoOrigin::updated_by`. Another amount or script is a
     /// finding.
-    fn add(&mut self, outpoint: OutPoint, utxo: Utxo) -> Option<MonitorFinding> {
+    fn add(&mut self, outpoint: OutPoint, utxo: Utxo) -> Vec<MonitorFinding> {
         let Some(held) = self.utxos.get_mut(&outpoint) else {
             self.utxos.insert(outpoint, utxo);
-            return None;
+            return Vec::new();
         };
-        held.origin = held.origin.updated_by(utxo.origin);
-        let same = held.amount == utxo.amount && held.script_pubkey == utxo.script_pubkey;
-        (!same).then_some(MonitorFinding::BtcRpcInconsistency(
-            BtcRpcInconsistency::UtxoMismatch {
+        let mut findings = Vec::new();
+        match held.origin.updated_by(utxo.origin) {
+            Some(origin) => held.origin = origin,
+            None => findings.push(MonitorFinding::UtxoOriginConflict {
                 outpoint,
-                held_amount: held.amount,
-                seen_amount: utxo.amount,
-                held_script: held.script_pubkey.clone(),
-                seen_script: utxo.script_pubkey,
-            },
-        ))
+                held: held.origin,
+                new: utxo.origin,
+            }),
+        }
+        if held.amount != utxo.amount || held.script_pubkey != utxo.script_pubkey {
+            findings.push(MonitorFinding::BtcRpcInconsistency(
+                BtcRpcInconsistency::UtxoMismatch {
+                    outpoint,
+                    held_amount: held.amount,
+                    seen_amount: utxo.amount,
+                    held_script: held.script_pubkey.clone(),
+                    seen_script: utxo.script_pubkey,
+                },
+            ));
+        }
+        findings
     }
 
     /// Spend a UTXO by the transaction `txid`. One the pool does not hold, or
@@ -460,7 +471,7 @@ mod tests {
     fn pool_seen_at(first_seen: UnixSeconds) -> UtxoPool {
         let mut pool = UtxoPool::default();
         let approved = FinishedDeposit::new(deposit(1, 1_000, first_seen), UtxoOrigin::Deposit);
-        assert!(pool.add_deposit(&approved).is_none());
+        assert!(pool.add_deposit(&approved).is_empty());
         pool
     }
 
@@ -491,7 +502,7 @@ mod tests {
     #[test]
     fn a_confirmed_withdrawal_spends_its_inputs_and_adds_its_change() {
         let mut pool = pool_with_one();
-        assert!(pool.add_deposit(&unapproved(2, 2_000, 500, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(2, 2_000, 500, 0)).is_empty());
 
         let findings = pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
@@ -523,13 +534,13 @@ mod tests {
     fn a_repeated_add_keeps_the_utxo_and_another_amount_is_a_finding() {
         let mut pool = pool_with_one();
 
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 900, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 900, 0)).is_empty());
         assert_eq!(pool.get(&outpoint(1)).unwrap().first_seen, 500);
 
         let findings = pool.add_deposit(&unapproved(1, 1_001, 900, 0));
         assert_eq!(
             findings,
-            Some(MonitorFinding::BtcRpcInconsistency(
+            vec![MonitorFinding::BtcRpcInconsistency(
                 BtcRpcInconsistency::UtxoMismatch {
                     outpoint: outpoint(1),
                     held_amount: 1_000,
@@ -537,7 +548,7 @@ mod tests {
                     held_script: script(),
                     seen_script: script(),
                 }
-            ))
+            )]
         );
     }
 
@@ -551,7 +562,7 @@ mod tests {
 
         assert_eq!(
             findings,
-            Some(MonitorFinding::BtcRpcInconsistency(
+            vec![MonitorFinding::BtcRpcInconsistency(
                 BtcRpcInconsistency::UtxoMismatch {
                     outpoint: outpoint(1),
                     held_amount: 1_000,
@@ -559,7 +570,7 @@ mod tests {
                     held_script: script(),
                     seen_script: ScriptBuf::from_bytes(vec![0x52]),
                 }
-            ))
+            )]
         );
         assert_eq!(pool.get(&outpoint(1)).unwrap().script_pubkey, script());
     }
@@ -568,7 +579,7 @@ mod tests {
     fn a_repeated_add_keeps_an_approved_deposit_approved() {
         let mut pool = pool_with_one();
 
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_empty());
 
         assert_eq!(pool.get(&outpoint(1)).unwrap().origin, UtxoOrigin::Deposit);
     }
@@ -576,7 +587,7 @@ mod tests {
     #[test]
     fn an_unapproved_deposit_is_held_but_does_not_count() {
         let mut pool = pool_with_one();
-        assert!(pool.add_deposit(&unapproved(2, 2_000, 400, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(2, 2_000, 400, 0)).is_empty());
 
         assert!(pool.holds(&outpoint(2)));
         assert_eq!(pool.len(), 2);
@@ -626,7 +637,7 @@ mod tests {
     #[test]
     fn spending_an_unapproved_deposit_is_a_finding() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_empty());
 
         let findings = pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
@@ -677,7 +688,7 @@ mod tests {
     #[test]
     fn an_approval_marks_a_held_unapproved_deposit_approved() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_empty());
         assert_eq!(
             pool.get(&outpoint(1)).unwrap().origin,
             unapproved_origin(0, 1_000)
@@ -746,7 +757,7 @@ mod tests {
     fn a_mismatched_approval_still_marks_the_deposit_approved() {
         // Move mints on the approval, so the deposit counts.
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 500, 0)).is_empty());
 
         let sui = sui_approval(1, 2_000, script());
         assert_eq!(pool.check_sui_approval(&sui, SKEW).len(), 1);
@@ -792,7 +803,7 @@ mod tests {
     #[test]
     fn an_unapproved_deposit_is_not_reported_at_the_max_age() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
         let state = OutpointState::Unspent { block_time: 0 };
 
         assert!(findings_one(&pool, Some(state), 10 * MAX_AGE).is_empty());
@@ -801,7 +812,7 @@ mod tests {
     #[test]
     fn an_unapproved_deposit_spent_is_a_suspect() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
 
         let (findings, suspects) = check_one(&pool, Some(OutpointState::Spent), 1);
 
@@ -812,7 +823,7 @@ mod tests {
     #[test]
     fn a_missing_unapproved_deposit_is_an_rpc_inconsistency() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
 
         assert_eq!(
             findings_one(&pool, Some(OutpointState::Missing), 1),
@@ -834,15 +845,15 @@ mod tests {
                 unapproved_origin(requested_at, requested_amount),
             ))
         };
-        assert!(add(&mut pool, 300, 900).is_none());
+        assert!(add(&mut pool, 300, 900).is_empty());
 
-        assert!(add(&mut pool, 200, 800).is_none());
+        assert!(add(&mut pool, 200, 800).is_empty());
         assert_eq!(
             pool.get(&outpoint(1)).unwrap().origin,
             unapproved_origin(300, 900)
         );
 
-        assert!(add(&mut pool, 400, 1_000).is_none());
+        assert!(add(&mut pool, 400, 1_000).is_empty());
         assert_eq!(
             pool.get(&outpoint(1)).unwrap().origin,
             unapproved_origin(400, 1_000)
@@ -854,36 +865,79 @@ mod tests {
         let unapproved = unapproved_origin(300, 1_000);
         let deposit = UtxoOrigin::Deposit;
 
-        assert_eq!(unapproved.updated_by(deposit), deposit);
+        assert_eq!(unapproved.updated_by(deposit), Some(deposit));
         let later = unapproved_origin(400, 900);
-        assert_eq!(unapproved.updated_by(later), later);
+        assert_eq!(unapproved.updated_by(later), Some(later));
         // An equal or earlier request keeps the held one.
         assert_eq!(
             unapproved.updated_by(unapproved_origin(300, 900)),
-            unapproved
+            Some(unapproved)
         );
         assert_eq!(
             unapproved.updated_by(unapproved_origin(200, 900)),
-            unapproved
+            Some(unapproved)
         );
-        assert_eq!(deposit.updated_by(unapproved), deposit);
+        assert_eq!(deposit.updated_by(unapproved), Some(deposit));
         assert_eq!(
             UtxoOrigin::Change.updated_by(UtxoOrigin::Change),
-            UtxoOrigin::Change
+            Some(UtxoOrigin::Change)
+        );
+    }
+
+    #[test]
+    fn a_deposit_against_change_is_a_conflict() {
+        let unapproved = unapproved_origin(300, 1_000);
+        let (deposit, change) = (UtxoOrigin::Deposit, UtxoOrigin::Change);
+
+        assert_eq!(unapproved.updated_by(change), None);
+        assert_eq!(change.updated_by(unapproved), None);
+        assert_eq!(deposit.updated_by(change), None);
+        assert_eq!(change.updated_by(deposit), None);
+    }
+
+    #[test]
+    fn change_for_a_held_unapproved_deposit_is_a_conflict() {
+        let mut pool = UtxoPool::default();
+        let change = OutPoint {
+            txid: txid(7),
+            vout: 1,
+        };
+        let request = FinishedDeposit {
+            deposit_id: DepositId::new(txid(7), 1),
+            utxo: Utxo {
+                amount: 550,
+                script_pubkey: script(),
+                origin: unapproved_origin(300, 550),
+                first_seen: 700,
+            },
+        };
+        assert!(pool.add_deposit(&request).is_empty());
+
+        assert_eq!(
+            pool.add_withdrawals(&[withdrawal(7, vec![])]),
+            vec![MonitorFinding::UtxoOriginConflict {
+                outpoint: change,
+                held: unapproved_origin(300, 550),
+                new: UtxoOrigin::Change,
+            }]
+        );
+        assert_eq!(
+            pool.get(&change).unwrap().origin,
+            unapproved_origin(300, 550)
         );
     }
 
     #[test]
     fn an_approved_add_of_a_held_unapproved_deposit_approves_it() {
         let mut pool = UtxoPool::default();
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 300)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 300)).is_empty());
 
         let approved = FinishedDeposit::new(deposit(1, 1_000, 0), UtxoOrigin::Deposit);
-        assert!(pool.add_deposit(&approved).is_none());
+        assert!(pool.add_deposit(&approved).is_empty());
         assert_eq!(pool.get(&outpoint(1)).unwrap().origin, UtxoOrigin::Deposit);
 
         // A later unapproved add does not undo the approval.
-        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 400)).is_none());
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 400)).is_empty());
         assert_eq!(pool.get(&outpoint(1)).unwrap().origin, UtxoOrigin::Deposit);
     }
 
@@ -891,7 +945,7 @@ mod tests {
     fn an_unapproved_deposit_past_the_watch_at_the_sui_cursor_is_a_finding() {
         // `Timing::for_tests` watches a request for 1_000 s.
         let mut pool = pool_with_one();
-        assert!(pool.add_deposit(&unapproved(2, 2_000, 0, 100)).is_none());
+        assert!(pool.add_deposit(&unapproved(2, 2_000, 0, 100)).is_empty());
         let timing = Timing::for_tests();
 
         assert!(pool.unapproved_past_deadline(1_100, &timing).is_empty());

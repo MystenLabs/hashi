@@ -45,6 +45,7 @@ finding is an ERROR log line `monitor finding`, and it sets the metric
 | `UtxoUnexpectedSpend` | A pool UTXO was spent outside a Hashi withdrawal. |
 | `UtxoUnknownInputSpent` | A withdrawal spent a UTXO the pool does not hold. |
 | `UtxoUnapprovedInputSpent` | A withdrawal spent a held deposit with no approval. Move locks only UTXOs it holds, so the monitor missed an approval, or Move has a fault. |
+| `UtxoOriginConflict` | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
 | `UtxoTooOld` | An approved pool UTXO is older than 40 days. The committee can spend it alone at 60. |
 | `HbtcSupplyExceedsPool` | The hBTC supply has exceeded the pool value for 3 hours. |
 | `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
