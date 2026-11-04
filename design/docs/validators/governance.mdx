@@ -35,10 +35,13 @@ answer: >-
   Any committee member can create a proposal, which also casts their vote. Most proposals need 2/3 of committee weight; an emergency pause needs 5% to pause and 2/3 to unpause. Vote with hashi proposal vote, and anyone can execute a proposal once it reaches quorum.
 ---
 
-## How proposals work
+Hashi committee members govern the protocol through onchain proposals. Any committee member can create a proposal, members vote with stake weight, and anyone can execute the proposal once it reaches quorum. Most proposal types need 2/3 of committee weight. An emergency pause needs 5% to pause and 2/3 to unpause. Package upgrades also follow the rules in [Move Package Upgrades](../move-upgrades.mdx).
+
+## How do Hashi proposals work?
 
 - Any committee member can create a proposal, and creating one also casts your vote. Quorum is stake-weighted: most proposals require **2/3 of committee weight**, while an emergency pause uses a lower threshold (5% by default) so the committee can halt the protocol quickly (resuming again requires 2/3 by default). See the threshold column in [Proposal types](#proposal-types).
 - You can add or remove votes before execution. Once the proposal reaches quorum, anyone can execute it; the sender only pays gas.
+- A proposal stays open for a seven-day window. After that, `hashi proposal view <id>` shows it as `Expired`.
 - The `--execute` flag on `vote` auto-executes if your vote reaches quorum (except for Upgrade proposals).
 - Proposals carry optional `-m key=value` metadata for human context.
 
@@ -48,12 +51,14 @@ answer: >-
 
 Config parameters live in 2 stores: **instant config**, where a change applies as soon as the proposal executes, and **epoch config**, where a change lands in the next committee.
 
+Config values are type-prefixed: write the type, a colon, and the value, as in `u64:50000`.
+
 | Type | Threshold | Purpose | Parameters |
 |------|-----------|---------|-----------|
 | **UpdateConfig** | 2/3 | Change an existing instant config parameter (applies on execute) | `key` and type-prefixed `value` |
 | **UpdateEpochConfig** | 2/3 | Change an existing epoch config parameter (lands in the next committee) | `key` and type-prefixed `value` |
 | **AddConfig** | 2/3 | Add a new config key to either store (insert-only) | `key`, type-prefixed `value`, `--epoch` for the epoch store |
-| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta (submitted as an `UpdateEpochConfig` proposal) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **UpdateMpcConfig** | 2/3 | Change the MPC faulty bound and delta through an `UpdateEpochConfig` proposal (a shortcut, not a separate proposal type) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (a version cannot disable itself; execute through an older enabled version) |
@@ -79,7 +84,7 @@ Config parameters live in 2 stores: **instant config**, where a change applies a
 
 > The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`, `guardian_node_url`); `bitcoin_deposit_time_delay_ms` is still settable.
 
-## Lifecycle example: UpdateConfig
+## How to create, vote on, and execute a proposal
 
 Executed proposals stay on chain for inspection. The CLI refuses to vote on, remove a vote from, or execute one before signing anything, with a message that names the proposal and its type; `hashi proposal view <id>` shows `Status: Executed`, `Active (expires <date>)`, or `Expired` for a proposal past its seven-day window.
 
@@ -104,7 +109,7 @@ hashi proposal execute 0x<proposal-id>
 hashi config on-chain
 ```
 
-## Package upgrade flow
+## How to propose a package upgrade
 
 You must first classify every package upgrade as exclusive or non-exclusive.
 See [Move Package Upgrades](../move-upgrades.mdx) for the safety criteria, binary
