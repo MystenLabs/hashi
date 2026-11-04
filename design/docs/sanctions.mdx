@@ -61,6 +61,12 @@ account. To set up screening:
 2. Create an API key in the TRM platform under **Settings > API Tokens**.
 3. Set the key as `trm-api-key` in the node config.
 
+The node config accepts the following TRM settings:
+
+- `trm-api-key`: This key holds your TRM Labs API key. Without a key, the node does not screen.
+- `trm-verdict-reuse-ms`: The node reuses TRM's answer for the same set of addresses for this period instead of asking TRM again. The default is 5 minutes, and the maximum is 1 hour.
+- `trm-per-caller-burst` and `trm-per-caller-refill-per-sec`: These keys limit the number of TRM calls that each committee member, and the node itself, can spend at a node.
+
 Without a key, the node does not screen. TRM only covers Mainnet, so the node
 ignores the key on other networks.
 
