@@ -34,9 +34,9 @@ answer: >-
 ---
 ---
 
-These pages are for Sui validators joining the Hashi committee. They cover prerequisites, configuration, genesis, ongoing operations, and governance.
+To join the Hashi committee as an active Sui validator, you provision a Bitcoin archival node and a Sui full node, generate TLS, operator, and backup keys, write the validator config, register onchain with your validator account key, start the `hashi` service, and monitor it. Each step has a guide in this section, which also covers prerequisites, configuration, genesis, ongoing operations, and governance.
 
-Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](../committee.mdx) members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](../deposit.mdx) and [withdrawal](../withdraw.mdx) flows, plus [reconfiguration](../reconfiguration.mdx) at every epoch boundary.
+Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](../committee.mdx) members run the `hashi` service alongside their Sui validator to participate in multi-party computation (MPC) threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](../deposit.mdx) and [withdrawal](../withdraw.mdx) flows, plus [reconfiguration](../reconfiguration.mdx) at every epoch boundary.
 
 The pages cover both Hashi deployments, Testnet and Mainnet. The [Networks](../reference/networks.mdx) table gives each network's status and parameters. Network-specific examples come in **Mainnet** and **Testnet** tabs: pick your network in any one of them and the rest of the section follows. Everywhere else, use the column for your **target network**.
 
@@ -91,6 +91,8 @@ A Mainnet node depends on:
 See [External service dependencies](prerequisites.mdx#external-service-dependencies), [Sui RPC](prerequisites.mdx#sui-rpc), [Bitcoin node](prerequisites.mdx#bitcoin-node), and [Keys and Security](keys.mdx).
 
 ## Pages in this section
+
+Each card links to one guide in this section.
 
 import DocCardList from '@theme/DocCardList';
 
