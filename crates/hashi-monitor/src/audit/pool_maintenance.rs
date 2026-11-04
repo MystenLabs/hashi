@@ -76,6 +76,7 @@ impl Auditor {
         self.report_findings("pool", &findings);
         self.metrics
             .set_utxo_pool(self.utxo_pool.len(), self.utxo_pool.oldest_timestamp());
+        self.metrics.set_open_flows(open_withdrawals, open_deposits);
         findings
     }
 

@@ -462,7 +462,7 @@ impl Auditor {
             utc_timestamp(self.rpc_pollers.sui_read_until()),
             utc_timestamp(self.rpc_pollers.guardian_read_until()),
         );
-        self.catch_up_sources().await;
+        self.persistent_catch_up().await;
         // After the catch-up, so the snapshot holds only the open machines.
         self.gc_and_update_pool();
         self.save_snapshot().await;

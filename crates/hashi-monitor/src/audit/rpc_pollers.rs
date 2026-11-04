@@ -13,6 +13,8 @@
 //! 3. Check Bitcoin confirmations after each withdrawal has both Sui and guardian approvals.
 //! 4. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
 //! 5. Leave pool updates and checks to the auditor scheduler.
+//! 6. At startup, catch up Sui, then the guardian, then Bitcoin. Retry a failed source with a
+//!    backoff.
 
 use super::Auditor;
 use crate::config::Config;
@@ -133,59 +135,7 @@ impl RpcPollers {
     }
 }
 
-/// The wait after the first failed try of an initial catch-up.
-const CATCH_UP_FIRST_BACKOFF: Duration = Duration::from_secs(1);
-/// The longest wait between two tries of a failed initial catch-up.
-const CATCH_UP_MAX_BACKOFF: Duration = Duration::from_secs(60);
-
-/// The wait before the next try of a failed initial catch-up. It doubles at
-/// each failure, up to `CATCH_UP_MAX_BACKOFF`.
-struct CatchUpBackoff {
-    delay: Duration,
-}
-
-impl CatchUpBackoff {
-    fn new() -> Self {
-        Self {
-            delay: CATCH_UP_FIRST_BACKOFF,
-        }
-    }
-
-    /// Log the failure, then wait before the next try.
-    async fn wait(&mut self, source: &'static str, error: anyhow::Error) {
-        tracing::warn!(
-            source,
-            ?error,
-            retry_in = ?self.delay,
-            "initial catch-up failed; retrying"
-        );
-        tokio::time::sleep(self.delay).await;
-        self.delay = (self.delay * 2).min(CATCH_UP_MAX_BACKOFF);
-    }
-}
-
 impl Auditor {
-    /// Catch up Sui, then the guardian, then Bitcoin. Retry a failed source
-    /// with a backoff until it is current. Sui and the guardian add the
-    /// machines, so Bitcoin comes last and looks up all of them.
-    pub async fn catch_up_sources(&mut self) {
-        let mut backoff = CatchUpBackoff::new();
-        while let Err(error) = self.tick_sui().await {
-            backoff.wait(SOURCE_SUI, error).await;
-        }
-        tracing::info!(source = SOURCE_SUI, "finished initial catch-up");
-        let mut backoff = CatchUpBackoff::new();
-        while let Err(error) = self.tick_guardian().await {
-            backoff.wait(SOURCE_GUARDIAN, error).await;
-        }
-        tracing::info!(source = SOURCE_GUARDIAN, "finished initial catch-up");
-        let mut backoff = CatchUpBackoff::new();
-        while let Err(error) = self.tick_btc() {
-            backoff.wait(SOURCE_BTC, error).await;
-        }
-        tracing::info!(source = SOURCE_BTC, "finished initial catch-up");
-    }
-
     pub async fn tick_sui(&mut self) -> anyhow::Result<()> {
         // The head at the tick's start bounds the tick, so it ends.
         let up_to = self.rpc_pollers.latest_sui_checkpoint().await?;
@@ -318,6 +268,64 @@ impl Auditor {
         self.rpc_pollers.btc_checked_through = started_at;
         self.metrics.set_checked_through(SOURCE_BTC, started_at);
         Ok(())
+    }
+}
+
+// ====================
+//   Initial catch-up
+// ====================
+
+/// The wait after the first failed try of an initial catch-up.
+const CATCH_UP_FIRST_BACKOFF: Duration = Duration::from_secs(1);
+/// The longest wait between two tries of a failed initial catch-up.
+const CATCH_UP_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// The wait before the next try of a failed initial catch-up. It doubles at
+/// each failure, up to `CATCH_UP_MAX_BACKOFF`.
+struct CatchUpBackoff {
+    delay: Duration,
+}
+
+impl CatchUpBackoff {
+    fn new() -> Self {
+        Self {
+            delay: CATCH_UP_FIRST_BACKOFF,
+        }
+    }
+
+    /// Log the failure, then wait before the next try.
+    async fn wait(&mut self, source: &'static str, error: anyhow::Error) {
+        tracing::warn!(
+            source,
+            ?error,
+            retry_in = ?self.delay,
+            "initial catch-up failed; retrying"
+        );
+        tokio::time::sleep(self.delay).await;
+        self.delay = (self.delay * 2).min(CATCH_UP_MAX_BACKOFF);
+    }
+}
+
+impl Auditor {
+    /// Catch up Sui, then the guardian, then Bitcoin. Retry a failed source
+    /// with a backoff until it is current. Sui and the guardian add the
+    /// machines, so Bitcoin comes last and looks up all of them.
+    pub async fn persistent_catch_up(&mut self) {
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_sui().await {
+            backoff.wait(SOURCE_SUI, error).await;
+        }
+        tracing::info!(source = SOURCE_SUI, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_guardian().await {
+            backoff.wait(SOURCE_GUARDIAN, error).await;
+        }
+        tracing::info!(source = SOURCE_GUARDIAN, "finished initial catch-up");
+        let mut backoff = CatchUpBackoff::new();
+        while let Err(error) = self.tick_btc() {
+            backoff.wait(SOURCE_BTC, error).await;
+        }
+        tracing::info!(source = SOURCE_BTC, "finished initial catch-up");
     }
 }
 
