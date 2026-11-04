@@ -206,9 +206,9 @@ mod tests {
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::rpc::sui::tests::hashi_approval;
-    use crate::test_utils::approved;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
+    use crate::test_utils::unapproved;
     use crate::timing::Timing;
     use bitcoin::ScriptBuf;
     use hashi_types::guardian::s3::S3HourDirectory;
@@ -255,7 +255,7 @@ mod tests {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_699_999_000,
         };
-        assert!(pool.add_deposit(&approved(deposit)).is_none());
+        assert!(pool.add_deposit(&unapproved(deposit)).is_none());
         pool
     }
 

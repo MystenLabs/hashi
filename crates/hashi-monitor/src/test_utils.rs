@@ -127,6 +127,19 @@ pub fn withdrawal_tx(change_address: Vec<u8>) -> WithdrawalTx {
     )
 }
 
+/// The UTXO of `btc`, as an unapproved deposit requested at 0 with the
+/// paid amount.
+pub fn unapproved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
+    let requested_amount = btc.amount;
+    FinishedDeposit::new(
+        btc,
+        UtxoOrigin::UnapprovedDeposit {
+            requested_at: 0,
+            requested_amount,
+        },
+    )
+}
+
 /// The UTXO of `btc`, as an approved deposit.
 pub fn approved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
     FinishedDeposit::new(btc, UtxoOrigin::Deposit)

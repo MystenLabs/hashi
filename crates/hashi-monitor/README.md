@@ -18,7 +18,9 @@ Move cannot see.
   the approval, so a finding can come before the mint.
 - **The UTXO pool.** The monitor keeps its own pool of the UTXOs the bridge
   holds, changed only by Bitcoin facts. It checks each UTXO on Bitcoin once a
-  day, and it checks that the pool backs the hBTC supply on Sui.
+  day, and it checks that the pool backs the hBTC supply on Sui. A deposit
+  with no Sui approval stays in the pool, but only approved UTXOs count in
+  the pool value and the age checks.
 - **The guardian.** Each withdrawal log has a `seq` that the guardian's
   limiter takes once, in order. A repeat, a gap, or a jump is a finding.
 - **Itself.** A source that falls behind, or a snapshot that cannot be saved,
@@ -39,9 +41,11 @@ finding is an ERROR log line `monitor finding`, and it sets the metric
 | `WithdrawalMismatch` | Sui and the guardian state different inputs, payouts, or change. |
 | `InvalidEventAdded` | An event contradicts its withdrawal. |
 | `DepositUnbacked`, `DepositMismatch`, `DepositLate` | An approved deposit has no matching, timely Bitcoin output. |
+| `DepositNotApproved` | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
 | `UtxoUnexpectedSpend` | A pool UTXO was spent outside a Hashi withdrawal. |
 | `UtxoUnknownInputSpent` | A withdrawal spent a UTXO the pool does not hold. |
-| `UtxoTooOld` | A pool UTXO is older than 40 days. The committee can spend it alone at 60. |
+| `UtxoUnapprovedInputSpent` | A withdrawal spent a held deposit with no approval. Move locks only UTXOs it holds, so the monitor missed an approval, or Move has a fault. |
+| `UtxoTooOld` | An approved pool UTXO is older than 40 days. The committee can spend it alone at 60. |
 | `HbtcSupplyExceedsPool` | The hBTC supply has exceeded the pool value for 3 hours. |
 | `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
 | `GuardianClockSkew` | A guardian log's signed time differs from S3's time by more than 30 s. |
@@ -89,6 +93,10 @@ cargo run -p hashi-monitor -- \
   or delete `snapshot.json` to start again from genesis.
 - The snapshot is durable state, not a cache. Without it, the next start is a
   first run from genesis.
+- A snapshot from a monitor before unapproved deposits were tracked loads
+  every held deposit as approved. That monitor did not record approvals.
+  Deposits paid after the upgrade are exact. To make the old ones exact too,
+  delete `snapshot.json` and start again from genesis.
 
 ## Config
 
@@ -135,10 +143,16 @@ last save again, so their findings come again.
 - `hashi_monitor_checked_through_timestamp_seconds{source}`: how far each
   source is checked, for `sui`, `guardian`, `btc`, `utxo`, and `snapshot`.
 - `hashi_monitor_pool_utxo_count` and
-  `hashi_monitor_oldest_utxo_timestamp_seconds`: the held UTXOs, and the
-  earliest block time among them. An empty pool gives 0.
-- `hashi_monitor_pool_value_sats` and `hashi_monitor_hbtc_supply_sats`: the
-  pool value and the hBTC supply.
+  `hashi_monitor_oldest_utxo_timestamp_seconds`: the approved UTXOs, and the
+  earliest block time among them. With no approved UTXO, both are 0.
+- `hashi_monitor_pool_value_sats`: the total amount of the approved UTXOs.
+  - A deposit counts when the monitor has seen both its Bitcoin confirmation
+    and its Sui `DepositApproved`.
+  - A change output counts from the Bitcoin confirmation of its withdrawal.
+  - A UTXO stops counting at the Bitcoin confirmation of the withdrawal that
+    spends it.
+  - A deposit with no approval does not count.
+- `hashi_monitor_hbtc_supply_sats`: the hBTC supply.
 - `hashi_monitor_open_flows{kind}`: the open `withdrawal` and `deposit` flows,
   set at each maintenance tick and after the initial catch-up.
 
@@ -148,7 +162,7 @@ The hBTC supply less the pool value is zero or below in an honest bridge:
 hashi_monitor_hbtc_supply_sats - hashi_monitor_pool_value_sats
 ```
 
-The age of the oldest held UTXO, in days:
+The age of the oldest approved UTXO, in days:
 
 ```promql
 ((time() - hashi_monitor_oldest_utxo_timestamp_seconds) / 86400)

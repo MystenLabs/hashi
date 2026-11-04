@@ -69,13 +69,16 @@ impl Auditor {
             oldest_withdrawals = %self.oldest_open_withdrawals(),
             oldest_deposits = %self.oldest_open_deposits(),
             utxos_held = self.utxo_pool.len(),
+            utxos_approved = self.utxo_pool.approved_len(),
             pool_value_sats = self.utxo_pool.value(),
             "removed the closed machines and updated the pool"
         );
 
         self.report_findings("pool", &findings);
-        self.metrics
-            .set_utxo_pool(self.utxo_pool.len(), self.utxo_pool.oldest_timestamp());
+        self.metrics.set_utxo_pool(
+            self.utxo_pool.approved_len(),
+            self.utxo_pool.oldest_timestamp(),
+        );
         self.metrics.set_open_flows(open_withdrawals, open_deposits);
         findings
     }
@@ -95,6 +98,7 @@ impl Auditor {
                     deposit_id = %deposit.deposit_id,
                     amount = deposit.utxo.amount,
                     block_time = %utc_timestamp(deposit.utxo.first_seen),
+                    approved = deposit.utxo.origin.is_approved(),
                     "deposit request confirmed on Bitcoin at a bridge address"
                 ),
                 // Bitcoin answered without a UTXO, or the request lapsed.

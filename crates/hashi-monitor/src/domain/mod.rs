@@ -102,10 +102,56 @@ pub struct BtcConfirmation {
 /// How a UTXO entered the monitor's UTXO pool.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum UtxoOrigin {
-    /// A deposit Bitcoin confirmed at a bridge address.
+    /// A deposit Bitcoin confirmed at a bridge address, with a Sui
+    /// `DepositApproved`.
     Deposit,
+    /// A deposit Bitcoin confirmed at a bridge address, with no Sui
+    /// `DepositApproved` yet. For example, a sanction or a user mistake keeps
+    /// a deposit here.
+    UnapprovedDeposit {
+        /// The time of the latest request for the deposit. The approval
+        /// deadline counts from it.
+        requested_at: UnixSeconds,
+        /// The amount that the latest request claims.
+        requested_amount: u64,
+    },
     /// A change output of a withdrawal Bitcoin confirmed.
     Change,
+}
+
+impl UtxoOrigin {
+    /// Whether Hashi approved the UTXO: an approved deposit, or the change
+    /// of an approved withdrawal. Only these count in the pool value and the
+    /// age checks.
+    pub fn is_approved(self) -> bool {
+        !matches!(self, Self::UnapprovedDeposit { .. })
+    }
+
+    /// The origin of a held UTXO after a second add with the origin `new`.
+    fn updated_by(self, new: Self) -> Self {
+        match (self, new) {
+            // A repeat with change keeps the held origin.
+            (Self::Change, _) | (_, Self::Change) => self,
+            // A second request for an approved deposit. Move mints only once.
+            (Self::Deposit, Self::Deposit | Self::UnapprovedDeposit { .. }) => self,
+            // An approval approves the held deposit.
+            (Self::UnapprovedDeposit { .. }, Self::Deposit) => Self::Deposit,
+            // The later of two requests stays.
+            (
+                Self::UnapprovedDeposit {
+                    requested_at: held_at,
+                    ..
+                },
+                Self::UnapprovedDeposit { requested_at, .. },
+            ) => {
+                if requested_at > held_at {
+                    new
+                } else {
+                    self
+                }
+            }
+        }
+    }
 }
 
 /// The time through which each source has been read.
