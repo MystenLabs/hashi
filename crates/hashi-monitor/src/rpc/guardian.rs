@@ -276,9 +276,14 @@ impl GuardianWithdrawalsPoller {
                 .into_message()
                 .into_withdrawal()
                 .context("non-withdrawal log in the guardian's withdrawal logs")?;
-            let inconsistency = next.record(object_key, withdrawal.request_data.seq);
+            let inconsistency = next.record(object_key.clone(), withdrawal.request_data.seq);
             findings.extend(inconsistency.map(MonitorFinding::GuardianInconsistency));
-            match MonitorWithdrawalEvent::from_guardian(&withdrawal, timestamp_ms, keys) {
+            match MonitorWithdrawalEvent::from_guardian(
+                &withdrawal,
+                &object_key,
+                timestamp_ms,
+                keys,
+            ) {
                 Ok(event) => {
                     debug!(wid = %event.wid, txid = %event.btc_txid, "guardian withdrawal log");
                     withdrawal_events.push(MonitorEvent::Withdrawal(event));

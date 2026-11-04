@@ -26,7 +26,6 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalEventType;
-use crate::domain::WithdrawalTx;
 use crate::domain::utxo_pool::Utxo;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
@@ -99,6 +98,51 @@ impl UnapprovedCause {
     }
 }
 
+/// How a withdrawal event broke its deadline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EventTiming {
+    /// The event came after the deadline.
+    Late { event: MonitorWithdrawalEvent },
+    /// The event did not come by `cursor`, the position of its source.
+    Missing { cursor: UnixSeconds },
+}
+
+/// Why the monitor cannot trust a withdrawal's transaction or events.
+// Findings are rare, so the large variant does not cost much.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WithdrawalInvalidReason {
+    /// A single event's txid differs from the txid of the transaction that
+    /// its own inputs and outputs build.
+    TxidMismatch {
+        event: MonitorWithdrawalEvent,
+        computed: Txid,
+    },
+    /// The inputs and outputs of a single event do not build a transaction.
+    Unbuildable {
+        event: MonitorWithdrawalEvent,
+        error: String,
+    },
+    /// A new event disagrees with an event the monitor holds.
+    EventsDiffer {
+        kind: EventDiff,
+        held: MonitorWithdrawalEvent,
+        new: MonitorWithdrawalEvent,
+    },
+}
+
+/// What a new withdrawal event disagrees on. The monitor checks in this order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventDiff {
+    /// The new event names another txid.
+    Txid,
+    /// The full event differs from a held event of the same type.
+    Full,
+    /// The events name the same txid but disagree on what it does not
+    /// cover, such as which outputs are change.
+    Tx,
+}
+
 /// Why two events of one deposit request disagree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DepositMismatchReason {
@@ -124,47 +168,50 @@ pub enum DepositMismatchReason {
 /// Findings emitted by the monitor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorFinding {
-    InvalidEventAdded(String),
-    /// A withdrawal event came after its deadline in the timing table.
-    WithdrawalEventLate {
-        event: MonitorWithdrawalEvent,
-        relation: EventRelation,
-        deadline: UnixSeconds,
-        occurred_at: UnixSeconds, // same as event.timestamp
-    },
-    /// A withdrawal event is still missing after its deadline in the timing
-    /// table, at the cursor of its source.
-    WithdrawalEventMissing {
+    // ========================================================================
+    // Withdrawals
+    // E1: `WithdrawalPickedForProcessing`, the Hashi approval on Sui.
+    // E2: `WithdrawalLogMessage`, the guardian's log of its signature.
+    // E3: `BtcConfirmation`, the Bitcoin confirmation.
+    // ========================================================================
+    /// The monitor saw the successor of `event_type`, but `event_type` is
+    /// missing or more than its skew late. E2 is never missing, because the
+    /// monitor looks up E3 only after E2.
+    WithdrawalUnapproved {
         wid: WithdrawalID,
         event_type: WithdrawalEventType,
-        relation: EventRelation,
         deadline: UnixSeconds,
-        cursor: UnixSeconds,
+        timing: EventTiming,
     },
-    /// The Hashi approval's txid is not the txid of the transaction that its
-    /// inputs and outputs build.
-    WithdrawalTxidMismatch {
+    /// The monitor saw the predecessor of `event_type`, but `event_type` is
+    /// missing or more than its delay late.
+    WithdrawalStuck {
         wid: WithdrawalID,
-        claimed: Txid,
-        computed: Txid,
+        event_type: WithdrawalEventType,
+        deadline: UnixSeconds,
+        timing: EventTiming,
     },
-    /// The Hashi approval's inputs and outputs do not build a Bitcoin transaction.
-    WithdrawalTxUnbuildable {
+    /// The withdrawal's transaction or events contradict each other. See
+    /// `WithdrawalInvalidReason`.
+    WithdrawalInvalid {
         wid: WithdrawalID,
-        claimed: Txid,
-        reason: String,
+        reason: WithdrawalInvalidReason,
     },
-    /// The Hashi approval and the guardian's log state different inputs,
-    /// user payouts or change for the withdrawal.
-    WithdrawalMismatch {
-        wid: WithdrawalID,
-        sui: WithdrawalTx,
-        guardian: WithdrawalTx,
-    },
+
+    // ========================================================================
+    // Deposits
+    // E1: `SuiDepositRequestedEvent`, the request on Sui.
+    // E2: `BtcConfirmedDeposit`, the Bitcoin payment.
+    // E3: `SuiDepositApprovedEvent`, the Hashi approval on Sui.
+    // ========================================================================
     /// E3 without E2: Hashi approved a deposit, but its outpoint holds no
     /// unspent Bitcoin output.
-    DepositUnbacked {
-        sui: SuiDepositApprovedEvent,
+    DepositUnbacked { sui: SuiDepositApprovedEvent },
+    /// Two events of one deposit request disagree. See
+    /// `DepositMismatchReason`.
+    DepositMismatch {
+        request_id: Address,
+        reason: DepositMismatchReason,
     },
     /// E3 and E2 found, but the E2 block is later than E3 plus the skew.
     ///
@@ -175,12 +222,6 @@ pub enum MonitorFinding {
         sui: SuiDepositApprovedEvent,
         deadline: UnixSeconds,
         block_time: UnixSeconds,
-    },
-    /// Two events of one deposit request disagree. See
-    /// `DepositMismatchReason`.
-    DepositMismatch {
-        request_id: Address,
-        reason: DepositMismatchReason,
     },
     /// E2 found, but no E3 `DEPOSIT_REQUEST_WATCH` after the latest request.
     /// `causes` gives what the monitor can infer. The daily pool check
@@ -193,24 +234,13 @@ pub enum MonitorFinding {
         block_time: UnixSeconds,
         causes: Vec<UnapprovedCause>,
     },
-    /// A Bitcoin RPC answer contradicts one the monitor already holds. See
-    /// `BtcRpcInconsistency`.
-    BtcRpcInconsistency(BtcRpcInconsistency),
-    /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
-    /// warn age. The committee can spend a UTXO alone 60 days after it
-    /// confirms. This includes an unapproved deposit: a committee that
-    /// withholds the approval can take it then.
-    UtxoTooOld {
-        outpoint: OutPoint,
-        age_secs: u64,
-        threshold_secs: u64,
-    },
+
+    // ========================================================================
+    // UTXO pool and hBTC supply
+    // ========================================================================
     /// A UTXO in the monitor's UTXO pool was spent on Bitcoin, and no Hashi
     /// withdrawal confirmed on Bitcoin spent it.
-    UtxoUnexpectedSpend {
-        outpoint: OutPoint,
-        amount: u64,
-    },
+    UtxoUnexpectedSpend { outpoint: OutPoint, amount: u64 },
     /// A confirmed Hashi withdrawal spent a UTXO that is not in Move's pool,
     /// by the monitor's account. `held` is `None` if the pool never held it.
     /// The monitor missed an event, or Move has a fault.
@@ -226,12 +256,42 @@ pub enum MonitorFinding {
         held: UtxoOrigin,
         new: UtxoOrigin,
     },
+    /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
+    /// warn age. The committee can spend a UTXO alone 60 days after it
+    /// confirms. This includes an unapproved deposit: a committee that
+    /// withholds the approval can take it then.
+    UtxoTooOld {
+        outpoint: OutPoint,
+        age_secs: u64,
+        threshold_secs: u64,
+    },
     /// Sui's hBTC supply has exceeded the value of the UTXO pool since
     /// `since`, for longer than the grace. Bitcoin does not back every hBTC.
     HbtcSupplyExceedsPool {
         hbtc_supply: u64,
         pool_value: u64,
         since: UnixSeconds,
+    },
+
+    // ========================================================================
+    // Sources and the monitor
+    // Bitcoin answers, guardian logs, and the monitor's own progress.
+    // ========================================================================
+    /// A Bitcoin RPC answer contradicts one the monitor already holds. See
+    /// `BtcRpcInconsistency`.
+    BtcRpcInconsistency(BtcRpcInconsistency),
+    /// The guardian's logs break a rule that an honest guardian keeps. See
+    /// `GuardianInconsistency`.
+    GuardianInconsistency(GuardianInconsistency),
+    /// The time the guardian signed into a log differs from the time S3
+    /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
+    GuardianClockSkew {
+        session_id: SessionID,
+        object_key: String,
+        /// The guardian's signed time.
+        logged_at_ms: UnixMillis,
+        /// S3's `LastModified` time.
+        stored_at_ms: UnixMillis,
     },
     /// A source was last checked longer ago than its limit. Its events go
     /// unchecked until it catches up.
@@ -246,22 +306,35 @@ pub enum MonitorFinding {
         last_saved: UnixSeconds,
         limit_secs: u64,
     },
-    /// The time the guardian signed into a log differs from the time S3
-    /// recorded the object by more than `MAX_EXPECTED_LOG_CLOCK_SKEW`.
-    GuardianClockSkew {
-        session_id: SessionID,
-        object_key: String,
-        /// The guardian's signed time.
-        logged_at_ms: UnixMillis,
-        /// S3's `LastModified` time.
-        stored_at_ms: UnixMillis,
-    },
-    /// The guardian's logs break a rule that an honest guardian keeps. See
-    /// `GuardianInconsistency`.
-    GuardianInconsistency(GuardianInconsistency),
 }
 
 impl MonitorFinding {
+    /// The finding for a withdrawal event that broke its deadline. A late
+    /// or missing `Predecessor` is `WithdrawalUnapproved`, else
+    /// `WithdrawalStuck`.
+    pub fn withdrawal_timing(
+        wid: WithdrawalID,
+        event_type: WithdrawalEventType,
+        relation: EventRelation,
+        deadline: UnixSeconds,
+        timing: EventTiming,
+    ) -> Self {
+        match relation {
+            EventRelation::Predecessor => Self::WithdrawalUnapproved {
+                wid,
+                event_type,
+                deadline,
+                timing,
+            },
+            EventRelation::Successor => Self::WithdrawalStuck {
+                wid,
+                event_type,
+                deadline,
+                timing,
+            },
+        }
+    }
+
     /// A `DepositNotApproved` for the held `utxo` at `outpoint`, with the
     /// causes that the monitor can infer. `None` if `utxo` is not an
     /// unapproved deposit.
@@ -300,12 +373,15 @@ impl MonitorFinding {
             Self::DepositNotApproved { .. } => false,
             // A bad guardian clock or a slow S3 write. The checks still run.
             Self::GuardianClockSkew { .. } => false,
-            Self::InvalidEventAdded(_)
-            | Self::WithdrawalEventLate { .. }
-            | Self::WithdrawalEventMissing { .. }
-            | Self::WithdrawalTxidMismatch { .. }
-            | Self::WithdrawalTxUnbuildable { .. }
-            | Self::WithdrawalMismatch { .. }
+            // The monitor reports a missing E2 or E3 at each tick until the event
+            // comes. A late event is reported once, when it comes. A leaked guardian
+            // key lets a signature skip the guardian's log and limits, or, with the
+            // committee key, steal an approved input. Both leave E2 or E3 missing for
+            // good, and no other finding reports them. A late event did come, so it
+            // pages only in strict mode.
+            Self::WithdrawalStuck { timing, .. } => matches!(timing, EventTiming::Missing { .. }),
+            Self::WithdrawalUnapproved { .. }
+            | Self::WithdrawalInvalid { .. }
             | Self::DepositUnbacked { .. }
             | Self::DepositMismatch { .. }
             | Self::BtcRpcInconsistency(_)
@@ -328,12 +404,9 @@ impl MonitorFinding {
     /// The variant name. Alerting labels each finding with it.
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::InvalidEventAdded(_) => "InvalidEventAdded",
-            Self::WithdrawalEventLate { .. } => "WithdrawalEventLate",
-            Self::WithdrawalEventMissing { .. } => "WithdrawalEventMissing",
-            Self::WithdrawalTxidMismatch { .. } => "WithdrawalTxidMismatch",
-            Self::WithdrawalTxUnbuildable { .. } => "WithdrawalTxUnbuildable",
-            Self::WithdrawalMismatch { .. } => "WithdrawalMismatch",
+            Self::WithdrawalUnapproved { .. } => "WithdrawalUnapproved",
+            Self::WithdrawalStuck { .. } => "WithdrawalStuck",
+            Self::WithdrawalInvalid { .. } => "WithdrawalInvalid",
             Self::DepositUnbacked { .. } => "DepositUnbacked",
             Self::DepositLate { .. } => "DepositLate",
             Self::DepositMismatch { .. } => "DepositMismatch",
@@ -391,6 +464,13 @@ pub enum GuardianInconsistency {
         seq: u64,
         object_key: String,
     },
+    /// The monitor cannot read an output address in the withdrawal log at
+    /// `object_key`.
+    WithdrawalLogUnreadable {
+        object_key: String,
+        wid: WithdrawalID,
+        error: String,
+    },
 }
 
 impl fmt::Display for GuardianInconsistency {
@@ -411,6 +491,14 @@ impl fmt::Display for GuardianInconsistency {
             } => write!(
                 f,
                 "SeqJump(next_seq={next_seq}, seq={seq}, key={object_key})"
+            ),
+            Self::WithdrawalLogUnreadable {
+                object_key,
+                wid,
+                error,
+            } => write!(
+                f,
+                "WithdrawalLogUnreadable(key={object_key}, wid={wid}, error={error})"
             ),
         }
     }
@@ -436,6 +524,49 @@ impl fmt::Display for BtcRpcInconsistency {
                 f,
                 "UtxoVanished(outpoint={outpoint}, first_seen={})",
                 utc_timestamp(*first_seen),
+            ),
+        }
+    }
+}
+
+impl EventTiming {
+    /// The timing for a log line, against the `deadline` it broke.
+    fn describe(&self, deadline: UnixSeconds) -> String {
+        match self {
+            Self::Late { event } => format!(
+                "late_by={}, event={}",
+                human_duration(event.timestamp_secs.saturating_sub(deadline)),
+                MonitorEvent::Withdrawal(event.clone()),
+            ),
+            Self::Missing { cursor } => {
+                format!("missing, checked_through={}", utc_timestamp(*cursor))
+            }
+        }
+    }
+}
+
+impl fmt::Display for WithdrawalInvalidReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TxidMismatch { event, computed } => write!(
+                f,
+                "TxidMismatch(event={}, event_tx={{{}}}, computed={computed})",
+                MonitorEvent::Withdrawal(event.clone()),
+                event.tx,
+            ),
+            Self::Unbuildable { event, error } => write!(
+                f,
+                "Unbuildable(event={}, event_tx={{{}}}, error={error})",
+                MonitorEvent::Withdrawal(event.clone()),
+                event.tx,
+            ),
+            Self::EventsDiffer { kind, held, new } => write!(
+                f,
+                "EventsDiffer(kind={kind:?}, held={}, held_tx={{{}}}, new={}, new_tx={{{}}})",
+                MonitorEvent::Withdrawal(held.clone()),
+                held.tx,
+                MonitorEvent::Withdrawal(new.clone()),
+                new.tx,
             ),
         }
     }
@@ -468,54 +599,31 @@ impl fmt::Display for DepositMismatchReason {
 impl fmt::Display for MonitorFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidEventAdded(message) => {
-                write!(f, "InvalidEventAdded(message={message})")
-            }
-            Self::WithdrawalEventLate {
-                event,
-                relation,
-                deadline,
-                occurred_at,
-            } => write!(
-                f,
-                "WithdrawalEventLate(event={}, relation={relation:?}, deadline={}, occurred_at={}, late_by={})",
-                MonitorEvent::Withdrawal(event.clone()),
-                utc_timestamp(*deadline),
-                utc_timestamp(*occurred_at),
-                human_duration(occurred_at.saturating_sub(*deadline)),
-            ),
-            Self::WithdrawalEventMissing {
+            Self::WithdrawalUnapproved {
                 wid,
                 event_type,
-                relation,
                 deadline,
-                cursor,
+                timing,
             } => write!(
                 f,
-                "WithdrawalEventMissing(wid={wid}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
+                "WithdrawalUnapproved(wid={wid}, event_type={event_type:?}, deadline={}, {})",
                 utc_timestamp(*deadline),
-                utc_timestamp(*cursor),
+                timing.describe(*deadline),
             ),
-            Self::WithdrawalTxidMismatch {
+            Self::WithdrawalStuck {
                 wid,
-                claimed,
-                computed,
+                event_type,
+                deadline,
+                timing,
             } => write!(
                 f,
-                "WithdrawalTxidMismatch(wid={wid}, claimed={claimed}, computed={computed})"
+                "WithdrawalStuck(wid={wid}, event_type={event_type:?}, deadline={}, {})",
+                utc_timestamp(*deadline),
+                timing.describe(*deadline),
             ),
-            Self::WithdrawalTxUnbuildable {
-                wid,
-                claimed,
-                reason,
-            } => write!(
-                f,
-                "WithdrawalTxUnbuildable(wid={wid}, claimed={claimed}, reason={reason})"
-            ),
-            Self::WithdrawalMismatch { wid, sui, guardian } => write!(
-                f,
-                "WithdrawalMismatch(wid={wid}, sui={{{sui}}}, guardian={{{guardian}}})",
-            ),
+            Self::WithdrawalInvalid { wid, reason } => {
+                write!(f, "WithdrawalInvalid(wid={wid}, {reason})")
+            }
             Self::DepositUnbacked { sui } => write!(
                 f,
                 "DepositUnbacked({})",

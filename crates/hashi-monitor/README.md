@@ -44,10 +44,9 @@ loss of Bitcoin backing.
 
 | Kind | Essential | Meaning |
 |---|---|---|
-| `WithdrawalEventLate`, `WithdrawalEventMissing` | Yes | A withdrawal event is late or missing past its bound. |
-| `WithdrawalTxidMismatch`, `WithdrawalTxUnbuildable` | Yes | A Hashi approval's txid does not match its inputs and outputs. |
-| `WithdrawalMismatch` | Yes | Sui and the guardian state different inputs, payouts, or change. |
-| `InvalidEventAdded` | Yes | An event contradicts its withdrawal. |
+| `WithdrawalUnapproved` | Yes | A guardian signature came without its Hashi approval, or more than 5 minutes before it. Or a Bitcoin spend came more than 2 hours before its guardian signature. |
+| `WithdrawalStuck` | If missing | The guardian signature is missing 1 hour after the Hashi approval, or the Bitcoin confirmation is missing 1 day after the signature. The monitor reports a missing event at each tick until it comes, and a late event once, when it comes. A leaked guardian key lets a signature skip the guardian's log and limits, or, with the committee key, steal an input of the approved transaction. Both leave E2 or E3 missing for good, and no other finding reports them. A late event did come, so it pages only in strict mode. A slow guardian or Bitcoin confirmation also gives this finding. |
+| `WithdrawalInvalid` | Yes | The withdrawal's transaction or events contradict each other. The approved inputs and outputs do not build a transaction, or do not give the approved txid. Or two events state another txid, other inputs, payouts, or change. Or one event came again with other contents. |
 | `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |
 | `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
 | `DepositLate` | No | An approved deposit's Bitcoin block is more than 2 hours after the approval. Hashi approved before Bitcoin confirmed the payment, or a miner dated the block late. The payment came, so Bitcoin now backs the hBTC. |
@@ -57,7 +56,7 @@ loss of Bitcoin backing.
 | `UtxoOriginConflict` | Yes | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
 | `UtxoTooOld` | Yes | A pool UTXO is older than 40 days, approved or not. The committee can spend it alone at 60. |
 | `HbtcSupplyExceedsPool` | Yes | The hBTC supply has exceeded the pool value for 3 hours. |
-| `GuardianInconsistency` | Yes | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
+| `GuardianInconsistency` | Yes | Two logs for one `seq`, a missing `seq`, a skip of more than 10 seqs, or a log with an output address that the monitor cannot read. |
 | `GuardianClockSkew` | No | A guardian log's signed time differs from S3's time by more than 30 s. The cause is the guardian's clock or a slow S3 write. |
 | `BtcRpcInconsistency` | Yes | A Bitcoin answer contradicts an earlier one: a lying node or a reorg. |
 | `SourceStale` | Yes | Sui, the guardian, or Bitcoin is checked more than 3 hours behind, no daily pool check succeeded for 27 hours, or no hBTC supply read succeeded for 3 hours. |

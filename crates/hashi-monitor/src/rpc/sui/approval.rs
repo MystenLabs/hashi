@@ -99,6 +99,7 @@ pub mod tests {
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::domain::WithdrawalTx;
+    use crate::findings::WithdrawalInvalidReason;
     use hashi_types::move_types::WithdrawalTransaction;
 
     use std::collections::BTreeMap;
@@ -289,13 +290,15 @@ pub mod tests {
 
         let findings = rejection(approval(&txn));
 
-        assert_eq!(
-            findings,
-            vec![MonitorFinding::WithdrawalTxidMismatch {
-                wid: WID,
-                claimed,
-                computed,
-            }]
+        assert!(
+            matches!(
+                &findings[..],
+                [MonitorFinding::WithdrawalInvalid {
+                    wid: WID,
+                    reason: WithdrawalInvalidReason::TxidMismatch { event, computed: c },
+                }] if event.btc_txid == claimed && *c == computed
+            ),
+            "{findings:?}"
         );
     }
 
@@ -334,7 +337,10 @@ pub mod tests {
 
         assert!(matches!(
             findings[..],
-            [MonitorFinding::WithdrawalTxidMismatch { wid: WID, .. }]
+            [MonitorFinding::WithdrawalInvalid {
+                wid: WID,
+                reason: WithdrawalInvalidReason::TxidMismatch { .. },
+            }]
         ));
     }
 
@@ -348,8 +354,11 @@ pub mod tests {
 
         assert!(
             matches!(
-                findings[..],
-                [MonitorFinding::WithdrawalTxUnbuildable { wid: WID, claimed: c, .. }] if c == claimed
+                &findings[..],
+                [MonitorFinding::WithdrawalInvalid {
+                    wid: WID,
+                    reason: WithdrawalInvalidReason::Unbuildable { event, .. },
+                }] if event.btc_txid == claimed
             ),
             "{findings:?}"
         );

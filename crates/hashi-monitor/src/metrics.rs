@@ -273,7 +273,11 @@ mod tests {
     #[test]
     fn a_finding_sets_the_latest_timestamp_of_its_kind() {
         let metrics = MonitorMetrics::new();
-        let finding = MonitorFinding::InvalidEventAdded("invalid wid".to_string());
+        let finding = MonitorFinding::SourceStale {
+            source: SOURCE_GUARDIAN,
+            checked_through: 0,
+            limit_secs: 3_600,
+        };
 
         metrics.record_findings(std::slice::from_ref(&finding), 100);
         metrics.record_findings(&[], 150);
@@ -288,7 +292,7 @@ mod tests {
 
         let rendered = metrics.render();
         for line in [
-            r#"hashi_monitor_last_finding_timestamp_seconds{kind="InvalidEventAdded"} 200"#,
+            r#"hashi_monitor_last_finding_timestamp_seconds{kind="SourceStale"} 200"#,
             r#"hashi_monitor_last_finding_timestamp_seconds{kind="SnapshotStale"} 250"#,
             r#"hashi_monitor_checked_through_timestamp_seconds{source="guardian"} 300"#,
             r#"hashi_monitor_open_flows{kind="withdrawal"} 3"#,

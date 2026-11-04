@@ -563,6 +563,7 @@ mod tests {
     use crate::domain::UtxoOrigin;
     use crate::domain::WithdrawalEventType;
     use crate::findings::DepositMismatchReason;
+    use crate::findings::EventTiming;
     use crate::rpc::sui::tests::hashi_approval;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
@@ -940,8 +941,9 @@ mod tests {
         let missing = auditor.detect_timing_violations();
         assert!(matches!(
             missing[..],
-            [MonitorFinding::WithdrawalEventMissing {
+            [MonitorFinding::WithdrawalStuck {
                 event_type: WithdrawalEventType::E2GuardianApproved,
+                timing: EventTiming::Missing { .. },
                 ..
             }]
         ));
