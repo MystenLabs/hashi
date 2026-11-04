@@ -193,18 +193,10 @@ impl UtxoPool {
         self.utxos
             .iter()
             .filter_map(|(outpoint, utxo)| match utxo.origin {
-                UtxoOrigin::UnapprovedDeposit {
-                    requested_at,
-                    requested_amount,
-                } if requested_at + timing.deposit_request_watch < sui_cursor => {
-                    Some(MonitorFinding::deposit_not_approved(
-                        *outpoint,
-                        requested_amount,
-                        utxo.amount,
-                        requested_at,
-                        utxo.first_seen,
-                        timing,
-                    ))
+                UtxoOrigin::UnapprovedDeposit { requested_at, .. }
+                    if requested_at + timing.deposit_request_watch < sui_cursor =>
+                {
+                    MonitorFinding::deposit_not_approved(*outpoint, utxo, timing)
                 }
                 _ => None,
             })
@@ -973,16 +965,14 @@ mod tests {
     /// The causes of `DepositNotApproved` for a request of 1_000 at 100.
     /// `Timing::for_tests` expires a request after 500 s.
     fn causes(paid_amount: u64, block_time: UnixSeconds) -> Vec<UnapprovedCause> {
-        let finding = MonitorFinding::deposit_not_approved(
-            outpoint(1),
-            1_000,
-            paid_amount,
-            100,
-            block_time,
-            &Timing::for_tests(),
+        let paid = FinishedDeposit::new(
+            deposit(1, paid_amount, block_time),
+            unapproved_origin(100, 1_000),
         );
-        let MonitorFinding::DepositNotApproved { causes, .. } = finding else {
-            unreachable!("the constructor builds a DepositNotApproved");
+        let finding =
+            MonitorFinding::deposit_not_approved(outpoint(1), &paid.utxo, &Timing::for_tests());
+        let Some(MonitorFinding::DepositNotApproved { causes, .. }) = finding else {
+            unreachable!("an unapproved deposit gives a DepositNotApproved");
         };
         causes
     }

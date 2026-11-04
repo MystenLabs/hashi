@@ -24,6 +24,7 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
+use crate::domain::utxo_pool::Utxo;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
@@ -226,29 +227,31 @@ pub enum MonitorFinding {
 }
 
 impl MonitorFinding {
-    /// A `DepositNotApproved` with the causes that the monitor can infer.
-    pub fn deposit_not_approved(
-        outpoint: OutPoint,
-        requested_amount: u64,
-        paid_amount: u64,
-        requested_at: UnixSeconds,
-        block_time: UnixSeconds,
-        timing: &Timing,
-    ) -> Self {
-        Self::DepositNotApproved {
+    /// A `DepositNotApproved` for the held `utxo` at `outpoint`, with the
+    /// causes that the monitor can infer. `None` if `utxo` is not an
+    /// unapproved deposit.
+    pub fn deposit_not_approved(outpoint: OutPoint, utxo: &Utxo, timing: &Timing) -> Option<Self> {
+        let UtxoOrigin::UnapprovedDeposit {
+            requested_at,
+            requested_amount,
+        } = utxo.origin
+        else {
+            return None;
+        };
+        Some(Self::DepositNotApproved {
             outpoint,
             requested_amount,
-            paid_amount,
+            paid_amount: utxo.amount,
             requested_at,
-            block_time,
+            block_time: utxo.first_seen,
             causes: UnapprovedCause::infer(
                 requested_amount,
-                paid_amount,
+                utxo.amount,
                 requested_at,
-                block_time,
+                utxo.first_seen,
                 timing,
             ),
-        }
+        })
     }
 
     /// The variant name. Alerting labels each finding with it.
