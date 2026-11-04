@@ -281,16 +281,16 @@ impl ObjectIndex {
 }
 
 /// Everything a bootstrap scrape learns beyond the mirrored values:
-/// the routing table, the per-object index, and the minimum checkpoint
-/// height any scrape response was served at. Replaying the filtered
-/// transaction stream from `floor` (in order, through the tip)
-/// converges the mirror even where a page was served behind another —
-/// index versions make re-applied writes idempotent.
+/// the routing table, the per-object index, and the checkpoint heights
+/// its responses were served at. Replaying the filtered transaction
+/// stream from the floor (in order, through the tip) converges the
+/// mirror even where a page was served behind another — index versions
+/// make re-applied writes idempotent.
 #[derive(Debug)]
 pub(super) struct MirrorSeed {
     pub routing: RoutingTable,
     pub index: ObjectIndex,
-    pub floor: u64,
+    pub heights: PageHeights,
 }
 
 impl MirrorSeed {
@@ -298,18 +298,17 @@ impl MirrorSeed {
         Self {
             routing: RoutingTable::new(hashi_id, bitcoin_state_field_id),
             index: ObjectIndex::new(),
-            floor: u64::MAX,
+            heights: PageHeights::default(),
         }
     }
 
-    /// Fold one response's serving height into the replay floor.
     pub(super) fn observe_height(&mut self, height: u64) {
-        self.floor = self.floor.min(height);
+        self.heights.observe(height);
     }
 
     /// Merge the per-container seed entries a scrape helper produced.
     pub(super) fn absorb(&mut self, seed: ContainerSeed) {
-        self.observe_height(seed.height);
+        self.heights.merge(seed.heights);
         for (id, version, kind) in seed.entries {
             if let TrackedKind::DofWrapper { container } = &kind {
                 self.routing.register_wrapper(id, *container);
@@ -325,11 +324,41 @@ impl MirrorSeed {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PageHeights {
+    pub floor: u64,
+    pub ceiling: u64,
+}
+
+impl Default for PageHeights {
+    fn default() -> Self {
+        Self {
+            floor: u64::MAX,
+            ceiling: 0,
+        }
+    }
+}
+
+impl PageHeights {
+    pub(super) fn observe(&mut self, height: u64) {
+        self.floor = self.floor.min(height);
+        self.ceiling = self.ceiling.max(height);
+    }
+
+    pub(super) fn merge(&mut self, other: PageHeights) {
+        self.floor = self.floor.min(other.floor);
+        self.ceiling = self.ceiling.max(other.ceiling);
+    }
+
+    pub(super) fn raise_ceiling(&mut self, height: u64) {
+        self.ceiling = self.ceiling.max(height);
+    }
+}
+
 /// One scrape helper's contribution to the [`MirrorSeed`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct ContainerSeed {
-    /// The minimum checkpoint height across this helper's pages.
-    pub height: u64,
+    pub heights: PageHeights,
     /// (object id, version, meaning) triples for the index.
     pub entries: Vec<(Address, u64, TrackedKind)>,
     /// Interior containers discovered inside mirrored values.
@@ -338,22 +367,9 @@ pub(super) struct ContainerSeed {
     pub tob_tables: Vec<(Address, move_types::TobKey)>,
 }
 
-impl Default for ContainerSeed {
-    fn default() -> Self {
-        Self {
-            // The neutral element for the min-fold: a helper that read
-            // no pages must not drag the replay floor down.
-            height: u64::MAX,
-            entries: Vec::new(),
-            interior: Vec::new(),
-            tob_tables: Vec::new(),
-        }
-    }
-}
-
 impl ContainerSeed {
     pub(super) fn merge(&mut self, other: ContainerSeed) {
-        self.height = self.height.min(other.height);
+        self.heights.merge(other.heights);
         self.entries.extend(other.entries);
         self.interior.extend(other.interior);
         self.tob_tables.extend(other.tob_tables);

@@ -22,6 +22,7 @@ pub(crate) const PAUSED_REFUSAL_MSG: &str = "Hashi is paused";
 pub(crate) const NOT_READY_TO_FINALIZE_MSG: &str = "not ready to finalize";
 pub(crate) const UNSIGNED_REFUSAL_MSG: &str = "a withdrawal is still unsigned";
 pub(crate) const NOT_OLDEST_REFUSAL_MSG: &str = "missing the oldest approved request";
+pub(crate) const CATCHING_UP_REFUSAL_MSG: &str = "this node is still catching up";
 
 mod client;
 mod connection_limit;

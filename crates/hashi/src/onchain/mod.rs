@@ -14,6 +14,8 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use sui_futures::service::Service;
 use sui_rpc::Client;
@@ -21,11 +23,13 @@ use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
+use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
+use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -146,6 +150,7 @@ struct Inner {
     /// `None` when no mirror runs, which is not the same as covering
     /// nothing yet — there is no claim to make at all.
     state_watermark: watch::Sender<Option<u64>>,
+    scrape_ceiling: ScrapeCeiling,
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -160,6 +165,37 @@ struct Inner {
     /// limiter immediately — a re-bootstrap can swallow the fully-signed
     /// transitions that advance it.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
+}
+
+const SCRAPE_CEILING_MARGIN: u64 = 25;
+
+const EXECUTED_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct ScrapeCeiling(AtomicU64);
+
+impl ScrapeCeiling {
+    fn new(ceiling: u64) -> Self {
+        Self(AtomicU64::new(ceiling))
+    }
+
+    fn closed() -> Self {
+        Self::new(u64::MAX)
+    }
+
+    fn close(&self) {
+        self.0.store(u64::MAX, Ordering::Release);
+    }
+
+    fn set(&self, ceiling: u64) {
+        self.0.store(ceiling, Ordering::Release);
+    }
+
+    fn reached(&self, watermark: impl FnOnce() -> Option<u64>) -> bool {
+        let ceiling = self.0.load(Ordering::Acquire);
+        watermark()
+            .is_none_or(|watermark| watermark >= ceiling.saturating_add(SCRAPE_CEILING_MARGIN))
+    }
 }
 
 #[derive(Debug)]
@@ -201,7 +237,16 @@ impl OnchainState {
             )
         })
         .await?;
-        let seed = seed.context("a full scrape must produce a mirror seed")?;
+        let mut seed = seed.context("a full scrape must produce a mirror seed")?;
+        seed.heights
+            .raise_ceiling(executed_checkpoint(&state.client()).await?);
+        state.set_scrape_ceiling(seed.heights.ceiling);
+        tracing::info!(
+            floor = seed.heights.floor,
+            ceiling = seed.heights.ceiling,
+            objects = seed.index.len(),
+            "object mirror bootstrapped from scrape"
+        );
 
         let watcher_state = state.clone();
         // The watcher rebuilds its client on every reconnect, so hand it the URL.
@@ -267,13 +312,19 @@ impl OnchainState {
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
         // No seed means no mirror, so there is no floor to claim.
-        let (state_watermark, _) = watch::channel(seed.as_ref().map(|seed| seed.floor));
+        let (state_watermark, _) = watch::channel(seed.as_ref().map(|seed| seed.heights.floor));
+        let scrape_ceiling = if seed.is_some() {
+            ScrapeCeiling::closed()
+        } else {
+            ScrapeCeiling::new(0)
+        };
         let state = Inner {
             ids,
             client,
             sender,
             checkpoint,
             state_watermark,
+            scrape_ceiling,
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
@@ -411,6 +462,23 @@ impl OnchainState {
             current.replace(covered) != Some(covered)
         });
         self.observe_state_watermark();
+    }
+
+    pub fn caught_up_with_scrape(&self) -> bool {
+        self.0.scrape_ceiling.reached(|| self.state_watermark())
+    }
+
+    pub fn caught_up_state(&self) -> Option<RwLockReadGuard<'_, State>> {
+        let state = self.state();
+        self.caught_up_with_scrape().then_some(state)
+    }
+
+    fn close_scrape_gate(&self) {
+        self.0.scrape_ceiling.close();
+    }
+
+    fn set_scrape_ceiling(&self, ceiling: u64) {
+        self.0.scrape_ceiling.set(ceiling);
     }
 
     fn observe_state_watermark(&self) {
@@ -1225,10 +1293,46 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
+async fn executed_checkpoint(client: &Client) -> Result<u64> {
+    let deadline = tokio::time::Instant::now() + BOOT_SCRAPE_RETRY_WINDOW;
+    let mut backoff = BOOT_SCRAPE_MIN_BACKOFF;
+    loop {
+        let error = match first_streamed_checkpoint(client).await {
+            Ok(checkpoint) => return Ok(checkpoint),
+            Err(error) => error,
+        };
+        if tokio::time::Instant::now() + backoff >= deadline {
+            return Err(error.context("reading the executed checkpoint after a scrape"));
+        }
+        tracing::warn!(
+            backoff_ms = backoff.as_millis() as u64,
+            "Reading the executed checkpoint failed: {error:#}; retrying"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = backoff.saturating_mul(2).min(BOOT_SCRAPE_MAX_BACKOFF);
+    }
+}
+
+async fn first_streamed_checkpoint(client: &Client) -> Result<u64> {
+    let mut subscription = client
+        .clone()
+        .subscription_client()
+        .subscribe_checkpoints(SubscribeCheckpointsRequest::default().with_read_mask(
+            FieldMask::from_paths([Checkpoint::path_builder().sequence_number()]),
+        ))
+        .await?
+        .into_inner();
+    tokio::time::timeout(EXECUTED_CHECKPOINT_TIMEOUT, subscription.try_next())
+        .await
+        .context("timed out waiting for the first checkpoint frame")??
+        .context("checkpoint stream closed before the first frame")?
+        .cursor_opt()
+        .context("the first checkpoint frame carried no cursor")
+}
+
 /// Page through `list_dynamic_fields` manually, handing each response page
-/// to the caller immediately and returning the minimum checkpoint height.
-/// The height feeds the mirror's replay floor, which the auto-paginating
-/// stream helper cannot surface.
+/// to the caller immediately and returning the pages' checkpoint heights,
+/// which the auto-paginating stream helper cannot surface.
 async fn scrape_dynamic_field_pages(
     client: &Client,
     parent: Address,
@@ -1236,10 +1340,10 @@ async fn scrape_dynamic_field_pages(
     container: &'static str,
     metrics: Option<&crate::metrics::Metrics>,
     mut consume_page: impl FnMut(Vec<DynamicField>) -> Result<()>,
-) -> Result<u64> {
+) -> Result<route::PageHeights> {
     let started = std::time::Instant::now();
     let mut entries = 0u64;
-    let mut min_height = u64::MAX;
+    let mut heights = route::PageHeights::default();
     let mut pages = 0u64;
     let mut page_token: Option<bytes::Bytes> = None;
     loop {
@@ -1258,7 +1362,7 @@ async fn scrape_dynamic_field_pages(
         let height = response
             .checkpoint_height()
             .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
-        min_height = min_height.min(height);
+        heights.observe(height);
         let page = response.into_inner();
         pages += 1;
         if let Some(metrics) = metrics {
@@ -1303,7 +1407,7 @@ async fn scrape_dynamic_field_pages(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Scraped on-chain container"
     );
-    Ok(min_height)
+    Ok(heights)
 }
 
 /// The fullnode lists fields from its index and loads each object afterwards,
@@ -1564,11 +1668,11 @@ async fn scrape_tob_entries(
     // the bag holds a couple of epochs' worth of buckets, so the
     // collection stays small.
     let mut to_scrape: Vec<(
-        move_types::TobKey,
+        TobKey,
         move_types::LinkedTable<Address>,
         Option<move_types::PresigSealV1>,
     )> = Vec::new();
-    seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
+    seed.heights = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
             // The leader's TOB GC destroys dead buckets concurrently with this
             // scan, and the RPC's defaulting accessor hands back an EMPTY value
@@ -1582,7 +1686,7 @@ async fn scrape_tob_entries(
                 );
                 continue;
             };
-            let key: move_types::TobKey = field
+            let key: TobKey = field
                 .name()
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize TobKey: {e}"))?;
@@ -1618,7 +1722,7 @@ async fn scrape_tob_entries(
             DynamicField::path_builder().field_object().version(),
         ]);
         let mut nodes = BTreeMap::new();
-        let node_height = scrape_dynamic_field_pages(
+        let node_heights = scrape_dynamic_field_pages(
             &client,
             certs.id,
             node_mask,
@@ -1656,7 +1760,7 @@ async fn scrape_tob_entries(
             },
         )
         .await?;
-        seed.height = seed.height.min(node_height);
+        seed.heights.merge(node_heights);
         buckets.insert(
             key,
             types::TobBucket {
@@ -1734,7 +1838,7 @@ async fn scrape_treasury(
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
 
-    seed.height =
+    seed.heights =
         scrape_dynamic_field_pages(&client, container, mask, "treasury", metrics, |fields| {
             for field in fields {
                 let object_type = field.child_object().object_type();
@@ -1832,7 +1936,7 @@ async fn scrape_all_member_info(
     ]);
     let mut seed = route::ContainerSeed::default();
     let mut member_info = BTreeMap::new();
-    seed.height = scrape_dynamic_field_pages(
+    seed.heights = scrape_dynamic_field_pages(
         &client,
         member_info_id,
         mask,
@@ -1914,7 +2018,7 @@ async fn scrape_committees(
     let mut seed = route::ContainerSeed::default();
     let mut move_committees = BTreeMap::new();
     let mut raw_handoffs = BTreeMap::new();
-    seed.height = scrape_dynamic_field_pages(
+    seed.heights = scrape_dynamic_field_pages(
         &client,
         committees_id,
         mask,
@@ -2045,7 +2149,7 @@ where
     ]);
     let mut seed = route::ContainerSeed::default();
     let mut values = Vec::new();
-    seed.height = scrape_dynamic_field_pages(client, container, mask, label, metrics, |fields| {
+    seed.heights = scrape_dynamic_field_pages(client, container, mask, label, metrics, |fields| {
         for field in fields {
             let value: T = listed_bcs(
                 field.child_object_opt().and_then(Object::contents_opt),
@@ -2171,7 +2275,7 @@ async fn scrape_utxo_records(
 )> {
     let mut seed = route::ContainerSeed::default();
     let mut utxo_records = BTreeMap::new();
-    seed.height = scrape_dynamic_field_pages(
+    seed.heights = scrape_dynamic_field_pages(
         &client,
         utxo_records_id,
         plain_field_mask(),
@@ -2253,7 +2357,7 @@ async fn scrape_proposal_bag(
     let mut seed = route::ContainerSeed::default();
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
-    seed.height = scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics, |fields| {
+    seed.heights = scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics, |fields| {
         for field in fields {
             // `child_object.object_type` is the fully-qualified type, e.g.
             //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
@@ -2620,6 +2724,45 @@ mod tests {
         let mut expected = [0u8; 48];
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
+    }
+}
+
+#[cfg(test)]
+mod scrape_ceiling_tests {
+    use super::Address;
+    use super::ScrapeCeiling;
+    use super::route;
+
+    #[test]
+    fn a_scrape_is_caught_up_once_replay_passes_its_highest_page_by_the_margin() {
+        let mut seed =
+            route::MirrorSeed::new(Address::from_static("0x1"), Address::from_static("0x2"));
+        seed.observe_height(12);
+        let mut container = route::ContainerSeed::default();
+        container.heights.observe(10);
+        let mut merged = route::ContainerSeed::default();
+        merged.heights.observe(15);
+        container.merge(merged);
+        seed.absorb(container);
+        seed.absorb(route::ContainerSeed::default());
+        assert_eq!(
+            seed.heights,
+            route::PageHeights {
+                floor: 10,
+                ceiling: 15
+            }
+        );
+
+        let ceiling = ScrapeCeiling::new(seed.heights.ceiling);
+        assert!(!ceiling.reached(|| Some(seed.heights.floor)));
+        assert!(!ceiling.reached(|| Some(39)));
+        assert!(ceiling.reached(|| Some(40)));
+
+        ceiling.close();
+        assert!(!ceiling.reached(|| Some(1_000)));
+        ceiling.set(20);
+        assert!(!ceiling.reached(|| Some(44)));
+        assert!(ceiling.reached(|| Some(45)));
     }
 }
 

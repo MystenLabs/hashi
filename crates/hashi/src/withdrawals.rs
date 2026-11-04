@@ -31,6 +31,7 @@ use crate::btc_monitor::limits::BitcoindCharge;
 use crate::btc_monitor::limits::BitcoindGate;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
+use crate::grpc::CATCHING_UP_REFUSAL_MSG;
 use crate::grpc::NOT_OLDEST_REFUSAL_MSG;
 use crate::grpc::NOT_READY_TO_FINALIZE_MSG;
 use crate::grpc::RunGate;
@@ -748,6 +749,10 @@ pub struct FeeEstimateUnavailable(anyhow::Error);
 pub struct WithdrawalStillUnsigned;
 
 #[derive(Debug, Error)]
+#[error("{marker}", marker = CATCHING_UP_REFUSAL_MSG)]
+pub struct MirrorCatchingUp;
+
+#[derive(Debug, Error)]
 #[error("{marker}: {0}", marker = NOT_OLDEST_REFUSAL_MSG)]
 pub struct OldestRequestMissing(Address);
 
@@ -1076,7 +1081,9 @@ impl Hashi {
             expected_txid
         );
 
-        let state = self.onchain_state().state();
+        let Some(state) = self.onchain_state().caught_up_state() else {
+            return Err(MirrorCatchingUp.into());
+        };
         let hashi = state.hashi();
         let queue = &hashi.bitcoin().withdrawal_queue;
         check_commitment_against_queue(
