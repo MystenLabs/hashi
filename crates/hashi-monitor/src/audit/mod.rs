@@ -655,7 +655,7 @@ mod tests {
                     script_pubkey: sui.script_pubkey.clone(),
                     block_time: 150,
                 }))
-                .is_none()
+                .is_empty()
         );
         assert_eq!(auditor.utxo_pool.value(), 0);
         let outpoint = OutPoint::from(sui.deposit_id);
@@ -851,7 +851,7 @@ mod tests {
             auditor
                 .utxo_pool
                 .add_deposit(&unapproved(deposit))
-                .is_none()
+                .is_empty()
         );
         // An approval the guardian never signed: its E2 is overdue.
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(hashi_approval())]);

@@ -21,6 +21,7 @@ use crate::domain::BtcConfirmedDeposit;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::SuiDepositApprovedEvent;
+use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
 use crate::time::human_duration;
@@ -188,6 +189,13 @@ pub enum MonitorFinding {
         outpoint: OutPoint,
         txid: Txid,
     },
+    /// A deposit and a withdrawal's change claim one outpoint. Move refuses a
+    /// request for held change, so an insider or a Move fault is the cause.
+    UtxoOriginConflict {
+        outpoint: OutPoint,
+        held: UtxoOrigin,
+        new: UtxoOrigin,
+    },
     /// Sui's hBTC supply has exceeded the value of the UTXO pool since
     /// `since`, for longer than the grace. Bitcoin does not back every hBTC.
     HbtcSupplyExceedsPool {
@@ -267,6 +275,7 @@ impl MonitorFinding {
             Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
             Self::UtxoUnknownInputSpent { .. } => "UtxoUnknownInputSpent",
             Self::UtxoUnapprovedInputSpent { .. } => "UtxoUnapprovedInputSpent",
+            Self::UtxoOriginConflict { .. } => "UtxoOriginConflict",
             Self::HbtcSupplyExceedsPool { .. } => "HbtcSupplyExceedsPool",
             Self::SourceStale { .. } => "SourceStale",
             Self::SnapshotStale { .. } => "SnapshotStale",
@@ -478,6 +487,14 @@ impl fmt::Display for MonitorFinding {
             Self::UtxoUnapprovedInputSpent { outpoint, txid } => write!(
                 f,
                 "UtxoUnapprovedInputSpent(outpoint={outpoint}, txid={txid})"
+            ),
+            Self::UtxoOriginConflict {
+                outpoint,
+                held,
+                new,
+            } => write!(
+                f,
+                "UtxoOriginConflict(outpoint={outpoint}, held={held:?}, new={new:?})"
             ),
             Self::HbtcSupplyExceedsPool {
                 hbtc_supply,

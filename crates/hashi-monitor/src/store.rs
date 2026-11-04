@@ -255,7 +255,7 @@ mod tests {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_699_999_000,
         };
-        assert!(pool.add_deposit(&unapproved(deposit)).is_none());
+        assert!(pool.add_deposit(&unapproved(deposit)).is_empty());
         pool
     }
 
