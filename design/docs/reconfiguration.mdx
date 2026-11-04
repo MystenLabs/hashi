@@ -110,8 +110,9 @@ formed committee's total weight.
 
 At genesis (the first Hashi epoch, when no MPC public key exists yet and the
 committee must run initial DKG), the **launch switch**
-additionally gates `start_reconfig`: it aborts until the publisher
-has sent `hashi::finish_publish` (the `hashi launch` CLI command), which
+additionally gates `start_reconfig`. The launch switch is the onchain gate
+that `hashi::finish_publish` opens: `start_reconfig` aborts until the publisher
+sends `hashi::finish_publish` (the `hashi launch` CLI command), which
 finalizes the deploy configuration and hands the package `UpgradeCap` into
 onchain custody. This gives the publisher explicit control over when (and
 with which registered validators) the initial committee forms. After genesis
@@ -230,7 +231,8 @@ Examples include:
   or encryption key updates, formed a bad pending committee.
 
 In these cases, anyone can call the `reconfig::abort_reconfig` entry function
-directly, naming the pending epoch to abort. It is deliberately not a
+directly, naming the pending epoch to abort. Like `start_reconfig`, it is
+permissionless: the caller does not need to be a committee member. It is deliberately not a
 governance proposal and takes no vote: the committees that could vote on one
 are exactly the parties a stalled reconfiguration puts in doubt. The pending
 committee might never finish DKG or key rotation, and the same offline stake
@@ -304,4 +306,14 @@ Nodes normally submit these transactions themselves; `abort-reconfig` and
 | --- | --- | --- |
 | `hashi launch` | Sends `hashi::finish_publish` at genesis, finalizing the deploy configuration and handing the package `UpgradeCap` into onchain custody, which opens the launch switch | None |
 | `hashi committee abort-reconfig` | Submits the abort for the pending reconfiguration | Nothing is pending, or the pending epoch is still Sui's current epoch |
-| `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | Governance holds reconfiguration (`reconfig_hold` is set), a reconfiguration is already pending, a committee already exists for Sui's current epoch, Hashi is already on Sui's current epoch, or the fullnode's Sui epoch is behind Hashi's |
+| `hashi committee start-reconfig` | Submits the replacement `start_reconfig` | Any of the [refusal conditions](#hashi-committee-start-reconfig-refusal-conditions) |
+
+#### `hashi committee start-reconfig` refusal conditions
+
+`hashi committee start-reconfig` refuses when any of these conditions holds:
+
+- Governance holds reconfiguration (`reconfig_hold` is set)
+- A reconfiguration is already pending
+- A committee already exists for Sui's current epoch
+- Hashi is already on Sui's current epoch
+- The fullnode's Sui epoch is behind Hashi's
