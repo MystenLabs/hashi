@@ -10,7 +10,7 @@
 //!
 //! How it works:
 //! 1. After the pool update in each maintenance tick, read the hBTC supply and sum the
-//!    approved UTXO amounts. Export both as gauges.
+//!    amounts of the UTXOs in Move's pool. Export both as gauges.
 //! 2. While the supply exceeds the pool value, keep the time it started.
 //! 3. Report `HbtcSupplyExceedsPool` at each tick once that lasts
 //!    `HBTC_SUPPLY_GRACE`.

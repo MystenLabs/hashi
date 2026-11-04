@@ -21,9 +21,8 @@
 //! 5. A second add of a held UTXO is a repeat. It can approve a held
 //!    unapproved deposit, or give it a later request. A second amount or
 //!    script is a `BtcRpcInconsistency`. A deposit against change is a
-//!    `UtxoOriginConflict`. A spend of a UTXO the pool does not hold is
-//!    `UtxoUnknownInputSpent`, and of an unapproved deposit is
-//!    `UtxoUnapprovedInputSpent`.
+//!    `UtxoOriginConflict`. A spend of a UTXO that is not in Move's pool is
+//!    `UtxoOutsideMovePoolSpent`.
 //! 6. A `DepositApproved` must match a held deposit's amount and script. It
 //!    marks the deposit approved, also when it does not match: Move mints on
 //!    it.
@@ -37,12 +36,12 @@
 //! that AML screening rejects or a request with a wrong amount. Such a UTXO
 //! stays an unapproved deposit.
 //!
-//! Approved UTXOs: the pool value, the pool gauges, and `UtxoTooOld` use only
-//! the UTXOs that Hashi approved. The daily check looks up every held UTXO.
-//! - A deposit becomes an approved UTXO when the monitor has seen both its
-//!   Bitcoin confirmation and its Sui `DepositApproved`.
-//! - A change output becomes an approved UTXO at the Bitcoin confirmation of
-//!   its withdrawal.
+//! UTXOs in Move's pool: the pool value, the pool gauges, and `UtxoTooOld`
+//! use only these. The daily check looks up every held UTXO.
+//! - A deposit enters Move's pool when the monitor has seen both its Bitcoin
+//!   confirmation and its Sui `DepositApproved`.
+//! - A change output enters Move's pool at the Bitcoin confirmation of its
+//!   withdrawal.
 //! - A UTXO leaves the pool at the Bitcoin confirmation of the withdrawal
 //!   that spends it.
 //!
@@ -137,9 +136,9 @@ impl UtxoPool {
         self.utxos.len()
     }
 
-    /// The number of approved UTXOs.
-    pub fn approved_len(&self) -> usize {
-        self.approved().count()
+    /// The number of UTXOs in Move's pool.
+    pub fn in_move_pool_len(&self) -> usize {
+        self.in_move_pool().count()
     }
 
     /// Whether no UTXO is held.
@@ -147,19 +146,21 @@ impl UtxoPool {
         self.utxos.is_empty()
     }
 
-    /// The sum of the approved amounts, in satoshis.
+    /// The sum of the amounts in Move's pool, in satoshis.
     pub fn value(&self) -> u64 {
-        self.approved()
+        self.in_move_pool()
             .fold(0, |sum, utxo| sum.saturating_add(utxo.amount))
     }
 
-    /// The earliest block timestamp among the approved UTXOs.
+    /// The earliest block timestamp among the UTXOs in Move's pool.
     pub fn oldest_timestamp(&self) -> Option<UnixSeconds> {
-        self.approved().map(|utxo| utxo.first_seen).min()
+        self.in_move_pool().map(|utxo| utxo.first_seen).min()
     }
 
-    fn approved(&self) -> impl Iterator<Item = &Utxo> {
-        self.utxos.values().filter(|utxo| utxo.origin.is_approved())
+    fn in_move_pool(&self) -> impl Iterator<Item = &Utxo> {
+        self.utxos
+            .values()
+            .filter(|utxo| utxo.origin.in_move_pool())
     }
 
     /// The outpoints held, in order.
@@ -175,7 +176,7 @@ impl UtxoPool {
     /// Mark a held unapproved deposit approved. Any other UTXO is unchanged.
     fn mark_approved(&mut self, deposit_id: DepositId) {
         if let Some(utxo) = self.utxos.get_mut(&OutPoint::from(deposit_id))
-            && !utxo.origin.is_approved()
+            && matches!(utxo.origin, UtxoOrigin::UnapprovedDeposit { .. })
         {
             utxo.origin = UtxoOrigin::Deposit;
         }
@@ -305,15 +306,16 @@ impl UtxoPool {
         findings
     }
 
-    /// Spend a UTXO by the transaction `txid`. One the pool does not hold, or
-    /// holds with no approval, is a finding.
+    /// Spend a UTXO by the transaction `txid`. One that is not in Move's pool
+    /// is a finding.
     fn spend(&mut self, outpoint: OutPoint, txid: Txid) -> Option<MonitorFinding> {
         match self.utxos.remove(&outpoint) {
-            None => Some(MonitorFinding::UtxoUnknownInputSpent { outpoint, txid }),
-            Some(utxo) if !utxo.origin.is_approved() => {
-                Some(MonitorFinding::UtxoUnapprovedInputSpent { outpoint, txid })
-            }
-            Some(_) => None,
+            Some(utxo) if utxo.origin.in_move_pool() => None,
+            held => Some(MonitorFinding::UtxoOutsideMovePoolSpent {
+                outpoint,
+                txid,
+                held: held.map(|utxo| utxo.origin),
+            }),
         }
     }
 
@@ -332,7 +334,7 @@ impl UtxoPool {
             match states.get(outpoint) {
                 Some(OutpointState::Unspent { block_time }) => {
                     let age_secs = now.saturating_sub(*block_time);
-                    if utxo.origin.is_approved() && age_secs >= timing.utxo_max_age {
+                    if utxo.origin.in_move_pool() && age_secs >= timing.utxo_max_age {
                         findings.push(MonitorFinding::UtxoTooOld {
                             outpoint: *outpoint,
                             age_secs,
@@ -591,19 +593,19 @@ mod tests {
 
         assert!(pool.holds(&outpoint(2)));
         assert_eq!(pool.len(), 2);
-        assert_eq!(pool.approved_len(), 1);
+        assert_eq!(pool.in_move_pool_len(), 1);
         assert_eq!(pool.value(), 1_000);
         assert_eq!(pool.oldest_timestamp(), Some(500));
 
         pool.mark_approved(DepositId::new(txid(2), 0));
 
-        assert_eq!(pool.approved_len(), 2);
+        assert_eq!(pool.in_move_pool_len(), 2);
         assert_eq!(pool.value(), 3_000);
         assert_eq!(pool.oldest_timestamp(), Some(400));
     }
 
     #[test]
-    fn a_second_spend_of_a_utxo_is_a_spend_of_an_unknown_utxo() {
+    fn a_second_spend_of_a_utxo_is_a_spend_outside_the_move_pool() {
         let mut pool = pool_with_one();
         pool.add_withdrawals(&[withdrawal(7, vec![outpoint(1)])]);
 
@@ -611,9 +613,10 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::UtxoUnknownInputSpent {
+            vec![MonitorFinding::UtxoOutsideMovePoolSpent {
                 outpoint: outpoint(1),
                 txid: txid(8),
+                held: None,
             }]
         );
     }
@@ -626,9 +629,10 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::UtxoUnknownInputSpent {
+            vec![MonitorFinding::UtxoOutsideMovePoolSpent {
                 outpoint: outpoint(9),
                 txid: txid(7),
+                held: None,
             }]
         );
         assert_eq!(pool.outpoints(), vec![change_of(7)]);
@@ -643,9 +647,10 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::UtxoUnapprovedInputSpent {
+            vec![MonitorFinding::UtxoOutsideMovePoolSpent {
                 outpoint: outpoint(1),
                 txid: txid(7),
+                held: Some(unapproved_origin(0, 1_000)),
             }]
         );
         assert!(!pool.holds(&outpoint(1)));

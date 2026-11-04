@@ -120,10 +120,10 @@ pub enum UtxoOrigin {
 }
 
 impl UtxoOrigin {
-    /// Whether Hashi approved the UTXO: an approved deposit, or the change
-    /// of an approved withdrawal. Only these count in the pool value and the
-    /// age checks.
-    pub fn is_approved(self) -> bool {
+    /// Whether Move's pool holds the UTXO: an approved deposit, or change.
+    /// Only these count in the pool value and the age checks. Move adds an
+    /// approved deposit after the deposit delay.
+    pub fn in_move_pool(self) -> bool {
         !matches!(self, Self::UnapprovedDeposit { .. })
     }
 

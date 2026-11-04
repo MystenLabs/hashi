@@ -175,19 +175,13 @@ pub enum MonitorFinding {
         outpoint: OutPoint,
         amount: u64,
     },
-    /// A confirmed Hashi withdrawal spent a UTXO the monitor's UTXO pool
-    /// never held. The bridge spent a UTXO that no verified deposit or
-    /// change brought in, or the pool missed the UTXO's entry.
-    UtxoUnknownInputSpent {
+    /// A confirmed Hashi withdrawal spent a UTXO that is not in Move's pool,
+    /// by the monitor's account. `held` is `None` if the pool never held it.
+    /// The monitor missed an event, or Move has a fault.
+    UtxoOutsideMovePoolSpent {
         outpoint: OutPoint,
         txid: Txid,
-    },
-    /// A confirmed Hashi withdrawal spent a held deposit with no approval.
-    /// Move locks only UTXOs it holds, so the monitor missed an approval, or
-    /// Move has a fault.
-    UtxoUnapprovedInputSpent {
-        outpoint: OutPoint,
-        txid: Txid,
+        held: Option<UtxoOrigin>,
     },
     /// A deposit and a withdrawal's change claim one outpoint. Move refuses a
     /// request for held change, so an insider or a Move fault is the cause.
@@ -273,8 +267,7 @@ impl MonitorFinding {
             Self::BtcRpcInconsistency(_) => "BtcRpcInconsistency",
             Self::UtxoTooOld { .. } => "UtxoTooOld",
             Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
-            Self::UtxoUnknownInputSpent { .. } => "UtxoUnknownInputSpent",
-            Self::UtxoUnapprovedInputSpent { .. } => "UtxoUnapprovedInputSpent",
+            Self::UtxoOutsideMovePoolSpent { .. } => "UtxoOutsideMovePoolSpent",
             Self::UtxoOriginConflict { .. } => "UtxoOriginConflict",
             Self::HbtcSupplyExceedsPool { .. } => "HbtcSupplyExceedsPool",
             Self::SourceStale { .. } => "SourceStale",
@@ -481,12 +474,13 @@ impl fmt::Display for MonitorFinding {
                 f,
                 "UtxoUnexpectedSpend(outpoint={outpoint}, amount={amount})"
             ),
-            Self::UtxoUnknownInputSpent { outpoint, txid } => {
-                write!(f, "UtxoUnknownInputSpent(outpoint={outpoint}, txid={txid})")
-            }
-            Self::UtxoUnapprovedInputSpent { outpoint, txid } => write!(
+            Self::UtxoOutsideMovePoolSpent {
+                outpoint,
+                txid,
+                held,
+            } => write!(
                 f,
-                "UtxoUnapprovedInputSpent(outpoint={outpoint}, txid={txid})"
+                "UtxoOutsideMovePoolSpent(outpoint={outpoint}, txid={txid}, held={held:?})"
             ),
             Self::UtxoOriginConflict {
                 outpoint,
