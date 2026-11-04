@@ -68,6 +68,7 @@ pub struct Hashi {
     mpc_manager: OnceLock<Arc<mpc::FairRwLock<mpc::MpcManager>>>,
     shape_params: RwLock<Option<Arc<mpc::shape_params::ShapeParams>>>,
     public_outputs: Arc<mpc::public_outputs::PublicOutputs>,
+    identified_bad_nodes: Arc<mpc::identified_bad_nodes::IdentifiedBadNodes>,
     mpc_manager_install: Mutex<()>,
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
@@ -115,6 +116,7 @@ impl Hashi {
             mpc_manager: OnceLock::new(),
             shape_params: RwLock::new(None),
             public_outputs: Arc::default(),
+            identified_bad_nodes: Arc::default(),
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
@@ -160,6 +162,7 @@ impl Hashi {
             mpc_manager: OnceLock::new(),
             shape_params: RwLock::new(None),
             public_outputs: Arc::default(),
+            identified_bad_nodes: Arc::default(),
             mpc_manager_install: Mutex::new(()),
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
@@ -238,11 +241,13 @@ impl Hashi {
                 // Poisoning indicates a bug, so we propagate the panic rather than recover.
                 let mut installed = lock.write().unwrap();
                 manager.adopt_public_outputs(&self.public_outputs);
+                manager.adopt_identified_bad_nodes(&self.identified_bad_nodes);
                 *installed = manager;
             }
             None => {
                 // First-time initialization (e.g. new committee member joining mid-rotation).
                 manager.adopt_public_outputs(&self.public_outputs);
+                manager.adopt_identified_bad_nodes(&self.identified_bad_nodes);
                 let _ = self
                     .mpc_manager
                     .set(Arc::new(mpc::FairRwLock::new(manager)));
@@ -256,6 +261,10 @@ impl Hashi {
 
     pub(crate) fn public_outputs(&self) -> &mpc::public_outputs::PublicOutputs {
         &self.public_outputs
+    }
+
+    pub(crate) fn identified_bad_nodes(&self) -> &mpc::identified_bad_nodes::IdentifiedBadNodes {
+        &self.identified_bad_nodes
     }
 
     pub fn signing_manager_for(&self, epoch: u64) -> Option<Arc<mpc::SigningManager>> {

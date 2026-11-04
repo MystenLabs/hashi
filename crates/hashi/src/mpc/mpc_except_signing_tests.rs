@@ -17339,11 +17339,37 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         response,
         ComplaintResponse::NonceGenerationAvid(_)
     ));
+    assert!(
+        !responder
+            .identified_bad_nodes
+            .contains(setup.epoch(), &victim)
+    );
+
+    let mut voteless = setup.create_manager(3);
+    let result = voteless.handle_complain_request(victim, &request);
+    assert!(
+        matches!(
+            result,
+            Err(MpcError::ComplaintRefused(ComplaintRefusal::NoHeldVote))
+        ),
+        "{result:?}"
+    );
+    assert!(
+        !voteless
+            .identified_bad_nodes
+            .contains(setup.epoch(), &victim)
+    );
 
     let wrong_accuser = setup.address(2);
     let result = confirmers[1].handle_complain_request(wrong_accuser, &request);
     assert!(
-        result.is_err(),
+        matches!(
+            result,
+            Err(MpcError::BadComplaint {
+                reason: BadComplaint::RevealInvalid,
+                ..
+            })
+        ),
         "a complaint from the wrong accuser must not be answered: {result:?}"
     );
 
@@ -17384,8 +17410,57 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
 
     let result = confirmers[1].handle_complain_request(victim, &blame_request);
     assert!(
-        matches!(result, Err(MpcError::InvalidCertificate(_))),
+        matches!(
+            result,
+            Err(MpcError::BadComplaint {
+                reason: BadComplaint::CertificateInvalid,
+                ..
+            })
+        ),
         "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
+    );
+
+    let unvoted_target = AvidVoteMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: MessagesHash::from([7u8; 32]),
+        batch_index,
+    };
+    let mut unvoted = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, unvoted_target.clone());
+    for i in 0..6usize {
+        unvoted
+            .add_signature(setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(i),
+                &unvoted_target,
+            ))
+            .unwrap();
+    }
+    let unvoted_request = ComplainRequest {
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: unvoted.finish().unwrap(),
+        },
+        ..blame_request.clone()
+    };
+    let result = confirmers[2].handle_complain_request(setup.address(1), &unvoted_request);
+    assert!(
+        matches!(
+            result,
+            Err(MpcError::ComplaintRefused(
+                ComplaintRefusal::VoteNotCertified
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(
+        !confirmers[2]
+            .identified_bad_nodes
+            .contains(setup.epoch(), &setup.address(1))
     );
 
     let mut full = setup
@@ -17413,9 +17488,15 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: setup.epoch(),
     };
-    let result = confirmers[1].handle_complain_request(victim, &full_blame_request);
+    let result = confirmers[1].handle_complain_request(setup.address(3), &full_blame_request);
     assert!(
-        !matches!(result, Err(MpcError::InvalidCertificate(_))),
+        matches!(
+            result,
+            Err(MpcError::BadComplaint {
+                reason: BadComplaint::NotPendingRecipient,
+                ..
+            })
+        ),
         "a full-quorum AvidVote cert must clear certificate verification; verifying it \
          in the legacy domain would reject every blame complaint: {result:?}"
     );
@@ -20101,6 +20182,160 @@ fn a_callers_third_concurrent_write_waits_for_one_of_its_two_lock_runs() {
             .get()
             > 0.0
     );
+}
+
+#[test]
+fn a_flagged_callers_nonce_complaints_are_refused_before_its_permits() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let (dkg_dealer, _, dkg_complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rand::thread_rng());
+    let manager = setup.create_manager(2);
+    let epoch = manager.mpc_config.epoch;
+    let caller = setup.address(1);
+    let nonce_dealer = setup.address(3);
+    let vote_target = AvidVoteMessagesHash {
+        dealer_address: nonce_dealer,
+        messages_hash: MessagesHash::from([7u8; 32]),
+        batch_index: 0,
+    };
+    let mut aggregator = setup
+        .committee()
+        .signature_aggregator(TEST_HASHI_ID, vote_target.clone());
+    for i in 0..4 {
+        aggregator
+            .add_signature(setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                epoch,
+                setup.address(i),
+                &vote_target,
+            ))
+            .unwrap();
+    }
+    let vote_cert = aggregator.finish().unwrap();
+    let blame = |dealer: Address, batch_index: u32| ComplainRequest {
+        epoch,
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        dealer,
+        batch_index: Some(batch_index),
+        share_index: None,
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: vote_cert.clone(),
+        },
+    };
+    let dkg = ComplainRequest {
+        epoch,
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        dealer: dkg_dealer,
+        batch_index: None,
+        share_index: None,
+        complaint: ProtocolComplaint::Avss(dkg_complaint),
+    };
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi.clone());
+    let complain = |request: &ComplainRequest| {
+        let mut proto_request = tonic::Request::new(request.to_proto());
+        proto_request.extensions_mut().insert(caller);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.complain(proto_request).await
+        })
+    };
+    let idle_refs = Arc::strong_count(&mpc_lock);
+    let wait_for_refs = |refs: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&mpc_lock) != refs {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "manager refs never reached {refs}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let mismatched = rt
+        .block_on(complain(&blame(nonce_dealer, 1)))
+        .unwrap()
+        .unwrap_err();
+    hashi.set_mpc_manager(setup.create_manager(2));
+    let reinstalled = mpc_lock
+        .write()
+        .unwrap()
+        .handle_complain_request(caller, &blame(nonce_dealer, 0));
+    let held = mpc_lock.write().unwrap();
+    let dkg_runs: Vec<_> = (0..2).map(|_| complain(&dkg)).collect();
+    wait_for_refs(idle_refs + 2);
+    let refused: Vec<_> = [blame(nonce_dealer, 0), blame(caller, 0)]
+        .iter()
+        .map(|request| {
+            let run = complain(request);
+            rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), run).await })
+                .expect("a refused complaint must not wait for a permit")
+                .unwrap()
+                .unwrap_err()
+                .code()
+        })
+        .collect();
+    drop(held);
+    let dkg_codes: Vec<_> = dkg_runs
+        .into_iter()
+        .map(|run| rt.block_on(run).unwrap().unwrap_err().code())
+        .collect();
+
+    assert_eq!(
+        mismatched.code(),
+        tonic::Code::InvalidArgument,
+        "{}",
+        mismatched.message()
+    );
+    assert_eq!(
+        metrics
+            .mpc_complaint_callers_flagged_total
+            .with_label_values(&[&caller.to_string(), "certificate_mismatch"])
+            .get(),
+        1
+    );
+    assert!(
+        matches!(
+            reinstalled,
+            Err(MpcError::ComplaintRefused(ComplaintRefusal::Flagged))
+        ),
+        "{reinstalled:?}"
+    );
+    assert_eq!(refused, [tonic::Code::PermissionDenied; 2]);
+    for reason in ["flagged", "own_dealing"] {
+        assert_eq!(
+            metrics
+                .mpc_complaints_refused_total
+                .with_label_values(&[&caller.to_string(), reason])
+                .get(),
+            1,
+            "{reason}"
+        );
+    }
+    assert_eq!(dkg_codes, [tonic::Code::NotFound; 2]);
 }
 
 #[test]

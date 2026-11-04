@@ -3,6 +3,7 @@
 
 use super::caller_membership;
 use super::gates;
+use super::proto_conversions;
 use crate::grpc::HttpService;
 use crate::grpc::PAUSED_REFUSAL_MSG;
 use crate::grpc::SIGNING_MANAGER_NOT_READY_MSG;
@@ -16,6 +17,7 @@ use crate::mpc::retrieve_from_store;
 use crate::mpc::shape_params::ShapeParams;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
+use crate::mpc::types::ComplaintRefusal;
 use crate::mpc::types::MpcError;
 use crate::mpc::types::SigningError;
 use hashi_types::proto::ComplainRequest;
@@ -222,11 +224,15 @@ impl MpcService for HttpService {
         let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let protocol = proto_protocol_label(external_request.protocol_type);
+        check_complaint_refusal(self, caller, &external_request)?;
         let lock_run = self.mpc_write_run(caller).await;
+        check_complaint_refusal(self, caller, &external_request)?;
         let mpc_manager = self.mpc_manager()?;
         let service = self.clone();
         let refused = self.metrics().mpc_rpc_caller_refused_total.clone();
-        let result = spawn_blocking(move || -> Result<_, Status> {
+        let span = tracing::Span::current();
+        let complaint = spawn_blocking(move || -> Result<_, Status> {
+            let _span = span.entered();
             let epoch = external_request
                 .epoch
                 .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
@@ -242,36 +248,23 @@ impl MpcService for HttpService {
                         refusal,
                     )
                 })?;
-            if let Err(e) =
-                gates::check_complain(&shape, committee, caller, epoch, &external_request)
-            {
-                return Ok(Err(e));
-            }
+            gates::check_complain(&shape, committee, caller, epoch, &external_request)
+                .map_err(|e| complaint_error(&service, caller, protocol, e))?;
             let internal_request = types::ComplainRequest::try_from(&external_request)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             drop(external_request);
-            let mut mgr = lock_run.write(&mpc_manager);
-            validate_epoch_current_or_previous(
-                mgr.mpc_config.epoch,
-                mgr.previous_epoch,
-                internal_request.epoch,
-            )?;
-            Ok(mgr.handle_complain_request(caller, &internal_request))
+            let outcome = {
+                let mut mgr = lock_run.write(&mpc_manager);
+                validate_epoch_current_or_previous(
+                    mgr.mpc_config.epoch,
+                    mgr.previous_epoch,
+                    internal_request.epoch,
+                )?;
+                mgr.handle_complain_request(caller, &internal_request)
+            };
+            outcome.map_err(|e| complaint_error(&service, caller, protocol, e))
         })
         .await?;
-        let complaint = result.map_err(|e| {
-            if matches!(e, MpcError::ComplaintWithheld { .. }) {
-                self.metrics().mpc_complaints_withheld_total.inc();
-            } else {
-                if matches!(e, MpcError::CountCheckRefused { .. }) {
-                    self.metrics()
-                        .refusal_counters()
-                        .request(&caller, "complain", protocol);
-                }
-                tracing::warn!("complain failed: {e}");
-            }
-            mpc_error_to_status(e)
-        })?;
         Ok(tonic::Response::new(ComplainResponse::from(&complaint)))
     }
 
@@ -459,6 +452,58 @@ async fn check_public_output_caller(
     }
 }
 
+fn check_complaint_refusal(
+    service: &HttpService,
+    caller: Address,
+    request: &ComplainRequest,
+) -> Result<(), Status> {
+    let dealer = request
+        .dealer
+        .as_deref()
+        .and_then(|dealer| dealer.parse::<Address>().ok());
+    let protocol = request
+        .protocol_type
+        .and_then(|value| proto_conversions::mpc_protocol_type_from_proto(value).ok());
+    let (Some(epoch), Some(dealer), Some(protocol)) = (request.epoch, dealer, protocol) else {
+        return Ok(());
+    };
+    service
+        .identified_bad_nodes()
+        .complaint_refusal(protocol, epoch, &caller, &dealer)
+        .map_or(Ok(()), |refusal| {
+            Err(refuse_complaint(service, caller, refusal))
+        })
+}
+
+fn complaint_error(service: &HttpService, caller: Address, protocol: &str, e: MpcError) -> Status {
+    let metrics = service.metrics();
+    match &e {
+        MpcError::ComplaintWithheld { .. } => metrics.mpc_complaints_withheld_total.inc(),
+        MpcError::ComplaintRefused(refusal) => return refuse_complaint(service, caller, *refusal),
+        MpcError::BadComplaint { reason, .. } => metrics
+            .mpc_complaint_callers_flagged_total
+            .with_label_values(&[&caller.to_string(), reason.label()])
+            .inc(),
+        MpcError::CountCheckRefused { .. } => {
+            metrics
+                .refusal_counters()
+                .request(&caller, "complain", protocol);
+            tracing::warn!("complain failed: {e}");
+        }
+        _ => tracing::warn!("complain failed: {e}"),
+    }
+    mpc_error_to_status(e)
+}
+
+fn refuse_complaint(service: &HttpService, caller: Address, refusal: ComplaintRefusal) -> Status {
+    service
+        .metrics()
+        .mpc_complaints_refused_total
+        .with_label_values(&[&caller.to_string(), refusal.label()])
+        .inc();
+    mpc_error_to_status(MpcError::ComplaintRefused(refusal))
+}
+
 fn send_messages_error(sender: Address, e: MpcError) -> Status {
     if matches!(&e, MpcError::NotReady(_)) {
         tracing::info!("send_messages from {sender:?}: {e}");
@@ -608,7 +653,12 @@ fn mpc_error_to_status(err: MpcError) -> Status {
         | InvalidConfig(_)
         | NotReady(_) => Status::failed_precondition(err.to_string()),
         NotFound(_) => Status::not_found(err.to_string()),
-        ComplaintWithheld { .. } => Status::permission_denied(err.to_string()),
+        ComplaintWithheld { .. }
+        | ComplaintRefused(ComplaintRefusal::OwnDealing | ComplaintRefusal::Flagged) => {
+            Status::permission_denied(err.to_string())
+        }
+        ComplaintRefused(_) => Status::failed_precondition(err.to_string()),
+        BadComplaint { .. } => Status::invalid_argument(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }

@@ -311,7 +311,7 @@ fn mpc_protocol_type_to_proto(pt: types::ProtocolTypeIndicator) -> proto::MpcPro
 }
 
 #[allow(clippy::result_large_err)]
-fn mpc_protocol_type_from_proto(
+pub(super) fn mpc_protocol_type_from_proto(
     value: i32,
 ) -> Result<types::ProtocolTypeIndicator, TryFromProtoError> {
     match proto::MpcProtocolType::try_from(value) {

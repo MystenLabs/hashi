@@ -3,6 +3,7 @@
 
 pub mod count_check;
 pub mod fair_rwlock;
+pub(crate) mod identified_bad_nodes;
 pub mod message_cache;
 mod mpc_except_signing;
 mod presig_seal;

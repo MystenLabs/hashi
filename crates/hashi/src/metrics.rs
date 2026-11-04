@@ -258,6 +258,8 @@ pub struct Metrics {
     /// the complaint response policy. Should never increase: any increase
     /// means a verified complaint about such a dealer reached this node.
     pub mpc_complaints_withheld_total: IntCounter,
+    pub mpc_complaints_refused_total: IntCounterVec,
+    pub mpc_complaint_callers_flagged_total: IntCounterVec,
     /// Nonce batches abandoned because the checkpoint clock never passed the
     /// accumulation window's cutoff
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
@@ -1470,6 +1472,21 @@ impl Metrics {
                 "hashi_mpc_complaints_withheld_total",
                 "Verified complaints withheld because the dealer is outside the complaint \
                  response policy",
+                registry,
+            )
+            .unwrap(),
+            mpc_complaints_refused_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_complaints_refused_total",
+                "Nonce complaint requests refused without verifying them, by caller and reason",
+                &["peer", "reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_complaint_callers_flagged_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_complaint_callers_flagged_total",
+                "Callers flagged by a provably bad nonce complaint, refused until the epoch ends \
+                 or this node restarts, by caller and the check it failed",
+                &["peer", "reason"],
                 registry,
             )
             .unwrap(),

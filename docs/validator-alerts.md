@@ -93,6 +93,11 @@ Dashboard-worthy but **not** alerts:
   one at a time across all peers, so a rate near 1 means that peer keeps it
   busy, which slows your node's own presigning and key rotation; compare across
   nodes.
+- `hashi_mpc_complaint_callers_flagged_total` — peers that sent a nonce
+  complaint your node judged provably bad, by the check it failed. Your
+  node already refuses their nonce complaints until the epoch ends or it
+  restarts, counted in `hashi_mpc_complaints_refused_total`. One peer usually
+  means it is faulty or runs a broken build, and needs nothing from you.
 
 ## What NOT to alert on
 
@@ -137,6 +142,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_withdrawal_bitcoin_check_*` | node |
 | `hashi_peer_*`, `hashi_mpc_unguarded_spawn_blocking_total` | node |
 | `hashi_mpc_peer_refusals_*`, `hashi_mpc_refusals_total`, `hashi_mpc_stored_rows_refused_*`, `hashi_mpc_committee_members` | node |
+| `hashi_mpc_complaint_callers_flagged_total`, `hashi_mpc_complaints_refused_total` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |
