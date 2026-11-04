@@ -109,9 +109,11 @@ entry fun deposit(
 )
 ```
 
-The function checks that the service is not paused (the contract accepts deposits
-during a reconfiguration), that the deposit meets the minimum amount, and that
-the UTXO is not already in the pool, active or spent. It then creates a
+The function checks that the service is not paused, that the deposit meets the
+minimum amount, and that the UTXO is not already in the pool, active or spent.
+Unlike `approve_deposit` and `confirm_deposit`, `deposit` does not abort while
+a reconfiguration is pending, so the contract accepts new deposit requests
+during a reconfiguration. It then creates a
 `DepositRequest` and places it in the deposit queue. Committee members start
 monitoring Bitcoin for confirmation.
 
@@ -220,8 +222,10 @@ graph LR
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
-After both checks in `confirm_deposit` pass, the function mints the
-corresponding amount of `hBTC` and sends it to the Sui address in the UTXO's
-`derivation_path` (a UTXO whose `derivation_path` is `None` mints nothing). The function adds the
-deposited UTXO to the Hashi-managed UTXO pool, making it available
-for future withdrawal coin selection.
+After both checks in `confirm_deposit` pass, the function:
+
+1. Mints the corresponding amount of `hBTC`. A UTXO whose `derivation_path` is
+   `None` mints nothing.
+2. Sends the `hBTC` to the Sui address in the UTXO's `derivation_path`.
+3. Adds the deposited UTXO to the Hashi-managed UTXO pool, making it available
+   for future withdrawal coin selection.
