@@ -34,8 +34,8 @@ pnpm add @mysten/hashi @mysten/sui
 
 ## Setup
 
-The SDK attaches to any Sui client via `$extend`. After extension, every Hashi method lives under
-`client.hashi.*`.
+The SDK attaches to any Sui client through `$extend`. Calling `$extend(hashi())` on a Sui client
+adds a `hashi` namespace to the client it returns. Every Hashi method lives under `client.hashi.*`.
 
 ```ts
 import { SuiGrpcClient } from '@mysten/sui/grpc';
@@ -100,8 +100,8 @@ if (result.$kind !== 'Transaction') {
 // `hBTC` lands in `recipient`'s balance once the committee confirms.
 ```
 
-A single funding tx may pay the deposit address on multiple outputs — pass them all in `utxos` and
-they're batched into one atomic Sui PTB.
+A single funding transaction might pay the deposit address on multiple outputs. Pass them all in
+`utxos`, and the SDK batches them into one atomic Sui programmable transaction block (PTB).
 
 ## Quickstart: Request withdrawal (burn hBTC → receive BTC)
 
@@ -127,6 +127,11 @@ const evt = result.Transaction.events?.find((e) =>
 );
 const requestId = (evt as { json?: { request_id?: string } } | undefined)?.json?.request_id;
 ```
+
+If the result has no `WithdrawalRequested` event, `requestId` is `undefined`. Check that
+`requestId` is defined before you pass it to `cancelWithdrawal`. To find the request ID later, read
+`item.requestId` from the withdrawal entries that [`view.transactionHistory`](#transaction-history)
+returns.
 
 ## Quickstart: Cancel a pending withdrawal
 
