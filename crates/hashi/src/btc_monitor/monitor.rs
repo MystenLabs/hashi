@@ -1606,10 +1606,10 @@ impl Monitor {
                     caller,
                 ));
             }
-            MonitorMessage::BroadcastTransaction(tx, caller) => {
-                self.rpc_workers.spawn(Self::broadcast_transaction(
+            MonitorMessage::BroadcastPackage(package, caller) => {
+                self.rpc_workers.spawn(Self::broadcast_package(
                     self.bitcoind_rpc.clone(),
-                    tx,
+                    package,
                     caller,
                 ));
             }
@@ -1721,41 +1721,38 @@ impl Monitor {
         caller.reply(results);
     }
 
-    async fn broadcast_transaction(
+    async fn broadcast_package(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-        tx: bitcoin::Transaction,
+        package: Vec<bitcoin::Transaction>,
         mut caller: Caller<()>,
     ) {
-        // Broadcast via the bitcoind RPC, not kyoto's P2P submit_package, which
-        // dropped its response or hung under load.
-        let txid = tx.compute_txid();
+        let Some(child) = package.last() else {
+            caller.reply(Err(anyhow::anyhow!("Cannot broadcast an empty package")));
+            return;
+        };
+        let txid = child.compute_txid();
         let Some(result) = caller
-            .rpc(&bitcoind_rpc, move |rpc| rpc.send_raw_transaction(&tx))
+            .rpc(&bitcoind_rpc, move |rpc| {
+                rpc.submit_package(&package, None, None)
+            })
             .await
         else {
             caller.reply(Err(anyhow::anyhow!(
-                "Broadcast of {txid} expired before its bitcoind RPC could start"
+                "Package broadcast for {txid} expired before its bitcoind RPC could start"
             )));
             return;
         };
-        match result {
-            Ok(_) => {
-                info!("Transaction {txid} broadcast via Bitcoin Core RPC");
-                caller.reply(Ok(()));
-            }
-            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
-                if e.code == -27 =>
-            {
-                // RPC error -27: tx already confirmed on-chain ("outputs already in utxo
-                // set"), so the broadcast succeeded. (A mempool duplicate returns Ok.)
-                debug!("Transaction {txid} already confirmed on-chain");
-                caller.reply(Ok(()));
-            }
-            Err(e) => {
-                error!("Failed to broadcast transaction {txid}: {e}");
-                caller.reply(Err(anyhow::anyhow!(e)));
-            }
-        }
+        let result = result
+            .map_err(anyhow::Error::from)
+            .and_then(|response| response.into_model().map_err(anyhow::Error::from))
+            .and_then(|response| {
+                anyhow::ensure!(
+                    response.package_msg == "success",
+                    "Bitcoin Core rejected package for {txid}: {response:?}"
+                );
+                Ok(())
+            });
+        caller.reply(result);
     }
 
     async fn get_transaction_status(
@@ -2423,10 +2420,11 @@ impl MonitorClient {
         .await
     }
 
-    pub async fn broadcast_transaction(&self, transaction: bitcoin::Transaction) -> Result<()> {
+    /// Submit a child-last withdrawal package through the gated Bitcoin RPC worker.
+    pub(crate) async fn broadcast_package(&self, package: Vec<bitcoin::Transaction>) -> Result<()> {
         self.request(
-            |caller| MonitorMessage::BroadcastTransaction(transaction, caller),
-            "broadcast_transaction",
+            |caller| MonitorMessage::BroadcastPackage(package, caller),
+            "broadcast_package",
             None,
         )
         .await
@@ -2471,8 +2469,8 @@ enum MonitorMessage {
     // Returns an estimated fee rate targeting confirmation within `conf_target` blocks.
     GetRecentFeeRate(u16, Caller<FeeRate>),
 
-    // Broadcast a transaction to the network.
-    BroadcastTransaction(bitcoin::Transaction, Caller<()>),
+    // Broadcast a child and its independent parents, with the child last.
+    BroadcastPackage(Vec<bitcoin::Transaction>, Caller<()>),
 
     TestMempoolAccept(bitcoin::Transaction, Caller<Vec<MempoolAcceptance>>),
 
