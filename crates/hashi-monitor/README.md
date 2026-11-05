@@ -46,7 +46,7 @@ act on the other findings. They show a delay or a fault that moves no Bitcoin.
 
 | Kind | Essential | Meaning |
 |---|---|---|
-| `WithdrawalUnapproved` | Yes | A guardian signature came without its Hashi approval, or more than 5 minutes before it. Or a Bitcoin spend came more than 2 hours before its guardian signature. |
+| `WithdrawalUnapproved` | Yes | A guardian signature came without its Hashi approval, or more than 5 minutes before it. Or a Bitcoin spend came without its guardian signature, or more than 2 hours before it. The monitor looks the transaction up on Bitcoin from the Hashi approval, so it sees a spend that the guardian never logged. |
 | `WithdrawalStuck` | If missing | The guardian signature is missing 1 hour after the Hashi approval, or the Bitcoin confirmation is missing 1 day after the signature. The monitor reports a missing event at each tick until it comes, and a late event once, when it comes. A leaked guardian key lets a signature skip the guardian's log and limits, or, with the committee key, steal an input of the approved transaction. Both leave E2 or E3 missing for good, and no other finding reports them. A late event did come, so it pages only in strict mode. A slow guardian or Bitcoin confirmation also gives this finding. |
 | `WithdrawalInvalid` | Yes | The withdrawal's transaction or events contradict each other. The approved inputs and outputs do not build a transaction, or do not give the approved txid. Or two events state another txid, other inputs, payouts, or change. Or one event came again with other contents. |
 | `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |

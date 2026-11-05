@@ -459,6 +459,13 @@ impl BtcRpcClient {
 
 #[cfg(test)]
 impl BtcRpcClient {
+    /// A client with no node. It answers each lookup of a txid in `answers`.
+    pub fn answering_for_tests(answers: HashMap<Txid, Option<BtcConfirmation>>) -> Self {
+        let client = Self::new(&Config::for_tests(), 1, 0).expect("a client needs no node");
+        *client.confirmation_cache.borrow_mut() = answers;
+        client
+    }
+
     fn cached_confirmations(&self) -> usize {
         self.confirmation_cache.borrow().len()
     }

@@ -19,15 +19,18 @@
 //!    the event is kept.
 //! 3. A kept event is judged against each neighbor the machine has seen,
 //!    and it removes itself from the expected events.
-//! 4. The auditor looks the transaction up on Bitcoin while E3 is expected,
-//!    and asks for timing violations each tick: an expected event whose
-//!    deadline the source's cursor has passed is reported missing.
+//! 4. From E1 until E3, the auditor looks the transaction up on Bitcoin.
+//!    It does not wait for E2, so a transaction that the guardian never
+//!    logged still gives E3, and the missing E2 is reported.
+//! 5. Each tick, the auditor asks for timing violations: an expected event
+//!    whose deadline the source's cursor has passed is reported missing.
 //!
 //! Invariants:
 //! - `expected_events` never holds an event type in `seen_events`.
 //! - Findings are returned to the caller and not kept. A complete machine
 //!   may have reported findings earlier.
 
+use crate::domain::BtcConfirmation;
 use crate::domain::Cursors;
 use crate::domain::FinishedWithdrawal;
 use crate::domain::MonitorWithdrawalEvent;
@@ -58,8 +61,8 @@ pub struct WithdrawalStateMachine {
     expected_events: Vec<(WithdrawalEventType, UnixSeconds, EventRelation)>,
     /// The time of the last Bitcoin lookup of the transaction.
     btc_checked_at: Option<UnixSeconds>,
-    /// The withdrawal for the UTXO pool, once Bitcoin confirmed it.
-    confirmed: Option<FinishedWithdrawal>,
+    /// Bitcoin's confirmation of the transaction, once a lookup found it.
+    btc_confirmation: Option<BtcConfirmation>,
     /// The withdrawal id. Every event must carry it.
     wid: WithdrawalID,
     /// The transaction id. Every event must carry it.
@@ -76,7 +79,7 @@ impl WithdrawalStateMachine {
             seen_events: Vec::new(),
             expected_events: Vec::new(),
             btc_checked_at: None,
-            confirmed: None,
+            btc_confirmation: None,
             wid: event.wid,
             btc_txid: event.btc_txid,
             tx: event.tx.clone(),
@@ -103,14 +106,13 @@ impl WithdrawalStateMachine {
         &self.tx
     }
 
-    /// The withdrawal for the UTXO pool, or `None` until Bitcoin confirmed it.
-    pub fn finished(&self) -> Option<&FinishedWithdrawal> {
-        self.confirmed.as_ref()
-    }
-
-    /// The withdrawal Bitcoin confirmed, if any.
-    pub fn into_finished(self) -> Option<FinishedWithdrawal> {
-        self.confirmed
+    /// The withdrawal for the UTXO pool, or `None` until Bitcoin confirmed it
+    /// and E2 came. The pool takes the change layout from E2, the guardian's
+    /// word.
+    pub fn finished(&self) -> Option<FinishedWithdrawal> {
+        let e2 = self.get(WithdrawalEventType::E2GuardianApproved)?;
+        let confirmation = self.btc_confirmation.clone()?;
+        Some(FinishedWithdrawal::from_confirmation(e2, confirmation))
     }
 
     pub fn wid(&self) -> WithdrawalID {
@@ -140,13 +142,12 @@ impl WithdrawalStateMachine {
             .any(|(event, _, _)| *event == event_type)
     }
 
-    /// Permit Bitcoin lookups only after both the Sui and guardian approvals arrive.
+    /// Look the transaction up on Bitcoin from E1 until E3 comes, with or without E2.
     /// Sui approves a withdrawal after the flows that made its inputs, so the monitor has read them.
     /// Thus every flow this one spends from is open or closed when this one closes.
     pub fn expects_btc(&self) -> bool {
         self.get(WithdrawalEventType::E1HashiApproved).is_some()
-            && self.get(WithdrawalEventType::E2GuardianApproved).is_some()
-            && self.expects(WithdrawalEventType::E3BtcConfirmed)
+            && self.get(WithdrawalEventType::E3BtcConfirmed).is_none()
     }
 
     /// Whether every expected event was seen, so the pool can take the flow
@@ -283,12 +284,7 @@ impl WithdrawalStateMachine {
                     self.btc_txid,
                     self.tx.clone(),
                 );
-                // E3 is expected only after E2, so E2 is present here. The
-                // pool takes the change layout from E2, the guardian's word.
-                let e2 = self
-                    .get(WithdrawalEventType::E2GuardianApproved)
-                    .expect("E3 is expected only after E2");
-                self.confirmed = Some(FinishedWithdrawal::from_confirmation(e2, confirmation));
+                self.btc_confirmation = Some(confirmation);
                 self.add_event(e_btc, timing)
             }
             None => Vec::new(),
@@ -367,7 +363,7 @@ impl WithdrawalStateMachine {
     /// E2, and `confirmation` as E3, with no timing finding.
     pub fn complete_for_tests(
         approval: MonitorWithdrawalEvent,
-        confirmation: crate::domain::BtcConfirmation,
+        confirmation: BtcConfirmation,
         timing: &Timing,
     ) -> Self {
         let e2 = MonitorWithdrawalEvent {
@@ -382,9 +378,9 @@ impl WithdrawalStateMachine {
             approval.tx.clone(),
         );
         let mut sm = Self::new(approval, timing);
-        assert!(sm.add_event(e2.clone(), timing).is_empty());
+        assert!(sm.add_event(e2, timing).is_empty());
         assert!(sm.add_event(e3, timing).is_empty());
-        sm.confirmed = Some(FinishedWithdrawal::from_confirmation(&e2, confirmation));
+        sm.btc_confirmation = Some(confirmation);
         assert!(sm.is_ready_for_gc());
         sm
     }
@@ -398,6 +394,7 @@ mod tests {
     use crate::test_utils::withdrawal_tx;
     use hashi_types::bitcoin::DerivationPath;
     use hashi_types::bitcoin::witness_program_from_address;
+    use std::collections::HashMap;
 
     fn event(
         source: WithdrawalEventType,
@@ -487,7 +484,7 @@ mod tests {
             &timing,
         );
         assert!(sm.expects(WithdrawalEventType::E2GuardianApproved));
-        assert!(!sm.expects_btc());
+        assert!(sm.expects_btc());
 
         assert!(
             sm.add_event(
@@ -528,6 +525,53 @@ mod tests {
             .is_empty()
         );
         assert!(sm.expects_btc());
+    }
+
+    #[test]
+    fn a_confirmation_before_the_guardian_log_waits_for_e2() {
+        use WithdrawalEventType::*;
+        let timing = Timing::for_tests();
+        let e1 = event(E1HashiApproved, 9, 100, 7);
+        let mut sm = WithdrawalStateMachine::new(e1.clone(), &timing);
+        let confirmation = BtcConfirmation {
+            block_time: 110,
+            confirmed_time: 120,
+            inputs: vec![],
+            outputs: vec![],
+        };
+        let client = BtcRpcClient::answering_for_tests(HashMap::from([(
+            e1.btc_txid,
+            Some(confirmation.clone()),
+        )]));
+
+        // E1 alone is enough for the lookup. E3 at 120 expects E2 by 150.
+        assert!(
+            sm.try_fetch_btc_tx(&timing, &client, 130)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!sm.expects_btc());
+        assert!(sm.finished().is_none());
+        assert!(matches!(
+            sm.timing_violations(&Cursors {
+                sui: 0,
+                guardian: 150
+            })[..],
+            [MonitorFinding::WithdrawalUnapproved {
+                event_type: E2GuardianApproved,
+                timing: EventTiming::Missing { cursor: 150 },
+                ..
+            }]
+        ));
+
+        // E2 closes the flow, and the pool takes the change layout from it.
+        let e2 = event(E2GuardianApproved, 9, 115, 7);
+        assert!(sm.add_event(e2.clone(), &timing).is_empty());
+        assert!(sm.is_ready_for_gc());
+        assert_eq!(
+            sm.finished(),
+            Some(FinishedWithdrawal::from_confirmation(&e2, confirmation))
+        );
     }
 
     #[test]

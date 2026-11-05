@@ -273,7 +273,7 @@ mod tests {
             .is_empty()
         );
         assert!(
-            pool.add_withdrawals(&[withdrawal.finished().cloned().unwrap()])
+            pool.add_withdrawals(&[withdrawal.finished().unwrap()])
                 .is_empty()
         );
 

@@ -48,7 +48,8 @@ use crate::state_machine::WithdrawalStateMachine;
 /// The object that holds the snapshot.
 const SNAPSHOT_KEY: &str = "snapshot.json";
 
-/// The format of the snapshot. Change it when a saved type changes.
+/// The format of the snapshot. Change it when an old snapshot cannot load,
+/// or loads with another meaning.
 const SNAPSHOT_VERSION: u32 = 1;
 
 /// What the continuous auditor keeps between runs.
