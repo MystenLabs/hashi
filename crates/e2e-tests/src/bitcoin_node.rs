@@ -451,7 +451,13 @@ mod tests {
                     },
                 ],
             )?;
-            broadcast(node, &filler)?;
+            // Equal-feerate fillers tie for eviction, so Core may trim the one
+            // just submitted. That still raises the floor; check the pool below.
+            if let Err(error) = broadcast(node, &filler)
+                && !error.to_string().contains("mempool full")
+            {
+                return Err(error);
+            }
             let pool = mempool(node)?;
             let info: Value = node.rpc_client().call("getmempoolinfo", &[])?;
             let floor = info["mempoolminfee"]
