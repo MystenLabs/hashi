@@ -2057,6 +2057,18 @@ async fn lookup_tx_block(
         .await
     {
         Ok(tx_info) => tx_info,
+        // Core excludes the unspendable genesis coinbase from transaction lookup.
+        Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
+            if e.code == -5
+                && e.message
+                    == "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved" =>
+        {
+            return Err(DepositConfirmError::BeforeStartCheckpoint {
+                txid,
+                height: 0,
+                start_height: start_checkpoint.height,
+            });
+        }
         // -5 also covers "-txindex off" and "txindex still indexing";
         // only the ready-index message is a durable not-found.
         Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
@@ -3886,6 +3898,55 @@ mod tests {
         Arc::new(corepc_client::client_sync::v29::Client::new(&format!(
             "http://{addr}"
         )))
+    }
+
+    #[tokio::test]
+    async fn genesis_lookup_is_permanent_but_index_errors_are_retryable() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let txid = genesis.txdata[0].compute_txid();
+        let tip = HashCheckpoint::new(100, block_hash(1));
+        for (message, permanent) in [
+            (
+                "The genesis block coinbase is not considered an ordinary transaction and cannot be retrieved",
+                true,
+            ),
+            (
+                "No such mempool transaction. Use -txindex or provide a block hash to enable blockchain transaction queries",
+                false,
+            ),
+            (
+                "Blockchain transactions are still in the process of being indexed",
+                false,
+            ),
+        ] {
+            let metrics = Arc::new(fresh_metrics());
+            let monitor = test_monitor(metrics.clone(), DepositTracker::new(metrics));
+            let rpc = stub_bitcoind(move |req| {
+                if req.contains("\"getblockhash\"") {
+                    rpc_ok(req, &tip.hash.to_string())
+                } else {
+                    rpc_error(req, -5, message)
+                }
+            })
+            .await;
+            let error = lookup_tx_block(
+                BitcoindRpc::new(rpc, None),
+                monitor.requester.clone(),
+                monitor.deposit_lookup_cache.clone(),
+                txid,
+                tip,
+                monitor.start_checkpoint,
+            )
+            .await
+            .unwrap_err();
+            if permanent {
+                assert!(matches!(error, DepositConfirmError::BeforeStartCheckpoint {
+                    txid: actual, height: 0, start_height: 0,
+                } if actual == txid));
+            } else {
+                assert!(matches!(error, DepositConfirmError::Other(_)));
+            }
+        }
     }
 
     #[tokio::test]
