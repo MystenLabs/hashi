@@ -451,7 +451,7 @@ The port is configurable through `listen-address`. It must be publicly reachable
 | Metrics push (`push-url`) | per URL | HTTPS | Metrics push, when `[metrics-push]` is set (see [Metrics push](monitoring.mdx#metrics-push)) |
 
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) break the checkpoint subscription.
-> - **Bitcoin RPC:** the RPC user or whitelist must permit `sendrawtransaction` and `testmempoolaccept`, not only read calls.
+> - **Bitcoin RPC:** the RPC user or whitelist must permit `submitpackage` and `testmempoolaccept`, not only read calls.
 
 ### Metrics and liveness (not public)
 
