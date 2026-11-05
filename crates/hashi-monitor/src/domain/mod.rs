@@ -121,8 +121,8 @@ pub enum UtxoOrigin {
 
 impl UtxoOrigin {
     /// Whether Move's pool holds the UTXO: an approved deposit, or change.
-    /// Only these count in the pool value and the age checks. Move adds an
-    /// approved deposit after the deposit delay.
+    /// Only these count in the pool value. Move adds an approved deposit
+    /// after the deposit delay.
     pub fn in_move_pool(self) -> bool {
         !matches!(self, Self::UnapprovedDeposit { .. })
     }

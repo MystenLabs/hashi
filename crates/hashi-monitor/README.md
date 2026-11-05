@@ -20,7 +20,7 @@ Move cannot see.
   holds, changed only by Bitcoin facts. It checks each UTXO on Bitcoin once a
   day, and it checks that the pool backs the hBTC supply on Sui. A deposit
   with no Sui approval stays in the pool, but only the UTXOs in Move's pool
-  count in the pool value and the age checks.
+  count in the pool value.
 - **The guardian.** Each withdrawal log has a `seq` that the guardian's
   limiter takes once, in order. A repeat, a gap, or a jump is a finding.
 - **Itself.** A source that falls behind, or a snapshot that cannot be saved,
@@ -45,7 +45,7 @@ finding is an ERROR log line `monitor finding`, and it sets the metric
 | `UtxoUnexpectedSpend` | A pool UTXO was spent outside a Hashi withdrawal. |
 | `UtxoOutsideMovePoolSpent` | A withdrawal spent a UTXO that is not in Move's pool: the pool never held it, or held it as a deposit with no approval. The monitor missed an event, or Move has a fault. |
 | `UtxoOriginConflict` | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
-| `UtxoTooOld` | An approved pool UTXO is older than 40 days. The committee can spend it alone at 60. |
+| `UtxoTooOld` | A pool UTXO is older than 40 days, approved or not. The committee can spend it alone at 60. |
 | `HbtcSupplyExceedsPool` | The hBTC supply has exceeded the pool value for 3 hours. |
 | `GuardianInconsistency` | Two logs for one `seq`, a missing `seq`, or a skip of more than 10 seqs. |
 | `GuardianClockSkew` | A guardian log's signed time differs from S3's time by more than 30 s. |

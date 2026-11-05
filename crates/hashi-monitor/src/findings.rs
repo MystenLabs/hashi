@@ -164,7 +164,8 @@ pub enum MonitorFinding {
     BtcRpcInconsistency(BtcRpcInconsistency),
     /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
     /// warn age. The committee can spend a UTXO alone 60 days after it
-    /// confirms.
+    /// confirms. This includes an unapproved deposit: a committee that
+    /// withholds the approval can take it then.
     UtxoTooOld {
         outpoint: OutPoint,
         age_secs: u64,

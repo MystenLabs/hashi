@@ -36,8 +36,9 @@
 //! that AML screening rejects or a request with a wrong amount. Such a UTXO
 //! stays an unapproved deposit.
 //!
-//! UTXOs in Move's pool: the pool value, the pool gauges, and `UtxoTooOld`
-//! use only these. The daily check looks up every held UTXO.
+//! UTXOs in Move's pool: the pool value and the pool gauges use only these.
+//! The daily check looks up every held UTXO, and `UtxoTooOld` covers every
+//! held UTXO.
 //! - A deposit enters Move's pool when the monitor has seen both its Bitcoin
 //!   confirmation and its Sui `DepositApproved`.
 //! - A change output enters Move's pool at the Bitcoin confirmation of its
@@ -326,7 +327,7 @@ impl UtxoPool {
             match states.get(outpoint) {
                 Some(OutpointState::Unspent { block_time }) => {
                     let age_secs = now.saturating_sub(*block_time);
-                    if utxo.origin.in_move_pool() && age_secs >= timing.utxo_max_age {
+                    if age_secs >= timing.utxo_max_age {
                         findings.push(MonitorFinding::UtxoTooOld {
                             outpoint: *outpoint,
                             age_secs,
@@ -798,12 +799,20 @@ mod tests {
     }
 
     #[test]
-    fn an_unapproved_deposit_is_not_reported_at_the_max_age() {
+    fn an_unapproved_deposit_is_reported_at_the_max_age() {
         let mut pool = UtxoPool::default();
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
         let state = OutpointState::Unspent { block_time: 0 };
+        assert!(findings_one(&pool, Some(state.clone()), MAX_AGE - 1).is_empty());
 
-        assert!(findings_one(&pool, Some(state), 10 * MAX_AGE).is_empty());
+        assert_eq!(
+            findings_one(&pool, Some(state), MAX_AGE),
+            vec![MonitorFinding::UtxoTooOld {
+                outpoint: outpoint(1),
+                age_secs: MAX_AGE,
+                threshold_secs: MAX_AGE,
+            }]
+        );
     }
 
     #[test]
