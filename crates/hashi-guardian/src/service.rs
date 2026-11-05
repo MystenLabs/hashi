@@ -48,6 +48,7 @@ use hashi_types::guardian::StandardWithdrawalResponse;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// Owns request execution. The enclave itself contains no control mutex.
 #[derive(Clone)]
@@ -88,11 +89,15 @@ impl GuardianService {
     {
         let enclave = self.enclave.clone();
         let rpc_turn = self.rpc_turn.clone();
-        tokio::spawn(async move {
-            let _turn = rpc_turn.lock().await;
-            let mut enclave = enclave.lock().await;
-            task(&mut enclave).await
-        })
+        // Keep the RPC span, so handler logs carry the RPC name.
+        tokio::spawn(
+            async move {
+                let _turn = rpc_turn.lock().await;
+                let mut enclave = enclave.lock().await;
+                task(&mut enclave).await
+            }
+            .in_current_span(),
+        )
         .await
         .expect("guardian task failed")
     }
