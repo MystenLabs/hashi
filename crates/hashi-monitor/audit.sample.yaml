@@ -49,3 +49,8 @@ btc:
   # http_headers:
   #   Origin: "https://example.com"
   #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
+
+# The findings that alert. `strict`, the default, alerts on every finding.
+# `essential` alerts only on the findings that every operator must act on.
+# The other findings are then WARN log lines. The README lists both groups.
+# alert_mode: strict

@@ -8,8 +8,10 @@
 //! finding, and the metrics record the time of the last one.
 //!
 //! Assumptions:
-//! - Every finding needs an operator action, so all findings have one level.
-//!   A condition that needs no action is not a finding.
+//! - Every finding needs an operator action. A condition that needs no
+//!   action is not a finding.
+//! - Every operator must act on an essential finding. The other findings
+//!   show no loss of Bitcoin backing. `AlertMode` decides if they alert.
 //! - `BtcRpcInconsistency` means a Bitcoin RPC answer contradicts one the
 //!   monitor already holds. The bridge cannot cause it. The inner enum names
 //!   the contradiction.
@@ -40,6 +42,18 @@ use hashi_types::guardian::unix_millis_to_seconds;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
+
+/// The findings that alert: an ERROR log line, and the finding metric. A
+/// finding that does not alert is a WARN log line.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertMode {
+    /// Every finding alerts.
+    #[default]
+    Strict,
+    /// Only the essential findings alert. See `MonitorFinding::is_essential`.
+    Essential,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum EventRelation {
@@ -253,6 +267,42 @@ impl MonitorFinding {
                 timing,
             ),
         })
+    }
+
+    /// Whether every operator must act on the finding. The other findings
+    /// show no loss of Bitcoin backing.
+    pub fn is_essential(&self) -> bool {
+        match self {
+            // Hashi approved before Bitcoin confirmed, or a miner dated the
+            // block late. The payment came, so Bitcoin now backs the hBTC.
+            Self::DepositLate { .. } => false,
+            // No hBTC was minted. A user waits for it.
+            Self::DepositNotApproved { .. } => false,
+            // A bad guardian clock or a slow S3 write. The checks still run.
+            Self::GuardianClockSkew { .. } => false,
+            Self::InvalidEventAdded(_)
+            | Self::WithdrawalEventLate { .. }
+            | Self::WithdrawalEventMissing { .. }
+            | Self::WithdrawalTxidMismatch { .. }
+            | Self::WithdrawalTxUnbuildable { .. }
+            | Self::WithdrawalMismatch { .. }
+            | Self::DepositUnbacked { .. }
+            | Self::DepositMismatch { .. }
+            | Self::BtcRpcInconsistency(_)
+            | Self::UtxoTooOld { .. }
+            | Self::UtxoUnexpectedSpend { .. }
+            | Self::UtxoOutsideMovePoolSpent { .. }
+            | Self::UtxoOriginConflict { .. }
+            | Self::HbtcSupplyExceedsPool { .. }
+            | Self::SourceStale { .. }
+            | Self::SnapshotStale { .. }
+            | Self::GuardianInconsistency(_) => true,
+        }
+    }
+
+    /// Whether the finding alerts in `mode`.
+    pub fn alerts_in(&self, mode: AlertMode) -> bool {
+        mode == AlertMode::Strict || self.is_essential()
     }
 
     /// The variant name. Alerting labels each finding with it.

@@ -45,6 +45,7 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::utxo_pool::SuspectSpend;
 use crate::domain::utxo_pool::UtxoPool;
+use crate::findings::AlertMode;
 use crate::findings::MonitorFinding;
 use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
@@ -103,15 +104,31 @@ const SNAPSHOT_SAVE_INTERVAL: u64 = 60 * 60;
 /// seconds. A failed save costs only a longer replay at the next restart.
 const SNAPSHOT_STALE_LIMIT: u64 = 12 * 60 * 60;
 
-pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
+/// Log each finding: an ERROR line if it alerts in `mode`, else a WARN line.
+pub fn log_findings(
+    source: &'static str,
+    phase: &'static str,
+    findings: &[MonitorFinding],
+    mode: AlertMode,
+) {
     for finding in findings.iter() {
-        tracing::error!(
-            source,
-            phase,
-            total = findings.len(),
-            finding = %finding,
-            "monitor finding"
-        );
+        if finding.alerts_in(mode) {
+            tracing::error!(
+                source,
+                phase,
+                total = findings.len(),
+                finding = %finding,
+                "monitor finding"
+            );
+        } else {
+            tracing::warn!(
+                source,
+                phase,
+                total = findings.len(),
+                finding = %finding,
+                "monitor finding"
+            );
+        }
     }
 }
 
@@ -411,9 +428,12 @@ impl Auditor {
         )
     }
 
+    /// Log the findings, and record the ones that alert in the metrics.
     fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
-        log_findings("continuous", phase, findings);
-        self.metrics.record_findings(findings, now_timestamp_secs());
+        let mode = self.cfg.alert_mode;
+        log_findings("continuous", phase, findings, mode);
+        let alerts = findings.iter().filter(|finding| finding.alerts_in(mode));
+        self.metrics.record_findings(alerts, now_timestamp_secs());
     }
 
     /// Report the open withdrawals that missed a timing bound.
@@ -835,6 +855,62 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: cursor,
         }
+    }
+
+    /// A late deposit and a stale snapshot, reported in `mode`. Returns the
+    /// kinds that set the finding metric.
+    fn alerted_kinds(mode: AlertMode) -> Vec<&'static str> {
+        let mut cfg = Config::for_tests();
+        cfg.alert_mode = mode;
+        let metrics = Arc::new(MonitorMetrics::new());
+        let auditor = auditor_with(&cfg, metrics.clone());
+        let late = MonitorFinding::DepositLate {
+            sui: approval_of(&deposit_request(), 200),
+            deadline: 300,
+            block_time: 400,
+        };
+        let stale = MonitorFinding::SnapshotStale {
+            last_saved: 0,
+            limit_secs: 3_600,
+        };
+        auditor.report_findings("test", &[late, stale]);
+
+        let rendered = metrics.render();
+        ["DepositLate", "SnapshotStale"]
+            .into_iter()
+            .filter(|kind| rendered.contains(&format!("kind=\"{kind}\"")))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_essential_findings_alert_in_essential_mode() {
+        assert_eq!(
+            alerted_kinds(AlertMode::Strict),
+            vec!["DepositLate", "SnapshotStale"]
+        );
+        assert_eq!(alerted_kinds(AlertMode::Essential), vec!["SnapshotStale"]);
+    }
+
+    #[test]
+    fn late_and_unapproved_deposits_are_not_essential() {
+        let sui = approval_of(&deposit_request(), 200);
+        let not_approved = MonitorFinding::DepositNotApproved {
+            outpoint: sui.deposit_id.into(),
+            requested_amount: 1_000,
+            paid_amount: 1_000,
+            requested_at: 100,
+            block_time: 200,
+            causes: vec![],
+        };
+        let late = MonitorFinding::DepositLate {
+            sui: sui.clone(),
+            deadline: 300,
+            block_time: 400,
+        };
+
+        assert!(!late.is_essential());
+        assert!(!not_approved.is_essential());
+        assert!(MonitorFinding::DepositUnbacked { sui }.is_essential());
     }
 
     #[tokio::test]
