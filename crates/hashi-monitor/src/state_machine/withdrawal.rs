@@ -26,8 +26,8 @@
 //! - Findings are returned to the caller and not kept. A complete machine
 //!   may have reported findings earlier.
 
-use crate::domain::ConfirmedWithdrawal;
 use crate::domain::Cursors;
+use crate::domain::FinishedWithdrawal;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::WithdrawalTx;
@@ -54,7 +54,7 @@ pub struct WithdrawalStateMachine {
     /// The time of the last Bitcoin lookup of the transaction.
     btc_checked_at: Option<UnixSeconds>,
     /// The withdrawal for the UTXO pool, once Bitcoin confirmed it.
-    confirmed: Option<ConfirmedWithdrawal>,
+    confirmed: Option<FinishedWithdrawal>,
     /// The withdrawal id. Every event must carry it.
     wid: WithdrawalID,
     /// The transaction id. Every event must carry it.
@@ -99,12 +99,12 @@ impl WithdrawalStateMachine {
     }
 
     /// The withdrawal for the UTXO pool, or `None` until Bitcoin confirmed it.
-    pub fn confirmed(&self) -> Option<&ConfirmedWithdrawal> {
+    pub fn finished(&self) -> Option<&FinishedWithdrawal> {
         self.confirmed.as_ref()
     }
 
     /// The withdrawal Bitcoin confirmed, if any.
-    pub fn into_confirmed(self) -> Option<ConfirmedWithdrawal> {
+    pub fn into_finished(self) -> Option<FinishedWithdrawal> {
         self.confirmed
     }
 
@@ -273,7 +273,7 @@ impl WithdrawalStateMachine {
                 let e2 = self
                     .get(WithdrawalEventType::E2GuardianApproved)
                     .expect("E3 is expected only after E2");
-                self.confirmed = Some(ConfirmedWithdrawal::from_confirmation(e2, confirmation));
+                self.confirmed = Some(FinishedWithdrawal::from_confirmation(e2, confirmation));
                 self.add_event(e_btc, timing)
             }
             None => Vec::new(),
@@ -361,7 +361,7 @@ impl WithdrawalStateMachine {
         let mut sm = Self::new(approval, timing);
         assert!(sm.add_event(e2.clone(), timing).is_empty());
         assert!(sm.add_event(e3, timing).is_empty());
-        sm.confirmed = Some(ConfirmedWithdrawal::from_confirmation(&e2, confirmation));
+        sm.confirmed = Some(FinishedWithdrawal::from_confirmation(&e2, confirmation));
         assert!(sm.is_ready_for_gc());
         sm
     }

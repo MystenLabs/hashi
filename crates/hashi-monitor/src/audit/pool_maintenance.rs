@@ -22,8 +22,8 @@
 //!   After the bitcoin tick finishes, maintenance takes both machines and adds D before applying W.
 
 use super::Auditor;
-use crate::domain::ConfirmedDeposit;
-use crate::domain::ConfirmedWithdrawal;
+use crate::domain::FinishedDeposit;
+use crate::domain::FinishedWithdrawal;
 use crate::domain::WithdrawalEventType;
 use crate::findings::MonitorFinding;
 use crate::metrics::SOURCE_UTXO;
@@ -81,20 +81,20 @@ impl Auditor {
     }
 
     /// Remove the deposit machines that closed since the last call. Returns
-    /// the deposits Bitcoin confirmed, for the pool.
-    fn take_closed_deposits(&mut self) -> Vec<ConfirmedDeposit> {
+    /// the UTXOs Bitcoin paid, for the pool.
+    fn take_closed_deposits(&mut self) -> Vec<FinishedDeposit> {
         let mut deposits = Vec::new();
         for (request_id, sm) in self
             .pending_deposits
             .extract_if(|_, sm| sm.is_ready_for_gc())
         {
             let deposit_id = sm.deposit_id();
-            let deposit = sm.into_confirmed();
+            let deposit = sm.into_finished();
             match &deposit {
                 Some(deposit) => tracing::debug!(
                     deposit_id = %deposit.deposit_id,
-                    amount = deposit.amount,
-                    block_time = %utc_timestamp(deposit.block_time),
+                    amount = deposit.utxo.amount,
+                    block_time = %utc_timestamp(deposit.utxo.first_seen),
                     "deposit request confirmed on Bitcoin at a bridge address"
                 ),
                 // Bitcoin answered without a UTXO, or the request lapsed.
@@ -110,7 +110,7 @@ impl Auditor {
     }
 
     /// Remove closed withdrawal machines and return their confirmed withdrawals for the pool.
-    fn take_closed_withdrawals(&mut self) -> Vec<ConfirmedWithdrawal> {
+    fn take_closed_withdrawals(&mut self) -> Vec<FinishedWithdrawal> {
         let mut withdrawals = Vec::new();
         for (wid, sm) in self
             .pending_withdrawals
@@ -134,7 +134,7 @@ impl Auditor {
                 e2_to_e3 = %human_timestamp_delta(e3.timestamp_secs, e2.timestamp_secs),
                 "withdrawal flow is complete"
             );
-            withdrawals.extend(sm.into_confirmed());
+            withdrawals.extend(sm.into_finished());
         }
         withdrawals
     }

@@ -26,13 +26,14 @@ pub mod withdrawal;
 
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
-pub use deposit::ConfirmedDeposit;
+pub use deposit::BtcConfirmedDeposit;
 pub use deposit::DepositId;
+pub use deposit::FinishedDeposit;
 pub use deposit::SuiDepositApprovedEvent;
 pub use deposit::SuiDepositRequestedEvent;
 use serde::Deserialize;
 use serde::Serialize;
-pub use withdrawal::ConfirmedWithdrawal;
+pub use withdrawal::FinishedWithdrawal;
 pub use withdrawal::MonitorWithdrawalEvent;
 pub use withdrawal::WithdrawalEventType;
 pub use withdrawal::WithdrawalTx;

@@ -149,10 +149,10 @@ impl MonitorWithdrawalEvent {
     }
 }
 
-/// A withdrawal Bitcoin confirmed, with the guardian's word on which of its
-/// outputs are change. The UTXO pool applies it.
+/// The result of a finished withdrawal machine: the transaction Bitcoin
+/// confirmed, with the guardian's word on which outputs are change.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ConfirmedWithdrawal {
+pub struct FinishedWithdrawal {
     pub txid: Txid,
     pub confirmation: BtcConfirmation,
     /// The vout of the first change output. The change outputs trail the
@@ -160,7 +160,7 @@ pub struct ConfirmedWithdrawal {
     pub first_change_vout: usize,
 }
 
-impl ConfirmedWithdrawal {
+impl FinishedWithdrawal {
     /// The withdrawal the guardian approved in `e2`, as Bitcoin confirmed
     /// it. Only the change layout is E2's: Bitcoin cannot say which outputs
     /// are change, and the guardian labels them from paths it derives. The

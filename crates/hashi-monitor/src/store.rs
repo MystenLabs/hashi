@@ -202,10 +202,11 @@ impl SnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ConfirmedDeposit;
+    use crate::domain::BtcConfirmedDeposit;
     use crate::domain::DepositId;
     use crate::domain::WithdrawalEventType;
     use crate::rpc::sui::tests::hashi_approval;
+    use crate::test_utils::approved;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
     use crate::timing::Timing;
@@ -248,13 +249,13 @@ mod tests {
     /// A pool that holds one UTXO.
     fn pool_with_a_utxo() -> UtxoPool {
         let mut pool = UtxoPool::default();
-        let deposit = ConfirmedDeposit {
+        let deposit = BtcConfirmedDeposit {
             deposit_id: DepositId::new(txid(1), 0),
             amount: 1_000,
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_699_999_000,
         };
-        assert!(pool.add_deposit(&deposit).is_none());
+        assert!(pool.add_deposit(&approved(deposit)).is_none());
         pool
     }
 
