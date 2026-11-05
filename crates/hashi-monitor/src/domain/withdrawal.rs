@@ -25,7 +25,9 @@ use hashi_types::move_types::WithdrawalPickedForProcessing;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::findings::GuardianInconsistency;
 use crate::findings::MonitorFinding;
+use crate::findings::WithdrawalInvalidReason;
 use crate::keys::HashiBTCKeys;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -78,49 +80,48 @@ impl MonitorWithdrawalEvent {
         tx: WithdrawalTx,
         timestamp_secs: UnixSeconds,
     ) -> Result<Self, Vec<MonitorFinding>> {
-        match tx.unsigned_tx() {
-            Ok(built) if built.compute_txid() == claimed_txid => {}
-            Ok(built) => {
-                return Err(vec![MonitorFinding::WithdrawalTxidMismatch {
-                    wid,
-                    claimed: claimed_txid,
-                    computed: built.compute_txid(),
-                }]);
-            }
-            Err(error) => {
-                return Err(vec![MonitorFinding::WithdrawalTxUnbuildable {
-                    wid,
-                    claimed: claimed_txid,
-                    reason: format!("{error:#}"),
-                }]);
-            }
-        }
-        Ok(Self {
+        let event = Self {
             event_type,
             wid,
             timestamp_secs,
             btc_txid: claimed_txid,
             tx,
-        })
+        };
+        let reason = match event.tx.unsigned_tx() {
+            Ok(built) if built.compute_txid() == claimed_txid => return Ok(event),
+            Ok(built) => WithdrawalInvalidReason::TxidMismatch {
+                computed: built.compute_txid(),
+                event,
+            },
+            Err(error) => WithdrawalInvalidReason::Unbuildable {
+                error: format!("{error:#}"),
+                event,
+            },
+        };
+        Err(vec![MonitorFinding::WithdrawalInvalid { wid, reason }])
     }
 
-    /// E2 from the guardian's withdrawal log message, logged at
-    /// `timestamp_ms`. The log labels every output it signed; `keys` turn its
-    /// change paths into addresses. A layout the keys cannot build, or one
-    /// that does not hash to the txid the log states, is returned as findings.
+    /// E2 from the guardian's withdrawal log message at `object_key`, logged
+    /// at `timestamp_ms`. The log labels every output it signed; `keys` turn
+    /// its change paths into addresses. An output address the monitor cannot
+    /// read gives `WithdrawalLogUnreadable`. A layout that does not build, or does
+    /// not hash to the txid the log states, gives `WithdrawalInvalid`.
     pub fn from_guardian(
         withdrawal: &WithdrawalLogMessage,
+        object_key: &str,
         timestamp_ms: u64,
         keys: &HashiBTCKeys,
     ) -> Result<Self, Vec<MonitorFinding>> {
         let wid = withdrawal.request_data.wid;
         let tx =
             WithdrawalTx::from_guardian(keys, &withdrawal.request_data.utxos).map_err(|error| {
-                vec![MonitorFinding::WithdrawalTxUnbuildable {
-                    wid,
-                    claimed: withdrawal.txid,
-                    reason: format!("{error:#}"),
-                }]
+                vec![MonitorFinding::GuardianInconsistency(
+                    GuardianInconsistency::WithdrawalLogUnreadable {
+                        object_key: object_key.to_owned(),
+                        wid,
+                        error: format!("{error:#}"),
+                    },
+                )]
             })?;
         Self::checked(
             WithdrawalEventType::E2GuardianApproved,
@@ -231,14 +232,20 @@ impl WithdrawalTx {
         for output in &utxos.outputs {
             match output {
                 OutputUTXOWire::External(external) => {
+                    let output = format!(
+                        "external output to {} of {} sat",
+                        external.address.assume_checked_ref(),
+                        external.amount.to_sat()
+                    );
                     let address = external
                         .address
                         .clone()
                         .require_network(keys.network())
-                        .context("guardian external output address is for another network")?;
+                        .with_context(|| format!("{output}: the address is for another network"))?;
                     withdrawal_outputs.push(OutputUtxo {
                         amount: external.amount.to_sat(),
-                        bitcoin_address: witness_program_from_address(&address)?,
+                        bitcoin_address: witness_program_from_address(&address)
+                            .with_context(|| output.clone())?,
                     });
                 }
                 OutputUTXOWire::Internal(internal) => change_outputs.push(OutputUtxo {
@@ -388,10 +395,18 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::WithdrawalTxidMismatch {
+            vec![MonitorFinding::WithdrawalInvalid {
                 wid,
-                claimed,
-                computed,
+                reason: WithdrawalInvalidReason::TxidMismatch {
+                    event: MonitorWithdrawalEvent {
+                        event_type: WithdrawalEventType::E2GuardianApproved,
+                        wid,
+                        timestamp_secs: 100,
+                        btc_txid: claimed,
+                        tx: tx.clone(),
+                    },
+                    computed,
+                },
             }]
         );
         let event = MonitorWithdrawalEvent::checked(
@@ -416,11 +431,16 @@ mod tests {
                 DerivationPath::ZERO,
             )],
             outputs: vec![OutputUTXOWire::external(
-                mainnet.into_unchecked(),
+                mainnet.clone().into_unchecked(),
                 Amount::from_sat(1),
             )],
         };
 
-        assert!(WithdrawalTx::from_guardian(&keys, &utxos).is_err());
+        let error = WithdrawalTx::from_guardian(&keys, &utxos).unwrap_err();
+        // The error names the output, so the finding shows it.
+        assert!(
+            format!("{error:#}").contains(&mainnet.to_string()),
+            "{error:#}"
+        );
     }
 }
