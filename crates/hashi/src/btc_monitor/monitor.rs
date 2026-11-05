@@ -152,7 +152,7 @@ pub enum DepositConfirmError {
         actual: RecordedOutput,
     },
     #[error(
-        "transaction {txid} is confirmed at height {height}, before monitor start height {start_height}"
+        "transaction {txid} is confirmed at height {height}, at or before monitor checkpoint {start_height}"
     )]
     BeforeStartCheckpoint {
         txid: bitcoin::Txid,
@@ -2101,8 +2101,8 @@ async fn lookup_tx_block(
     Ok(TxBlockLookup::Confirmed(block_info))
 }
 
-// Core can identify blocks older than Kyoto's retained chain. Only classify that
-// boundary as permanent after checking active-chain membership and the captured tip.
+// Kyoto does not retain the checkpoint header itself. Only classify blocks at or
+// below it as permanent after checking active-chain membership and the captured tip.
 async fn classify_missing_kyoto_block(
     bitcoind_rpc: &BitcoindRpc,
     txid: bitcoin::Txid,
@@ -2124,7 +2124,7 @@ async fn classify_missing_kyoto_block(
             return anyhow::anyhow!("Failed to look up block header {block_hash}: {e}").into();
         }
     };
-    if header.confirmations > 0 && header.height < start_checkpoint.height {
+    if header.confirmations > 0 && header.height <= start_checkpoint.height {
         if let Err(e) =
             require_core_checkpoint(bitcoind_rpc, tip, "after block header lookup").await
         {
@@ -3895,11 +3895,11 @@ mod tests {
         let anchor = HashCheckpoint::new(100, block_hash(4));
         for (height, confirmations, consistent, permanent) in [
             (99, 102, true, true),
-            (100, 101, true, false),
+            (100, 101, true, true),
             (101, 100, true, false),
-            (99, -1, true, false),
-            (99, 0, true, false),
-            (99, 102, false, false),
+            (100, -1, true, false),
+            (100, 0, true, false),
+            (100, 101, false, false),
         ] {
             let rpc = stub_bitcoind(move |req| {
                 if req.contains("\"getblockheader\"") {
@@ -3922,15 +3922,15 @@ mod tests {
             let error = classify_missing_kyoto_block(
                 &BitcoindRpc::new(rpc, None),
                 txid,
-                block_hash(2),
+                anchor.hash,
                 tip,
                 anchor,
             )
             .await;
             if permanent {
                 assert!(matches!(error, DepositConfirmError::BeforeStartCheckpoint {
-                    txid: actual, height: 99, start_height: 100,
-                } if actual == txid));
+                    txid: actual, height: actual_height, start_height: 100,
+                } if actual == txid && actual_height == height));
             } else {
                 assert!(matches!(error, DepositConfirmError::Other(_)), "{error}");
             }

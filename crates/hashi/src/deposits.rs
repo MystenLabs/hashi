@@ -504,7 +504,7 @@ pub enum UnapprovedDepositError {
     #[error("Deposit UTXO has already been spent on Bitcoin: {0}")]
     BitcoinUtxoSpent(#[source] anyhow::Error),
 
-    #[error("Bitcoin deposit predates the monitor start checkpoint: {0}")]
+    #[error("Bitcoin deposit is at or before the monitor start checkpoint: {0}")]
     BitcoinBeforeStartCheckpoint(#[source] anyhow::Error),
 
     #[error("Deposit data mismatch: {0}")]
