@@ -71,6 +71,8 @@ async fn main() -> Result<()> {
 fn abort_on_panic() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Log the panic as JSON, so level-based queries find it.
+        tracing::error!(panic = %info, "Guardian panicked");
         default(info); // keep the standard panic message + backtrace
         std::process::abort();
     }));
