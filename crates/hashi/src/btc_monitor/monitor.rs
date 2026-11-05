@@ -128,6 +128,12 @@ struct RawTransactionLocation {
     block_hash: Option<bitcoin::BlockHash>,
 }
 
+#[derive(serde::Deserialize)]
+struct BlockHeaderLocation {
+    height: u32,
+    confirmations: i64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DepositConfirmError {
     #[error("UTXO {txid}:{vout} has already been spent on Bitcoin")]
@@ -144,6 +150,14 @@ pub enum DepositConfirmError {
         vout: u32,
         expected: bitcoin::TxOut,
         actual: RecordedOutput,
+    },
+    #[error(
+        "transaction {txid} is confirmed at height {height}, before monitor start height {start_height}"
+    )]
+    BeforeStartCheckpoint {
+        txid: bitcoin::Txid,
+        height: u32,
+        start_height: u32,
     },
     #[error("per-caller deposit discovery limit reached")]
     DiscoveriesFull,
@@ -490,6 +504,7 @@ struct DepositDiscoveryWorkerResult {
 
 struct DepositDiscoveryContext {
     tip: HashCheckpoint,
+    start_checkpoint: HashCheckpoint,
     bitcoind_rpc: BitcoindRpc,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
@@ -500,6 +515,7 @@ struct DepositDiscoveryContext {
 
 struct UtxoHeightResolutionContext {
     tip: HashCheckpoint,
+    start_checkpoint: HashCheckpoint,
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
@@ -852,6 +868,7 @@ impl Monitor {
     ) -> DepositDiscoveryContext {
         DepositDiscoveryContext {
             tip,
+            start_checkpoint: self.start_checkpoint,
             bitcoind_rpc: BitcoindRpc::new(self.bitcoind_rpc.clone(), charge),
             requester: self.requester.clone(),
             deposit_lookup_cache: self.deposit_lookup_cache.clone(),
@@ -987,9 +1004,19 @@ impl Monitor {
             match &status {
                 Ok(status) => self.start_deposit_check(tip, request, status.clone()),
                 Err(e) => {
-                    let _ = request
-                        .result_tx
-                        .send(Err(anyhow::anyhow!(e.to_string()).into()));
+                    let error = match e {
+                        DepositConfirmError::BeforeStartCheckpoint {
+                            txid,
+                            height,
+                            start_height,
+                        } => DepositConfirmError::BeforeStartCheckpoint {
+                            txid: *txid,
+                            height: *height,
+                            start_height: *start_height,
+                        },
+                        _ => anyhow::anyhow!(e.to_string()).into(),
+                    };
+                    let _ = request.result_tx.send(Err(error));
                 }
             }
         }
@@ -1586,6 +1613,7 @@ impl Monitor {
                 };
                 let context = UtxoHeightResolutionContext {
                     tip,
+                    start_checkpoint: self.start_checkpoint,
                     bitcoind_rpc: self.bitcoind_rpc.clone(),
                     requester: self.requester.clone(),
                     deposit_lookup_cache: self.deposit_lookup_cache.clone(),
@@ -1644,6 +1672,7 @@ impl Monitor {
     ) {
         let UtxoHeightResolutionContext {
             tip,
+            start_checkpoint,
             bitcoind_rpc,
             requester,
             deposit_lookup_cache,
@@ -1662,6 +1691,7 @@ impl Monitor {
                     deposit_lookup_cache.clone(),
                     txid,
                     tip,
+                    start_checkpoint,
                 )
             },
         )
@@ -2006,6 +2036,7 @@ async fn lookup_tx_block(
     deposit_lookup_cache: SharedDepositLookupCache,
     txid: bitcoin::Txid,
     tip: HashCheckpoint,
+    start_checkpoint: HashCheckpoint,
 ) -> Result<TxBlockLookup, DepositConfirmError> {
     if let Some(block_info) = deposit_lookup_cache.get_tx_block(&txid) {
         return Ok(TxBlockLookup::Confirmed(block_info));
@@ -2047,21 +2078,65 @@ async fn lookup_tx_block(
     let height = if let Some(height) = deposit_lookup_cache.get_block_height(&block_hash) {
         height
     } else {
-        let height = requester
-            .height_of_hash(block_hash)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to look up block hash {block_hash} in Kyoto: {e}")
-            })?
-            .ok_or_else(|| {
-                anyhow::anyhow!("Block hash {block_hash} from bitcoind is not on Kyoto's chain")
-            })?;
+        let height = match requester.height_of_hash(block_hash).await.map_err(|e| {
+            anyhow::anyhow!("Failed to look up block hash {block_hash} in Kyoto: {e}")
+        })? {
+            Some(height) => height,
+            None => {
+                return Err(classify_missing_kyoto_block(
+                    &bitcoind_rpc,
+                    txid,
+                    block_hash,
+                    tip,
+                    start_checkpoint,
+                )
+                .await);
+            }
+        };
         deposit_lookup_cache.put_block_height(block_hash, height);
         height
     };
     let block_info = HashCheckpoint::new(height, block_hash);
     deposit_lookup_cache.put_tx_block(txid, block_info);
     Ok(TxBlockLookup::Confirmed(block_info))
+}
+
+// Core can identify blocks older than Kyoto's retained chain. Only classify that
+// boundary as permanent after checking active-chain membership and the captured tip.
+async fn classify_missing_kyoto_block(
+    bitcoind_rpc: &BitcoindRpc,
+    txid: bitcoin::Txid,
+    block_hash: bitcoin::BlockHash,
+    tip: HashCheckpoint,
+    start_checkpoint: HashCheckpoint,
+) -> DepositConfirmError {
+    let header = bitcoind_rpc
+        .call(move |rpc| {
+            rpc.call::<BlockHeaderLocation>(
+                "getblockheader",
+                &[serde_json::json!(block_hash), serde_json::json!(true)],
+            )
+        })
+        .await;
+    let header = match header {
+        Ok(header) => header,
+        Err(e) => {
+            return anyhow::anyhow!("Failed to look up block header {block_hash}: {e}").into();
+        }
+    };
+    if header.confirmations > 0 && header.height < start_checkpoint.height {
+        if let Err(e) =
+            require_core_checkpoint(bitcoind_rpc, tip, "after block header lookup").await
+        {
+            return e;
+        }
+        return DepositConfirmError::BeforeStartCheckpoint {
+            txid,
+            height: header.height,
+            start_height: start_checkpoint.height,
+        };
+    }
+    anyhow::anyhow!("Block hash {block_hash} from bitcoind is not on Kyoto's chain").into()
 }
 
 async fn assemble_utxo_height_snapshot<F, Fut>(
@@ -2114,6 +2189,7 @@ async fn discover_deposit(
 ) -> Result<DepositStatus, DepositConfirmError> {
     let DepositDiscoveryContext {
         tip,
+        start_checkpoint,
         bitcoind_rpc,
         requester,
         deposit_lookup_cache,
@@ -2129,6 +2205,7 @@ async fn discover_deposit(
         deposit_lookup_cache.clone(),
         txid,
         tip,
+        start_checkpoint,
     )
     .await?
     {
@@ -2651,6 +2728,7 @@ mod tests {
             monitor.deposit_lookup_cache.clone(),
             txid,
             HashCheckpoint::new(100, block_hash(3)),
+            monitor.start_checkpoint,
         )
         .await
         .unwrap();
@@ -3808,6 +3886,90 @@ mod tests {
         Arc::new(corepc_client::client_sync::v29::Client::new(&format!(
             "http://{addr}"
         )))
+    }
+
+    #[tokio::test]
+    async fn missing_kyoto_block_requires_active_pre_anchor_header_and_consistent_tip() {
+        let txid = make_outpoint(1).txid;
+        let tip = HashCheckpoint::new(200, block_hash(3));
+        let anchor = HashCheckpoint::new(100, block_hash(4));
+        for (height, confirmations, consistent, permanent) in [
+            (99, 102, true, true),
+            (100, 101, true, false),
+            (101, 100, true, false),
+            (99, -1, true, false),
+            (99, 0, true, false),
+            (99, 102, false, false),
+        ] {
+            let rpc = stub_bitcoind(move |req| {
+                if req.contains("\"getblockheader\"") {
+                    rpc_reply(
+                        req,
+                        serde_json::json!({
+                            "height": height, "confirmations": confirmations,
+                        }),
+                        serde_json::Value::Null,
+                    )
+                } else {
+                    assert!(req.contains("\"getblockhash\""));
+                    rpc_ok(
+                        req,
+                        &if consistent { tip.hash } else { block_hash(5) }.to_string(),
+                    )
+                }
+            })
+            .await;
+            let error = classify_missing_kyoto_block(
+                &BitcoindRpc::new(rpc, None),
+                txid,
+                block_hash(2),
+                tip,
+                anchor,
+            )
+            .await;
+            if permanent {
+                assert!(matches!(error, DepositConfirmError::BeforeStartCheckpoint {
+                    txid: actual, height: 99, start_height: 100,
+                } if actual == txid));
+            } else {
+                assert!(matches!(error, DepositConfirmError::Other(_)), "{error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_anchor_discovery_preserves_typed_error_for_all_waiters() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        monitor.tip = Some(HashCheckpoint::new(200, block_hash(3)));
+        let outpoint = make_outpoint(1);
+        tracker.upsert_request(Address::new([1; 32]), outpoint);
+        let DepositDiscovery::Discover(token) = tracker.discovery(&outpoint) else {
+            panic!("expected discovery token");
+        };
+        let (first, first_rx) = deposit_check_request_for(outpoint);
+        let (second, second_rx) = deposit_check_request_for(outpoint);
+        monitor
+            .pending_deposit_checks
+            .insert((outpoint, None), vec![first, second]);
+        monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
+            token: Some(token),
+            generation: tracker.bitcoin_generation(),
+            group: (outpoint, None),
+            result: Err(DepositConfirmError::BeforeStartCheckpoint {
+                txid: outpoint.txid,
+                height: 99,
+                start_height: 100,
+            }),
+        }));
+        for rx in [first_rx, second_rx] {
+            assert!(
+                matches!(rx.await.unwrap(), Err(DepositConfirmError::BeforeStartCheckpoint {
+                txid, height: 99, start_height: 100,
+            }) if txid == outpoint.txid)
+            );
+        }
     }
 
     #[tokio::test]

@@ -215,6 +215,11 @@ impl Hashi {
                     outpoint.txid
                 )));
             }
+            Err(e @ DepositConfirmError::BeforeStartCheckpoint { .. }) => {
+                return Err(UnapprovedDepositError::BitcoinBeforeStartCheckpoint(
+                    anyhow!(e),
+                ));
+            }
             Err(e @ DepositConfirmError::UtxoSpent { .. }) => {
                 self.metrics.deposits_rejected_utxo_spent.inc();
                 return Err(UnapprovedDepositError::BitcoinUtxoSpent(anyhow!(e)));
@@ -499,6 +504,9 @@ pub enum UnapprovedDepositError {
     #[error("Deposit UTXO has already been spent on Bitcoin: {0}")]
     BitcoinUtxoSpent(#[source] anyhow::Error),
 
+    #[error("Bitcoin deposit predates the monitor start checkpoint: {0}")]
+    BitcoinBeforeStartCheckpoint(#[source] anyhow::Error),
+
     #[error("Deposit data mismatch: {0}")]
     DepositDataMismatch(#[source] anyhow::Error),
 
@@ -553,6 +561,7 @@ impl UnapprovedDepositError {
             Self::InvalidOnchainRequest(_)
             | Self::DuplicateOrSpentOnSui(_)
             | Self::BitcoinUtxoSpent(_)
+            | Self::BitcoinBeforeStartCheckpoint(_)
             | Self::DepositDataMismatch(_)
             | Self::AmlRejected(_) => UnapprovedDepositErrorKind::NeverRetry,
         }
