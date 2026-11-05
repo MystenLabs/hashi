@@ -167,13 +167,10 @@ pub(crate) struct LeaderService {
     withdrawal_archive_scan_needed: bool,
     withdrawal_archive_scan_target: u64,
     // Singleton task that destroys dead TOB cert buckets on-chain; resolves
-    // to the sweep's outcome (epoch swept, whether the backlog drained).
+    // to the sweep's outcome (where to resume, whether it found work).
     tob_prune_task: Option<AbortOnDropHandle<anyhow::Result<garbage_collection::TobPruneOutcome>>>,
     tob_prune_retry: GlobalRetryTracker<garbage_collection::TobPruneErrorKind>,
-    // Last hashi epoch whose TOB prune sweep fully drained the backlog.
-    // `None` triggers a sweep on the first leader tick (boot backlog); a
-    // cap-limited or failed sweep leaves it unset so the next tick re-runs.
-    last_tob_prune_epoch: Option<u64>,
+    tob_prune_schedule: garbage_collection::TobPruneSchedule,
 
     // Singleton task that reconciles the guardian committee with the on-chain committee.
     guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -230,7 +227,7 @@ impl LeaderService {
             withdrawal_archive_scan_target: 0,
             tob_prune_task: None,
             tob_prune_retry: GlobalRetryTracker::new(),
-            last_tob_prune_epoch: None,
+            tob_prune_schedule: Default::default(),
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
         }
@@ -333,7 +330,7 @@ impl LeaderService {
                         self.check_delete_proposals(checkpoint_timestamp_ms);
                         self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
                         self.check_archive_confirmed_withdrawals(checkpoint_timestamp_ms);
-                        self.check_prune_tob_certs(checkpoint_timestamp_ms);
+                        self.check_prune_tob_certs(checkpoint_height, checkpoint_timestamp_ms);
                     } else {
                         trace!("We are not the leader node");
                         // Deposit tasks outlive the leader's turn, but not a halt.
@@ -448,16 +445,15 @@ impl LeaderService {
                     match &result {
                         Ok(Ok(outcome)) => {
                             self.tob_prune_retry.clear();
-                            // Only a fully-drained sweep closes the epoch
-                            // gate; a cap-limited one re-runs next tick.
-                            if outcome.drained {
-                                self.last_tob_prune_epoch = Some(outcome.swept_epoch);
-                            }
+                            self.tob_prune_schedule.finish(outcome);
                         }
-                        _ => self.tob_prune_retry.record_failure(
-                            garbage_collection::TobPruneErrorKind::Failed,
-                            checkpoint_rx.borrow().timestamp_ms,
-                        ),
+                        _ => {
+                            self.tob_prune_schedule.fail();
+                            self.tob_prune_retry.record_failure(
+                                garbage_collection::TobPruneErrorKind::Failed,
+                                checkpoint_rx.borrow().timestamp_ms,
+                            );
+                        }
                     }
                     Self::log_task_result("tob_prune", result);
                 }
@@ -554,7 +550,7 @@ impl LeaderService {
         };
         let num_validators = committee.members().len() as u64;
 
-        let current_turn = checkpoint_height / NUM_CONSECUTIVE_LEADER_CHECKPOINTS;
+        let current_turn = leader_turn(checkpoint_height);
         let is_leader = (current_turn % num_validators) == this_validator_idx;
 
         trace!("Node index {this_validator_idx} is leader node: {is_leader}");
@@ -745,6 +741,10 @@ pub(crate) fn is_retriable_transport(status: &tonic::Status) -> bool {
             | tonic::Code::Cancelled
             | tonic::Code::DeadlineExceeded
     )
+}
+
+fn leader_turn(checkpoint_height: u64) -> u64 {
+    checkpoint_height / NUM_CONSECUTIVE_LEADER_CHECKPOINTS
 }
 
 fn turn_has_room(checkpoint_height: u64) -> bool {

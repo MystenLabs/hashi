@@ -479,6 +479,21 @@ fn is_execution_failure(e: &anyhow::Error) -> bool {
         )
 }
 
+fn is_tob_bucket_abort(e: &anyhow::Error) -> bool {
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    transaction_execution_error(e).is_some_and(|error| {
+        error
+            .kind
+            .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
+            == Some(ExecutionErrorKind::MoveAbort)
+            && error
+                .abort_opt()
+                .and_then(|abort| abort.location().module_opt())
+                .is_some_and(|module| matches!(module, "cert_submission" | "tob" | "dynamic_field"))
+    })
+}
+
 /// Set the sender and gas overrides on `builder`, then finish it according to
 /// `mode`: serialize it unsigned, dry-run it, or sign and submit it.
 ///
@@ -2122,46 +2137,21 @@ impl SuiTxExecutor {
         Ok(max_checkpoint)
     }
 
-    /// Destroy dead TOB cert buckets via the GC entries
-    /// (`cert_submission::destroy_key_gen_certs` / `destroy_nonce_certs`).
-    ///
-    /// One move call per bucket — scalar pure args only, so the builder's
-    /// pure-input dedup is harmless. The binding per-transaction limit is
-    /// Sui's 2048 deleted-object-ids cap: destroying a bucket deletes its bag
-    /// `Field`, its `LinkedTable`, and one node per dealer (committee-sized,
-    /// ~80 ids today), and a `KeyGen` target may destroy TWO buckets. Bucket
-    /// sizes are unknowable here (candidate discovery decodes field names
-    /// only) and grow with committee size, so instead of a sizing model the
-    /// chunking is adaptive: start at `TOB_DESTROYS_PER_TX` calls per
-    /// transaction and HALVE any chunk that fails to EXECUTE down to
-    /// singletons. Every chunk is simulated by the SDK build before it is
-    /// submitted, so an over-limit chunk always fails there (typed, nothing
-    /// submitted, no gas burned); a failed on-chain status is treated the
-    /// same way. Build and transport failures are not size signals, so they
-    /// propagate immediately to the caller's retry backoff instead of
-    /// spending halving attempts on a doomed RPC. Only a singleton execution
-    /// failure propagates, so an over-limit chunk can never permanently
-    /// wedge the sweep behind an unbounded identical retry.
-    ///
-    /// The calls route to the ACTIVE package (the rule for every entry an
-    /// upgrade may introduce) and the Hashi shared input is pre-resolved:
-    /// sui >= 1.76 fullnodes fail simulation
-    /// with INVALID_LINKAGE when inferring an unresolved shared input's
-    /// mutability requires inspecting an upgraded package's module (see
-    /// `delete_expired_proposals`).
     pub async fn execute_destroy_tob_certs(
         &mut self,
-        targets: &[crate::onchain::TobPruneTarget],
-    ) -> anyhow::Result<()> {
+        targets: &[onchain::TobPruneTarget],
+    ) -> anyhow::Result<Vec<onchain::TobPruneTarget>> {
         let call_package_id = self.active_call_package_id();
         let hashi_initial_shared_version = crate::cli::client::fetch_initial_shared_version(
             &mut self.client,
             self.hashi_ids.hashi_object_id,
         )
         .await?;
-
-        let mut queue: std::collections::VecDeque<&[crate::onchain::TobPruneTarget]> =
+        let mut queue: std::collections::VecDeque<&[onchain::TobPruneTarget]> =
             targets.chunks(Self::TOB_DESTROYS_PER_TX).collect();
+        let mut skipped = Vec::new();
+        let mut last_refusal = None;
+        let mut result = Ok(());
         while let Some(chunk) = queue.pop_front() {
             match self
                 .destroy_tob_chunk(chunk, call_package_id, hashi_initial_shared_version)
@@ -2170,17 +2160,31 @@ impl SuiTxExecutor {
                 Ok(()) => {}
                 Err(e) if chunk.len() > 1 && is_execution_failure(&e) => {
                     let mid = chunk.len() / 2;
-                    tracing::warn!(
+                    tracing::debug!(
                         chunk_len = chunk.len(),
                         "destroy TOB certs chunk failed to execute; splitting and retrying: {e:#}"
                     );
                     queue.push_front(&chunk[mid..]);
                     queue.push_front(&chunk[..mid]);
                 }
-                Err(e) => return Err(e),
+                Err(e) if is_tob_bucket_abort(&e) => {
+                    skipped.extend_from_slice(chunk);
+                    last_refusal = Some(e);
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
             }
         }
-        Ok(())
+        if let Some(e) = last_refusal {
+            tracing::warn!(
+                ?skipped,
+                "Move refused to destroy {} TOB cert target(s), skipping them; last refusal: {e:#}",
+                skipped.len()
+            );
+        }
+        result.map(|()| skipped)
     }
 
     /// Initial destroy-calls-per-transaction for [`Self::execute_destroy_tob_certs`].
@@ -3195,6 +3199,54 @@ mod tests {
             move_abort_name(&anyhow::anyhow!("connection refused")),
             None
         );
+    }
+
+    #[test]
+    fn destroy_tob_skips_only_bucket_aborts() {
+        use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+        use sui_rpc::proto::sui::rpc::v2::MoveAbort;
+        use sui_rpc::proto::sui::rpc::v2::MoveLocation;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ErrorDetails;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+        let failed = |kind: ExecutionErrorKind, module: Option<&str>| {
+            let mut error = ExecutionError::default();
+            error.kind = Some(kind as i32);
+            if let Some(module) = module {
+                let mut location = MoveLocation::default();
+                location.module = Some(module.to_owned());
+                let mut abort = MoveAbort::default();
+                abort.location = Some(location);
+                error.error_details = Some(ErrorDetails::Abort(abort));
+            }
+            let mut status = ExecutionStatus::default();
+            status.error = Some(error);
+            anyhow::Error::from(TransactionExecutionError {
+                function: "destroy_tob_certs",
+                status,
+            })
+        };
+        assert!(is_tob_bucket_abort(&failed(
+            ExecutionErrorKind::MoveAbort,
+            Some("cert_submission")
+        )));
+        assert!(is_tob_bucket_abort(&failed(
+            ExecutionErrorKind::MoveAbort,
+            Some("tob")
+        )));
+        assert!(is_tob_bucket_abort(&failed(
+            ExecutionErrorKind::MoveAbort,
+            Some("dynamic_field")
+        )));
+        assert!(!is_tob_bucket_abort(&failed(
+            ExecutionErrorKind::MoveAbort,
+            Some("versioning")
+        )));
+        assert!(!is_tob_bucket_abort(&failed(
+            ExecutionErrorKind::ExecutionCanceledDueToConsensusObjectCongestion,
+            None
+        )));
+        assert!(!is_tob_bucket_abort(&anyhow::anyhow!("connection refused")));
     }
 
     #[test]

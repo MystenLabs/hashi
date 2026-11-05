@@ -50,7 +50,7 @@ use hashi_types::move_types;
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
 /// Bounded so a huge queue isn't returned as one oversized page that overflows
-/// the gRPC decode limit; the SDK still pages through every entry.
+/// the gRPC decode limit.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
 const BOOT_SCRAPE_RETRY_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -628,9 +628,7 @@ impl OnchainState {
     }
 
     /// Every TOB bucket key the mirror holds, with each bucket's
-    /// submission count. This is the cert GC's work list: a bucket is
-    /// destroyable once the current epoch is at least two past its
-    /// `key.epoch`.
+    /// submission count.
     pub fn tob_bucket_keys(&self) -> Vec<(move_types::TobKey, u64)> {
         self.state()
             .hashi
@@ -1091,43 +1089,62 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
-    /// List every TOB bucket key in the on-chain bag, for the leader's GC.
+    /// List one page of TOB bucket keys, from `page_token` or the bag's start,
+    /// for the leader's resumable GC sweep.
     ///
     /// Decodes dynamic-field NAMES only — the `TobKey` layout is frozen — so
     /// bucket VALUE layouts this binary cannot decode never fail the sweep.
     /// Whether a bucket's stored type is supported for removal is decided
     /// on-chain by the destroy entry. A name that fails to decode as a
     /// `TobKey` is skipped with a warning rather than failing the listing.
-    pub async fn list_tob_keys(&self) -> Result<Vec<TobKey>> {
-        let tob_id = self.tob_id();
-        let mut stream = self
+    pub async fn list_tob_key_page(&self, page_token: Option<bytes::Bytes>) -> Result<TobKeyPage> {
+        let mut request = ListDynamicFieldsRequest::default()
+            .with_parent(self.tob_id())
+            .with_page_size(SCRAPE_PAGE_SIZE)
+            // field_id rides along solely for the skip-warning below: a
+            // masked-out field would log an empty default.
+            .with_read_mask(FieldMask::from_paths([
+                DynamicField::path_builder().field_id(),
+                DynamicField::path_builder().name().finish(),
+            ]));
+        if let Some(token) = page_token {
+            request = request.with_page_token(token);
+        }
+        let page = self
             .0
             .client
             .clone()
-            .list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(tob_id)
-                    .with_page_size(SCRAPE_PAGE_SIZE)
-                    // field_id rides along solely for the skip-warning
-                    // below: a masked-out field would log an empty default.
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().field_id(),
-                        DynamicField::path_builder().name().finish(),
-                    ])),
+            .state_client()
+            .list_dynamic_fields(request)
+            .await?
+            .into_inner();
+        let keys = page
+            .dynamic_fields
+            .iter()
+            .filter_map(
+                |field| match bcs::from_bytes::<TobKey>(field.name().value()) {
+                    Ok(key) => Some(key),
+                    Err(e) => {
+                        tracing::warn!(
+                            field_id = %field.field_id(),
+                            "Skipping TOB bag entry whose name does not decode as a TobKey: {e}"
+                        );
+                        None
+                    }
+                },
             )
-            .pipe(Box::pin);
-        let mut keys = Vec::new();
-        while let Some(field) = stream.try_next().await? {
-            match bcs::from_bytes::<TobKey>(field.name().value()) {
-                Ok(key) => keys.push(key),
-                Err(e) => tracing::warn!(
-                    field_id = %field.field_id(),
-                    "Skipping TOB bag entry whose name does not decode as a TobKey: {e}"
-                ),
-            }
-        }
-        Ok(keys)
+            .collect();
+        Ok(TobKeyPage {
+            keys,
+            next_page_token: page.next_page_token,
+        })
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct TobKeyPage {
+    pub keys: Vec<TobKey>,
+    pub next_page_token: Option<bytes::Bytes>,
 }
 
 #[derive(Debug, thiserror::Error)]
