@@ -34,8 +34,10 @@ use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::grpc::CATCHING_UP_REFUSAL_MSG;
 use crate::grpc::NOT_OLDEST_REFUSAL_MSG;
 use crate::grpc::NOT_READY_TO_FINALIZE_MSG;
+use crate::grpc::OVER_CAPACITY_REFUSAL_MSG;
 use crate::grpc::RunGate;
 use crate::grpc::UNSIGNED_REFUSAL_MSG;
+use crate::guardian_limiter::LimiterView;
 use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
@@ -600,6 +602,7 @@ fn check_selected_inputs(
 pub(crate) struct PreparedCommitment {
     selected_utxos: Vec<Utxo>,
     fee: u64,
+    outflow: u64,
     max_bucket_capacity: u64,
     tx_weight: Weight,
     ancestor_weight: Weight,
@@ -614,7 +617,7 @@ pub(crate) fn check_commitment_outflow(
     input_total: u64,
     change_outputs: &[OutputUtxo],
     max_bucket_capacity: Option<u64>,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<(u64, u64)> {
     let max_bucket_capacity = max_bucket_capacity
         .ok_or_else(|| anyhow!("No local guardian limiter to check the commitment against"))?;
     let outflow = limiter_outflow(input_total, change_outputs);
@@ -623,7 +626,22 @@ pub(crate) fn check_commitment_outflow(
         "Commitment spends {outflow} sats from the pool, above the limiter's max bucket \
          capacity of {max_bucket_capacity} sats",
     );
-    Ok(max_bucket_capacity)
+    Ok((outflow, max_bucket_capacity))
+}
+
+const LIMITER_CAPACITY_SLACK_SECS: u64 = 60;
+
+pub(crate) fn check_commitment_capacity(
+    outflow: u64,
+    limiter: &LimiterView,
+    timestamp_ms: u64,
+) -> Result<(), AboveLimiterCapacity> {
+    let capacity =
+        limiter.capacity_at((timestamp_ms / 1000).saturating_add(LIMITER_CAPACITY_SLACK_SECS));
+    if outflow > capacity {
+        return Err(AboveLimiterCapacity { outflow, capacity });
+    }
+    Ok(())
 }
 
 fn eligible_for_commitment(request: &WithdrawalRequest, max_bucket_capacity: u64) -> bool {
@@ -751,6 +769,13 @@ pub struct WithdrawalStillUnsigned;
 #[derive(Debug, Error)]
 #[error("{marker}", marker = CATCHING_UP_REFUSAL_MSG)]
 pub struct MirrorCatchingUp;
+
+#[derive(Debug, Error)]
+#[error("{marker}: spends {outflow} sats against {capacity}", marker = OVER_CAPACITY_REFUSAL_MSG)]
+pub struct AboveLimiterCapacity {
+    outflow: u64,
+    capacity: u64,
+}
 
 #[derive(Debug, Error)]
 #[error("{marker}: {0}", marker = NOT_OLDEST_REFUSAL_MSG)]
@@ -1000,7 +1025,7 @@ impl Hashi {
         }
 
         // 5b. Verify the batch fits the guardian limiter's max bucket capacity.
-        let max_bucket_capacity = check_commitment_outflow(
+        let (outflow, max_bucket_capacity) = check_commitment_outflow(
             input_total,
             &approval.outputs[request_count..],
             self.local_limiter()
@@ -1022,6 +1047,7 @@ impl Hashi {
         Ok(PreparedCommitment {
             selected_utxos,
             fee,
+            outflow,
             max_bucket_capacity,
             tx_weight,
             ancestor_weight,
@@ -1081,18 +1107,29 @@ impl Hashi {
             expected_txid
         );
 
-        let Some(state) = self.onchain_state().caught_up_state() else {
-            return Err(MirrorCatchingUp.into());
-        };
-        let hashi = state.hashi();
-        let queue = &hashi.bitcoin().withdrawal_queue;
-        check_commitment_against_queue(
-            &approval.request_ids,
-            queue.has_unsigned_txn(),
-            queue.requests().values(),
-            prepared.max_bucket_capacity,
-            hashi.config.bitcoin_withdrawal_minimum(),
-        )
+        {
+            let Some(state) = self.onchain_state().caught_up_state() else {
+                return Err(MirrorCatchingUp.into());
+            };
+            let hashi = state.hashi();
+            let queue = &hashi.bitcoin().withdrawal_queue;
+            check_commitment_against_queue(
+                &approval.request_ids,
+                queue.has_unsigned_txn(),
+                queue.requests().values(),
+                prepared.max_bucket_capacity,
+                hashi.config.bitcoin_withdrawal_minimum(),
+            )?;
+        }
+        let limiter = self
+            .local_limiter()
+            .ok_or_else(|| anyhow!("No local guardian limiter to check the commitment against"))?;
+        check_commitment_capacity(
+            prepared.outflow,
+            &limiter.view(),
+            self.onchain_state().latest_checkpoint_timestamp_ms(),
+        )?;
+        Ok(())
     }
 
     fn commitment_request(&self, id: &Address) -> Result<WithdrawalRequest, RefusedItem> {
@@ -2295,6 +2332,7 @@ pub enum WithdrawalCommitmentErrorKind {
     BtcTxBuildFailed,
     CommitmentCheckFailed,
     NotOldest,
+    OverCapacity,
     FailedQuorum,
     FeeEstimateFailed,
     UtxoSelectionFailed,
@@ -2332,6 +2370,9 @@ pub enum WithdrawalCommitmentError {
 
     #[error("Commitment check refused the batch: {0}")]
     NotOldest(#[source] anyhow::Error),
+
+    #[error("Commitment check refused the batch: {0}")]
+    OverCapacity(#[source] anyhow::Error),
 }
 
 impl WithdrawalCommitmentError {
@@ -2342,6 +2383,7 @@ impl WithdrawalCommitmentError {
             Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
             Self::CommitmentCheckFailed(_) => WithdrawalCommitmentErrorKind::CommitmentCheckFailed,
             Self::NotOldest(_) => WithdrawalCommitmentErrorKind::NotOldest,
+            Self::OverCapacity(_) => WithdrawalCommitmentErrorKind::OverCapacity,
         }
     }
 }
@@ -2791,6 +2833,8 @@ mod tests {
     use crate::utxo_pool::CoinSelectionParams;
     use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin_txid::BitcoinTxid;
+    use hashi_types::guardian::LimiterConfig;
+    use hashi_types::guardian::LimiterState;
 
     fn a_signature() -> SchnorrSignature {
         let bytes = hex::decode(
@@ -3064,6 +3108,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_batch_cut_at_capacity_passes_and_one_above_the_slack_is_refused() {
+        let view = LimiterView {
+            config: LimiterConfig {
+                refill_rate: 1_000,
+                max_bucket_capacity: 2_000_000,
+            },
+            state: LimiterState {
+                num_tokens_available: 100_000,
+                last_updated_at: 1_000,
+                next_seq: 0,
+            },
+        };
+        assert!(check_commitment_capacity(100_000, &view, 1_000_000).is_ok());
+        assert!(check_commitment_capacity(160_000, &view, 1_000_999).is_ok());
+        let refusal = check_commitment_capacity(160_001, &view, 1_000_000).unwrap_err();
+        assert!(refusal.to_string().contains(OVER_CAPACITY_REFUSAL_MSG));
     }
 
     #[test]

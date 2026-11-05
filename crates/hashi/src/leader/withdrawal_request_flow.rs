@@ -17,6 +17,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::trm;
+use crate::withdrawals::AboveLimiterCapacity;
 use crate::withdrawals::CommitmentItem;
 use crate::withdrawals::FeeEstimateUnavailable;
 use crate::withdrawals::MirrorCatchingUp;
@@ -626,7 +627,8 @@ impl LeaderService {
                     WithdrawalCommitmentErrorKind::CommitmentCheckFailed => {
                         error!("Withdrawal batch not proposed: {e}")
                     }
-                    WithdrawalCommitmentErrorKind::NotOldest => {
+                    WithdrawalCommitmentErrorKind::NotOldest
+                    | WithdrawalCommitmentErrorKind::OverCapacity => {
                         info!("Withdrawal batch not proposed: {e}")
                     }
                     WithdrawalCommitmentErrorKind::UtxoSelectionFailed => {}
@@ -900,6 +902,9 @@ async fn build_checked_commitment(
         }
         if refusal.is::<OldestRequestMissing>() {
             return Err(WithdrawalCommitmentError::NotOldest(refusal));
+        }
+        if refusal.is::<AboveLimiterCapacity>() {
+            return Err(WithdrawalCommitmentError::OverCapacity(refusal));
         }
         let Some(refused) = refusal.downcast_ref::<RefusedItems>() else {
             return Err(WithdrawalCommitmentError::CommitmentCheckFailed(refusal));
