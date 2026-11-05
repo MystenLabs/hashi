@@ -34,7 +34,9 @@ answer: >-
   A Hashi node needs 3 CPU cores, 2GB of memory, 10GB of persistent storage, and a 1 Gbps link, plus two external services you provide: an archival Bitcoin Core v29 or newer node with txindex, blockfilterindex, and peerblockfilters, and a Sui fullnode serving the gRPC v2 API with indexing enabled. Build the binary with the deterministic Docker build and check its sha256 against the release.
 ---
 
-## Resources
+A Hashi node needs 3 CPU cores, 2GB of memory, 10GB of persistent storage, and a 1 Gbps link. It also depends on two external services that you provide: an archival Bitcoin Core v29 or newer node with `txindex`, `blockfilterindex`, and `peerblockfilters`, and a Sui full node that serves the gRPC v2 API with indexing enabled. Build the binary with the deterministic Docker build and check its sha256 against the published value in [Releases](../reference/releases.mdx). For configuration details, see [Sui RPC](#sui-rpc), [Configure Bitcoin Core for Hashi](#bitcoin-node), and [Validator config](configuration.mdx#validator-config).
+
+## What hardware does a Hashi node need? {#resources}
 
 The requirements for running a Hashi node are **low** compared with those of a Sui node. To reduce blast radius, avoid **colocating** the Hashi process with a Sui validator. There should be no performance concerns with containerizing the process or running it in Kubernetes.
 
@@ -56,7 +58,7 @@ The requirements for running a Hashi node are **low** compared with those of a S
 >
 > These figures reflect Testnet observations and might change for Mainnet.
 
-## External service dependencies
+## What external services does a Hashi node depend on? {#external-service-dependencies}
 
 A Hashi node depends on two external services that you provide:
 
@@ -73,14 +75,14 @@ See [Sui RPC](#sui-rpc) and [Bitcoin node](#bitcoin-node) for details.
 
 ## Software dependencies
 
-**Hashi binary.** Build the Linux x86-64 binary with the deterministic Docker build. It compiles in a pinned, reproducible environment, extracts the binary to `out/hashi`, and prints its sha256:
+**Hashi binary.** Build the Linux x86-64 binary with the deterministic Docker build. It compiles in a pinned, reproducible environment, extracts the binary to `out/hashi`, and prints its sha256.
+
+> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Release tags follow `<network>-<major>.<minor>` (for example `testnet-1.0` and `mainnet-1.0`), and each release's notes give its source commit and binary sha256 (see [Releases](../reference/releases.mdx)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 ```bash
 # Reproducible build (requires Docker); writes out/hashi and prints its sha256
 GIT_REVISION=$(git rev-parse HEAD) bash docker/hashi/build.sh --no-cache
 ```
-
-> **Which source ref to build.** Check out your network's release tag **before** running the build; the script builds whatever is in your working tree. Release tags follow `<network>-<major>.<minor>` (for example `testnet-1.0` and `mainnet-1.0`), and each release's notes give its source commit and binary sha256 (see [Releases](../reference/releases.mdx)). The binary embeds `GIT_REVISION`: releases set it to the full 40-character source commit, while the script's default is a short hash, which changes the checksum.
 
 The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum. Compute the sha256 of your build and compare it against the published value:
 
@@ -104,6 +106,8 @@ See the [Hashi Node Backups](../node-backup.mdx) guide for the full key-generati
 ## Sui RPC
 
 Hashi connects to Sui over the **gRPC v2 API (gRPC over HTTP/2)**, **not** JSON-RPC. The fullnode must expose the `sui.rpc.v2` services, including the **streaming `SubscriptionService`** (`subscribe_checkpoints`) the node uses to follow the chain. A fullnode that serves only JSON-RPC does not work.
+
+In the transport tables for each network, h2c means HTTP/2 cleartext: gRPC over HTTP/2 without TLS encryption.
 
 <Tabs groupId="network" queryString>
 <TabItem value="mainnet" label="Mainnet" default>
@@ -142,7 +146,7 @@ Point `sui-rpc` at a fullnode serving `sui.rpc.v2` plus the `SubscribeCheckpoint
 
 Set `sui-chain-id` and `sui-rpc` to match your target network, as shown in the [Networks](../reference/networks.mdx) table.
 
-## Bitcoin node
+## How to configure Bitcoin Core for Hashi {#bitcoin-node}
 
 Hashi talks to Bitcoin over **two independent channels**, both of which must be reachable:
 
@@ -205,7 +209,7 @@ bitcoin-trusted-peers = ["<bitcoin-node-host>:8333"]       # host:port (port is 
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in whitelist-only mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. Leave `bitcoin-start-height` unset on Mainnet: for the default (`800000`) and any other height above Taproot activation, the light client anchors at a built-in checkpoint just below Taproot activation (block `709631`) and syncs headers and filters from there each time it starts. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
+> Notes: ports `8332` (RPC) / `8333` (P2P) are Bitcoin Core **Mainnet** defaults and match Hashi's default `bitcoin-rpc` port, but that default points at `localhost`, so set the host when the Bitcoin node runs elsewhere. The light client runs in whitelist-only mode: it connects **only** to `bitcoin-trusted-peers` and does not contact any other peer, even a reachable one, so that list must be correct and reachable. Leave `bitcoin-start-height` unset on Mainnet: for the default (`800000`) and any other height above Taproot activation, the light client anchors at a built-in checkpoint just below Taproot activation (block `709631`) and syncs headers and filters from there each time it starts. `CookieFile` auth works only when Hashi can read the Bitcoin node's cookie file, so across hosts use `UserPass`.
 
 **Verify your node:**
 
@@ -259,7 +263,7 @@ bitcoin-trusted-peers = ["127.0.0.1:38333"]       # host:port (port is mandatory
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in whitelist-only mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit); override it only if you need a different anchor.
+> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in whitelist-only mode: it connects **only** to `bitcoin-trusted-peers` and does not contact any other peer, even a reachable one, so that list must be correct and reachable. `bitcoin-start-height` defaults to `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit); override it only if you need a different anchor.
 
 **Verify your node:**
 
