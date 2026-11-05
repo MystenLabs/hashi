@@ -67,7 +67,7 @@ fn to_status(e: GuardianError) -> Status {
              {}s",
             required_quiet_secs.saturating_sub(heartbeat_age_secs)
         )),
-        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
+        RateLimitExceeded { .. } => Status::resource_exhausted("Rate limit exceeded"),
         S3Error(msg) => Status::internal(msg),
         InvalidS3Log(msg) => Status::internal(msg),
         InternalError(msg) => Status::internal(msg),
@@ -88,7 +88,7 @@ fn log_failure(e: &GuardianError) {
         | LimiterSequenceMismatch { .. }
         | CurrentSessionHeartbeatNotLive { .. }
         | PriorSessionHeartbeatStillRecent { .. }
-        | RateLimitExceeded
+        | RateLimitExceeded { .. }
         | Unavailable(_) => tracing::warn!(error = ?e, "Guardian RPC rejected"),
         S3Error(_) | InvalidS3Log(_) | InternalError(_) => {
             tracing::error!(error = ?e, "Guardian RPC failed")
@@ -245,7 +245,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(proto::OperatorActivateResponse {}))
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(wid = tracing::field::Empty))]
     async fn standard_withdrawal(
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,

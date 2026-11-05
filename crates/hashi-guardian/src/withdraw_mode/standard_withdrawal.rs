@@ -31,6 +31,8 @@ pub async fn standard_withdrawal(
     let signed_request =
         HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_request, network)?;
     let wid = *signed_request.message().wid();
+    // Add the wid to the RPC span, so each later log line carries it.
+    tracing::Span::current().record("wid", tracing::field::display(wid));
     // 0) Validation
     enclave.require_fully_initialized()?;
 
@@ -56,11 +58,11 @@ pub async fn standard_withdrawal(
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-    let post_state = enclave.state.consume_from_limiter(
-        request.seq(),
-        request.timestamp_secs(),
-        consumed_amount_sats,
-    )?;
+    let seq = request.seq();
+    let post_state =
+        enclave
+            .state
+            .consume_from_limiter(seq, request.timestamp_secs(), consumed_amount_sats)?;
     debug!("Rate limit check passed.");
 
     // 3) Sign tx (while holding the control lock)
@@ -75,7 +77,7 @@ pub async fn standard_withdrawal(
     debug!("BTC signatures generated.");
 
     // 4) Log while holding the control lock, before returning signatures.
-    info!("Withdrawal {} processed successfully. Logging to S3.", wid);
+    debug!("Withdrawal signed. Logging to S3.");
     let msg = WithdrawalLogMessage {
         txid,
         request_data: StandardWithdrawalRequestWire::from(request),
@@ -87,7 +89,13 @@ pub async fn standard_withdrawal(
         .log_withdraw(msg)
         .await
         .expect("S3 logger must be initialized to log a withdrawal");
-    info!("Withdrawal {} logged.", wid);
+    info!(
+        %txid,
+        seq,
+        consumed_sats = consumed_amount_sats,
+        tokens_available = post_state.num_tokens_available,
+        "Withdrawal signed and logged"
+    );
     Ok(enclave.sign(response))
 }
 
@@ -301,7 +309,7 @@ mod tests {
         let second = standard_withdrawal(&mut enclave, wire(req2)).await;
         assert!(matches!(
             second.unwrap_err(),
-            GuardianError::RateLimitExceeded
+            GuardianError::RateLimitExceeded { .. }
         ));
 
         let captured = captures.lock().unwrap();

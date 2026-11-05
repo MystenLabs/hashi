@@ -107,7 +107,10 @@ impl RateLimiter {
 
         let capacity = self.state.capacity_at(&self.config, timestamp);
         if capacity < amount_sats {
-            return Err(RateLimitExceeded);
+            return Err(RateLimitExceeded {
+                requested_sats: amount_sats,
+                capacity_sats: capacity,
+            });
         }
 
         self.state.last_updated_at = timestamp;
