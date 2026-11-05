@@ -1776,6 +1776,202 @@ mod tests {
         Ok(())
     }
 
+    /// Recover an evicted, fully signed CPFP package through the leader, not
+    /// through a test-issued submitpackage RPC. The parent cannot relay alone.
+    #[tokio::test]
+    async fn test_leader_recovers_evicted_low_fee_parent_package() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_bitcoin_initial_blocks(210)
+                .with_bitcoin_args(["-maxmempool=5", "-datacarriersize=100000"]),
+        )
+        .await?;
+        create_deposit_and_wait(&mut networks, 200_000).await?;
+
+        // Poll the persisted signing state as well as Core: restarting must
+        // recover the original signed transaction, not start a new withdrawal.
+        async fn request_signed_withdrawal(
+            networks: &mut TestNetworks,
+        ) -> Result<(Address, bitcoin::Transaction)> {
+            let destination = networks.bitcoin_node.get_new_address()?;
+            let request_id = {
+                let hashi = networks.hashi_network.nodes()[0].hashi();
+                let user_key = networks.sui_network.user_keys[0].clone();
+                SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+                    .with_signer(user_key.into())
+                    .execute_create_withdrawal_request(
+                        30_000,
+                        extract_witness_program(&destination)?,
+                    )
+                    .await?
+            };
+            let tx = tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let txid = {
+                        let hashi = networks.hashi_network.nodes()[0].hashi();
+                        hashi
+                            .onchain_state()
+                            .withdrawal_txns()
+                            .iter()
+                            .find(|txn| {
+                                txn.request_ids.contains(&request_id) && txn.is_fully_signed()
+                            })
+                            .map(|txn| Txid::from(txn.txid))
+                    };
+                    if let Some(txid) = txid {
+                        let rpc = networks.bitcoin_node.rpc_client();
+                        // Only membership is needed. The v29 typed entry
+                        // schema requires fields removed by newer Core.
+                        let mempool: Vec<Txid> = rpc.call("getrawmempool", &[])?;
+                        if mempool.contains(&txid) {
+                            let tx = rpc.get_raw_transaction(txid)?.transaction()?;
+                            return Ok::<_, anyhow::Error>(tx);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .context("Withdrawal did not become signed and enter the mempool")??;
+            Ok((request_id, tx))
+        }
+
+        let (parent_request, parent) = request_signed_withdrawal(&mut networks).await?;
+        for node in networks.hashi_network.nodes_mut() {
+            node.shutdown().await;
+            node.config_mut().withdrawal_min_fee_rate_sat_vb = Some(20);
+        }
+        networks.hashi_network.start_pending_validators().await?;
+        let (child_request, child) = request_signed_withdrawal(&mut networks).await?;
+        let parent_txid = parent.compute_txid();
+        let child_txid = child.compute_txid();
+        assert_eq!(parent.input.len(), 1);
+        assert_eq!(child.input.len(), 1);
+        let change = child.input[0].previous_output;
+        assert_eq!(change.txid, parent_txid, "Child must spend parent change");
+        // With one request, vout 0 is its destination and vout 1 is change.
+        assert_eq!(change.vout, 1);
+        let parent_fee = 200_000 - parent.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+        let child_fee = parent.output[change.vout as usize].value.to_sat()
+            - child.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+        let parent_vsize = parent.vsize() as u64;
+        let child_vsize = child.vsize() as u64;
+        assert!(parent_fee < 20 * parent_vsize);
+        // Coin selection prices weight units, rounding the resulting fee to
+        // whole sats, not each transaction's weight up to whole vbytes first.
+        let target_rate = bitcoin::FeeRate::from_sat_per_vb(20).unwrap();
+        let parent_target_fee = target_rate.fee_wu(parent.weight()).unwrap().to_sat();
+        let child_own_fee = target_rate.fee_wu(child.weight()).unwrap().to_sat();
+        let ancestor_deficit = parent_target_fee.saturating_sub(parent_fee);
+        assert!(ancestor_deficit > 0);
+        assert!(
+            child_fee >= child_own_fee + ancestor_deficit,
+            "Child fee {child_fee} must cover own fee {child_own_fee} plus ancestor \
+             deficit {ancestor_deficit}; parent fee={parent_fee}, \
+             parent weight={}, child weight={}",
+            parent.weight(),
+            child.weight(),
+        );
+        {
+            let hashi = networks.hashi_network.nodes()[0].hashi();
+            assert!(
+                child_fee <= hashi.onchain_state().worst_case_network_fee(),
+                "Child fee must fit the single-request fee cap"
+            );
+        }
+        for node in networks.hashi_network.nodes_mut() {
+            node.shutdown().await;
+        }
+
+        {
+            let rpc = networks.bitcoin_node.rpc_client();
+            // Evict the package without raising the dynamic floor above its
+            // actual feerate. Restore both deltas before testing recovery.
+            for txid in [parent_txid, child_txid] {
+                rpc.call::<serde_json::Value>(
+                    "prioritisetransaction",
+                    &[
+                        serde_json::json!(txid),
+                        serde_json::json!(0),
+                        serde_json::json!(-1_000_000),
+                    ],
+                )?;
+            }
+            crate::bitcoin_node::fill_mempool_until_evicted(
+                &networks.bitcoin_node,
+                &[parent_txid, child_txid],
+            )?;
+            for txid in [parent_txid, child_txid] {
+                rpc.call::<serde_json::Value>(
+                    "prioritisetransaction",
+                    &[
+                        serde_json::json!(txid),
+                        serde_json::json!(0),
+                        serde_json::json!(1_000_000),
+                    ],
+                )?;
+            }
+            let mempool: Vec<Txid> = rpc.call("getrawmempool", &[])?;
+            assert!(!mempool.contains(&parent_txid));
+            assert!(!mempool.contains(&child_txid));
+            let info: serde_json::Value = rpc.call("getmempoolinfo", &[])?;
+            let floor_sat_vb = info["mempoolminfee"]
+                .as_f64()
+                .context("Missing mempool fee floor")?
+                * 100_000.0;
+            let parent_rate = parent_fee as f64 / parent_vsize as f64;
+            let package_rate =
+                (parent_fee + child_fee) as f64 / (parent_vsize + child_vsize) as f64;
+            assert!(
+                floor_sat_vb > parent_rate,
+                "{floor_sat_vb} <= parent rate {parent_rate}"
+            );
+            assert!(
+                floor_sat_vb < package_rate,
+                "{floor_sat_vb} >= package rate {package_rate}"
+            );
+            let acceptance: serde_json::Value = rpc.call(
+                "testmempoolaccept",
+                &[serde_json::json!([
+                    bitcoin::consensus::encode::serialize_hex(&parent)
+                ])],
+            )?;
+            assert_eq!(acceptance[0]["allowed"], false);
+            assert_eq!(acceptance[0]["reject-reason"], "mempool min fee not met");
+        }
+
+        // Only the production leader may rebroadcast here. No blocks are
+        // mined until both original txids have reappeared in the mempool.
+        networks.hashi_network.start_pending_validators().await?;
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let mempool: Vec<Txid> = networks
+                    .bitcoin_node
+                    .rpc_client()
+                    .call("getrawmempool", &[])?;
+                if mempool.contains(&parent_txid) && mempool.contains(&child_txid) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .context("Leader failed to recover the original parent/child package")??;
+        let parent_confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+        let child_confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        tokio::try_join!(
+            parent_confirmations.wait_for(parent_request, Duration::from_secs(90)),
+            child_confirmations.wait_for(child_request, Duration::from_secs(90)),
+        )?;
+        drop(miner);
+        Ok(())
+    }
+
     // TODO(guardian): re-enable once the guardian is idempotent per withdrawal
     // id. With the guardian now always-on, a withdrawal finalized through the
     // guardian in epoch N consumes its limiter seq; if `sign_withdrawal` does

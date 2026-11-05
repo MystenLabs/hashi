@@ -2421,7 +2421,7 @@ impl MonitorClient {
     }
 
     /// Submit a child-last withdrawal package through the gated Bitcoin RPC worker.
-    pub(crate) async fn broadcast_package(&self, package: Vec<bitcoin::Transaction>) -> Result<()> {
+    pub async fn broadcast_package(&self, package: Vec<bitcoin::Transaction>) -> Result<()> {
         self.request(
             |caller| MonitorMessage::BroadcastPackage(package, caller),
             "broadcast_package",
