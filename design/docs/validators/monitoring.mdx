@@ -88,6 +88,8 @@ Notes:
 | `hashi_reconfig_hold` | gauge | 1 when the onchain `reconfig_hold` config flag is set: the chain refuses `start_reconfig`, so Hashi stays behind Sui's epoch on its current committee until governance clears it (see [Stuck reconfigurations](epoch-changes.mdx#stuck-reconfigurations)). Healthy: `0`. |
 | `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |
 | `hashi_is_leader` | gauge | 1 when this node is the current leader. |
+| `hashi_leader_checkpoints_total` | counter | Checkpoint updates this node observed while acting as leader. Measures leadership activity, not exact checkpoint coverage: updates can coalesce, and `always` nodes can count the same checkpoints as other leaders. A fleet-wide shortfall does not prove skipped turns, and overlapping leaders can mask them. |
+| `hashi_force_run_as_leader` | gauge | 1 for the configured `force-run-as-leader` mode, in the `mode` label (`default`, `always` or `never`). A `never` node gives up its leader turns, which go unused unless another node runs with `always`. |
 | `hashi_kyoto_synced` | gauge | 1 when the Bitcoin light client is synced. Healthy: `1` in steady state. |
 | `hashi_kyoto_best_height` | gauge | Bitcoin tip block height. Healthy: tracks your Bitcoin node's `getblockchaininfo` height. |
 | `hashi_kyoto_connected_peers` | gauge | Bitcoin P2P peer count. See the note below on what value is healthy. |

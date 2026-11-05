@@ -142,7 +142,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_kyoto_*` | node |
 | `hashi_deposit_outpoint_confirmations` | node |
 | `hashi_latest_checkpoint_*`, `hashi_task_last_iteration_timestamp_seconds` | node |
-| `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
+| `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader`, `hashi_leader_checkpoints_total`, `hashi_force_run_as_leader` | node |
 | `hashi_withdrawal_commitment_left_out_total` | node (counts only while leading) |
 | `hashi_db_*` | node |
 | `hashi_withdrawal_bitcoin_check_*` | node |

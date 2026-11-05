@@ -205,6 +205,11 @@ async fn run_server(config_path: std::path::PathBuf) -> anyhow::Result<()> {
             config.sui_rpc.as_deref().unwrap(),
         ))
         .unwrap();
+    prometheus::default_registry()
+        .register(hashi::metrics::force_run_as_leader_metric(
+            &config.force_run_as_leader(),
+        ))
+        .unwrap();
 
     let _metrics_server = hashi::metrics::start_prometheus_server(
         config.metrics_http_address(),
