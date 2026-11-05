@@ -540,13 +540,14 @@ mod tests {
     use crate::domain::BtcConfirmation;
     use crate::domain::BtcConfirmedDeposit;
     use crate::domain::DepositId;
+    use crate::domain::UtxoOrigin;
     use crate::domain::WithdrawalEventType;
     use crate::rpc::sui::tests::hashi_approval;
     use crate::test_utils::approval_of;
-    use crate::test_utils::approved;
     use crate::test_utils::deposit_request;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
+    use crate::test_utils::unapproved;
     use crate::test_utils::withdrawal_tx;
     use crate::timing::Timing;
     use bitcoin::Amount;
@@ -648,19 +649,27 @@ mod tests {
         assert!(
             auditor
                 .utxo_pool
-                .add_deposit(&approved(BtcConfirmedDeposit {
+                .add_deposit(&unapproved(BtcConfirmedDeposit {
                     deposit_id: sui.deposit_id,
                     amount: 50_000,
                     script_pubkey: sui.script_pubkey.clone(),
                     block_time: 150,
                 }))
-                .is_none()
+                .is_empty()
         );
+        assert_eq!(auditor.utxo_pool.value(), 0);
+        let outpoint = OutPoint::from(sui.deposit_id);
         assert!(
             auditor
                 .ingest(MonitorEvent::DepositApproved(sui))
                 .is_empty()
         );
+        // The approval marks the held deposit approved, so it counts.
+        assert_eq!(
+            auditor.utxo_pool.get(&outpoint).unwrap().origin,
+            UtxoOrigin::Deposit
+        );
+        assert_eq!(auditor.utxo_pool.value(), 50_000);
     }
 
     #[tokio::test]
@@ -695,7 +704,53 @@ mod tests {
 
         assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.pending_deposits.is_empty());
-        assert_eq!(auditor.utxo_pool.len(), 1);
+        // Move mints on the approval, so the deposit counts.
+        assert_eq!(
+            auditor
+                .utxo_pool
+                .get(&OutPoint::from(sui.deposit_id))
+                .unwrap()
+                .origin,
+            UtxoOrigin::Deposit
+        );
+        assert_eq!(auditor.utxo_pool.value(), 50_000);
+    }
+
+    #[tokio::test]
+    async fn a_request_bitcoin_pays_without_an_approval_enters_as_an_unapproved_deposit() {
+        let mut auditor = auditor_with_pool().await;
+        let (request, _) = deposit_request_and_approval(50_000);
+        let request_id = request.request_id;
+        let requested_at = request.timestamp_secs;
+        let outpoint = OutPoint::from(request.deposit_id);
+        assert!(
+            auditor
+                .ingest(MonitorEvent::DepositRequested(request))
+                .is_empty()
+        );
+        auditor
+            .pending_deposits
+            .get_mut(&request_id)
+            .unwrap()
+            .record_lookup(
+                &Timing::for_tests(),
+                0,
+                // Another amount, so the origin must keep the request's.
+                Some(&crate::test_utils::confirmation(40_000, p2wpkh(0x54))),
+            );
+
+        assert!(auditor.gc_and_update_pool().is_empty());
+
+        let utxo = auditor.utxo_pool.get(&outpoint).unwrap();
+        assert_eq!(utxo.amount, 40_000);
+        assert_eq!(
+            utxo.origin,
+            UtxoOrigin::UnapprovedDeposit {
+                requested_at,
+                requested_amount: 50_000,
+            }
+        );
+        assert_eq!(auditor.utxo_pool.value(), 0);
     }
 
     #[tokio::test]
@@ -792,7 +847,12 @@ mod tests {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             block_time: 1_700_000_000,
         };
-        assert!(auditor.utxo_pool.add_deposit(&approved(deposit)).is_none());
+        assert!(
+            auditor
+                .utxo_pool
+                .add_deposit(&unapproved(deposit))
+                .is_empty()
+        );
         // An approval the guardian never signed: its E2 is overdue.
         auditor.ingest_batch(vec![MonitorEvent::Withdrawal(hashi_approval())]);
         auditor.save_snapshot().await;

@@ -58,8 +58,9 @@ enum BtcAnswer {
 /// transaction confirms or the request's life ends, then closes:
 /// - Confirmed, and the output pays the bridge script of the claimed path:
 ///   the UTXO is bridge money. The pool takes it, whatever Move does with
-///   the request later. Two requests for one UTXO give the pool the same
-///   UTXO twice, which it stores once.
+///   the request later. It counts only once a Sui approval arrives: see
+///   `UtxoPool`. Two requests for one UTXO give the pool the same UTXO
+///   twice, which it stores once.
 /// - Confirmed, but no such output: the claim is wrong. It is the user's
 ///   problem, and nothing is kept.
 /// - Not confirmed within `DEPOSIT_REQUEST_WATCH`: the request lapses.
@@ -75,7 +76,8 @@ enum BtcAnswer {
 /// - E1 does not expect E2. A user may never pay, so a request that
 ///   lapses is not a finding.
 /// - E2 does not expect E3. Sanctions and user mistakes leave valid
-///   deposits unapproved, so a missing E3 is not a finding yet.
+///   deposits unapproved. The machine does not report a missing E3. The
+///   pool reports it as `DepositNotApproved`.
 /// - E3 expects E2 already. `EMPTY_LOOKUPS_BEFORE_ALERT` lookups after E3
 ///   that find no E2 report E3 unbacked, before the machine closes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -126,11 +128,24 @@ impl DepositStateMachine {
         }
     }
 
-    /// The UTXO Bitcoin paid, if any. The auditor calls it when it takes the
-    /// closed machine.
+    /// Whether the machine holds a Sui `DepositApproved`.
+    pub fn is_approved(&self) -> bool {
+        self.sui_approval.is_some()
+    }
+
+    /// The UTXO Bitcoin paid, if any. It is approved when the machine holds
+    /// a Sui approval. The auditor calls it when it takes the closed machine.
     pub fn into_finished(self) -> Option<FinishedDeposit> {
+        let origin = if self.is_approved() {
+            UtxoOrigin::Deposit
+        } else {
+            UtxoOrigin::UnapprovedDeposit {
+                requested_at: self.requested_at(),
+                requested_amount: self.sui_request.amount,
+            }
+        };
         match self.btc_answer {
-            BtcAnswer::Paid(deposit) => Some(FinishedDeposit::new(deposit, UtxoOrigin::Deposit)),
+            BtcAnswer::Paid(deposit) => Some(FinishedDeposit::new(deposit, origin)),
             BtcAnswer::Pending | BtcAnswer::NotPaid | BtcAnswer::Lapsed => None,
         }
     }
@@ -264,7 +279,7 @@ impl DepositStateMachine {
             return BtcAnswer::NotPaid;
         };
         if deposit.amount != request.amount {
-            tracing::debug!(
+            tracing::warn!(
                 request_id = %request.request_id,
                 deposit_id = %request.deposit_id,
                 claimed_amount = request.amount,

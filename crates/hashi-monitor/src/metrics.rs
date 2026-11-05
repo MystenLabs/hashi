@@ -31,7 +31,7 @@ pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
     oldest_utxo_timestamp_seconds: IntGauge,
-    /// The sum of the held UTXO amounts, in satoshis.
+    /// The sum of the UTXO amounts in Move's pool, in satoshis. See `UtxoPool`.
     pool_value_sats: IntGauge,
     /// Sui's hBTC supply, in satoshis. 0 until the first read.
     hbtc_supply_sats: IntGauge,
@@ -86,17 +86,17 @@ impl MonitorMetrics {
 
         let pool_utxo_count = IntGauge::new(
             "hashi_monitor_pool_utxo_count",
-            "Number of UTXOs held in the monitor pool",
+            "Number of UTXOs in Move's pool, by the monitor's account",
         )
         .expect("valid metric");
         let oldest_utxo_timestamp_seconds = IntGauge::new(
             "hashi_monitor_oldest_utxo_timestamp_seconds",
-            "Earliest held UTXO block timestamp in Unix seconds; 0 for an empty pool",
+            "Earliest block timestamp of a UTXO in Move's pool, in Unix seconds; 0 with no such UTXO",
         )
         .expect("valid metric");
         let pool_value_sats = IntGauge::new(
             "hashi_monitor_pool_value_sats",
-            "Sum of the UTXO amounts held in the monitor pool, in satoshis",
+            "Sum of the UTXO amounts in Move's pool, by the monitor's account, in satoshis",
         )
         .expect("valid metric");
         let hbtc_supply_sats = IntGauge::new(

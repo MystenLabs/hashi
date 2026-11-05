@@ -10,7 +10,7 @@
 //!
 //! How it works:
 //! 1. After the pool update in each maintenance tick, read the hBTC supply and sum the
-//!    held UTXO amounts. Export both as gauges.
+//!    amounts of the UTXOs in Move's pool. Export both as gauges.
 //! 2. While the supply exceeds the pool value, keep the time it started.
 //! 3. Report `HbtcSupplyExceedsPool` at each tick once that lasts
 //!    `HBTC_SUPPLY_GRACE`.
@@ -19,14 +19,17 @@
 //!    earliest, the maintenance tick reports `SourceStale` for `hbtc_supply`.
 //!
 //! Assumptions:
-//! - In an honest bridge, the supply never exceeds the pool value. The pool
-//!   takes a deposit at its Bitcoin confirmation, and Move mints at least
-//!   `deposit_time_delay_ms` after the approval. Move burns a withdrawal at
-//!   E1, and the pool drops it at E3. The burned amount includes the miner
-//!   fee, so it equals what leaves the pool.
-//! - The supply exceeds the pool value only for a short time when the
-//!   monitor's Bitcoin side lags. `HBTC_SUPPLY_GRACE` is `SOURCE_STALE_LIMIT`:
-//!   a longer lag is a `SourceStale` finding already.
+//! - In an honest bridge, the supply never exceeds the pool value. A deposit
+//!   counts when the monitor has seen both its Bitcoin confirmation and its
+//!   Sui approval. Move mints at least `deposit_time_delay_ms` after the
+//!   approval. Move burns a withdrawal at E1, and the pool drops it at E3.
+//!   The burned amount includes the miner fee, so it equals what leaves the
+//!   pool.
+//! - The supply exceeds the pool value for a short time when the monitor's
+//!   Bitcoin side lags, or when its Sui cursor lags the supply read by more
+//!   than the deposit delay. The Sui poll runs each minute, and the delay is
+//!   10 minutes. A false finding needs such a lag, and mints, for all of
+//!   `HBTC_SUPPLY_GRACE`.
 
 use super::Auditor;
 use super::rpc_pollers::SOURCE_STALE_LIMIT;

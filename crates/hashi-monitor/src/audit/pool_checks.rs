@@ -12,7 +12,10 @@
 //! 2. Keep suspect spends until Sui polling passes their lookup completion timestamps.
 //! 3. Clear spends that pending or completed withdrawals explain.
 //! 4. Report the remaining spends as findings.
-//! 5. Report `SourceStale` for the pool check when none has succeeded for
+//! 5. Report `DepositNotApproved` for each unapproved deposit whose latest
+//!    request is more than `DEPOSIT_REQUEST_WATCH` before the Sui cursor.
+//!    The report repeats at each check until an approval comes.
+//! 6. Report `SourceStale` for the pool check when none has succeeded for
 //!    `UTXO_CHECK_INTERVAL` plus `SOURCE_STALE_LIMIT`. Before the first
 //!    success, count from the start of the audit loop, after the first
 //!    catch-up.
@@ -48,7 +51,10 @@ impl Auditor {
         // The pool check does not use one Bitcoin snapshot and can see spends from newer blocks.
         // Record completion time so Sui polling must cover the whole lookup period.
         let now = now_timestamp_secs();
-        let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
+        let (mut findings, suspects) = pool.check(&states, now, &self.cfg.timing);
+        findings.extend(
+            pool.unapproved_past_deadline(self.rpc_pollers.sui_read_until(), &self.cfg.timing),
+        );
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),
@@ -147,6 +153,7 @@ mod tests {
     use crate::test_utils::approved;
     use crate::test_utils::p2wpkh;
     use crate::test_utils::txid;
+    use crate::test_utils::unapproved;
     use hashi_types::guardian::WithdrawalID;
     use std::sync::Arc;
 
@@ -188,13 +195,13 @@ mod tests {
         assert!(
             auditor
                 .utxo_pool
-                .add_deposit(&approved(BtcConfirmedDeposit {
+                .add_deposit(&unapproved(BtcConfirmedDeposit {
                     deposit_id: DepositId::new(txid(9), 1),
                     amount: 5_000,
                     script_pubkey: p2wpkh(0x54),
                     block_time: 900,
                 }))
-                .is_none()
+                .is_empty()
         );
 
         let findings = auditor.check_suspect_spends();
@@ -263,7 +270,7 @@ mod tests {
                 script_pubkey: p2wpkh(0x55),
                 block_time: 900,
             }))
-            .is_none()
+            .is_empty()
         );
         assert!(
             pool.add_withdrawals(&[withdrawal.finished().cloned().unwrap()])

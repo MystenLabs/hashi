@@ -102,10 +102,65 @@ pub struct BtcConfirmation {
 /// How a UTXO entered the monitor's UTXO pool.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum UtxoOrigin {
-    /// A deposit Bitcoin confirmed at a bridge address.
+    /// A deposit Bitcoin confirmed at a bridge address, with a Sui
+    /// `DepositApproved`.
     Deposit,
+    /// A deposit Bitcoin confirmed at a bridge address, with no Sui
+    /// `DepositApproved` yet. For example, a sanction or a user mistake keeps
+    /// a deposit here.
+    UnapprovedDeposit {
+        /// The time of the latest request for the deposit. The approval
+        /// deadline counts from it.
+        requested_at: UnixSeconds,
+        /// The amount that the latest request claims.
+        requested_amount: u64,
+    },
     /// A change output of a withdrawal Bitcoin confirmed.
     Change,
+}
+
+impl UtxoOrigin {
+    /// Whether Move's pool holds the UTXO: an approved deposit, or change.
+    /// Only these count in the pool value. Move adds an approved deposit
+    /// after the deposit delay.
+    pub fn in_move_pool(self) -> bool {
+        !matches!(self, Self::UnapprovedDeposit { .. })
+    }
+
+    fn is_change(self) -> bool {
+        self == Self::Change
+    }
+
+    /// The origin of a held UTXO after a second add with the origin `new`.
+    /// `None` means that a deposit and change claim one outpoint.
+    fn updated_by(self, new: Self) -> Option<Self> {
+        // 1. A deposit and change cannot share an outpoint.
+        if self.is_change() != new.is_change() {
+            return None;
+        }
+        // 2. Both are change: a repeat keeps the held origin.
+        if self.is_change() {
+            return Some(self);
+        }
+        // 3. Both are deposits.
+        match (self, new) {
+            // A second request for an approved deposit. Move mints only once.
+            (Self::Deposit, Self::Deposit | Self::UnapprovedDeposit { .. }) => Some(self),
+            // An approval approves the held deposit.
+            (Self::UnapprovedDeposit { .. }, Self::Deposit) => Some(Self::Deposit),
+            // The later of two requests stays.
+            (
+                Self::UnapprovedDeposit {
+                    requested_at: held_at,
+                    ..
+                },
+                Self::UnapprovedDeposit { requested_at, .. },
+            ) => Some(if requested_at > held_at { new } else { self }),
+            (Self::Change, _) | (_, Self::Change) => {
+                unreachable!("steps 1 and 2 return for change")
+            }
+        }
+    }
 }
 
 /// The time through which each source has been read.

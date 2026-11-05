@@ -18,7 +18,7 @@
 //!   For example, deposit D creates an output that withdrawal W spends. Bitcoin confirms both transactions.
 //!   Within one Bitcoin tick, the auditor processes withdrawal results before deposit results.
 //!   W therefore becomes complete while D still appears pending and its output is absent from the pool.
-//!   Maintenance during this gap could apply W without adding D and report `UtxoUnknownInputSpent`.
+//!   Maintenance during this gap could apply W without adding D and report `UtxoOutsideMovePoolSpent`.
 //!   After the bitcoin tick finishes, maintenance takes both machines and adds D before applying W.
 
 use super::Auditor;
@@ -69,13 +69,16 @@ impl Auditor {
             oldest_withdrawals = %self.oldest_open_withdrawals(),
             oldest_deposits = %self.oldest_open_deposits(),
             utxos_held = self.utxo_pool.len(),
+            utxos_in_move_pool = self.utxo_pool.in_move_pool_len(),
             pool_value_sats = self.utxo_pool.value(),
             "removed the closed machines and updated the pool"
         );
 
         self.report_findings("pool", &findings);
-        self.metrics
-            .set_utxo_pool(self.utxo_pool.len(), self.utxo_pool.oldest_timestamp());
+        self.metrics.set_utxo_pool(
+            self.utxo_pool.in_move_pool_len(),
+            self.utxo_pool.oldest_timestamp(),
+        );
         self.metrics.set_open_flows(open_withdrawals, open_deposits);
         findings
     }
@@ -95,6 +98,7 @@ impl Auditor {
                     deposit_id = %deposit.deposit_id,
                     amount = deposit.utxo.amount,
                     block_time = %utc_timestamp(deposit.utxo.first_seen),
+                    approved = deposit.utxo.origin.in_move_pool(),
                     "deposit request confirmed on Bitcoin at a bridge address"
                 ),
                 // Bitcoin answered without a UTXO, or the request lapsed.
@@ -166,9 +170,10 @@ mod tests {
 
         assert_eq!(
             findings,
-            vec![MonitorFinding::UtxoUnknownInputSpent {
+            vec![MonitorFinding::UtxoOutsideMovePoolSpent {
                 outpoint: unknown,
                 txid: txid(7),
+                held: None,
             }]
         );
         assert!(auditor.pending_withdrawals.is_empty());
