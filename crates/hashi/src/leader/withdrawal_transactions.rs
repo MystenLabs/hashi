@@ -1418,7 +1418,8 @@ impl LeaderService {
         Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock)
     }
 
-    /// Rebuilds and submits a signed withdrawal, including any immediate unconfirmed parents.
+    /// Rebuilds and submits a signed withdrawal. Missing immediate parents are
+    /// submitted with it as a package; otherwise it is broadcast on its own.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid))]
     async fn rebuild_and_broadcast_withdrawal_btc_tx(
         inner: &Arc<Hashi>,
@@ -1438,33 +1439,44 @@ impl LeaderService {
             .collect();
 
         let mut package = Vec::with_capacity(parents.len() + 1);
+        let mut parent_missing = false;
         for parent in parents.into_values() {
             let parent_txid = parent.txid.into();
-            if matches!(
-                inner
-                    .btc_monitor()
-                    .get_transaction_status(parent_txid, None)
-                    .await?,
-                TxStatus::Confirmed { .. }
-            ) {
-                continue;
+            match inner
+                .btc_monitor()
+                .get_transaction_status(parent_txid, None)
+                .await?
+            {
+                TxStatus::Confirmed { .. } => continue,
+                TxStatus::InMempool => {}
+                TxStatus::NotFound => parent_missing = true,
             }
             // Submit only the immediate layer. Core decides whether any deeper
             // ancestry already in its mempool satisfies package policy; missing
             // ancestors or unsupported topology must surface as rejection.
             package.push(Self::rebuild_signed_tx_from_onchain(inner, &parent)?);
         }
-        package.push(Self::rebuild_signed_tx_from_onchain(inner, txn)?);
+        let tx = Self::rebuild_signed_tx_from_onchain(inner, txn)?;
 
-        match inner.btc_monitor().broadcast_package(package).await {
+        // Package submission disables Core's CPFP carve-out, without which a
+        // withdrawal recipient's descendants can block our child. Use it only
+        // when a parent must be resubmitted alongside the child.
+        let result = if parent_missing {
+            package.push(tx);
+            inner.btc_monitor().broadcast_package(package).await
+        } else {
+            inner.btc_monitor().broadcast_transaction(tx).await
+        };
+        match result {
             Ok(()) => {
-                info!("Re-broadcast withdrawal package");
+                info!(parent_missing, "Re-broadcast withdrawal tx");
                 Ok(())
             }
             Err(error) => {
+                warn!("Withdrawal broadcast rejected: {error:#}");
                 // A parent or child may confirm between status lookup and
                 // submission. Only live evidence that the child is present
-                // reconciles a rejected (or partially accepted) package.
+                // reconciles a rejected (or partially accepted) submission.
                 match inner
                     .btc_monitor()
                     .get_transaction_status(txid, None)
