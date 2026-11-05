@@ -16,6 +16,7 @@ use crate::metrics::SIGNING_REFUSAL_CAP;
 use crate::metrics::SIGNING_REFUSAL_CATCHING_UP;
 use crate::metrics::SIGNING_REFUSAL_COMMITTEE;
 use crate::metrics::SIGNING_REFUSAL_NOT_OLDEST;
+use crate::metrics::SIGNING_REFUSAL_OVER_CAPACITY;
 use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::SIGNING_REFUSAL_SHAPE;
 use crate::metrics::SIGNING_REFUSAL_UNSIGNED;
@@ -24,6 +25,7 @@ use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::trm;
+use crate::withdrawals::AboveLimiterCapacity;
 use crate::withdrawals::MalformedSigningRequest;
 use crate::withdrawals::MirrorCatchingUp;
 use crate::withdrawals::MpcInputSignaturesMessage;
@@ -580,6 +582,8 @@ impl HttpService {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_UNSIGNED);
         } else if err.is::<OldestRequestMissing>() {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_NOT_OLDEST);
+        } else if err.is::<AboveLimiterCapacity>() {
+            self.count_signing_refusal(caller, SIGNING_REFUSAL_OVER_CAPACITY);
         }
         Status::failed_precondition(err.to_string())
     }

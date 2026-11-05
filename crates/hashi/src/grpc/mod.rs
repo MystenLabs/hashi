@@ -23,6 +23,7 @@ pub(crate) const NOT_READY_TO_FINALIZE_MSG: &str = "not ready to finalize";
 pub(crate) const UNSIGNED_REFUSAL_MSG: &str = "a withdrawal is still unsigned";
 pub(crate) const NOT_OLDEST_REFUSAL_MSG: &str = "missing the oldest approved request";
 pub(crate) const CATCHING_UP_REFUSAL_MSG: &str = "this node is still catching up";
+pub(crate) const OVER_CAPACITY_REFUSAL_MSG: &str = "above what the limiter allows within a minute";
 
 mod client;
 mod connection_limit;

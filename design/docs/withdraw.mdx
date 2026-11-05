@@ -220,7 +220,9 @@ A validator signs an unsigned withdrawal transaction only while no earlier
 withdrawal transaction awaits signatures, and only if it includes the
 earliest-approved request at or above the minimum and within the bucket's
 maximum capacity, when there is one. It also refuses until it has replayed the
-chain past the state it loaded at its last restart or reload.
+chain past the state it loaded at its last restart or reload, and it refuses a
+transaction that spends more than its own copy of the Guardian's rate limiter
+allows a minute from now.
 
 The leader commits the resulting unsigned transaction and its txid onchain by
 calling `hashi::withdraw::commit_withdrawal_tx`:

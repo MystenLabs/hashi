@@ -338,6 +338,7 @@ pub const SIGNING_REFUSAL_PAUSED: &str = "paused";
 pub const SIGNING_REFUSAL_UNSIGNED: &str = "unsigned";
 pub const SIGNING_REFUSAL_NOT_OLDEST: &str = "not_oldest";
 pub const SIGNING_REFUSAL_CATCHING_UP: &str = "catching_up";
+pub const SIGNING_REFUSAL_OVER_CAPACITY: &str = "over_capacity";
 
 const MPC_REFUSAL_REQUEST: &str = "request";
 const MPC_REFUSAL_RESPONSE: &str = "response";
@@ -586,7 +587,7 @@ impl Metrics {
             .unwrap(),
             withdrawal_signing_refused_total: register_int_counter_vec_with_registry!(
                 "hashi_withdrawal_signing_refused_total",
-                "SignDepositConfirmation, SignWithdrawalRequestApproval, SignWithdrawalTxConstruction, SignWithdrawalTransaction, SignWithdrawalTxSigning, SignMpcInputSignatures, SignWithdrawalConfirmation and SignGuardianWithdrawalRequest calls refused, and GetPartialSignatures calls refused while paused, by caller and reason (committee, cap, busy, shape, paused, unsigned, not_oldest or catching_up)",
+                "SignDepositConfirmation, SignWithdrawalRequestApproval, SignWithdrawalTxConstruction, SignWithdrawalTransaction, SignWithdrawalTxSigning, SignMpcInputSignatures, SignWithdrawalConfirmation and SignGuardianWithdrawalRequest calls refused, and GetPartialSignatures calls refused while paused, by caller and reason (committee, cap, busy, shape, paused, unsigned, not_oldest, catching_up or over_capacity)",
                 &["peer", "reason"],
                 registry,
             )
