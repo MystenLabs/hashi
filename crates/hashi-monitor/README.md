@@ -39,8 +39,10 @@ key `alert_mode` picks the findings that alert:
 - `essential`: only the essential findings alert. The other findings are
   WARN log lines `monitor finding`, and they do not set the metric.
 
-Every operator must act on an essential finding. The other findings show no
-loss of Bitcoin backing.
+Every operator must act on an essential finding. It shows a loss of Bitcoin
+backing, a broken protocol rule, or a check that cannot run. An event that
+comes before the event it depends on breaks a rule. Only the Hashi team can
+act on the other findings. They show a delay or a fault that moves no Bitcoin.
 
 | Kind | Essential | Meaning |
 |---|---|---|
@@ -49,7 +51,7 @@ loss of Bitcoin backing.
 | `WithdrawalInvalid` | Yes | The withdrawal's transaction or events contradict each other. The approved inputs and outputs do not build a transaction, or do not give the approved txid. Or two events state another txid, other inputs, payouts, or change. Or one event came again with other contents. |
 | `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |
 | `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
-| `DepositLate` | No | An approved deposit's Bitcoin block is more than 2 hours after the approval. Hashi approved before Bitcoin confirmed the payment, or a miner dated the block late. The payment came, so Bitcoin now backs the hBTC. |
+| `DepositLate` | Yes | An approved deposit's Bitcoin block is more than 2 hours after the approval. A miner can date a block at most 2 hours ahead, so Hashi approved before Bitcoin confirmed the payment. |
 | `DepositNotApproved` | No | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
 | `UtxoUnexpectedSpend` | Yes | A pool UTXO was spent outside a Hashi withdrawal. |
 | `UtxoOutsideMovePoolSpent` | Yes | A withdrawal spent a UTXO that is not in Move's pool: the pool never held it, or held it as a deposit with no approval. The monitor missed an event, or Move has a fault. |
