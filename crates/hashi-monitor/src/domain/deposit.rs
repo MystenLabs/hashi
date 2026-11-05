@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use sui_sdk_types::Address;
 
+use crate::findings::DepositMismatchReason;
 use crate::findings::MonitorFinding;
 use crate::keys::HashiBTCKeys;
 
@@ -147,8 +148,11 @@ impl SuiDepositApprovedEvent {
         }
         if self.amount != paid.amount || self.script_pubkey != paid.script_pubkey {
             findings.push(MonitorFinding::DepositMismatch {
-                sui: self.clone(),
-                btc: paid.clone(),
+                request_id: self.request_id,
+                reason: DepositMismatchReason::PaymentDiffers {
+                    sui: self.clone(),
+                    btc: paid.clone(),
+                },
             });
         }
         findings

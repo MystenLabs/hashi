@@ -48,7 +48,8 @@ loss of Bitcoin backing.
 | `WithdrawalTxidMismatch`, `WithdrawalTxUnbuildable` | Yes | A Hashi approval's txid does not match its inputs and outputs. |
 | `WithdrawalMismatch` | Yes | Sui and the guardian state different inputs, payouts, or change. |
 | `InvalidEventAdded` | Yes | An event contradicts its withdrawal. |
-| `DepositUnbacked`, `DepositMismatch` | Yes | An approved deposit has no matching Bitcoin output. |
+| `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |
+| `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
 | `DepositLate` | No | An approved deposit's Bitcoin block is more than 2 hours after the approval. Hashi approved before Bitcoin confirmed the payment, or a miner dated the block late. The payment came, so Bitcoin now backs the hBTC. |
 | `DepositNotApproved` | No | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
 | `UtxoUnexpectedSpend` | Yes | A pool UTXO was spent outside a Hashi withdrawal. |

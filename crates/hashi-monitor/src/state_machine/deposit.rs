@@ -20,10 +20,10 @@ use crate::domain::BtcConfirmation;
 use crate::domain::BtcConfirmedDeposit;
 use crate::domain::DepositId;
 use crate::domain::FinishedDeposit;
-use crate::domain::MonitorEvent;
 use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::UtxoOrigin;
+use crate::findings::DepositMismatchReason;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::timing::Timing;
@@ -153,10 +153,12 @@ impl DepositStateMachine {
     /// The request seen again. One with other contents is a finding and is
     /// dropped.
     pub fn add_sui_request(&self, event: &SuiDepositRequestedEvent) -> Option<MonitorFinding> {
-        (*event != self.sui_request).then(|| {
-            MonitorFinding::InvalidEventAdded(
-                "duplicate deposit request for same request id with different contents".to_string(),
-            )
+        (*event != self.sui_request).then(|| MonitorFinding::DepositMismatch {
+            request_id: self.sui_request.request_id,
+            reason: DepositMismatchReason::RequestDiffers {
+                held: self.sui_request.clone(),
+                new: event.clone(),
+            },
         })
     }
 
@@ -170,10 +172,13 @@ impl DepositStateMachine {
         timing: &Timing,
     ) -> Vec<MonitorFinding> {
         if !event.matches_request(&self.sui_request) {
-            return vec![MonitorFinding::InvalidEventAdded(format!(
-                "deposit approval differs from its request: {}",
-                MonitorEvent::DepositApproved(event),
-            ))];
+            return vec![MonitorFinding::DepositMismatch {
+                request_id: self.sui_request.request_id,
+                reason: DepositMismatchReason::ApprovalDiffers {
+                    request: self.sui_request.clone(),
+                    approval: event,
+                },
+            }];
         }
         if self.sui_approval.is_some() {
             return Vec::new();
@@ -326,7 +331,10 @@ mod tests {
         );
         assert!(matches!(
             &findings[..],
-            [MonitorFinding::DepositMismatch { btc, .. }] if btc.amount == 40_000
+            [MonitorFinding::DepositMismatch {
+                reason: DepositMismatchReason::PaymentDiffers { btc, .. },
+                ..
+            }] if btc.amount == 40_000
         ));
     }
 
@@ -356,7 +364,10 @@ mod tests {
 
         assert!(matches!(
             &sm.add_sui_approval(approval(), &Timing::for_tests())[..],
-            [MonitorFinding::DepositMismatch { btc, .. }] if btc.amount == 40_000
+            [MonitorFinding::DepositMismatch {
+                reason: DepositMismatchReason::PaymentDiffers { btc, .. },
+                ..
+            }] if btc.amount == 40_000
         ));
     }
 
@@ -368,12 +379,18 @@ mod tests {
         assert_eq!(sm.add_sui_request(&request), None);
         let other_amount = SuiDepositRequestedEvent {
             amount: 60_000,
-            ..request
+            ..request.clone()
         };
-        assert!(matches!(
+        assert_eq!(
             sm.add_sui_request(&other_amount),
-            Some(MonitorFinding::InvalidEventAdded(_))
-        ));
+            Some(MonitorFinding::DepositMismatch {
+                request_id: request.request_id,
+                reason: DepositMismatchReason::RequestDiffers {
+                    held: request,
+                    new: other_amount,
+                },
+            })
+        );
     }
 
     #[test]
@@ -384,10 +401,16 @@ mod tests {
             ..approval()
         };
 
-        assert!(matches!(
-            &sm.add_sui_approval(other_path, &Timing::for_tests())[..],
-            [MonitorFinding::InvalidEventAdded(_)]
-        ));
+        assert_eq!(
+            sm.add_sui_approval(other_path.clone(), &Timing::for_tests()),
+            vec![MonitorFinding::DepositMismatch {
+                request_id: other_path.request_id,
+                reason: DepositMismatchReason::ApprovalDiffers {
+                    request: deposit_request(),
+                    approval: other_path,
+                },
+            }]
+        );
         assert_eq!(sm.sui_approval, None);
     }
 

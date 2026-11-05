@@ -562,6 +562,7 @@ mod tests {
     use crate::domain::DepositId;
     use crate::domain::UtxoOrigin;
     use crate::domain::WithdrawalEventType;
+    use crate::findings::DepositMismatchReason;
     use crate::rpc::sui::tests::hashi_approval;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
@@ -604,7 +605,10 @@ mod tests {
         };
         assert!(matches!(
             &auditor.ingest(MonitorEvent::DepositRequested(contradiction))[..],
-            [MonitorFinding::InvalidEventAdded(_)]
+            [MonitorFinding::DepositMismatch {
+                reason: DepositMismatchReason::RequestDiffers { .. },
+                ..
+            }]
         ));
         assert_eq!(auditor.pending_deposits.len(), 1);
 
@@ -718,9 +722,10 @@ mod tests {
                 0,
                 Some(&crate::test_utils::confirmation(50_000, p2wpkh(0x54))),
             );
-        assert!(
-            matches!(&findings[..], [MonitorFinding::DepositMismatch { sui: claimed, btc }] if *claimed == sui && btc.amount == 50_000)
-        );
+        assert!(matches!(&findings[..], [MonitorFinding::DepositMismatch {
+                reason: DepositMismatchReason::PaymentDiffers { sui: claimed, btc },
+                ..
+            }] if *claimed == sui && btc.amount == 50_000));
 
         assert!(auditor.gc_and_update_pool().is_empty());
         assert!(auditor.pending_deposits.is_empty());
