@@ -84,8 +84,9 @@ active committee keeps its pinned copy.
 ## `Upgrade`
 
 Authorizes a package upgrade and records whether it is exclusive. An exclusive
-upgrade atomically disables all previous versions as the new package is
-committed; a non-exclusive upgrade deliberately leaves them callable. Every
+upgrade disables all previous versions in the same step that commits the new
+package, so no previous version stays callable alongside the new one. A
+non-exclusive upgrade deliberately leaves them callable. Every
 upgrade must make this classification explicitly. See
 [Move Package Upgrades](move-upgrades.mdx) for the decision criteria and
 validator rollout contract.
