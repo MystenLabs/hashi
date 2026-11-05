@@ -152,7 +152,8 @@ pub fn approved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
 }
 
 /// Read one HTTP request on `listener`, then answer it with `response`.
-pub fn respond(listener: &TcpListener, response: &str) {
+/// Returns the request body.
+pub fn respond(listener: &TcpListener, response: &str) -> String {
     let (stream, _) = listener.accept().unwrap();
     let mut reader = BufReader::new(stream);
     let mut content_length = 0;
@@ -167,23 +168,29 @@ pub fn respond(listener: &TcpListener, response: &str) {
             content_length = value.trim().parse().unwrap();
         }
     }
-    reader.read_exact(&mut vec![0; content_length]).unwrap();
+    let mut request = vec![0; content_length];
+    reader.read_exact(&mut request).unwrap();
     reader.into_inner().write_all(response.as_bytes()).unwrap();
+    String::from_utf8(request).unwrap()
 }
 
 /// A Bitcoin RPC URL. A thread answers the next requests on it, in order,
-/// with HTTP 200 and each JSON body of `bodies`.
-pub fn btc_rpc_answering(bodies: Vec<String>) -> (String, JoinHandle<()>) {
+/// with HTTP 200 and each JSON body of `bodies`. The thread returns the
+/// request bodies.
+pub fn btc_rpc_answering(bodies: Vec<String>) -> (String, JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
-        for body in bodies {
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            respond(&listener, &response);
-        }
+        bodies
+            .iter()
+            .map(|body| {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                respond(&listener, &response)
+            })
+            .collect()
     });
     (url, server)
 }

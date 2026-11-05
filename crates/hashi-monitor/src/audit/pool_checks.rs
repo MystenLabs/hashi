@@ -299,7 +299,7 @@ mod tests {
     fn auditor_with_spent_pending_input(
         btc_txid: Txid,
         bodies: Vec<String>,
-    ) -> (Auditor, OutPoint, JoinHandle<()>) {
+    ) -> (Auditor, OutPoint, JoinHandle<Vec<String>>) {
         let (rpc_url, server) = btc_rpc_answering(bodies);
         let mut cfg = Config::for_tests();
         cfg.btc.rpc_url = rpc_url;
@@ -426,8 +426,10 @@ mod tests {
         let (mut auditor, _, server) = auditor_with_spent_pending_input(tx.compute_txid(), bodies);
 
         assert!(auditor.check_suspect_spends().is_empty());
-        server.join().unwrap();
+        // Before the join: a failed lookup sends fewer requests, and the join
+        // would then wait for them.
         assert!(auditor.suspect_spends.is_empty());
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -439,8 +441,9 @@ mod tests {
             auditor_with_spent_pending_input(txid(7), vec![in_ibd.to_string()]);
 
         assert!(auditor.check_suspect_spends().is_empty());
-        server.join().unwrap();
         assert!(auditor.suspect_spends.contains_key(&outpoint));
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains("getblockchaininfo"), "{requests:?}");
     }
 
     #[tokio::test]

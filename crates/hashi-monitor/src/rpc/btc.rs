@@ -1329,7 +1329,9 @@ mod tests {
     }
 
     /// A client of a one-request server that answers `response`.
-    fn client_answered_by(response: &'static str) -> (BtcRpcClient, std::thread::JoinHandle<()>) {
+    fn client_answered_by(
+        response: &'static str,
+    ) -> (BtcRpcClient, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut cfg = Config::for_tests();
         cfg.btc.rpc_url = format!("http://{}", listener.local_addr().unwrap());
