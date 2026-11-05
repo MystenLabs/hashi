@@ -1418,8 +1418,8 @@ impl LeaderService {
         Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock)
     }
 
-    /// Rebuilds a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
-    /// data (stored witness signatures) and broadcast it to the Bitcoin network.
+    /// Rebuilds and submits a signed withdrawal. Missing immediate parents are
+    /// submitted with it as a package; otherwise it is broadcast on its own.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid))]
     async fn rebuild_and_broadcast_withdrawal_btc_tx(
         inner: &Arc<Hashi>,
@@ -1428,15 +1428,65 @@ impl LeaderService {
     ) -> anyhow::Result<()> {
         warn!("Withdrawal tx not found, re-broadcasting from on-chain signatures");
 
-        let tx = Self::rebuild_signed_tx_from_onchain(inner, txn)
-            .inspect_err(|e| error!("Failed to rebuild signed withdrawal tx: {e}"))?;
+        // Immediate parents: withdrawals whose outputs this transaction spends. A
+        // Sui-confirmed parent is already deep in Bitcoin, so skip it without a lookup.
+        let parents: BTreeMap<_, _> = inner
+            .onchain_state()
+            .withdrawal_txns()
+            .into_iter()
+            .filter(|w| !w.is_confirmed() && txn.inputs.iter().any(|input| input.id.txid == w.txid))
+            .map(|w| (w.txid, w))
+            .collect();
 
-        inner
-            .btc_monitor()
-            .broadcast_transaction(tx)
-            .await
-            .inspect(|()| info!("Re-broadcast withdrawal tx"))
-            .inspect_err(|e| error!("Failed to re-broadcast withdrawal tx: {e}"))
+        let mut package = Vec::with_capacity(parents.len() + 1);
+        let mut parent_missing = false;
+        for parent in parents.into_values() {
+            let parent_txid = parent.txid.into();
+            match inner
+                .btc_monitor()
+                .get_transaction_status(parent_txid, None)
+                .await?
+            {
+                TxStatus::Confirmed { .. } => continue,
+                TxStatus::InMempool => {}
+                TxStatus::NotFound => parent_missing = true,
+            }
+            // Submit only the immediate layer. Core decides whether any deeper
+            // ancestry already in its mempool satisfies package policy; missing
+            // ancestors or unsupported topology must surface as rejection.
+            package.push(Self::rebuild_signed_tx_from_onchain(inner, &parent)?);
+        }
+        let tx = Self::rebuild_signed_tx_from_onchain(inner, txn)?;
+
+        // Package submission disables Core's CPFP carve-out, without which a
+        // withdrawal recipient's descendants can block our child. Use it only
+        // when a parent must be resubmitted alongside the child.
+        let result = if parent_missing {
+            package.push(tx);
+            inner.btc_monitor().broadcast_package(package).await
+        } else {
+            inner.btc_monitor().broadcast_transaction(tx).await
+        };
+        match result {
+            Ok(()) => {
+                info!(parent_missing, "Re-broadcast withdrawal tx");
+                Ok(())
+            }
+            Err(error) => {
+                warn!("Withdrawal broadcast rejected: {error:#}");
+                // A parent or child may confirm between status lookup and
+                // submission. Only live evidence that the child is present
+                // reconciles a rejected (or partially accepted) submission.
+                match inner
+                    .btc_monitor()
+                    .get_transaction_status(txid, None)
+                    .await?
+                {
+                    TxStatus::Confirmed { .. } | TxStatus::InMempool => Ok(()),
+                    TxStatus::NotFound => Err(error),
+                }
+            }
+        }
     }
 
     /// Rebuilds a fully signed Bitcoin transaction from on-chain

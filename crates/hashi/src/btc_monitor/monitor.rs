@@ -1613,6 +1613,13 @@ impl Monitor {
                     caller,
                 ));
             }
+            MonitorMessage::BroadcastPackage(package, caller) => {
+                self.rpc_workers.spawn(Self::broadcast_package(
+                    self.bitcoind_rpc.clone(),
+                    package,
+                    caller,
+                ));
+            }
             MonitorMessage::TestMempoolAccept(tx, caller) => {
                 self.rpc_workers.spawn(Self::test_mempool_accept(
                     self.bitcoind_rpc.clone(),
@@ -1756,6 +1763,40 @@ impl Monitor {
                 caller.reply(Err(anyhow::anyhow!(e)));
             }
         }
+    }
+
+    async fn broadcast_package(
+        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+        package: Vec<bitcoin::Transaction>,
+        mut caller: Caller<()>,
+    ) {
+        let Some(child) = package.last() else {
+            caller.reply(Err(anyhow::anyhow!("Cannot broadcast an empty package")));
+            return;
+        };
+        let txid = child.compute_txid();
+        let Some(result) = caller
+            .rpc(&bitcoind_rpc, move |rpc| {
+                rpc.submit_package(&package, None, None)
+            })
+            .await
+        else {
+            caller.reply(Err(anyhow::anyhow!(
+                "Package broadcast for {txid} expired before its bitcoind RPC could start"
+            )));
+            return;
+        };
+        let result = result
+            .map_err(anyhow::Error::from)
+            .and_then(|response| response.into_model().map_err(anyhow::Error::from))
+            .and_then(|response| {
+                anyhow::ensure!(
+                    response.package_msg == "success",
+                    "Bitcoin Core rejected package for {txid}: {response:?}"
+                );
+                Ok(())
+            });
+        caller.reply(result);
     }
 
     async fn get_transaction_status(
@@ -2432,6 +2473,16 @@ impl MonitorClient {
         .await
     }
 
+    /// Submit a child-last withdrawal package through the gated Bitcoin RPC worker.
+    pub async fn broadcast_package(&self, package: Vec<bitcoin::Transaction>) -> Result<()> {
+        self.request(
+            |caller| MonitorMessage::BroadcastPackage(package, caller),
+            "broadcast_package",
+            None,
+        )
+        .await
+    }
+
     pub async fn test_mempool_accept(
         &self,
         transaction: bitcoin::Transaction,
@@ -2473,6 +2524,9 @@ enum MonitorMessage {
 
     // Broadcast a transaction to the network.
     BroadcastTransaction(bitcoin::Transaction, Caller<()>),
+
+    // Broadcast a child and its independent parents, with the child last.
+    BroadcastPackage(Vec<bitcoin::Transaction>, Caller<()>),
 
     TestMempoolAccept(bitcoin::Transaction, Caller<Vec<MempoolAcceptance>>),
 

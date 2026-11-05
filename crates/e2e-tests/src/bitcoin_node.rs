@@ -38,6 +38,15 @@ pub struct BitcoinNodeHandle {
 
 impl BitcoinNodeHandle {
     pub fn new(rpc_port: u16, data_dir: PathBuf, bitcoin_core_path: PathBuf) -> Result<Self> {
+        Self::new_with_args(rpc_port, data_dir, bitcoin_core_path, &[])
+    }
+
+    fn new_with_args(
+        rpc_port: u16,
+        data_dir: PathBuf,
+        bitcoin_core_path: PathBuf,
+        extra_args: &[String],
+    ) -> Result<Self> {
         let rpc_url = format!("http://127.0.0.1:{}", rpc_port);
         let p2p_port = get_available_port();
         info!(
@@ -69,6 +78,7 @@ impl BitcoinNodeHandle {
             .arg("-peerblockfilters=1") // Serve filters to peers (BIP-157)
             .arg("-txindex=1") // Enable transaction index for RPC queries
             .arg("-listenonion=0")
+            .args(extra_args)
             .stdout(stdout)
             .stderr(stderr)
             .spawn()
@@ -253,6 +263,7 @@ pub struct BitcoinNodeBuilder {
     initial_blocks: u64,
     bitcoin_core_path: Option<PathBuf>,
     rpc_port: Option<u16>,
+    extra_args: Vec<String>,
 }
 
 impl BitcoinNodeBuilder {
@@ -262,6 +273,7 @@ impl BitcoinNodeBuilder {
             bitcoin_core_path: None,
             dir: None,
             rpc_port: None,
+            extra_args: Vec::new(),
         }
     }
 
@@ -285,6 +297,11 @@ impl BitcoinNodeBuilder {
         self
     }
 
+    pub fn with_extra_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.extra_args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
     pub async fn build(self) -> Result<BitcoinNodeHandle> {
         let bitcoin_core_path = self
             .bitcoin_core_path
@@ -293,7 +310,12 @@ impl BitcoinNodeBuilder {
 
         let data_dir = self.dir.ok_or_else(|| anyhow!("no data_dir configured"))?;
 
-        let node_handle = BitcoinNodeHandle::new(rpc_port, data_dir, bitcoin_core_path)?;
+        let node_handle = BitcoinNodeHandle::new_with_args(
+            rpc_port,
+            data_dir,
+            bitcoin_core_path,
+            &self.extra_args,
+        )?;
         node_handle.wait_until_ready().await?;
         if self.initial_blocks > 0 {
             node_handle.generate_blocks(self.initial_blocks)?;
@@ -309,5 +331,296 @@ impl BitcoinNodeBuilder {
 impl Default for BitcoinNodeBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+pub(crate) use tests::fill_mempool_until_evicted;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::OutPoint;
+    use bitcoin::ScriptBuf;
+    use bitcoin::Transaction;
+    use bitcoin::TxIn;
+    use bitcoin::TxOut;
+    use bitcoin::consensus::encode::deserialize_hex;
+    use bitcoin::consensus::encode::serialize_hex;
+    use hashi::btc_monitor::TrustedPeer;
+    use hashi::btc_monitor::config::MonitorConfig;
+    use hashi::btc_monitor::monitor::Monitor;
+    use serde_json::Value;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn wallet_script(node: &BitcoinNodeHandle) -> Result<ScriptBuf> {
+        let address: String = node
+            .rpc_client()
+            .call("getnewaddress", &[json!(""), json!("bech32")])?;
+        Ok(address
+            .parse::<bitcoin::Address<_>>()?
+            .require_network(bitcoin::Network::Regtest)?
+            .script_pubkey())
+    }
+
+    fn signed_spend(
+        node: &BitcoinNodeHandle,
+        input: OutPoint,
+        output: Vec<TxOut>,
+    ) -> Result<Transaction> {
+        let unsigned = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: input,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output,
+        };
+        let signed: Value = node.rpc_client().call(
+            "signrawtransactionwithwallet",
+            &[json!(serialize_hex(&unsigned))],
+        )?;
+        anyhow::ensure!(
+            signed["complete"] == true,
+            "Incomplete wallet signature: {signed}"
+        );
+        Ok(deserialize_hex(signed["hex"].as_str().ok_or_else(
+            || anyhow!("Missing signed transaction hex: {signed}"),
+        )?)?)
+    }
+
+    fn confirmed_coins(node: &BitcoinNodeHandle) -> Result<Vec<(OutPoint, Amount)>> {
+        let coins: Vec<Value> = node.rpc_client().call("listunspent", &[json!(1)])?;
+        coins
+            .into_iter()
+            .map(|coin| {
+                Ok((
+                    OutPoint {
+                        txid: serde_json::from_value(coin["txid"].clone())?,
+                        vout: serde_json::from_value(coin["vout"].clone())?,
+                    },
+                    Amount::from_btc(
+                        coin["amount"]
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("Missing coin amount: {coin}"))?,
+                    )?,
+                ))
+            })
+            .collect()
+    }
+
+    fn mempool(node: &BitcoinNodeHandle) -> Result<Vec<Txid>> {
+        Ok(node.rpc_client().call("getrawmempool", &[])?)
+    }
+
+    fn broadcast(node: &BitcoinNodeHandle, tx: &Transaction) -> Result<()> {
+        let _: Txid = node
+            .rpc_client()
+            .call("sendrawtransaction", &[json!(serialize_hex(tx))])?;
+        Ok(())
+    }
+
+    pub(crate) fn fill_mempool_until_evicted(
+        node: &BitcoinNodeHandle,
+        txids: &[Txid],
+    ) -> Result<()> {
+        // Independent confirmed inputs avoid ancestor limits and CPFP effects.
+        // Each large transaction pays about 10 sat/vB.
+        let script = wallet_script(node)?;
+        let data = bitcoin::script::PushBytesBuf::try_from(vec![0; 80_000])?;
+        let data_script = bitcoin::script::Builder::new()
+            .push_opcode(bitcoin::opcodes::all::OP_RETURN)
+            .push_slice(data)
+            .into_script();
+        for (input, amount) in confirmed_coins(node)? {
+            let filler = signed_spend(
+                node,
+                input,
+                vec![
+                    TxOut {
+                        value: amount - Amount::from_sat(810_000),
+                        script_pubkey: script.clone(),
+                    },
+                    TxOut {
+                        value: Amount::ZERO,
+                        script_pubkey: data_script.clone(),
+                    },
+                ],
+            )?;
+            // Equal-feerate fillers tie for eviction, so Core may trim the one
+            // just submitted. That still raises the floor; check the pool below.
+            if let Err(error) = broadcast(node, &filler)
+                && !error.to_string().contains("mempool full")
+            {
+                return Err(error);
+            }
+            let pool = mempool(node)?;
+            let info: Value = node.rpc_client().call("getmempoolinfo", &[])?;
+            let floor = info["mempoolminfee"]
+                .as_f64()
+                .ok_or_else(|| anyhow!("Missing mempool floor: {info}"))?;
+            let relay_floor = info["minrelaytxfee"]
+                .as_f64()
+                .ok_or_else(|| anyhow!("Missing relay floor: {info}"))?;
+            if txids.iter().all(|txid| !pool.contains(txid)) && floor > relay_floor {
+                return Ok(());
+            }
+        }
+        anyhow::bail!(
+            "Exhausted confirmed coins before eviction and dynamic mempool floor increase"
+        )
+    }
+
+    fn monitor_config(node: &BitcoinNodeHandle) -> MonitorConfig {
+        MonitorConfig::builder()
+            .network(bitcoin::Network::Regtest)
+            .trusted_peers(vec![TrustedPeer::from_hostname(
+                "127.0.0.1",
+                node.p2p_port(),
+            )])
+            .start_height(210)
+            .bitcoind_rpc_config(
+                node.rpc_url().to_owned(),
+                Auth::UserPass(RPC_USER.to_owned(), RPC_PASSWORD.to_owned()),
+            )
+            .build()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_monitor_broadcast_package_recovers_evicted_parent() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+        let dir = tempfile::tempdir()?;
+        let node = BitcoinNodeBuilder::new()
+            .dir(dir.path())
+            .with_initial_blocks(210)
+            .with_extra_args(["-maxmempool=5", "-datacarriersize=100000"])
+            .build()
+            .await?;
+        let mut coins = confirmed_coins(&node)?.into_iter();
+        let (input, amount) = coins.next().ok_or_else(|| anyhow!("No mature coinbase"))?;
+        let script = wallet_script(&node)?;
+        let parent = signed_spend(
+            &node,
+            input,
+            vec![TxOut {
+                value: amount - Amount::from_sat(200),
+                script_pubkey: script.clone(),
+            }],
+        )?;
+        broadcast(&node, &parent)?;
+        let child = signed_spend(
+            &node,
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            vec![TxOut {
+                value: parent.output[0].value - Amount::from_sat(10_000),
+                script_pubkey: script.clone(),
+            }],
+        )?;
+        assert!(mempool(&node)?.contains(&parent.compute_txid()));
+
+        fill_mempool_until_evicted(&node, &[parent.compute_txid()])?;
+        assert!(
+            !mempool(&node)?.contains(&parent.compute_txid()),
+            "The low-fee parent must actually be evicted"
+        );
+        let info: Value = node.rpc_client().call("getmempoolinfo", &[])?;
+        let floor_sat_vb = info["mempoolminfee"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("Missing mempool floor: {info}"))?
+            * 100_000.0;
+        assert!(floor_sat_vb > 200.0 / parent.vsize() as f64);
+        assert!(10_200.0 / (parent.vsize() + child.vsize()) as f64 > floor_sat_vb);
+
+        let (monitor, _service) = Monitor::run(
+            monitor_config(&node),
+            Arc::new(hashi::metrics::Metrics::new_default()),
+        )?;
+        // submitpackage can return an RPC success envelope containing rejection.
+        // The monitor must propagate that rejection, not report success.
+        assert!(
+            monitor
+                .broadcast_package(vec![child.clone()])
+                .await
+                .is_err()
+        );
+        let pool = mempool(&node)?;
+        assert!(!pool.contains(&child.compute_txid()));
+        assert!(!pool.contains(&parent.compute_txid()));
+
+        monitor
+            .broadcast_package(vec![parent.clone(), child.clone()])
+            .await?;
+        let pool = mempool(&node)?;
+        assert!(pool.contains(&parent.compute_txid()));
+        assert!(pool.contains(&child.compute_txid()));
+
+        // Already-in-mempool results are idempotent success.
+        monitor
+            .broadcast_package(vec![parent.clone(), child.clone()])
+            .await?;
+        let pool = mempool(&node)?;
+        assert!(pool.contains(&parent.compute_txid()));
+        assert!(pool.contains(&child.compute_txid()));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_monitor_broadcast_package_with_confirmed_parent() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+        let dir = tempfile::tempdir()?;
+        let node = BitcoinNodeBuilder::new()
+            .dir(dir.path())
+            .with_initial_blocks(210)
+            .build()
+            .await?;
+        let (input, amount) = confirmed_coins(&node)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No mature coinbase"))?;
+        let script = wallet_script(&node)?;
+        let parent = signed_spend(
+            &node,
+            input,
+            vec![TxOut {
+                value: amount - Amount::from_sat(200),
+                script_pubkey: script.clone(),
+            }],
+        )?;
+        broadcast(&node, &parent)?;
+        node.generate_blocks(1)?;
+        let parent_info: Value = node.rpc_client().call(
+            "getrawtransaction",
+            &[json!(parent.compute_txid()), json!(true)],
+        )?;
+        assert!(parent_info["confirmations"].as_u64().unwrap_or(0) > 0);
+        assert!(!mempool(&node)?.contains(&parent.compute_txid()));
+        let child = signed_spend(
+            &node,
+            OutPoint {
+                txid: parent.compute_txid(),
+                vout: 0,
+            },
+            vec![TxOut {
+                value: parent.output[0].value - Amount::from_sat(10_000),
+                script_pubkey: script,
+            }],
+        )?;
+        assert!(!mempool(&node)?.contains(&child.compute_txid()));
+        let (monitor, _service) = Monitor::run(
+            monitor_config(&node),
+            Arc::new(hashi::metrics::Metrics::new_default()),
+        )?;
+        monitor.broadcast_package(vec![child.clone()]).await?;
+        let pool = mempool(&node)?;
+        assert!(pool.contains(&child.compute_txid()));
+        assert!(!pool.contains(&parent.compute_txid()));
+        Ok(())
     }
 }

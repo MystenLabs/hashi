@@ -244,6 +244,16 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_bitcoin_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.bitcoin_builder = self.bitcoin_builder.with_extra_args(args);
+        self
+    }
+
+    pub fn with_bitcoin_initial_blocks(mut self, blocks: u64) -> Self {
+        self.bitcoin_builder = self.bitcoin_builder.with_initial_blocks(blocks);
+        self
+    }
+
     pub fn with_batch_size_per_weight(mut self, batch_size_per_weight: u16) -> Self {
         self.hashi_builder = self
             .hashi_builder
