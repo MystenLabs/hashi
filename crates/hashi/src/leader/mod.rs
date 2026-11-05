@@ -567,6 +567,9 @@ impl LeaderService {
     /// the cached `is_leader`.
     fn update_leadership(&mut self, checkpoint_height: u64) -> bool {
         let is_leader = Self::node_is_leader(&self.inner, checkpoint_height);
+        if is_leader {
+            self.inner.metrics.leader_checkpoints_total.inc();
+        }
         self.set_leadership(is_leader);
         is_leader
     }

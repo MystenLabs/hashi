@@ -194,6 +194,7 @@ pub struct Metrics {
     pub sui_address_balance_objects_swept_total: IntCounter,
 
     pub is_leader: IntGauge,
+    pub leader_checkpoints_total: IntCounter,
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
     pub utxo_selection_attempt_failures_total: IntCounterVec,
@@ -1297,6 +1298,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            leader_checkpoints_total: register_int_counter_with_registry!(
+                "hashi_leader_checkpoints_total",
+                "Sui checkpoints this node observed while acting as leader",
+                registry,
+            )
+            .unwrap(),
             leader_retries_total: register_int_counter_vec_with_registry!(
                 "hashi_leader_retries_total",
                 "Total leader retry attempts by operation and error kind",
@@ -2386,6 +2393,27 @@ pub fn sui_rpc_info_metric(endpoint: &str) -> Box<dyn prometheus::core::Collecto
     )
     .unwrap();
     metric.with_label_values(&[endpoint]).set(1);
+    Box::new(metric)
+}
+
+pub fn force_run_as_leader_metric(
+    mode: &crate::config::ForceRunAsLeader,
+) -> Box<dyn prometheus::core::Collector> {
+    use crate::config::ForceRunAsLeader;
+    let metric = IntGaugeVec::new(
+        prometheus::opts!(
+            "hashi_force_run_as_leader",
+            "Configured force-run-as-leader override for this validator"
+        ),
+        &["mode"],
+    )
+    .unwrap();
+    let mode = match mode {
+        ForceRunAsLeader::Default => "default",
+        ForceRunAsLeader::Always => "always",
+        ForceRunAsLeader::Never => "never",
+    };
+    metric.with_label_values(&[mode]).set(1);
     Box::new(metric)
 }
 
