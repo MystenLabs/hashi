@@ -14,6 +14,7 @@ use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
+use tracing::debug;
 use tracing::info;
 
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -36,13 +37,13 @@ pub async fn standard_withdrawal(
     // 1) Verify certificate
     let committee = enclave.state.get_committee()?;
 
-    info!("Verifying request certificate.");
+    debug!("Verifying request certificate.");
     verify_hashi_cert(
         enclave.config.hashi_object_id()?,
         committee,
         &signed_request,
     )?;
-    info!("Request certificate verified.");
+    debug!("Request certificate verified.");
 
     let (request_sign, request) = signed_request.into_parts();
 
@@ -50,7 +51,7 @@ pub async fn standard_withdrawal(
     //    exclusive until it is durably logged or the enclave aborts.
     validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
-    info!("Checking rate limits.");
+    debug!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
@@ -60,10 +61,10 @@ pub async fn standard_withdrawal(
         request.timestamp_secs(),
         consumed_amount_sats,
     )?;
-    info!("Rate limit check passed.");
+    debug!("Rate limit check passed.");
 
     // 3) Sign tx (while holding the control lock)
-    info!("Generating BTC signatures.");
+    debug!("Generating BTC signatures.");
     let (txid, signatures) = enclave
         .config
         .btc_sign(request.utxos())
@@ -71,7 +72,7 @@ pub async fn standard_withdrawal(
     let response = StandardWithdrawalResponse {
         enclave_signatures: signatures,
     };
-    info!("BTC signatures generated.");
+    debug!("BTC signatures generated.");
 
     // 4) Log while holding the control lock, before returning signatures.
     info!("Withdrawal {} processed successfully. Logging to S3.", wid);
