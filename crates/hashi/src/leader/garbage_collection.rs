@@ -5,6 +5,7 @@
 
 use super::LeaderService;
 use crate::onchain::TobKey;
+use crate::onchain::TobKeyPage;
 use crate::onchain::TobPruneTarget;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
@@ -102,8 +103,12 @@ const _: () = assert!(MAX_PROPOSAL_DELETIONS_PER_GC <= MAX_PTB_COMMANDS);
 // record: it drains a whole LinkedTable (~80 object deletions on a full
 // committee), so the per-transaction chunk in
 // `execute_destroy_tob_certs` is small and a sweep is several transactions.
-// A larger backlog drains over successive sweeps, oldest epochs first.
+// A larger backlog drains over successive sweeps.
 const MAX_TOB_PRUNES_PER_GC: usize = 200;
+
+const MAX_TOB_PRUNE_PAGES_PER_SWEEP: usize = 10;
+
+const MAX_TOB_PRUNE_SWEEP_FAILURES: u32 = 3;
 
 /// Mirror of the Move floors in `cert_submission.move`. The Move asserts are
 /// authoritative — drift here only produces aborting GC transactions, never
@@ -194,17 +199,68 @@ impl crate::leader::retry::RetryPolicy for TobPruneErrorKind {
     }
 }
 
-/// Result of one TOB prune sweep, consumed by the leader loop's reap arm.
 #[derive(Debug)]
 pub(super) struct TobPruneOutcome {
-    /// The hashi epoch captured when the sweep was spawned; advances the
-    /// once-per-epoch gate. Captured at spawn so an epoch flip mid-sweep
-    /// cannot mask the new epoch's work.
-    pub(super) swept_epoch: u64,
-    /// Whether the sweep selected fewer buckets than its cap — i.e. the
-    /// backlog is fully drained and the gate may close until the epoch
-    /// advances.
-    pub(super) drained: bool,
+    pub(super) next_page_token: Option<bytes::Bytes>,
+    pub(super) found_destroyable: bool,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct TobPruneSchedule {
+    pass: Option<TobPrunePass>,
+    drained_epoch: Option<u64>,
+    last_turn: Option<u64>,
+    failures: u32,
+}
+
+#[derive(Debug)]
+struct TobPrunePass {
+    started_epoch: u64,
+    resume_token: Option<bytes::Bytes>,
+    found_destroyable: bool,
+}
+
+impl TobPruneSchedule {
+    pub(super) fn is_due(&self, current_epoch: u64, turn: u64) -> bool {
+        self.drained_epoch != Some(current_epoch) && self.last_turn != Some(turn)
+    }
+
+    pub(super) fn begin(&mut self, current_epoch: u64, turn: u64) -> Option<bytes::Bytes> {
+        self.last_turn = Some(turn);
+        self.pass
+            .get_or_insert_with(|| TobPrunePass {
+                started_epoch: current_epoch,
+                resume_token: None,
+                found_destroyable: false,
+            })
+            .resume_token
+            .clone()
+    }
+
+    pub(super) fn finish(&mut self, outcome: &TobPruneOutcome) {
+        self.failures = 0;
+        let Some(pass) = self.pass.as_mut() else {
+            return;
+        };
+        pass.found_destroyable |= outcome.found_destroyable;
+        match &outcome.next_page_token {
+            Some(token) => pass.resume_token = Some(token.clone()),
+            None => {
+                if !pass.found_destroyable {
+                    self.drained_epoch = Some(pass.started_epoch);
+                }
+                self.pass = None;
+            }
+        }
+    }
+
+    pub(super) fn fail(&mut self) {
+        self.failures += 1;
+        if self.failures >= MAX_TOB_PRUNE_SWEEP_FAILURES {
+            self.failures = 0;
+            self.pass = None;
+        }
+    }
 }
 
 impl LeaderService {
@@ -657,59 +713,41 @@ impl LeaderService {
         Ok(())
     }
 
-    /// If the hashi epoch has advanced since the last fully-drained sweep
-    /// and no task is in-flight, spawn a background task that lists the TOB
-    /// bag and destroys every dead cert bucket. Epoch-gated rather than
-    /// timestamp-gated because eligibility only changes at epoch boundaries
-    /// and candidate discovery is a live RPC bag listing, not a mirror read;
-    /// the gate is only advanced by a sweep that drained the backlog, so a
-    /// cap-limited sweep re-runs on the next leader checkpoint.
-    pub(super) fn check_prune_tob_certs(&mut self, checkpoint_timestamp_ms: u64) {
+    pub(super) fn check_prune_tob_certs(
+        &mut self,
+        checkpoint_height: u64,
+        checkpoint_timestamp_ms: u64,
+    ) {
         if self.tob_prune_task.is_some() {
             debug!("TOB prune task already in-flight, skipping");
             return;
         }
-
-        // Gating on the ACTIVE version (not merely the latest published)
-        // keeps the sweep off a chain whose semantics this binary does not
-        // implement.
         let Some(active) = self.inner.onchain_state().active_package_version() else {
             return;
         };
         if active < TOB_PRUNE_MIN_PACKAGE_VERSION {
             return;
         }
-
         let current_epoch = self.inner.onchain_state().epoch();
-        if self.last_tob_prune_epoch == Some(current_epoch) {
+        let turn = super::leader_turn(checkpoint_height);
+        if !self.tob_prune_schedule.is_due(current_epoch, turn) {
             return;
         }
-
         if self.tob_prune_retry.should_skip(checkpoint_timestamp_ms) {
             debug!("TOB prune GC in backoff, skipping");
             return;
         }
-
+        let resume_token = self.tob_prune_schedule.begin(current_epoch, turn);
         let inner = self.inner.clone();
         self.tob_prune_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
-            Self::prune_tob_certs(inner, current_epoch).await
+            Self::prune_tob_certs(inner, resume_token).await
         })));
     }
 
-    /// List the TOB bag, select dead buckets, and destroy them on-chain.
-    ///
-    /// Freshness: the listing is a live RPC read; the committee epochs and
-    /// current epoch come from the mirror, which can only lag the chain. A
-    /// lagging epoch shrinks both floors and a missing recent committee only
-    /// disables key-generation selections, so staleness is strictly
-    /// conservative — and the Move floors re-check against the authoritative
-    /// on-chain epoch at execution regardless. Races with another pruner are
-    /// absorbed by the entries' missing-bucket idempotency.
     async fn prune_tob_certs(
         inner: Arc<crate::Hashi>,
-        swept_epoch: u64,
+        resume_token: Option<bytes::Bytes>,
     ) -> anyhow::Result<TobPruneOutcome> {
-        let keys = inner.onchain_state().list_tob_keys().await?;
         let (committee_epochs, current_epoch) = {
             let state = inner.onchain_state().state();
             let committees = &state.hashi().committees;
@@ -718,33 +756,78 @@ impl LeaderService {
                 committees.epoch(),
             )
         };
-        let targets = find_tob_buckets_to_prune(&keys, &committee_epochs, current_epoch);
+        let onchain = inner.onchain_state();
+        let (targets, next_page_token) = collect_tob_prune_targets(
+            move |token| onchain.list_tob_key_page(token),
+            resume_token,
+            &committee_epochs,
+            current_epoch,
+        )
+        .await?;
+        let pass_continues = next_page_token.is_some();
         if targets.is_empty() {
-            debug!("No TOB cert buckets eligible for pruning");
+            debug!(
+                pass_continues,
+                "No TOB cert buckets eligible for pruning in this sweep"
+            );
             return Ok(TobPruneOutcome {
-                swept_epoch,
-                drained: true,
+                next_page_token,
+                found_destroyable: false,
             });
         }
-
-        // Whether more work may remain past the cap, decided before the
-        // destroy so a partially-failed batch also re-runs via the retry path.
-        let drained = targets.len() < MAX_TOB_PRUNES_PER_GC;
         info!(
-            bucket_count = targets.len(),
-            drained, "Destroying dead TOB cert bucket(s)"
+            target_count = targets.len(),
+            pass_continues, "Destroying dead TOB cert bucket(s)"
         );
         let mut executor = SuiTxExecutor::from_hashi(inner)?;
-        executor.execute_destroy_tob_certs(&targets).await?;
+        let skipped = executor.execute_destroy_tob_certs(&targets).await?;
         info!(
-            bucket_count = targets.len(),
-            "Successfully destroyed dead TOB cert buckets"
+            target_count = targets.len(),
+            skipped_count = skipped.len(),
+            "Finished destroying dead TOB cert buckets"
         );
         Ok(TobPruneOutcome {
-            swept_epoch,
-            drained,
+            next_page_token,
+            found_destroyable: targets.len() > skipped.len(),
         })
     }
+}
+
+async fn collect_tob_prune_targets<F, Fut>(
+    mut list_page: F,
+    resume_token: Option<bytes::Bytes>,
+    committee_epochs: &BTreeSet<u64>,
+    current_epoch: u64,
+) -> anyhow::Result<(Vec<TobPruneTarget>, Option<bytes::Bytes>)>
+where
+    F: FnMut(Option<bytes::Bytes>) -> Fut,
+    Fut: Future<Output = anyhow::Result<TobKeyPage>>,
+{
+    let mut targets = Vec::new();
+    let mut token = resume_token;
+    for page_index in 0..MAX_TOB_PRUNE_PAGES_PER_SWEEP {
+        let page = match list_page(token.clone()).await {
+            Ok(page) => page,
+            Err(e) if page_index > 0 => {
+                warn!("Listing the TOB bag failed mid-sweep; keeping what was collected: {e:#}");
+                break;
+            }
+            Err(e) => return Err(e),
+        };
+        for target in find_tob_buckets_to_prune(&page.keys, committee_epochs, current_epoch) {
+            if targets.len() == MAX_TOB_PRUNES_PER_GC {
+                break;
+            }
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        token = page.next_page_token;
+        if token.is_none() || targets.len() == MAX_TOB_PRUNES_PER_GC {
+            break;
+        }
+    }
+    Ok((targets, token))
 }
 
 fn deposit_request_expiration_timestamp_ms(request: &DepositRequest) -> u64 {
@@ -853,11 +936,9 @@ fn find_confirmed_withdrawals_pending_archive(
 ///   understand.
 ///
 /// Output order: epochs ascending (oldest first); within an epoch the
-/// key-generation target first, then nonce batches DESCENDING by index, so
-/// truncation at [`MAX_TOB_PRUNES_PER_GC`] always leaves a partially-drained
-/// epoch's surviving batches as a contiguous `0..m` prefix (in-epoch presig
-/// recovery walks batches from 0 and stops at the first hole; dead epochs no
-/// longer need that, but the discipline costs nothing).
+/// key-generation target first, then nonce batches DESCENDING by index,
+/// truncated at [`MAX_TOB_PRUNES_PER_GC`]. The sweep calls this once per page,
+/// so across pages targets come in the bag's hash order.
 ///
 /// Pure-data core, extracted for unit testing like
 /// [`find_spent_utxos_pending_cleanup`].
@@ -1346,5 +1427,146 @@ mod tests {
         ];
         let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
         assert!(targets.is_empty());
+    }
+
+    fn page(keys: Vec<TobKey>, next: Option<usize>) -> TobKeyPage {
+        TobKeyPage {
+            keys,
+            next_page_token: next.map(|index| bytes::Bytes::from(index.to_string())),
+        }
+    }
+
+    async fn sweep(
+        bag: &[TobKeyPage],
+        resume_token: Option<bytes::Bytes>,
+    ) -> (Vec<TobPruneTarget>, Option<bytes::Bytes>) {
+        collect_tob_prune_targets(
+            |token: Option<bytes::Bytes>| {
+                let index = token.map_or(0, |token| {
+                    std::str::from_utf8(&token).unwrap().parse().unwrap()
+                });
+                std::future::ready(anyhow::Ok(bag[index].clone()))
+            },
+            resume_token,
+            &epochs(&[0, 2, 10]),
+            10,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn capped_sweep_resumes_from_its_token() {
+        let bag = [
+            page((0..150).map(|i| nonce_key(1, i)).collect(), Some(1)),
+            page((150..250).map(|i| nonce_key(1, i)).collect(), Some(2)),
+            page((0..10).map(|i| nonce_key(3, i)).collect(), None),
+        ];
+        let (targets, token) = sweep(&bag, None).await;
+        assert_eq!(targets.len(), MAX_TOB_PRUNES_PER_GC);
+        assert_eq!(token, bag[1].next_page_token);
+        let (targets, token) = sweep(&bag, token).await;
+        assert_eq!(targets.len(), 10);
+        assert_eq!(token, None);
+    }
+
+    #[tokio::test]
+    async fn sweep_stops_at_its_page_budget() {
+        let pages = MAX_TOB_PRUNE_PAGES_PER_SWEEP + 2;
+        let bag: Vec<TobKeyPage> = (0..pages)
+            .map(|i| {
+                page(
+                    vec![nonce_key(10, i as u32)],
+                    (i + 1 < pages).then_some(i + 1),
+                )
+            })
+            .collect();
+        let (targets, token) = sweep(&bag, None).await;
+        assert!(targets.is_empty());
+        assert_eq!(
+            token,
+            bag[MAX_TOB_PRUNE_PAGES_PER_SWEEP - 1].next_page_token
+        );
+        let (_, token) = sweep(&bag, token).await;
+        assert_eq!(token, None);
+    }
+
+    #[tokio::test]
+    async fn failed_later_page_keeps_what_was_collected() {
+        let first = page(vec![nonce_key(1, 0)], Some(1));
+        let list_page = |token: Option<bytes::Bytes>| {
+            std::future::ready(match token {
+                None => anyhow::Ok(first.clone()),
+                Some(_) => Err(anyhow::anyhow!("unavailable")),
+            })
+        };
+        let (targets, token) = collect_tob_prune_targets(list_page, None, &epochs(&[0, 2, 10]), 10)
+            .await
+            .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(token, first.next_page_token);
+        assert!(
+            collect_tob_prune_targets(list_page, token, &epochs(&[0, 2, 10]), 10)
+                .await
+                .is_err()
+        );
+    }
+
+    fn swept(next_page_token: Option<&'static str>, found_destroyable: bool) -> TobPruneOutcome {
+        TobPruneOutcome {
+            next_page_token: next_page_token
+                .map(|token| bytes::Bytes::from_static(token.as_bytes())),
+            found_destroyable,
+        }
+    }
+
+    #[test]
+    fn pass_marks_the_epoch_it_started_under_drained() {
+        let mut schedule = TobPruneSchedule::default();
+        assert_eq!(schedule.begin(5, 1), None);
+        schedule.finish(&swept(Some("next"), false));
+        assert!(!schedule.is_due(5, 1));
+        assert!(schedule.is_due(6, 2));
+        assert_eq!(
+            schedule.begin(6, 2),
+            swept(Some("next"), false).next_page_token
+        );
+        schedule.finish(&swept(None, false));
+        assert!(!schedule.is_due(5, 3));
+        assert!(schedule.is_due(6, 3));
+    }
+
+    #[test]
+    fn pass_that_found_targets_is_not_drained() {
+        let mut schedule = TobPruneSchedule::default();
+        schedule.begin(5, 1);
+        schedule.finish(&swept(Some("next"), true));
+        schedule.begin(5, 2);
+        schedule.finish(&swept(None, false));
+        assert!(schedule.is_due(5, 3));
+        assert_eq!(schedule.begin(5, 3), None);
+        schedule.finish(&swept(None, false));
+        assert!(!schedule.is_due(5, 4));
+    }
+
+    #[test]
+    fn repeated_failures_start_the_pass_over() {
+        let next = swept(Some("next"), false).next_page_token;
+        let mut schedule = TobPruneSchedule::default();
+        schedule.begin(5, 1);
+        schedule.finish(&swept(Some("next"), false));
+        for turn in 2..4 {
+            assert_eq!(schedule.begin(5, turn), next);
+            schedule.fail();
+        }
+        assert_eq!(schedule.begin(5, 4), next);
+        schedule.finish(&swept(Some("next"), false));
+        for turn in 5..7 {
+            assert_eq!(schedule.begin(5, turn), next);
+            schedule.fail();
+        }
+        assert_eq!(schedule.begin(5, 7), next);
+        schedule.fail();
+        assert_eq!(schedule.begin(5, 8), None);
     }
 }
