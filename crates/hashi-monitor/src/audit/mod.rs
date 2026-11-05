@@ -16,7 +16,7 @@
 //!    At startup, catch up Sui, then the guardian, then Bitcoin. Retry a failed source
 //!    until it is current. Then remove the closed machines and save the snapshot.
 //!    Only then start the loop, so the loop does not start with a large unanswered backlog.
-//! 5. Check Bitcoin confirmations after both withdrawal approvals arrive.
+//! 5. Check Bitcoin confirmations from each withdrawal's Sui approval on.
 //!    Check that each fresh deposit approval names an unspent outpoint.
 //! 6. Every `MAINTENANCE_INTERVAL`, run one maintenance tick in this order:
 //!    1. Remove the closed machines and add their flows to the pool. Log the open flows.

@@ -10,7 +10,7 @@
 //! How it works:
 //! 1. Read Sui events and guardian logs into the flow machines.
 //! 2. Before the mint, check that each fresh deposit approval names an unspent outpoint.
-//! 3. Check Bitcoin confirmations after each withdrawal has both Sui and guardian approvals.
+//! 3. Check Bitcoin confirmations from each withdrawal's Sui approval on, also with no guardian log.
 //! 4. Find each source that is behind its limit. The auditor reports it as a `SourceStale` finding.
 //! 5. Leave pool updates and checks to the auditor scheduler.
 //! 6. At startup, catch up Sui, then the guardian, then Bitcoin. Retry a failed source with a

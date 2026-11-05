@@ -178,8 +178,8 @@ pub enum MonitorFinding {
     // E3: `BtcConfirmation`, the Bitcoin confirmation.
     // ========================================================================
     /// The monitor saw the successor of `event_type`, but `event_type` is
-    /// missing or more than its skew late. E2 is never missing, because the
-    /// monitor looks up E3 only after E2.
+    /// missing or more than its skew late. The monitor looks up E3 from E1,
+    /// so a Bitcoin spend with no guardian log gives a missing E2.
     WithdrawalUnapproved {
         wid: WithdrawalID,
         event_type: WithdrawalEventType,

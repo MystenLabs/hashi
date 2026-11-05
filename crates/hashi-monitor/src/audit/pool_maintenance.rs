@@ -138,7 +138,7 @@ impl Auditor {
                 e2_to_e3 = %human_timestamp_delta(e3.timestamp_secs, e2.timestamp_secs),
                 "withdrawal flow is complete"
             );
-            withdrawals.extend(sm.into_finished());
+            withdrawals.extend(sm.finished());
         }
         withdrawals
     }
