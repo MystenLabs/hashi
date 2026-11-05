@@ -36,7 +36,7 @@ answer: >-
 
 Genesis forms the initial Hashi committee and generates the shared Bitcoin master key through Distributed Key Generation (DKG).
 
-## Timeline
+## How does Hashi genesis work?
 
 ```
 Package Published → Validators Register → Launch (Admin) → DKG (Automatic) → End Reconfig → Presignatures → Operational
@@ -61,6 +61,8 @@ hashi register --config /path/to/validator.toml \
 # sign the printed base64 tx with the account key and broadcast; see Keys and Security for
 # the sui keytool sign / sui client execute-signed-tx commands
 ```
+
+To sign the printed transaction with your account key and broadcast it, use the `sui keytool sign` and `sui client execute-signed-tx` commands in [Keys and Security](keys.mdx).
 
 The registration transaction records your validator address and writes your endpoint URL, Ed25519 TLS public key, and operator address to the chain. Your node writes its BLS12-381 and ECIES encryption public keys when it starts ([Step 3: start the server](#step-3-start-the-server)); until then `hashi launch` lists you as missing next-epoch keys. [Committee](../committee.mdx#registration-information) explains how the protocol uses each of these fields, and [why the committee is not exactly the set of Sui validators](../committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators).
 
@@ -104,7 +106,7 @@ Once the launch transaction lands, every node submits `start_reconfig` and the f
 
 After DKG, validators exchange BLS signatures over the result. Once 2/3 of committee weight has signed, a node submits `end_reconfig` onchain and the committee generates presignatures. **No operator action needed**; monitor logs for `submitting end_reconfig`, `end_reconfig complete for epoch <N>`, and presignature generation.
 
-## Post-genesis verification
+## How to verify genesis
 
 ```bash
 hashi committee -c hashi-cli.toml list
@@ -117,7 +119,7 @@ curl -s http://localhost:9180/metrics | grep -E 'hashi_epoch|hashi_reconfig_in_p
 
 Expected after success: `hashi_epoch` > 0, `hashi_reconfig_in_progress` = 0, `hashi_presig_pool_remaining` > 0.
 
-## Joining after launch
+## How to join the committee after launch
 
 A validator that registers after the launch is not in the genesis committee. It joins at a later committee formation, which happens at each Sui epoch change (see [Epoch Changes](epoch-changes.mdx)). The steps are steps 2 and 3 above, and their order matters:
 
