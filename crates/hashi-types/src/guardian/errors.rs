@@ -47,7 +47,11 @@ pub enum GuardianError {
         heartbeat_age_secs: UnixSeconds,
         required_quiet_secs: UnixSeconds,
     },
-    RateLimitExceeded,
+    /// The withdrawal needs more sats than the limiter has at the request time.
+    RateLimitExceeded {
+        requested_sats: u64,
+        capacity_sats: u64,
+    },
     /// A service condition known to be temporary and safe for callers to retry.
     Unavailable(String),
 }
@@ -145,7 +149,7 @@ impl std::fmt::Display for GuardianError {
                  in {}s",
                 required_quiet_secs.saturating_sub(*heartbeat_age_secs)
             ),
-            GuardianError::RateLimitExceeded => write!(f, "Rate limit exceeded"),
+            GuardianError::RateLimitExceeded { .. } => write!(f, "Rate limit exceeded"),
             GuardianError::Unavailable(e) => write!(f, "Unavailable: {}", e),
         }
     }

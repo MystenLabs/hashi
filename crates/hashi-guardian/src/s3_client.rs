@@ -26,6 +26,7 @@ use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::UnixMillis;
 use serde::Serialize;
+use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
@@ -213,8 +214,6 @@ impl GuardianS3Client {
     ) -> GuardianResult<()> {
         let s3_client = &self.client;
 
-        info!("Logging to {}", key);
-
         let body = serde_json::to_vec(value).expect("Cant serialize to JSON");
 
         // `If-None-Match: *` makes retries safe: a lost-ack write that already
@@ -250,12 +249,7 @@ impl GuardianS3Client {
             info!("Object {} already contains the intended record", key);
         }
 
-        info!("Logged entry to immutable storage");
-        info!("Object locked until: {:?}", expiry_time);
-        info!(
-            "Public URL: https://{}.s3.amazonaws.com/{}",
-            self.bucket_info.name, key
-        );
+        debug!(key, ?expiry_time, "Wrote S3 log record");
 
         Ok(())
     }

@@ -15,6 +15,8 @@ use hashi_types::guardian::SignedLogEntry;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::Instant;
+use tracing::debug;
+use tracing::info;
 use tracing::warn;
 
 const MAX_S3_WRITE_ATTEMPTS: usize = 5;
@@ -74,8 +76,13 @@ impl LogWriter {
         let deadline = self.state.next_write_deadline();
 
         write_with_retries(s3, &record, deadline).await;
+        let key = record.object_key();
         if record.log_type() == LogType::Heartbeat {
             self.state.renew(write_started_at);
+            // Heartbeats run every minute. Keep them out of the default log level.
+            debug!(%key, "Wrote heartbeat log record");
+        } else {
+            info!(%key, log_type = ?record.log_type(), "Wrote log record");
         }
     }
 }

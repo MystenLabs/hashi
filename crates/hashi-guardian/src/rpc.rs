@@ -26,7 +26,7 @@ pub struct GuardianGrpc {
 }
 
 fn to_status(e: GuardianError) -> Status {
-    tracing::error!(error = ?e, "Guardian RPC failed");
+    log_failure(&e);
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         Unauthenticated(msg) => Status::unauthenticated(msg),
@@ -67,7 +67,7 @@ fn to_status(e: GuardianError) -> Status {
              {}s",
             required_quiet_secs.saturating_sub(heartbeat_age_secs)
         )),
-        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
+        RateLimitExceeded { .. } => Status::resource_exhausted("Rate limit exceeded"),
         S3Error(msg) => Status::internal(msg),
         InvalidS3Log(msg) => Status::internal(msg),
         InternalError(msg) => Status::internal(msg),
@@ -75,8 +75,30 @@ fn to_status(e: GuardianError) -> Status {
     }
 }
 
+/// Log a rejection that the caller or the lifecycle state causes at warn.
+/// Also log a temporary error at warn.
+/// Log a guardian fault at error. The RPC span gives the method name.
+fn log_failure(e: &GuardianError) {
+    match e {
+        InvalidInputs(_)
+        | Unauthenticated(_)
+        | BuildNotAllowlisted(_)
+        | BuildNotCurrent(_)
+        | LifecycleMismatch { .. }
+        | LimiterSequenceMismatch { .. }
+        | CurrentSessionHeartbeatNotLive { .. }
+        | PriorSessionHeartbeatStillRecent { .. }
+        | RateLimitExceeded { .. }
+        | Unavailable(_) => tracing::warn!(error = ?e, "Guardian RPC rejected"),
+        S3Error(_) | InvalidS3Log(_) | InternalError(_) => {
+            tracing::error!(error = ?e, "Guardian RPC failed")
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl proto::guardian_service_server::GuardianService for GuardianGrpc {
+    #[tracing::instrument(skip_all)]
     async fn get_guardian_info(
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
@@ -88,6 +110,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp_pb))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn get_attested_guardian_info(
         &self,
         _request: Request<proto::GetAttestedGuardianInfoRequest>,
@@ -102,6 +125,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         ))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn setup_new_key(
         &self,
         request: Request<proto::SetupNewKeyRequest>,
@@ -119,6 +143,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn confirm_ceremony(
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
@@ -136,6 +161,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         ))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn rotate_kp_set(
         &self,
         request: Request<proto::BatchProvisionerRotateKpSetRequest>,
@@ -155,6 +181,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     }
 
     // operator_init is available in both ceremony and withdraw modes.
+    #[tracing::instrument(skip_all)]
     async fn operator_init(
         &self,
         request: Request<proto::OperatorInitRequest>,
@@ -169,6 +196,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(proto::OperatorInitResponse {}))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn provisioner_init(
         &self,
         request: Request<proto::BatchProvisionerInitRequest>,
@@ -183,6 +211,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(proto::ProvisionerInitResponse {}))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn provisioner_rotate_cert(
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
@@ -200,6 +229,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         ))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn operator_activate(
         &self,
         request: Request<proto::OperatorActivateRequest>,
@@ -215,6 +245,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(proto::OperatorActivateResponse {}))
     }
 
+    #[tracing::instrument(skip_all, fields(wid = tracing::field::Empty))]
     async fn standard_withdrawal(
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
@@ -235,6 +266,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp_pb))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn update_committee(
         &self,
         request: Request<proto::SignedCommitteeTransition>,
@@ -252,6 +284,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         }))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn update_committee_chain(
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,

@@ -14,6 +14,7 @@ use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalLogMessage;
+use tracing::debug;
 use tracing::info;
 
 const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
@@ -30,19 +31,21 @@ pub async fn standard_withdrawal(
     let signed_request =
         HashiSigned::<StandardWithdrawalRequest>::validate_addr(signed_request, network)?;
     let wid = *signed_request.message().wid();
+    // Add the wid to the RPC span, so each later log line carries it.
+    tracing::Span::current().record("wid", tracing::field::display(wid));
     // 0) Validation
     enclave.require_fully_initialized()?;
 
     // 1) Verify certificate
     let committee = enclave.state.get_committee()?;
 
-    info!("Verifying request certificate.");
+    debug!("Verifying request certificate.");
     verify_hashi_cert(
         enclave.config.hashi_object_id()?,
         committee,
         &signed_request,
     )?;
-    info!("Request certificate verified.");
+    debug!("Request certificate verified.");
 
     let (request_sign, request) = signed_request.into_parts();
 
@@ -50,20 +53,20 @@ pub async fn standard_withdrawal(
     //    exclusive until it is durably logged or the enclave aborts.
     validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
-    info!("Checking rate limits.");
+    debug!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
     // Miner fee leaves the pool too, so it must consume the limit;
     // change flows back, so it must not.
     let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
-    let post_state = enclave.state.consume_from_limiter(
-        request.seq(),
-        request.timestamp_secs(),
-        consumed_amount_sats,
-    )?;
-    info!("Rate limit check passed.");
+    let seq = request.seq();
+    let post_state =
+        enclave
+            .state
+            .consume_from_limiter(seq, request.timestamp_secs(), consumed_amount_sats)?;
+    debug!("Rate limit check passed.");
 
     // 3) Sign tx (while holding the control lock)
-    info!("Generating BTC signatures.");
+    debug!("Generating BTC signatures.");
     let (txid, signatures) = enclave
         .config
         .btc_sign(request.utxos())
@@ -71,10 +74,10 @@ pub async fn standard_withdrawal(
     let response = StandardWithdrawalResponse {
         enclave_signatures: signatures,
     };
-    info!("BTC signatures generated.");
+    debug!("BTC signatures generated.");
 
     // 4) Log while holding the control lock, before returning signatures.
-    info!("Withdrawal {} processed successfully. Logging to S3.", wid);
+    debug!("Withdrawal signed. Logging to S3.");
     let msg = WithdrawalLogMessage {
         txid,
         request_data: StandardWithdrawalRequestWire::from(request),
@@ -86,7 +89,13 @@ pub async fn standard_withdrawal(
         .log_withdraw(msg)
         .await
         .expect("S3 logger must be initialized to log a withdrawal");
-    info!("Withdrawal {} logged.", wid);
+    info!(
+        %txid,
+        seq,
+        consumed_sats = consumed_amount_sats,
+        tokens_available = post_state.num_tokens_available,
+        "Withdrawal signed and logged"
+    );
     Ok(enclave.sign(response))
 }
 
@@ -300,7 +309,7 @@ mod tests {
         let second = standard_withdrawal(&mut enclave, wire(req2)).await;
         assert!(matches!(
             second.unwrap_err(),
-            GuardianError::RateLimitExceeded
+            GuardianError::RateLimitExceeded { .. }
         ));
 
         let captured = captures.lock().unwrap();

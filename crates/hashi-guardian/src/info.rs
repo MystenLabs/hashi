@@ -6,17 +6,17 @@
 use crate::attestation::get_attestation;
 use crate::Enclave;
 use hashi_types::guardian::*;
-use tracing::info;
+use tracing::debug;
 
 /// Return self-reported guardian info without signing or attesting it.
 pub fn get_guardian_info(enclave: &Enclave) -> GuardianResponse<GuardianInfo> {
-    info!("/get_guardian_info - Received request");
+    debug!("/get_guardian_info - Received request");
     GuardianResponse::new(enclave.info(), now_timestamp_ms())
 }
 
 /// Return signed guardian info with a fresh attestation of its signing key.
 pub fn get_attested_guardian_info(enclave: &Enclave) -> GuardianResult<AttestedGuardianInfo> {
-    info!("/get_attested_guardian_info - Received request");
+    debug!("/get_attested_guardian_info - Received request");
     let signing_pub_key = enclave.config.signing_pubkey();
     let attestation = get_attestation(&signing_pub_key)?;
     Ok(AttestedGuardianInfo::new(
