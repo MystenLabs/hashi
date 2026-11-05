@@ -1824,8 +1824,13 @@ impl MpcManager {
                     .dealer_outputs
                     .contains_key(&DealerOutputsKey::Dkg(dealer))
                 {
-                    tracing::warn!("No dealer output for {:?} after processing", dealer);
-                    continue;
+                    // Processing a certified dealer either stores an output, directly or via
+                    // complaint recovery, or returns an error above, so a missing output is a
+                    // bug. Skipping the dealer could make the parties disagree on the set of
+                    // dealers.
+                    return Err(MpcError::ProtocolFailed(format!(
+                        "No dealer output for certified dealer {dealer:?} after processing"
+                    )));
                 }
                 match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
                     mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
