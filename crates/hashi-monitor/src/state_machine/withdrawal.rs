@@ -772,7 +772,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(stuck.is_essential());
+        assert!(!stuck.is_essential());
         let mut approved = approved;
         let late_e2 = approved.add_event(event(E2GuardianApproved, 7, 201, 7), &timing);
         assert!(matches!(
@@ -783,7 +783,6 @@ mod tests {
                 ..
             }]
         ));
-        // The late event came, so the withdrawal finished.
         assert!(!late_e2[0].is_essential());
     }
 

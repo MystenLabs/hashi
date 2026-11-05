@@ -18,6 +18,12 @@ use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::move_types::OutputUtxo;
 use hashi_types::move_types::Utxo;
 use hashi_types::move_types::UtxoId;
+use std::io::BufRead as _;
+use std::io::BufReader;
+use std::io::Read as _;
+use std::io::Write as _;
+use std::net::TcpListener;
+use std::thread::JoinHandle;
 
 use hashi_types::guardian::time::UnixSeconds;
 use sui_sdk_types::Address;
@@ -143,4 +149,53 @@ pub fn unapproved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
 /// The UTXO of `btc`, as an approved deposit.
 pub fn approved(btc: BtcConfirmedDeposit) -> FinishedDeposit {
     FinishedDeposit::new(btc, UtxoOrigin::Deposit)
+}
+
+/// Read one HTTP request on `listener`, then answer it with `response`.
+pub fn respond(listener: &TcpListener, response: &str) {
+    let (stream, _) = listener.accept().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut content_length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        let line = line.to_ascii_lowercase();
+        if let Some(value) = line.strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap();
+        }
+    }
+    reader.read_exact(&mut vec![0; content_length]).unwrap();
+    reader.into_inner().write_all(response.as_bytes()).unwrap();
+}
+
+/// A Bitcoin RPC URL. A thread answers the next requests on it, in order,
+/// with HTTP 200 and each JSON body of `bodies`.
+pub fn btc_rpc_answering(bodies: Vec<String>) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for body in bodies {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            respond(&listener, &response);
+        }
+    });
+    (url, server)
+}
+
+/// The answers of a synced regtest node with a `txindex` to the checks
+/// before a first lookup: `getblockchaininfo`, then `getindexinfo`.
+pub fn synced_btc_node_answers() -> Vec<String> {
+    let now = hashi_types::guardian::time::now_timestamp_secs();
+    vec![
+        format!(
+            r#"{{"result":{{"chain":"regtest","blocks":100,"headers":100,"time":{now},"initialblockdownload":false}},"error":null,"id":"hashi-monitor"}}"#
+        ),
+        r#"{"result":{"txindex":{"synced":true,"best_block_height":100}},"error":null,"id":"hashi-monitor"}"#.to_string(),
+    ]
 }

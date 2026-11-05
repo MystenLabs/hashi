@@ -132,6 +132,13 @@ pub enum WithdrawalInvalidReason {
         held: MonitorWithdrawalEvent,
         new: MonitorWithdrawalEvent,
     },
+    /// The withdrawal lists `outpoint` as an input, and the pending
+    /// withdrawal `other` lists it too. Move locks an input to one
+    /// withdrawal, so one of the two has no Hashi approval.
+    InputClaimed {
+        outpoint: OutPoint,
+        other: WithdrawalID,
+    },
 }
 
 /// What a new withdrawal event disagrees on. The monitor checks in this order.
@@ -372,13 +379,9 @@ impl MonitorFinding {
             Self::DepositNotApproved { .. } => false,
             // A bad guardian clock or a slow S3 write. The checks still run.
             Self::GuardianClockSkew { .. } => false,
-            // The monitor reports a missing E2 or E3 at each tick until the event
-            // comes. A late event is reported once, when it comes. A leaked guardian
-            // key lets a signature skip the guardian's log and limits, or, with the
-            // committee key, steal an approved input. Both leave E2 or E3 missing for
-            // good, and no other finding reports them. A late event did come, so it
-            // pages only in strict mode.
-            Self::WithdrawalStuck { timing, .. } => matches!(timing, EventTiming::Missing { .. }),
+            // A user waits for Bitcoin. A spend with no guardian log is a
+            // `WithdrawalUnapproved`, and a theft of an input is a `UtxoUnexpectedSpend`.
+            Self::WithdrawalStuck { .. } => false,
             Self::WithdrawalUnapproved { .. }
             | Self::WithdrawalInvalid { .. }
             | Self::DepositUnbacked { .. }
@@ -568,6 +571,9 @@ impl fmt::Display for WithdrawalInvalidReason {
                 MonitorEvent::Withdrawal(new.clone()),
                 new.tx,
             ),
+            Self::InputClaimed { outpoint, other } => {
+                write!(f, "InputClaimed(outpoint={outpoint}, other_wid={other})")
+            }
         }
     }
 }

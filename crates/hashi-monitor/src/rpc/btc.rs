@@ -122,8 +122,8 @@ pub enum OutpointState {
     /// The transaction is unknown or not confirmed deep enough, or it has no
     /// output at that vout.
     Missing,
-    /// The output exists, and a confirmed transaction has spent it. With
-    /// `include_mempool`, a mempool transaction also counts.
+    /// The output exists, and a transaction in a block, at any depth, has
+    /// spent it. With `include_mempool`, a mempool transaction also counts.
     Spent,
     /// The output exists and is in the UTXO set. Without `include_mempool`,
     /// a mempool spend does not change this.
@@ -400,6 +400,25 @@ impl BtcRpcClient {
         Ok(result)
     }
 
+    /// The txids that are in a block, at any depth. The confirmation cache
+    /// holds answers at the threshold depth, so this lookup does not use it.
+    pub fn lookup_mined(&self, txids: &[Txid]) -> anyhow::Result<HashSet<Txid>> {
+        let mut mined = HashSet::new();
+        if txids.is_empty() {
+            return Ok(mined);
+        }
+        // A node that is not synced answers "not found" for a mined transaction.
+        self.synced_height()?;
+        for batch in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
+            for (txid, transaction) in self.transport.mined_batch(batch)? {
+                if transaction.is_some() {
+                    mined.insert(txid);
+                }
+            }
+        }
+        Ok(mined)
+    }
+
     /// The state of each outpoint on Bitcoin. The transactions are fetched
     /// fresh, and the confirmation cache is not touched. `include_mempool`
     /// also counts a spend in the mempool.
@@ -606,11 +625,8 @@ impl HttpJsonRpcTransport {
         outcome
     }
 
-    fn lookup_confirmation_batch(
-        &self,
-        txids: &[Txid],
-        tip_height: u64,
-    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
+    /// Each txid with its transaction if it is in a block, at any depth.
+    fn mined_batch(&self, txids: &[Txid]) -> anyhow::Result<HashMap<Txid, Option<MinedTx>>> {
         let requests = txids
             .iter()
             .enumerate()
@@ -659,7 +675,15 @@ impl HttpJsonRpcTransport {
             seen.len(),
             txids.len()
         );
+        Ok(mined)
+    }
 
+    fn lookup_confirmation_batch(
+        &self,
+        txids: &[Txid],
+        tip_height: u64,
+    ) -> anyhow::Result<HashMap<Txid, Option<BtcConfirmation>>> {
+        let mined = self.mined_batch(txids)?;
         let mined_block_hashes = mined
             .values()
             .flatten()
@@ -915,10 +939,6 @@ fn response_index(response: &JsonRpcEnvelope, batch_len: usize) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::io::BufRead as _;
-    use std::io::BufReader;
-    use std::io::Read as _;
-    use std::io::Write as _;
     use std::net::TcpListener;
     use std::sync::Once;
 
@@ -943,6 +963,7 @@ mod tests {
     use super::ensure_txindex;
     use crate::config::BtcConfig;
     use crate::config::Config;
+    use crate::test_utils::respond;
     use crate::test_utils::txid;
 
     static TRACING_INIT: Once = Once::new();
@@ -1143,26 +1164,6 @@ mod tests {
         assert_eq!(lookup(false)?, OutpointState::Spent);
 
         Ok(())
-    }
-
-    /// Accept one connection, read its request, and answer `response`.
-    fn respond(listener: &TcpListener, response: &str) {
-        let (stream, _) = listener.accept().unwrap();
-        let mut reader = BufReader::new(stream);
-        let mut content_length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
-            }
-            let line = line.to_ascii_lowercase();
-            if let Some(value) = line.strip_prefix("content-length:") {
-                content_length = value.trim().parse().unwrap();
-            }
-        }
-        reader.read_exact(&mut vec![0; content_length]).unwrap();
-        reader.into_inner().write_all(response.as_bytes()).unwrap();
     }
 
     #[test]
