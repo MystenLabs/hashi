@@ -575,6 +575,7 @@ mod tests {
     use bitcoin::Amount;
     use bitcoin::ScriptBuf;
     use bitcoin::TxOut;
+    use hashi_types::guardian::SessionID;
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -863,26 +864,27 @@ mod tests {
         }
     }
 
-    /// A late deposit and a stale snapshot, reported in `mode`. Returns the
-    /// kinds that set the finding metric.
+    /// A guardian clock skew and a stale snapshot, reported in `mode`.
+    /// Returns the kinds that set the finding metric.
     fn alerted_kinds(mode: AlertMode) -> Vec<&'static str> {
         let mut cfg = Config::for_tests();
         cfg.alert_mode = mode;
         let metrics = Arc::new(MonitorMetrics::new());
         let auditor = auditor_with(&cfg, metrics.clone());
-        let late = MonitorFinding::DepositLate {
-            sui: approval_of(&deposit_request(), 200),
-            deadline: 300,
-            block_time: 400,
+        let skew = MonitorFinding::GuardianClockSkew {
+            session_id: SessionID::from("session"),
+            object_key: "log".to_string(),
+            logged_at_ms: 0,
+            stored_at_ms: 60_000,
         };
         let stale = MonitorFinding::SnapshotStale {
             last_saved: 0,
             limit_secs: 3_600,
         };
-        auditor.report_findings("test", &[late, stale]);
+        auditor.report_findings("test", &[skew, stale]);
 
         let rendered = metrics.render();
-        ["DepositLate", "SnapshotStale"]
+        ["GuardianClockSkew", "SnapshotStale"]
             .into_iter()
             .filter(|kind| rendered.contains(&format!("kind=\"{kind}\"")))
             .collect()
@@ -892,13 +894,13 @@ mod tests {
     async fn only_essential_findings_alert_in_essential_mode() {
         assert_eq!(
             alerted_kinds(AlertMode::Strict),
-            vec!["DepositLate", "SnapshotStale"]
+            vec!["GuardianClockSkew", "SnapshotStale"]
         );
         assert_eq!(alerted_kinds(AlertMode::Essential), vec!["SnapshotStale"]);
     }
 
     #[test]
-    fn late_and_unapproved_deposits_are_not_essential() {
+    fn a_late_deposit_is_essential_and_an_unapproved_one_is_not() {
         let sui = approval_of(&deposit_request(), 200);
         let not_approved = MonitorFinding::DepositNotApproved {
             outpoint: sui.deposit_id.into(),
@@ -914,7 +916,7 @@ mod tests {
             block_time: 400,
         };
 
-        assert!(!late.is_essential());
+        assert!(late.is_essential());
         assert!(!not_approved.is_essential());
         assert!(MonitorFinding::DepositUnbacked { sui }.is_essential());
     }

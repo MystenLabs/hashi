@@ -10,8 +10,11 @@
 //! Assumptions:
 //! - Every finding needs an operator action. A condition that needs no
 //!   action is not a finding.
-//! - Every operator must act on an essential finding. The other findings
-//!   show no loss of Bitcoin backing. `AlertMode` decides if they alert.
+//! - Every operator must act on an essential finding. It shows a loss of
+//!   Bitcoin backing, a broken protocol rule, or a check that cannot run.
+//!   An event that comes before the event it depends on breaks a rule.
+//! - Only the Hashi team can act on the other findings. They show a delay or
+//!   a fault that moves no Bitcoin. `AlertMode` decides if they alert.
 //! - `BtcRpcInconsistency` means a Bitcoin RPC answer contradicts one the
 //!   monitor already holds. The bridge cannot cause it. The inner enum names
 //!   the contradiction.
@@ -216,8 +219,8 @@ pub enum MonitorFinding {
     /// E3 and E2 found, but the E2 block is later than E3 plus the skew.
     ///
     /// Hashi approved a deposit whose block is later than `deadline`, the
-    /// approval plus the skew. Either Hashi approved before Bitcoin
-    /// confirmed, or a miner dated the block past the skew.
+    /// approval plus the skew. The skew covers a block that a miner dates
+    /// ahead, so Hashi approved before Bitcoin confirmed the payment.
     DepositLate {
         sui: SuiDepositApprovedEvent,
         deadline: UnixSeconds,
@@ -362,13 +365,9 @@ impl MonitorFinding {
         })
     }
 
-    /// Whether every operator must act on the finding. The other findings
-    /// show no loss of Bitcoin backing.
+    /// Whether every operator must act on the finding. See the module doc.
     pub fn is_essential(&self) -> bool {
         match self {
-            // Hashi approved before Bitcoin confirmed, or a miner dated the
-            // block late. The payment came, so Bitcoin now backs the hBTC.
-            Self::DepositLate { .. } => false,
             // No hBTC was minted. A user waits for it.
             Self::DepositNotApproved { .. } => false,
             // A bad guardian clock or a slow S3 write. The checks still run.
@@ -384,6 +383,7 @@ impl MonitorFinding {
             | Self::WithdrawalInvalid { .. }
             | Self::DepositUnbacked { .. }
             | Self::DepositMismatch { .. }
+            | Self::DepositLate { .. }
             | Self::BtcRpcInconsistency(_)
             | Self::UtxoTooOld { .. }
             | Self::UtxoUnexpectedSpend { .. }
