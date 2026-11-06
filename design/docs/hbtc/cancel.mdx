@@ -40,10 +40,10 @@ answer: >-
   hBTC to your Sui address.
 ---
 
-A withdrawal request waits in a queue before Hashi commits it to a Bitcoin
-transaction. While it waits, you can cancel it and get your `hBTC` back. This
-page explains when a cancellation succeeds and how to submit one with the
-Hashi CLI or the TypeScript SDK.
+A [withdrawal request](withdraw.mdx) waits in a queue before Hashi commits it
+to a Bitcoin transaction. While it waits, you can cancel it and get your `hBTC`
+back. A cancellation succeeds only when 3 conditions hold, and you submit it
+with the [Hashi CLI](../reference/cli.mdx) or the TypeScript SDK.
 
 ## When you can cancel
 
@@ -53,8 +53,9 @@ The onchain contract enforces 3 conditions. All of them must hold:
   can cancel it.
 - **Hashi has not committed it yet:** The request must still be in the
   Requested or Approved state. After the committee commits the request to a
-  Bitcoin transaction, Hashi burns the `hBTC` and the withdrawal completes on
-  Bitcoin. You cannot cancel it.
+  Bitcoin transaction, Hashi burns the `hBTC` at that point, not when Bitcoin
+  confirms the transaction, and the withdrawal then completes on Bitcoin. You
+  cannot cancel it.
 - **The cooldown has passed:** At least
   [`withdrawal_cancellation_cooldown_ms`](../config.mdx#withdrawal_cancellation_cooldown_ms)
   must have elapsed since you submitted the request. The cooldown stops rapid
@@ -94,8 +95,11 @@ await client.hashi.cancelWithdrawal({ signer, requestId });
 ```
 
 The SDK does not check the 3 conditions before signing. If any of them fails,
-the Sui transaction aborts and your `hBTC` stays locked in the request until
-the condition holds or the withdrawal completes.
+the Sui transaction aborts and your `hBTC` stays locked in the request. A
+transaction from a different Sui address always aborts, because only the
+address that submitted the request can cancel it. If the cooldown has not
+passed, you can try again after it passes, as long as Hashi has not committed
+the request.
 
 ## After you cancel
 
