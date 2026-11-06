@@ -63,9 +63,9 @@ account. To set up screening:
 
 The node config accepts the following TRM settings:
 
-- `trm-api-key`: This key holds your TRM Labs API key. Without a key, the node does not screen.
-- `trm-verdict-reuse-ms`: The node reuses TRM's answer for the same set of addresses for this period instead of asking TRM again. The default is 5 minutes, and the maximum is 1 hour.
-- `trm-per-caller-burst` and `trm-per-caller-refill-per-sec`: These keys limit the number of TRM calls that each committee member, and the node itself, can spend at a node.
+- `trm-api-key`: This key holds your TRM Labs API key.
+- `trm-verdict-reuse-ms`: The node reuses TRM's answer for the same set of addresses for this period instead of asking TRM again. The default is 5 minutes, `0` turns off reuse, and the maximum is 1 hour.
+- `trm-per-caller-burst` and `trm-per-caller-refill-per-sec`: These keys limit the number of TRM calls that each committee member, and the node itself, can spend at a node. The burst defaults to 200, which is also the minimum, and the refill defaults to 1 call per second.
 
 Without a key, the node does not screen. TRM only covers Mainnet, so the node
 ignores the key on other networks.
@@ -135,6 +135,6 @@ deposit that the current committee would have rejected. In either case, after
 Hashi accepts a UTXO into its pool, the protocol treats it as its own, and
 it must be available during coin selection to process withdraw requests.
 
-## What happens when the TRM API key is invalid
+## What happens when the TRM API key is invalid?
 
-An invalid or unauthorized API key does not let requests through, and it does not mark addresses as sanctioned. When TRM answers with `401 Unauthorized`, the node treats the failure as transient. It logs a warning such as `TRM is unavailable to screen deposit` or `TRM is unavailable to screen withdrawal request` and does not vote. The leader retries a deposit on the next Bitcoin block, so the node keeps abstaining until you fix the key. To find a misconfigured key, search the node logs for `TRM returned 401 Unauthorized`.
+An invalid or unauthorized API key does not let requests through, and it does not mark addresses as sanctioned. When TRM answers with `401 Unauthorized` or `403 Forbidden`, the node treats the failure as transient. It logs a warning such as `TRM is unavailable to screen deposit` or `TRM is unavailable to screen withdrawal request` and does not vote. The leader retries a deposit on the next Bitcoin block, so the node keeps abstaining until you fix the key. To find a misconfigured key, search the node logs for `TRM returned 401 Unauthorized`.

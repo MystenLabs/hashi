@@ -84,8 +84,8 @@ active committee keeps its pinned copy.
 ## `Upgrade`
 
 Authorizes a package upgrade and records whether it is exclusive. An exclusive
-upgrade disables all previous versions in the same step that commits the new
-package, so no previous version stays callable alongside the new one. A
+upgrade disables all previous versions in the same transaction that commits the
+new package, so no previous version stays callable alongside the new one. A
 non-exclusive upgrade deliberately leaves them callable. Every
 upgrade must make this classification explicitly. See
 [Move Package Upgrades](move-upgrades.mdx) for the decision criteria and
@@ -184,10 +184,10 @@ off the replacement that would otherwise follow is an `UpdateConfig` setting
 [`reconfig_hold`](config.mdx#reconfig_hold), passed by the committee that is
 still in service.
 
-## Choose the `AddConfig` target store
+## How do you choose the `AddConfig` target store?
 
-The boolean `epoch` field of the `AddConfig` proposal selects the target store: `true` targets the epoch config, and `false` targets the instant config. Every committee formed after execution carries a copy of keys added to the epoch config, and nodes read them from the committee's pinned snapshot, so they change only at epoch boundaries. Nodes read keys added to the instant config live from the `Hashi` object. A proposal must contain at least one entry (`ENoEntriesProvided`). In the CLI, set the `epoch` flag to add the key to the epoch config instead of the instant config, and prefix the value with its type, for example `u64:123` or `bool:true`.
+The boolean `epoch` field of the `AddConfig` proposal selects the target store: `true` targets the epoch config, and `false` targets the instant config. Every committee formed after execution carries a copy of keys added to the epoch config, and nodes read them from the committee's pinned snapshot, so they change only at epoch boundaries. Nodes read keys added to the instant config live from the `Hashi` object. A proposal must contain at least one entry (`ENoEntriesProvided`). In `hashi proposal create add-config`, pass `--epoch` to add the key to the epoch config instead of the instant config, and prefix the value with its type, for example `u64:123` or `bool:true`.
 
-## Who can vote on an open proposal
+## Who can vote on an open proposal?
 
-Voting eligibility depends on the committee in office when a member casts the vote, not on the committee that existed when the proposal was created. A validator seated at a reconfiguration after the proposal was created can vote on it, and its vote counts toward quorum when the proposal executes. A validator that is registered but not seated in the current committee cannot vote (`ENotCommitteeMember`).
+Voting eligibility depends on the committee in office when a member casts the vote, not on the committee in office when someone created the proposal. A validator seated at a reconfiguration after the proposal's creation can vote on it, and its vote counts toward quorum when the proposal executes. A registered validator that is not seated in the current committee, whether rotated out or not yet seated, cannot vote (`ENotCommitteeMember`).
