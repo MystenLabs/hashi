@@ -119,7 +119,10 @@ complete example.
   session that writes a log must match it. Keep a replaced build in
   `prev_builds` until the guardian cursor, logged at each guardian poll, passes
   its last log. A first run from genesis needs every build.
-- `sui.rpc_url` and `sui.package_id` name the Sui node and the Hashi package.
+- `sui.rpc_url` names the Sui node. `sui.hashi_package_id` names the original Hashi
+  package and defaults to `HASHI_MAINNET_PACKAGE_ID`. `sui.hashi_object_id`
+  names the Hashi object used for pause transactions and defaults to
+  `HASHI_MAINNET_OBJECT_ID`. Set both IDs for other deployments.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
   hosted providers.
 - `alert_mode` is optional. It picks the findings that alert: `strict`, the
@@ -135,6 +138,14 @@ The monitor reads Hashi's Bitcoin confirmation threshold and deposit time
 delay once, at startup. Restart the monitor after a governance change of
 either value. Until the restart, the monitor uses the old values and can
 report false findings.
+
+## Pausing the bridge
+
+`pause_operator_key_paths` specifies the operator key files the monitor uses to
+sign the governance transactions that pause the bridge.
+
+`hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,
+then confirms the on-chain paused flag. An already-paused bridge is a no-op.
 
 ## Alerting
 

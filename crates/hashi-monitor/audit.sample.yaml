@@ -39,7 +39,10 @@ deployment:
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
-  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # IDs default to mainnet; set both for other deployments.
+  # The package ID is the original package that defines Hashi's types.
+  hashi_package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
   # Cargo sets CARGO_PKG_NAME for the tests that parse this file; a deployment
@@ -54,3 +57,8 @@ btc:
 # `essential` alerts only on the findings that every operator must act on.
 # The other findings are then WARN log lines. The README lists both groups.
 # alert_mode: strict
+
+# Funded operators with enough combined voting weight to pause the bridge.
+# Defaults to an empty list.
+# pause_operator_key_paths:
+#   - "/path/to/operator.key"
