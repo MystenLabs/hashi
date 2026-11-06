@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use hashi_types::guardian::DeploymentConfig;
@@ -48,6 +49,10 @@ pub struct Config {
     /// The findings that alert. Omit for `strict`, where every finding alerts.
     #[serde(default)]
     pub alert_mode: AlertMode,
+    /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
+    /// Keys are loaded only on explicit pause invocation.
+    #[serde(default)]
+    pub pause_operator_key_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -57,8 +62,24 @@ pub struct SuiConfig {
     pub rpc_url: String,
 
     /// Original Hashi package: the event and object types the monitor reads keep
-    /// its address across upgrades.
-    pub package_id: String,
+    /// its address across upgrades. Omit to use the published mainnet package.
+    pub hashi_package_id: Option<sui_sdk_types::Address>,
+
+    /// Hashi shared object used for pause transactions.
+    /// Omit to use the published mainnet Hashi object.
+    pub hashi_object_id: Option<sui_sdk_types::Address>,
+}
+
+impl SuiConfig {
+    pub fn hashi_package_id(&self) -> sui_sdk_types::Address {
+        self.hashi_package_id
+            .unwrap_or(hashi::constants::HASHI_MAINNET_PACKAGE_ID)
+    }
+
+    pub fn hashi_object_id(&self) -> sui_sdk_types::Address {
+        self.hashi_object_id
+            .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,13 +169,15 @@ impl Config {
             }),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
-                package_id: format!("0x{}", "11".repeat(32)),
+                hashi_package_id: Some(sui_sdk_types::Address::new([0x11; 32])),
+                hashi_object_id: None,
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
                 http_headers: BTreeMap::new(),
             },
             alert_mode: AlertMode::Strict,
+            pause_operator_key_paths: vec![],
         }
     }
 }

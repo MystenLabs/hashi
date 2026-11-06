@@ -3661,6 +3661,7 @@ dependencies = [
  "clap",
  "e2e-tests",
  "futures",
+ "hashi",
  "hashi-guardian",
  "hashi-types",
  "hex",

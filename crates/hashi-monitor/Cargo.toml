@@ -9,6 +9,7 @@ axum.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
 futures.workspace = true
+hashi = { path = "../hashi" }
 hashi-types = { path = "../hashi-types" }
 # The guardian's S3 log reader, its S3 credential resolution and its log
 # clock-skew bound.
