@@ -82,6 +82,12 @@ Deposits are free and withdrawals pay only the Bitcoin miner fee. There is no
 protocol fee. See [User Flows](user-flows.mdx) for the end-to-end picture and
 [Fees](fees.mdx) for the numbers.
 
+The `hashi` CLI provides commands for each step:
+
+- **Deposit:** Deposits BTC into the Hashi bridge. You send BTC to a 2-of-2 taproot deposit address that Hashi derives from the MPC public key and the guardian BTC public key.
+- **Withdraw:** Withdraws BTC from the Hashi bridge.
+- **Balance:** Checks the hBTC balance of a Sui address and reports it in satoshis and BTC.
+
 ## What is hBTC?
 
 `hBTC` is a fungible `Coin<BTC>` on Sui that Hashi mints on deposit and burns
