@@ -108,6 +108,28 @@ The main components are:
 - **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
   key state used by nodes and initialization tooling.
 
+## RPC summary
+
+The guardian proxy serves gRPC endpoints, plus the public HTTP `/info` view.
+Operator RPCs reach the enclave directly. The following table maps each RPC in
+the flows to its caller, the endpoint that serves it, and the inputs that the
+sequence diagrams show:
+
+| **RPC** | **Caller** | **Served by** | **Inputs shown in the flows** |
+|---|---|---|---|
+| `OperatorInit` | Operator | Guardian enclave, directly | Ceremony mode: deployment config and S3 credentials. Withdraw mode: S3 credentials, `InitConfig`, and optional `GenesisState` |
+| `SetupNewKey` | Operator | Guardian enclave, directly | KP attested bundles, n, and t |
+| `OperatorActivate` | Operator | Guardian enclave, directly | `expected_state_hash` |
+| `ConfirmCeremony` | KPs | Public proxy (`guardian_url`) | Proposed ceremony digest |
+| `GetGuardianInfo` | MPC nodes and public clients | Public proxy (`guardian_url`) and node proxy (`guardian_node_url`) | None shown |
+| `GetAttestedGuardianInfo` | KPs and operators | Public proxy (`guardian_url`) | None shown |
+| `GetProvisioningTargetInfo` | KPs | Public proxy (`guardian_url`), forwarded to the provisioning guardian | None shown |
+| `SingleProvisionerInit` | KPs | Public proxy (`guardian_url`) share relay | Signed submission |
+| `ProvisionerInit` | Guardian proxy | Standby guardian enclave | T signed submissions |
+| `ProvisionerRotateCert` | KPs | Public proxy (`guardian_url`) | Not shown |
+| `StandardWithdrawal` | MPC nodes | Node proxy (`guardian_node_url`) | `cert`, `wid`, `utxos`, `seq`, and `timestamp` |
+| `UpdateCommitteeChain` | MPC nodes | Node proxy (`guardian_node_url`) | Signed handoffs |
+
 ## Ceremony mode flow
 
 Before the ceremony, each KP provides its public OpenPGP certificate, fingerprint
