@@ -61,7 +61,9 @@ holds the signing key, and the key moves to each new committee as the Sui
 validator set changes.
 
 A second, independent signer called the Guardian co-signs every withdrawal
-from inside a cloud enclave. Every deposit address requires both the committee
+from inside a cloud enclave. A cloud enclave is a cloud-hosted trusted
+execution environment that isolates the code running inside it from the rest
+of the machine. Every deposit address requires both the committee
 and the Guardian to spend it, so a compromised committee cannot move funds on
 its own. See [Guardian](guardian.mdx) and
 [Bitcoin Address Scheme](address-scheme.mdx) for the details.
