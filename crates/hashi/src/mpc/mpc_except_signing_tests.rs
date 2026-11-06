@@ -12653,6 +12653,127 @@ fn test_handle_complain_request_rotation_caches_response() {
 }
 
 #[test]
+fn a_rotation_complaint_decodes_only_the_complained_entry() {
+    use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
+    let mut rotation_setup = RotationTestSetup::new();
+    let mut rng = rand::thread_rng();
+
+    let victim_idx = 2;
+    let (victim_manager, victim_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(victim_idx);
+    let responder_idx = 1;
+    let (_, responder_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(responder_idx);
+    let dealer_idx = 0;
+    let (_, dealer_dkg_output, valid_rotation_messages) =
+        rotation_setup.create_rotation_dealer(dealer_idx);
+    let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+    let mut rotation_map = match valid_rotation_messages {
+        Messages::Rotation(map) => map,
+        _ => unreachable!(),
+    };
+    let mut share_indices = rotation_map.keys().copied();
+    let corrupted_share_index = share_indices.next().unwrap();
+    let complained_share_index = share_indices.next().unwrap();
+    let share_value = dealer_dkg_output
+        .key_shares
+        .shares
+        .iter()
+        .find(|s| s.index == complained_share_index)
+        .map(|s| s.value)
+        .unwrap();
+    let (_, cheating_message) = create_cheating_rotation_message(
+        &rotation_setup.setup,
+        &victim_manager.current_session_id(),
+        &dealer_addr,
+        share_value,
+        complained_share_index,
+        victim_idx as u16,
+        &mut rng,
+    );
+    rotation_map.insert(complained_share_index, cheating_message.clone());
+
+    let session_id = victim_manager
+        .current_session_id()
+        .rotation_session_id(&dealer_addr, complained_share_index);
+    let receiver = avss::Receiver::new(
+        victim_manager.mpc_config.nodes.clone(),
+        victim_manager.party_id().unwrap(),
+        Parameters {
+            t: victim_manager.mpc_config.threshold,
+            f: victim_manager.mpc_config.max_faulty,
+        },
+        session_id.to_vec(),
+        victim_dkg_output
+            .commitments
+            .get(&complained_share_index)
+            .copied(),
+        victim_manager.encryption_key().unwrap().inner().clone(),
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_message, &mut rng)
+        .unwrap()
+    {
+        avss::ProcessedMessage::Complaint(c) => c,
+        _ => panic!("Expected complaint from corrupted share"),
+    };
+
+    let previous_epoch = rotation_setup.setup.committee_set.epoch();
+    let target_epoch = rotation_setup.shrink_to_next_epoch(3);
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::open(tmpdir.path()).unwrap());
+    let mut responder = rotation_setup.rotation_manager_at_target(
+        responder_idx,
+        responder_dkg_output,
+        Arc::new(crate::storage::EpochPublicMessagesStore::new(
+            db.clone(),
+            target_epoch,
+        )),
+    );
+
+    let mut row = bcs::to_bytes(&rotation_map).unwrap();
+    let entries = stored_rows::rotation_entries(
+        &responder.shape_params(),
+        previous_epoch,
+        &dealer_addr,
+        &row,
+    )
+    .unwrap();
+    let point = entries[&corrupted_share_index].start + 1;
+    row[point..point + POINT_SIZE_IN_BYTES].fill(0xFF);
+    let (_, rotation_keyspace) = db
+        .backup_keyspaces()
+        .into_iter()
+        .find(|(name, _)| *name == "rotation_messages")
+        .unwrap();
+    rotation_keyspace
+        .insert(
+            [
+                previous_epoch.to_be_bytes().as_slice(),
+                dealer_addr.as_bytes(),
+            ]
+            .concat(),
+            row,
+        )
+        .unwrap();
+
+    let request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: Some(complained_share_index),
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: previous_epoch,
+    };
+    let response = responder
+        .handle_complain_request(rotation_setup.setup.address(victim_idx), &request)
+        .unwrap();
+    assert!(matches!(response, ComplaintResponse::Rotation(_)));
+}
+
+#[test]
 fn test_required_nonce_weight_is_the_privacy_threshold_floor() {
     const THRESHOLD: u16 = 52;
     const MAX_FAULTY: u16 = 20;
