@@ -129,10 +129,11 @@ minimum. See [Withdrawal fees](../fees.mdx#withdrawal-fees).
 
 Check these causes in order:
 
-- **Rate limiter capacity:** The Guardian's token bucket is empty, and your
-  request waits for it to refill. Hashi skips a request larger than the bucket's maximum
-  capacity until governance raises the limit. You can
-  [cancel it](cancel.mdx).
+- **Rate limiter capacity:** The Guardian's rate limiter works as a token
+  bucket: it holds a limited amount of withdrawal capacity that refills over
+  time. When the bucket is empty, your request waits for it to refill. Hashi
+  skips a request larger than the bucket's maximum capacity until governance
+  raises the limit. You can [cancel it](cancel.mdx).
 - **Protocol paused:** When the
   [`paused`](../config.mdx#paused) flag is set, queued requests stay queued
   and resume when the committee unpauses.
