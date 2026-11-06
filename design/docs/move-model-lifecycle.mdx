@@ -79,6 +79,11 @@ During a reconfiguration, users can still call `deposit()`, but approval and
 confirmation wait for the new committee; see
 [What is the entry-function gating principle?](#what-is-the-entry-function-gating-principle).
 
+The deposit and withdrawal lifecycle diagrams use 2 arrow styles:
+
+- **Solid arrow:** A function call, a state transition, or data that moves into a model.
+- **Dotted arrow:** An offchain observation or read, where a node watches or reads state and acts on what it sees.
+
 ```mermaid
 ---
 title: Deposit Flow - Move Model Lifecycle
@@ -173,6 +178,7 @@ flowchart TD
             BAL["Balance&lt;BTC&gt;<br/>(User's tokens)"]
             WR["WithdrawalRequest<br/>{ id, btc_amount, bitcoin_address }"]
             WRQ["WithdrawalRequestQueue<br/>.requests"]
+            WR_APPROVED["WithdrawalRequest (approved)<br/>approval_cert recorded"]
         end
 
         subgraph ProcessPhase["2. Processing Phase"]
@@ -221,7 +227,8 @@ flowchart TD
     WR -->|"request_withdrawal()"| WRQ
     WRQ -.->|"Observe & approve<br/>request"| MEMBERS2
     MEMBERS2 -->|"Screen BTC destination<br/>& Sui requester"| SCREEN2
-    SCREEN2 --> VOTE
+    SCREEN2 -->|"approve_request()"| WR_APPROVED
+    WR_APPROVED --> VOTE
     VOTE -.->|"Select UTXOs<br/>(off-chain)"| UTXO_POOL
     VOTE --> BURN
     BURN -->|"Balance&lt;BTC&gt; burned,<br/>WithdrawalTransaction created"| PW
