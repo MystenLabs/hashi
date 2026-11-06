@@ -329,6 +329,29 @@ guardian's URLs remain governable: `guardian_url`, its public endpoint, and
 `guardian_node_url`, the endpoint nodes call. A node resolves
 `guardian_node_url` once, so it picks up a change only after a restart.
 
+### `guardian_url`
+
+| | |
+|---|---|
+| **Key** | `guardian_url` |
+| **Type** | `string` |
+| **Default** | Set at launch |
+
+The guardian's public endpoint. Unlike `guardian_btc_public_key`, this key
+remains governable.
+
+### `guardian_node_url`
+
+| | |
+|---|---|
+| **Key** | `guardian_node_url` |
+| **Type** | `string` |
+| **Default** | Set at launch |
+
+The guardian endpoint that nodes call. This key remains governable. A node
+resolves `guardian_node_url` once, so it picks up a change only after a
+restart.
+
 ## Derived values
 
 Hashi computes several values from the configurable parameters above rather
