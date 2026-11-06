@@ -21,8 +21,7 @@ COPY Cargo.toml Cargo.lock /src/
 COPY crates/hashi-monitor/Cargo.toml /src/crates/hashi-monitor/Cargo.toml
 COPY crates/hashi-guardian/Cargo.toml /src/crates/hashi-guardian/Cargo.toml
 COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
-# Only for resolution: hashi-monitor's e2e-tests dev-dependency (and its hashi
-# and hashi-guardian-proxy dependencies) must load, though the binary builds none.
+# Include the e2e-tests dev-dependency and its local dependencies for resolution.
 COPY crates/e2e-tests/Cargo.toml /src/crates/e2e-tests/Cargo.toml
 COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
 COPY crates/hashi-guardian-proxy/Cargo.toml /src/crates/hashi-guardian-proxy/Cargo.toml
@@ -58,6 +57,7 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-mo
 FROM deps AS build
 
 COPY crates/hashi-monitor /src/crates/hashi-monitor
+COPY crates/hashi /src/crates/hashi
 COPY crates/hashi-guardian /src/crates/hashi-guardian
 COPY crates/hashi-types /src/crates/hashi-types
 

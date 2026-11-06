@@ -727,6 +727,7 @@ pub mod tests {
         );
         SuiConfig {
             rpc_url: format!("http://{addr}"),
+            transaction_rpc_url: "http://127.0.0.1:9".to_string(),
             hashi_package_id: Some(PACKAGE_ID),
             hashi_object_id: None,
         }
@@ -804,6 +805,7 @@ pub mod tests {
     pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
+            transaction_rpc_url: "http://127.0.0.1:9".to_string(),
             hashi_package_id: Some(PACKAGE_ID),
             hashi_object_id: None,
         };

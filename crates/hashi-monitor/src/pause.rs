@@ -22,7 +22,7 @@ use crate::config::Config;
 pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
     // Check on-chain state before loading any signing credentials.
     let read_config = CliConfig {
-        sui_rpc_url: config.sui.rpc_url.clone(),
+        sui_rpc_url: config.sui.transaction_rpc_url.clone(),
         package_id: Some(config.sui.hashi_package_id()),
         hashi_object_id: Some(config.sui.hashi_object_id()),
         ..CliConfig::default()
@@ -149,12 +149,13 @@ mod tests {
             std::fs::write(path, node.config().operator_private_key.as_ref().unwrap())?;
         }
         let mut config = Config::for_tests();
-        config.sui.rpc_url = networks.sui_network().rpc_url.clone();
+        // Keep the default unreachable audit RPC to prove pause uses only the fullnode.
+        config.sui.transaction_rpc_url = networks.sui_network().rpc_url.clone();
         config.sui.hashi_package_id = Some(ids.package_id);
         config.sui.hashi_object_id = Some(ids.hashi_object_id);
         config.pause_operator_key_paths = paths;
         let read_config = CliConfig {
-            sui_rpc_url: config.sui.rpc_url.clone(),
+            sui_rpc_url: networks.sui_network().rpc_url.clone(),
             package_id: Some(ids.package_id),
             hashi_object_id: Some(ids.hashi_object_id),
             ..CliConfig::default()

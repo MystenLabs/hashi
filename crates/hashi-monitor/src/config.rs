@@ -58,8 +58,11 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuiConfig {
-    /// Sui RPC endpoint.
+    /// Sui RPC endpoint for audit reads, including historical data.
     pub rpc_url: String,
+
+    /// Fullnode RPC endpoint for pause state reads and transactions.
+    pub transaction_rpc_url: String,
 
     /// Original Hashi package: the event and object types the monitor reads keep
     /// its address across upgrades. Omit to use the published mainnet package.
@@ -169,6 +172,7 @@ impl Config {
             }),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
+                transaction_rpc_url: "http://sui-transactions".to_string(),
                 hashi_package_id: Some(sui_sdk_types::Address::new([0x11; 32])),
                 hashi_object_id: None,
             },

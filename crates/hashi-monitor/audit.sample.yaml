@@ -38,7 +38,10 @@ deployment:
 #   session_token: "..." # Only for temporary credentials.
 
 sui:
+  # Archive endpoint for auditing Sui events.
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  # Fullnode endpoint for reading governance state and submitting pause transactions.
+  transaction_rpc_url: "https://fullnode.testnet.sui.io:443"
   # IDs default to mainnet; set both for other deployments.
   # The package ID is the original package that defines Hashi's types.
   hashi_package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"

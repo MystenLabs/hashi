@@ -119,8 +119,12 @@ complete example.
   session that writes a log must match it. Keep a replaced build in
   `prev_builds` until the guardian cursor, logged at each guardian poll, passes
   its last log. A first run from genesis needs every build.
-- `sui.rpc_url` names the Sui node. `sui.hashi_package_id` names the original Hashi
-  package and defaults to `HASHI_MAINNET_PACKAGE_ID`. `sui.hashi_object_id`
+- `sui.rpc_url`: archive endpoint for auditing Sui events from the Hashi
+  package's publication.
+- `sui.transaction_rpc_url`: fullnode endpoint for reading governance state
+  and submitting pause transactions.
+- `sui.hashi_package_id` names the original Hashi package and defaults to
+  `HASHI_MAINNET_PACKAGE_ID`. `sui.hashi_object_id`
   names the Hashi object used for pause transactions and defaults to
   `HASHI_MAINNET_OBJECT_ID`. Set both IDs for other deployments.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
