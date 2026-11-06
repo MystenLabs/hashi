@@ -131,18 +131,16 @@ pub struct Genesis {
 /// The genesis of the Hashi package in `config`.
 pub async fn package_genesis(config: &SuiConfig) -> anyhow::Result<Genesis> {
     let mut client = connect(config)?;
-    publish_genesis(&mut client, &config.package_id).await
+    publish_genesis(&mut client, config.package_id()).await
 }
 
 /// The checkpoint and time of the transaction that published `package_id`.
 /// The package object is immutable, so its previous transaction is its publish.
 async fn publish_genesis(
     client: &mut sui_rpc::Client,
-    package_id: &str,
+    package_id: Address,
 ) -> anyhow::Result<Genesis> {
-    let address = Address::from_str(package_id)
-        .with_context(|| format!("invalid Hashi package ID {package_id}"))?;
-    let request = GetObjectRequest::new(&address)
+    let request = GetObjectRequest::new(&package_id)
         .with_read_mask(FieldMask::from_paths(["previous_transaction"]));
     let publish_digest = client
         .ledger_client()
@@ -194,7 +192,7 @@ pub struct HashiSettings {
 }
 
 /// Read `HashiSettings` from the Hashi object. Fail unless the object's
-/// type is from `config.package_id`: the event filter uses that id, so a
+/// type is from `config.package_id()`: the event filter uses that id, so a
 /// wrong one reads no events.
 pub async fn read_hashi_settings(
     config: &SuiConfig,
@@ -215,8 +213,7 @@ pub async fn read_hashi_settings(
         .with_context(|| {
             format!("Sui GetObject response is missing the Hashi object {hashi_object_id}")
         })?;
-    let package_id = Address::from_str(&config.package_id)
-        .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
+    let package_id = config.package_id();
     let expected_type = StructTag::new(
         package_id,
         Identifier::from_static("hashi"),
@@ -288,8 +285,7 @@ impl SuiPoller {
         hashi_btc_keys: HashiBTCKeys,
         start: u64,
     ) -> anyhow::Result<Self> {
-        let package_id = Address::from_str(&config.package_id)
-            .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
+        let package_id = config.package_id();
 
         let package_versions = PackageVersions::new(BTreeMap::from([(1, package_id)]));
 
@@ -297,7 +293,7 @@ impl SuiPoller {
             client: connect(config)?,
             package_versions,
             hashi_btc_keys,
-            package_id: config.package_id.clone(),
+            package_id: package_id.to_string(),
             last_read_checkpoint_timestamp: 0,
             next_checkpoint: start,
             hbtc_treasury_cap_id: Address::ZERO,
@@ -731,7 +727,7 @@ pub mod tests {
         );
         SuiConfig {
             rpc_url: format!("http://{addr}"),
-            package_id: PACKAGE_ID.to_string(),
+            package_id: Some(PACKAGE_ID),
         }
     }
 
@@ -770,10 +766,7 @@ pub mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(
-            error.contains("sui.package_id must be the package that defines it"),
-            "{error}"
-        );
+        assert!(error.contains("sui.package_id"), "{error}");
     }
 
     #[tokio::test]
@@ -810,7 +803,7 @@ pub mod tests {
     pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
-            package_id: PACKAGE_ID.to_string(),
+            package_id: Some(PACKAGE_ID),
         };
         let mut poller = SuiPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
         poller.last_read_checkpoint_timestamp = last_read_checkpoint_timestamp;

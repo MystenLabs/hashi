@@ -38,7 +38,10 @@ deployment:
 #   session_token: "..." # Only for temporary credentials.
 
 sui:
+  # Archive endpoint for auditing Sui events.
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  # Defaults to mainnet; set for other deployments.
+  # The package ID is the original package that defines Hashi's types.
   package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
@@ -54,3 +57,12 @@ btc:
 # `essential` alerts only on the findings that every operator must act on.
 # The other findings are then WARN log lines. The README lists both groups.
 # alert_mode: strict
+
+# Omit for audit-only operation.
+# pause:
+#   transaction_rpc_url: "https://fullnode.testnet.sui.io:443"
+#   # Defaults to mainnet; set for other deployments.
+#   object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+#   # Operator key files for signing pause transactions.
+#   operator_key_paths:
+#     - "/path/to/operator.key"

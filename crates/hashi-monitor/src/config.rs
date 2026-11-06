@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use hashi_types::guardian::DeploymentConfig;
@@ -48,17 +49,46 @@ pub struct Config {
     /// The findings that alert. Omit for `strict`, where every finding alerts.
     #[serde(default)]
     pub alert_mode: AlertMode,
+    /// Configure to allow the monitor to pause the bridge.
+    pub pause: Option<PauseConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseConfig {
+    /// Fullnode RPC endpoint for pause state reads and transactions.
+    pub transaction_rpc_url: String,
+    /// Hashi shared object used for pause transactions.
+    /// Omit to use the published mainnet Hashi object.
+    pub object_id: Option<sui_sdk_types::Address>,
+    /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
+    /// Keys are loaded only on explicit pause invocation.
+    pub operator_key_paths: Vec<PathBuf>,
+}
+
+impl PauseConfig {
+    pub fn object_id(&self) -> sui_sdk_types::Address {
+        self.object_id
+            .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuiConfig {
-    /// Sui RPC endpoint.
+    /// Sui RPC endpoint for audit reads, including historical data.
     pub rpc_url: String,
 
     /// Original Hashi package: the event and object types the monitor reads keep
-    /// its address across upgrades.
-    pub package_id: String,
+    /// its address across upgrades. Omit to use the published mainnet package.
+    pub package_id: Option<sui_sdk_types::Address>,
+}
+
+impl SuiConfig {
+    pub fn package_id(&self) -> sui_sdk_types::Address {
+        self.package_id
+            .unwrap_or(hashi::constants::HASHI_MAINNET_PACKAGE_ID)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,13 +178,14 @@ impl Config {
             }),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
-                package_id: format!("0x{}", "11".repeat(32)),
+                package_id: Some(sui_sdk_types::Address::new([0x11; 32])),
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
                 http_headers: BTreeMap::new(),
             },
             alert_mode: AlertMode::Strict,
+            pause: None,
         }
     }
 }
@@ -178,6 +209,7 @@ mod tests {
 
         assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
         assert!(config.s3_credentials.is_none());
+        assert!(config.pause.is_none());
         assert_eq!(config.btc.rpc_url, env!("CARGO_PKG_NAME"));
     }
 

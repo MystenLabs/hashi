@@ -22,6 +22,9 @@ pub mod rpc;
 /// The YAML config file: the identity of one deployment.
 pub mod config;
 
+/// Explicit, dormant emergency-pause governance capability.
+pub mod pause;
+
 /// Timing bounds of the withdrawal and deposit flows.
 pub mod timing;
 

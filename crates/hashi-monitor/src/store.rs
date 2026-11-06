@@ -82,7 +82,7 @@ impl Snapshot {
     pub fn new(cfg: &Config, state: AuditState, pool: UtxoPool) -> Self {
         Self {
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
-            package_id: cfg.sui.package_id.clone(),
+            package_id: cfg.sui.package_id().to_string(),
             state,
             pool,
         }
@@ -91,7 +91,7 @@ impl Snapshot {
     /// Whether the snapshot was saved auditing the deployment in `cfg`.
     pub fn is_for(&self, cfg: &Config) -> bool {
         self.guardian_bucket == cfg.deployment.bucket_info.name
-            && self.package_id == cfg.sui.package_id
+            && self.package_id.parse::<sui_sdk_types::Address>().ok() == Some(cfg.sui.package_id())
     }
 }
 
@@ -171,7 +171,7 @@ impl SnapshotStore {
         let stored = StoredSnapshot {
             version: SNAPSHOT_VERSION,
             guardian_bucket: cfg.deployment.bucket_info.name.clone(),
-            package_id: cfg.sui.package_id.clone(),
+            package_id: cfg.sui.package_id().to_string(),
             state,
             utxos: pool.held_to_wire(),
         };
@@ -303,7 +303,7 @@ mod tests {
         assert!(snapshot.is_for(&cfg));
 
         let mut redeployed = cfg.clone();
-        redeployed.sui.package_id = format!("0x{}", "22".repeat(32));
+        redeployed.sui.package_id = Some(sui_sdk_types::Address::new([0x22; 32]));
         assert!(!snapshot.is_for(&redeployed));
 
         let mut other_guardian = cfg;
