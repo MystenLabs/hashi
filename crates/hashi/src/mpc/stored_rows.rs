@@ -51,6 +51,24 @@ pub(crate) fn rotation_messages(
     bcs::from_bytes(bytes).map_err(|e| refused(dealer, e.to_string()))
 }
 
+pub(crate) fn rotation_message(
+    shape: &ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+    bytes: &[u8],
+    share_index: ShareIndex,
+) -> MpcResult<Option<avss::Message>> {
+    rotation_entries(shape, epoch, dealer, bytes)?
+        .get(&share_index)
+        .map(|range| -> MpcResult<avss::Message> {
+            let entry = bytes
+                .get(range.clone())
+                .ok_or_else(|| refused(dealer, format!("entry {share_index} is out of range")))?;
+            bcs::from_bytes(entry).map_err(|e| refused(dealer, e.to_string()))
+        })
+        .transpose()
+}
+
 pub(crate) fn rotation_entries(
     shape: &ShapeParams,
     epoch: u64,
