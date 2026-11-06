@@ -62,6 +62,15 @@ confirmed onchain.
 Deposits are free. They must meet the configurable
 `bitcoin_deposit_minimum` (initially `30,000 sats`).
 
+### Who sets the deposit minimum
+
+Governance sets `bitcoin_deposit_minimum` the same way it sets
+`bitcoin_withdrawal_minimum`: through an `update_config` proposal that changes
+the onchain config when it executes. The value starts at 30,000 sats. Whatever
+value governance chooses, Hashi applies a floor of `DUST_RELAY_MIN_VALUE`
+(546 sats), so the effective deposit minimum never falls below Bitcoin's dust
+threshold.
+
 ## Withdrawal fees
 
 The only fee a user pays on withdrawal is the **miner fee**, the actual
@@ -168,8 +177,11 @@ the fee against three bounds:
 - **Floor**: the fee must be at least `1 sat/vB` (the minimum relay fee),
   or the Bitcoin network does not propagate the transaction.
 - **Ceiling**: the fee must not exceed 3x the validator's own fee
-  estimate for the same transaction weight, including any CPFP deficit
-  its unconfirmed ancestors owe (see
+  estimate for the same transaction weight. If the transaction spends
+  outputs of earlier transactions that have not confirmed yet (its
+  ancestors), the estimate also includes the fee those ancestors fall
+  short of at the current fee rate, which this transaction pays for them
+  through CPFP (see
   [Stuck transactions](#stuck-transactions)). This prevents a malicious leader from
   overpaying fees to extract value from users.
 - **Per-user cap**: the per-user share of the miner fee must not exceed
