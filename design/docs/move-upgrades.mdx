@@ -182,3 +182,11 @@ v2-style afterward.
 The pre-Mainnet tree ships this way already: the legacy module is gone,
 the atomic proposal type carries the name `upgrade`, and it is the only upgrade path.
 Mainnet begins with it from genesis.
+
+## How is quorum weight calculated?
+
+Hashi computes committee quorum in basis points of total committee weight. A valid certificate needs more than two thirds of total weight, matching the Sui system's 6667 bps threshold. The threshold weight uses ceiling division, so the required weight is never below the true fractional threshold. A vote tally reaches quorum when the voted weight is greater than or equal to this rounded-up threshold weight. When you check upgraded validator weight before voting, compare it against the rounded-up value, not against an exact two-thirds fraction.
+
+## How do you confirm the build matches the proposal digest?
+
+`hashi proposal execute-upgrade` builds the package with `sui move build` and prints the result as `Built digest:` followed by the hex digest. Compare this value with the digest the proposal records, which proposal creation prints as `Digest:`. The package must be byte-identical to the build whose digest went into the proposal: same commit and same `sui` binary. The chain enforces the match when it processes the `Upgrade` command, so a mismatch fails at simulation rather than costing gas. The command also verifies that the package's `PACKAGE_VERSION` constant is exactly 1 more than the currently published version.
