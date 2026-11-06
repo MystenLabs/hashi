@@ -34,9 +34,9 @@ answer: >-
   A Hashi node uses six keys. Your Sui validator account key signs the initial registration, a dedicated Ed25519 TLS key authenticates the node to peers, an operator key funded with at least 2 SUI signs day-to-day transactions, BLS12-381 and ECIES keys are generated at startup, and an OpenPGP backup key encrypts epoch backups.
 ---
 
-A Hashi node uses six keys. Your existing Sui validator account key signs the initial registration, you generate the TLS, operator, and backup keys, and the node creates the BLS12-381 and ECIES keys at startup.
+A Hashi node uses 6 keys. Your existing Sui validator account key signs the initial registration, you generate the TLS, operator, and backup keys, and the node creates the BLS12-381 and ECIES keys at startup.
 
-## Which keys does a Hashi node use?
+## Which keys does a Hashi node use? {#keys-overview}
 
 | Key | Algorithm | Provisioning | Purpose |
 |-----|-----------|-------------|---------|
@@ -158,7 +158,7 @@ hashi register --config /path/to/validator.toml \
 # sign with the validator account key (cold/hardware) and broadcast
 ```
 
-Onchain, `member_authorized(validator, sender)` authorizes every member action, where the sender must be the member's validator key **or** its registered operator address. A member action is any transaction your node sends as a committee member, such as cert submission, governance voting, and metadata updates. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to recover from a lost or compromised operator key, or to register again after your registration is removed. To rotate a working operator key, a plain `hashi register --operator-address 0x<new-operator>` signs with the configured `operator-private-key`:
+Onchain, `member_authorized(validator, sender)` authorizes every member action, where the sender must be the member's validator key **or** its registered operator address. A member action is any transaction sent on behalf of a committee member, from the node or the CLI. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to recover from a lost or compromised operator key, or to register again after your registration is removed. To rotate a working operator key, a plain `hashi register --operator-address 0x<new-operator>` signs with the configured `operator-private-key`:
 
 ```bash
 hashi register --config /path/to/validator.toml \

@@ -42,7 +42,7 @@ Hashi uses two configuration files:
 1. **Validator config**, used by `hashi server` and `hashi register`. Contains keys, endpoints, and all node parameters.
 2. **CLI config** (`hashi-cli.toml`), used by governance, query, deposit, and withdraw commands.
 
-## What is in the validator config?
+## What is in the validator config? {#validator-config}
 
 All fields use kebab-case. Optional fields show their defaults in comments.
 
@@ -347,7 +347,7 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 </TabItem>
 </Tabs>
 
-On Mainnet, leave `bitcoin-start-height` unset so the light client anchors at its built-in checkpoint. The `800000` in the Mainnet template is an illustrative override, not a recommended value.
+On Mainnet, leave `bitcoin-start-height` unset. The commented-out `800000` in the Mainnet template is the Mainnet default, shown for reference. For that value and any other height above Taproot activation, the light client anchors at its built-in checkpoint just below Taproot activation.
 
 > **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators should set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
 
@@ -414,7 +414,7 @@ network = "signet"
 </TabItem>
 </Tabs>
 
-## Which environment variables override the config?
+## Which environment variables override the config? {#environment-variables}
 
 All environment variables override their corresponding config file values.
 
@@ -432,7 +432,7 @@ All environment variables override their corresponding config file values.
 | `BTC_PRIVATE_KEY` | `bitcoin.private_key_path` | Path to BTC private key (WIF) |
 | `HASHI_GAS_BUDGET` | n/a | Gas budget for transactions (MIST) |
 
-## Which ports does a Hashi node need open?
+## Which ports does a Hashi node need open? {#network-and-firewall}
 
 ### Inbound
 

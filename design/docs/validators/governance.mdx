@@ -35,13 +35,13 @@ answer: >-
   Any committee member can create a proposal, which also casts their vote. Most proposals need 2/3 of committee weight; an emergency pause needs 5% to pause and 2/3 to unpause. Vote with hashi proposal vote, and anyone can execute a proposal once it reaches quorum.
 ---
 
-Hashi committee members govern the protocol through onchain proposals. Any committee member can create a proposal, members vote with stake weight, and anyone can execute the proposal once it reaches quorum. Most proposal types need 2/3 of committee weight. An emergency pause needs 5% to pause and 2/3 to unpause. Package upgrades also follow the rules in [Move Package Upgrades](../move-upgrades.mdx).
+Hashi committee members govern the protocol through onchain proposals. Any committee member can create a proposal, members vote with stake weight, and anyone can execute the proposal once it reaches quorum. Most proposal types need 2/3 of committee weight. By default, an emergency pause needs 5% to pause and 2/3 to unpause. Package upgrades also follow the rules in [Move Package Upgrades](../move-upgrades.mdx).
 
-## How do Hashi proposals work?
+## How do Hashi proposals work? {#how-proposals-work}
 
 - Any committee member can create a proposal, and creating one also casts your vote. Quorum is stake-weighted: most proposals require **2/3 of committee weight**, while an emergency pause uses a lower threshold (5% by default) so the committee can halt the protocol quickly (resuming again requires 2/3 by default). See the threshold column in [Proposal types](#proposal-types).
 - You can add or remove votes before execution. Once the proposal reaches quorum, anyone can execute it; the sender only pays gas.
-- A proposal stays open for a seven-day window. After that, `hashi proposal view <id>` shows it as `Expired`.
+- A proposal stays open for 7 days. After that, `hashi proposal view <id>` shows it as `Expired`.
 - The `--execute` flag on `vote` auto-executes if your vote reaches quorum (except for Upgrade proposals).
 - Proposals carry optional `-m key=value` metadata for human context.
 
@@ -84,7 +84,7 @@ Config values are type-prefixed: write the type, a colon, and the value, as in `
 
 > The CLI `update-config --help` lists a subset of keys (`bitcoin_deposit_minimum`, `bitcoin_withdrawal_minimum`, `bitcoin_confirmation_threshold`, `withdrawal_cancellation_cooldown_ms`, `paused`, `reconfig_hold`, `guardian_url`, `guardian_node_url`); `bitcoin_deposit_time_delay_ms` is still settable.
 
-## How to create, vote on, and execute a proposal
+## How to create, vote on, and execute a proposal {#lifecycle-example-updateconfig}
 
 Executed proposals stay on chain for inspection. The CLI refuses to vote on, remove a vote from, or execute one before signing anything, with a message that names the proposal and its type; `hashi proposal view <id>` shows `Status: Executed`, `Active (expires <date>)`, or `Expired` for a proposal past its seven-day window.
 
@@ -109,7 +109,7 @@ hashi proposal execute 0x<proposal-id>
 hashi config on-chain
 ```
 
-## How to propose a package upgrade
+## How to propose a package upgrade {#package-upgrade-flow}
 
 You must first classify every package upgrade as exclusive or non-exclusive.
 See [Move Package Upgrades](../move-upgrades.mdx) for the safety criteria, binary

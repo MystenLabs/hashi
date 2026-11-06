@@ -33,7 +33,7 @@ answer: >-
   Hashi serves Prometheus metrics at 127.0.0.1:9180/metrics and pushes them to the Mysten collection endpoint when [metrics-push] is set, which every operator must configure. Alert on hashi_reconfig_in_progress stuck at 1, hashi_presig_pool_remaining at 0, hashi_kyoto_synced at 0, and a low hashi_sui_balance.
 ---
 
-A Hashi node serves Prometheus metrics at `http://127.0.0.1:9180/metrics` and pushes them to the Mysten collection endpoint when you set `[metrics-push]` in the [Validator config](configuration.mdx#validator-config). Every operator must configure the push. The most important alerts fire when `hashi_reconfig_in_progress` stays at 1, `hashi_presig_pool_remaining` reaches 0, `hashi_kyoto_synced` reads 0, or `hashi_sui_balance` runs low. [Suggested alerts](#suggested-alerts) gives a full starting set.
+A Hashi node serves Prometheus metrics at `http://127.0.0.1:9180/metrics` and pushes them to the Mysten collection endpoint when you set `[metrics-push]` in the [Validator config](configuration.mdx#validator-config). Every operator must configure the push. [Suggested alerts](#suggested-alerts) gives a starting set. Its critical alerts include a node that is down, a reconfiguration in progress for more than 10 minutes, an empty presignature pool, and a signed withdrawal that your bitcoind rejects.
 
 ## Prometheus endpoint
 

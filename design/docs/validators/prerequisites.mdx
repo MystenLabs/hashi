@@ -34,7 +34,7 @@ answer: >-
   A Hashi node needs 3 CPU cores, 2GB of memory, 10GB of persistent storage, and a 1 Gbps link, plus two external services you provide: an archival Bitcoin Core v29 or newer node with txindex, blockfilterindex, and peerblockfilters, and a Sui fullnode serving the gRPC v2 API with indexing enabled. Build the binary with the deterministic Docker build and check its sha256 against the release.
 ---
 
-A Hashi node needs 3 CPU cores, 2GB of memory, 10GB of persistent storage, and a 1 Gbps link. It also depends on two external services that you provide: an archival Bitcoin Core v29 or newer node with `txindex`, `blockfilterindex`, and `peerblockfilters`, and a Sui full node that serves the gRPC v2 API with indexing enabled. Build the binary with the deterministic Docker build and check its sha256 against the published value in [Releases](../reference/releases.mdx). For configuration details, see [Sui RPC](#sui-rpc), [Configure Bitcoin Core for Hashi](#bitcoin-node), and [Validator config](configuration.mdx#validator-config).
+A Hashi node needs 3 CPU cores, 2GB of memory, 10GB of persistent storage, and a 1 Gbps link. It also depends on 2 external services that you provide: an archival Bitcoin Core v29 or newer node with `txindex`, `blockfilterindex`, and `peerblockfilters`, and a Sui fullnode that serves the gRPC v2 API with indexing enabled. Build the binary with the deterministic Docker build and check its sha256 against the published value in [Releases](../reference/releases.mdx). For configuration details, see [Sui RPC](#sui-rpc), [Configure Bitcoin Core for Hashi](#bitcoin-node), and [Validator config](configuration.mdx#validator-config).
 
 ## What hardware does a Hashi node need? {#resources}
 

@@ -33,7 +33,7 @@ answer: >-
   At every Sui epoch change the Hashi committee reconfigures: a node submits start_reconfig, processing pauses, key rotation runs, and end_reconfig resumes operations. Keep your node online and its registration current. A reconfiguration that overruns its Sui epoch is aborted and restarted by the nodes, or by hand with hashi committee abort-reconfig.
 ---
 
-At every Sui epoch change, the Hashi committee reconfigures. Keep your node online and its registration current. If a reconfiguration overruns its Sui epoch, the nodes abort and restart it. You can also abort it by hand with `hashi committee abort-reconfig`.
+At every Sui epoch change, the Hashi committee reconfigures. Keep your node online and its registration current. If a reconfiguration overruns its Sui epoch, the nodes abort it and start a fresh one. If no node is running to do this, you can abort it by hand with `hashi committee abort-reconfig` once its Sui epoch has ended.
 
 ## What happens automatically
 
