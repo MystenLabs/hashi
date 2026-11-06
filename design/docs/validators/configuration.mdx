@@ -35,12 +35,14 @@ answer: >-
   Hashi uses two config files: the validator config for hashi server and hashi register, and the CLI config for governance and queries. Keep top-level keys above the TOML tables, point sui-rpc and bitcoin-rpc at your own nodes, and open port 443 inbound to other committee members.
 ---
 
+To configure a Hashi node, write a validator config and a CLI config for your network, then open port 443 (the default) inbound to other committee members. Environment variables override some config values.
+
 Hashi uses two configuration files:
 
 1. **Validator config**, used by `hashi server` and `hashi register`. Contains keys, endpoints, and all node parameters.
 2. **CLI config** (`hashi-cli.toml`), used by governance, query, deposit, and withdraw commands.
 
-## Validator config
+## What is in the validator config? {#validator-config}
 
 All fields use kebab-case. Optional fields show their defaults in comments.
 
@@ -345,6 +347,8 @@ push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 </TabItem>
 </Tabs>
 
+On Mainnet, leave `bitcoin-start-height` unset. The commented-out `800000` in the Mainnet template is the Mainnet default, shown for reference. For that value and any other height above Taproot activation, the light client anchors at its built-in checkpoint just below Taproot activation.
+
 > **AML screening (TRM Labs).** `trm-api-key` is optional, but Mainnet operators should set one. Each operator screens with their own TRM account; [Sanctions](../sanctions.mdx#screening-with-trm-labs) explains how to create the key and what the node screens. Without a key the node logs `No TRM API key configured; AML screening is disabled` at startup and votes on deposits and withdrawals without screening them. TRM covers Mainnet only, so the key is ignored on Testnet.
 
 > **Already running a Testnet node?** Give the Mainnet node its own `db` directory, starting empty, and its own `backup-dir`. Both hold one deployment's node keys and MPC key shares, so never point a Mainnet node at a Testnet node's database or backups. We also recommend new TLS and operator keys for Mainnet (see [Keys and Security](keys.mdx)) rather than the ones a Testnet host has been using.
@@ -410,14 +414,14 @@ network = "signet"
 </TabItem>
 </Tabs>
 
-## Environment variables
+## Which environment variables override the config? {#environment-variables}
 
 All environment variables override their corresponding config file values.
 
 | Variable | Overrides | Purpose |
 |----------|-----------|---------|
 | `HASHI_CLI_CONFIG` | n/a | Path to CLI config file |
-| `SUI_RPC_URL` | `sui_rpc_url`; `sui-rpc` for `hashi register` only | Sui gRPC endpoint. `hashi server` ignores it. `hashi publish` and `hashi launch` also read it and default to Mainnet when it is unset |
+| `SUI_RPC_URL` | `sui_rpc_url`; `sui-rpc` for `hashi register` only | Sui gRPC endpoint. `hashi server` ignores it and reads `sui-rpc` from the validator config. `hashi publish` and `hashi launch` also read it and default to Mainnet when it is unset |
 | `HASHI_PACKAGE_ID` | `package_id` | Hashi package ID |
 | `HASHI_OBJECT_ID` | `hashi_object_id` | Hashi shared object ID |
 | `HASHI_KEYPAIR` | `keypair_path` | Path to signing key pair |
@@ -428,7 +432,7 @@ All environment variables override their corresponding config file values.
 | `BTC_PRIVATE_KEY` | `bitcoin.private_key_path` | Path to BTC private key (WIF) |
 | `HASHI_GAS_BUDGET` | n/a | Gas budget for transactions (MIST) |
 
-## Network and firewall
+## Which ports does a Hashi node need open? {#network-and-firewall}
 
 ### Inbound
 
