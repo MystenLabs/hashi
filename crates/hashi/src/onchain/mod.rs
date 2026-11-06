@@ -53,6 +53,10 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+const SCRAPE_PAGE_RETRIES: u32 = 3;
+const SCRAPE_PAGE_MIN_BACKOFF: Duration = Duration::from_millis(250);
+const SCRAPE_PAGE_RETRY_WINDOW: Duration = Duration::from_secs(10);
+
 const BOOT_SCRAPE_RETRY_WINDOW: Duration = Duration::from_secs(5 * 60);
 const BOOT_SCRAPE_MIN_BACKOFF: Duration = Duration::from_secs(1);
 const BOOT_SCRAPE_MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -75,8 +79,14 @@ pub fn is_inconsistent_listing(error: &anyhow::Error) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrapeScope {
     Full,
-    /// Everything but the Bitcoin collections, which are left `None`.
+    /// `Full` minus the Bitcoin collections, which are left `None`.
     GovernanceOnly,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScrapeFor {
+    Mirror,
+    Reader(ScrapeScope),
 }
 
 mod apply;
@@ -230,14 +240,14 @@ impl OnchainState {
             Self::scrape_into_state(
                 sui_rpc_url,
                 ids,
-                ScrapeScope::Full,
+                ScrapeFor::Mirror,
                 tls_private_key.clone(),
                 grpc_max_decoding_message_size,
                 metrics.clone(),
             )
         })
         .await?;
-        let mut seed = seed.context("a full scrape must produce a mirror seed")?;
+        let mut seed = seed.context("a mirror scrape must produce a seed")?;
         seed.heights
             .raise_ceiling(executed_checkpoint(&state.client()).await?);
         state.set_scrape_ceiling(seed.heights.ceiling);
@@ -260,7 +270,9 @@ impl OnchainState {
     }
 
     /// One-shot reader: scrapes once and starts no watcher, so the state
-    /// never refreshes. Live state needs [`OnchainState::new`].
+    /// never refreshes. Live state needs [`OnchainState::new`]. Readers load
+    /// no TOB buckets, even under [`ScrapeScope::Full`], so `tob_certs`,
+    /// `tob_bucket_keys` and `presig_seals` read as if none existed.
     pub async fn new_reader(
         sui_rpc_url: &str,
         ids: HashiIds,
@@ -270,7 +282,7 @@ impl OnchainState {
         let (state, _seed) = Self::scrape_into_state(
             sui_rpc_url,
             ids,
-            scope,
+            ScrapeFor::Reader(scope),
             None,
             grpc_max_decoding_message_size,
             None,
@@ -284,7 +296,7 @@ impl OnchainState {
     async fn scrape_into_state(
         sui_rpc_url: &str,
         ids: HashiIds,
-        scope: ScrapeScope,
+        scrape_for: ScrapeFor,
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
@@ -301,7 +313,7 @@ impl OnchainState {
         }
 
         let (mut state, checkpoint, seed) =
-            State::scrape(client.clone(), ids, scope, metrics.as_deref()).await?;
+            State::scrape(client.clone(), ids, scrape_for, metrics.as_deref()).await?;
         state.hashi.committees.configure_clients(
             tls_private_key.clone(),
             grpc_max_decoding_message_size,
@@ -531,7 +543,7 @@ impl OnchainState {
     fn reconcile_deposit_tracker(&self) {
         let requests = {
             let state = self.state();
-            // A `ScrapeScope::GovernanceOnly` mirror (the CLI, `hashi launch`)
+            // A `ScrapeScope::GovernanceOnly` reader (the CLI, `hashi launch`)
             // carries no Bitcoin collections and runs no deposit tracker
             // consumer, so there is nothing to reconcile.
             let Some(bitcoin) = state.hashi.try_bitcoin() else {
@@ -1213,7 +1225,7 @@ impl State {
     async fn scrape(
         client: Client,
         ids: HashiIds,
-        scope: ScrapeScope,
+        scrape_for: ScrapeFor,
         metrics: Option<&crate::metrics::Metrics>,
     ) -> Result<(Self, CheckpointInfo, Option<route::MirrorSeed>)> {
         // Sequenced before the state scrape rather than joined with it:
@@ -1226,7 +1238,7 @@ impl State {
             client,
             ids.hashi_object_id,
             ids.package_id,
-            scope,
+            scrape_for,
             &package_versions,
             metrics,
         )
@@ -1347,16 +1359,20 @@ async fn first_streamed_checkpoint(client: &Client) -> Result<u64> {
         .context("the first checkpoint frame carried no cursor")
 }
 
-/// Page through `list_dynamic_fields` manually, handing each response page
-/// to the caller immediately and returning the pages' checkpoint heights,
-/// which the auto-paginating stream helper cannot surface.
-async fn scrape_dynamic_field_pages(
+/// Page through `list_dynamic_fields` manually, returning the pages'
+/// checkpoint heights, which the auto-paginating stream helper cannot
+/// surface. Each page is decoded whole before `apply` sees any of it, so a
+/// page that fails retryably, in transport or on a field that vanished
+/// mid-scrape, is listed again from its token with none of the failed
+/// attempt's entries kept.
+async fn scrape_dynamic_field_pages<T>(
     client: &Client,
     parent: Address,
     mask: FieldMask,
     container: &'static str,
     metrics: Option<&crate::metrics::Metrics>,
-    mut consume_page: impl FnMut(Vec<DynamicField>) -> Result<()>,
+    mut decode: impl FnMut(&DynamicField) -> Result<Option<T>>,
+    mut apply: impl FnMut(T),
 ) -> Result<route::PageHeights> {
     let started = std::time::Instant::now();
     let mut entries = 0u64;
@@ -1364,37 +1380,54 @@ async fn scrape_dynamic_field_pages(
     let mut pages = 0u64;
     let mut page_token: Option<bytes::Bytes> = None;
     loop {
-        let mut request = ListDynamicFieldsRequest::default()
-            .with_parent(parent)
-            .with_page_size(SCRAPE_PAGE_SIZE)
-            .with_read_mask(mask.clone());
-        if let Some(token) = page_token.take() {
-            request = request.with_page_token(token);
-        }
-        let response = client
-            .clone()
-            .state_client()
-            .list_dynamic_fields(request)
-            .await?;
-        let height = response
-            .checkpoint_height()
-            .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
-        heights.observe(height);
-        let page = response.into_inner();
+        let first_attempt = tokio::time::Instant::now();
+        let mut retries = 0;
+        let mut backoff = SCRAPE_PAGE_MIN_BACKOFF;
+        let (listed, decoded, next_page_token) = loop {
+            let attempt = list_dynamic_field_page(client, parent, &mask, page_token.clone())
+                .await
+                .and_then(|(height, fields, next_page_token)| {
+                    heights.observe(height);
+                    if let Some(metrics) = metrics {
+                        metrics
+                            .scrape_pages_total
+                            .with_label_values(&[container])
+                            .inc();
+                        metrics
+                            .scrape_entries_total
+                            .with_label_values(&[container])
+                            .inc_by(fields.len() as u64);
+                    }
+                    let decoded = fields
+                        .iter()
+                        .filter_map(|field| decode(field).transpose())
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((fields.len() as u64, decoded, next_page_token))
+                });
+            match attempt {
+                Ok(page) => break page,
+                Err(error) if page_retry_due(retries, first_attempt.elapsed(), &error) => {
+                    retries += 1;
+                    tracing::warn!(
+                        container,
+                        retries,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "On-chain scrape page failed: {error:#}; retrying the page"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
+                Err(error) => {
+                    return Err(error.context(format!(
+                        "{container}: scrape page failed after {retries} retries in {:.1?}",
+                        first_attempt.elapsed()
+                    )));
+                }
+            }
+        };
+        decoded.into_iter().for_each(&mut apply);
         pages += 1;
-        if let Some(metrics) = metrics {
-            metrics
-                .scrape_pages_total
-                .with_label_values(&[container])
-                .inc();
-            metrics
-                .scrape_entries_total
-                .with_label_values(&[container])
-                .inc_by(page.dynamic_fields.len() as u64);
-        }
-        entries += page.dynamic_fields.len() as u64;
-        let next_page_token = page.next_page_token;
-        consume_page(page.dynamic_fields)?;
+        entries += listed;
         // A multi-million-entry container walks thousands of pages; keep a
         // heartbeat so a boot mid-scrape is distinguishable from a hang.
         if pages.is_multiple_of(100) {
@@ -1425,6 +1458,37 @@ async fn scrape_dynamic_field_pages(
         "Scraped on-chain container"
     );
     Ok(heights)
+}
+
+fn page_retry_due(retries: u32, since_first_attempt: Duration, error: &anyhow::Error) -> bool {
+    retries < SCRAPE_PAGE_RETRIES
+        && since_first_attempt < SCRAPE_PAGE_RETRY_WINDOW
+        && is_retryable_scrape_error(error)
+}
+
+async fn list_dynamic_field_page(
+    client: &Client,
+    parent: Address,
+    mask: &FieldMask,
+    page_token: Option<bytes::Bytes>,
+) -> Result<(u64, Vec<DynamicField>, Option<bytes::Bytes>)> {
+    let mut request = ListDynamicFieldsRequest::default()
+        .with_parent(parent)
+        .with_page_size(SCRAPE_PAGE_SIZE)
+        .with_read_mask(mask.clone());
+    if let Some(token) = page_token {
+        request = request.with_page_token(token);
+    }
+    let response = client
+        .clone()
+        .state_client()
+        .list_dynamic_fields(request)
+        .await?;
+    let height = response
+        .checkpoint_height()
+        .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+    let page = response.into_inner();
+    Ok((height, page.dynamic_fields, page.next_page_token))
 }
 
 /// The fullnode lists fields from its index and loads each object afterwards,
@@ -1504,7 +1568,7 @@ async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
     package_id: Address,
-    scope: ScrapeScope,
+    scrape_for: ScrapeFor,
     packages: &move_types::PackageVersions,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(CheckpointInfo, types::Hashi, Option<route::MirrorSeed>)> {
@@ -1513,7 +1577,7 @@ async fn scrape_hashi(
         metrics.scrape_in_progress.set(1);
     }
     let _in_progress = ScrapeInProgressReset(metrics);
-    tracing::info!(?scope, "Scraping on-chain state");
+    tracing::info!(?scrape_for, "Scraping on-chain state");
     let response = client
         .ledger_client()
         .get_object(
@@ -1564,8 +1628,8 @@ async fn scrape_hashi(
     // Under `GovernanceOnly` this read is skipped along with the
     // collections: the `BitcoinState` exists only to hand them their
     // table ids and the mirror its Bitcoin-side routing.
-    let bitcoin_state = match scope {
-        ScrapeScope::Full => {
+    let bitcoin_state = match scrape_for {
+        ScrapeFor::Mirror | ScrapeFor::Reader(ScrapeScope::Full) => {
             let (bitcoin_state_height, bitcoin_state_version, bitcoin_state) =
                 fetch_bitcoin_state(client.clone(), id, package_id).await?;
             seed.observe_height(bitcoin_state_height);
@@ -1577,7 +1641,7 @@ async fn scrape_hashi(
             );
             Some(bitcoin_state)
         }
-        ScrapeScope::GovernanceOnly => None,
+        ScrapeFor::Reader(ScrapeScope::GovernanceOnly) => None,
     };
 
     let (
@@ -1592,7 +1656,13 @@ async fn scrape_hashi(
         scrape_committees(client.clone(), committees.committees.id, metrics),
         scrape_treasury(client.clone(), treasury, metrics),
         scrape_proposals(client.clone(), proposals, metrics),
-        scrape_tob_entries(client.clone(), tob.id, packages, metrics),
+        async {
+            if matches!(scrape_for, ScrapeFor::Mirror) {
+                scrape_tob_entries(client.clone(), tob.id, packages, metrics).await
+            } else {
+                Ok(Default::default())
+            }
+        },
         scrape_bitcoin_collections(client.clone(), bitcoin_state, metrics),
     )?;
     for container_seed in [
@@ -1605,17 +1675,14 @@ async fn scrape_hashi(
         seed.absorb(container_seed);
     }
 
-    // Withhold the seed on a governance-only scrape: it neither routes
-    // the Bitcoin containers nor folded their serving heights into the
-    // replay floor, so a mirror bootstrapped from it would silently miss
-    // every deposit, withdrawal and UTXO write below the floor.
-    let (bitcoin, seed) = match bitcoin {
-        Some((bitcoin_seed, collections)) => {
-            seed.absorb(bitcoin_seed);
-            (Some(collections), Some(seed))
-        }
-        None => (None, None),
-    };
+    // Only the mirror's scrape routes every container and folds every serving
+    // height into the replay floor; a mirror bootstrapped from a reader's would
+    // silently miss writes below the floor.
+    let bitcoin = bitcoin.map(|(bitcoin_seed, collections)| {
+        seed.absorb(bitcoin_seed);
+        collections
+    });
+    let seed = matches!(scrape_for, ScrapeFor::Mirror).then_some(seed);
 
     let mut committee_set =
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
@@ -1633,7 +1700,7 @@ async fn scrape_hashi(
             .set(started.elapsed().as_millis() as i64);
     }
     tracing::info!(
-        ?scope,
+        ?scrape_for,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "On-chain state scrape complete"
     );
@@ -1689,8 +1756,13 @@ async fn scrape_tob_entries(
         move_types::LinkedTable<Address>,
         Option<move_types::PresigSealV1>,
     )> = Vec::new();
-    seed.heights = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
-        for field in fields {
+    seed.heights = scrape_dynamic_field_pages(
+        &client,
+        tob_id,
+        mask,
+        "tob",
+        metrics,
+        |field| {
             // The leader's TOB GC destroys dead buckets concurrently with this
             // scan, and the RPC's defaulting accessor hands back an EMPTY value
             // for an entry that vanished between page assembly and read (which
@@ -1701,7 +1773,7 @@ async fn scrape_tob_entries(
                     field_id = field.field_id(),
                     "tob entry vanished mid-scrape; skipping"
                 );
-                continue;
+                return Ok(None);
             };
             let key: TobKey = field
                 .name()
@@ -1711,23 +1783,22 @@ async fn scrape_tob_entries(
             // one this binary implements; any other type fails the scrape.
             versioned_decode::ensure_tob_cert_bucket(
                 packages,
-                &versioned_decode::field_value_type(&field)?,
+                &versioned_decode::field_value_type(field)?,
             )?;
             let certs: move_types::EpochCertsV1 = value
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
             let field_id: Address = field.field_id().parse()?;
-            seed.entries.push((
-                field_id,
-                field.field_object().version(),
-                route::TrackedKind::TobBucket(key),
-            ));
+            Ok(Some((field_id, field.field_object().version(), key, certs)))
+        },
+        |(field_id, version, key, certs)| {
+            seed.entries
+                .push((field_id, version, route::TrackedKind::TobBucket(key)));
             seed.interior.push((certs.certs.id, route::Slot::TobCerts));
             seed.tob_tables.push((certs.certs.id, key));
             to_scrape.push((key, certs.certs, certs.seal));
-        }
-        Ok(())
-    })
+        },
+    )
     .await?;
 
     let mut buckets = BTreeMap::new();
@@ -1745,35 +1816,40 @@ async fn scrape_tob_entries(
             node_mask,
             "tob",
             metrics,
-            |node_fields| {
-                for node_field in node_fields {
-                    // Same race as the bag listing: a destroy that lands
-                    // mid-walk deletes the nodes with the bucket.
-                    let Some(value) = node_field.value_opt().filter(|bcs| !bcs.value().is_empty())
-                    else {
-                        tracing::warn!(
-                            field_id = node_field.field_id(),
-                            "tob node vanished mid-scrape; skipping"
-                        );
-                        continue;
-                    };
-                    let dealer: Address = node_field
-                        .name()
+            |node_field| {
+                // Same race as the bag listing: a destroy that lands
+                // mid-walk deletes the nodes with the bucket.
+                let Some(value) = node_field.value_opt().filter(|bcs| !bcs.value().is_empty())
+                else {
+                    tracing::warn!(
+                        field_id = node_field.field_id(),
+                        "tob node vanished mid-scrape; skipping"
+                    );
+                    return Ok(None);
+                };
+                let dealer: Address = node_field
+                    .name()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
+                let node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1> =
+                    value
                         .deserialize()
-                        .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
-                    let node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1> =
-                        value
-                            .deserialize()
-                            .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
-                    let node_id: Address = node_field.field_id().parse()?;
-                    seed.entries.push((
-                        node_id,
-                        node_field.field_object().version(),
-                        route::TrackedKind::TobCert { key, dealer },
-                    ));
-                    nodes.insert(dealer, node);
-                }
-                Ok(())
+                        .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
+                let node_id: Address = node_field.field_id().parse()?;
+                Ok(Some((
+                    node_id,
+                    node_field.field_object().version(),
+                    dealer,
+                    node,
+                )))
+            },
+            |(node_id, version, dealer, node)| {
+                seed.entries.push((
+                    node_id,
+                    version,
+                    route::TrackedKind::TobCert { key, dealer },
+                ));
+                nodes.insert(dealer, node);
             },
         )
         .await?;
@@ -1855,51 +1931,73 @@ async fn scrape_treasury(
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
 
-    seed.heights =
-        scrape_dynamic_field_pages(&client, container, mask, "treasury", metrics, |fields| {
-            for field in fields {
-                let object_type = field.child_object().object_type();
-                let type_tag: TypeTag = match object_type.parse() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!(
-                            "skipping treasury dynamic field with unparseable type \
-                             {object_type:?}: {e}"
-                        );
-                        continue;
-                    }
-                };
-                let contents = field.child_object().contents().value();
-                let wrapper_id: Address = field.field_id().parse()?;
-                let child_id: Address = field.child_object().object_id().parse()?;
-                let child_version = field.child_object().version();
-
-                let kind = if let Some(treasury_cap) =
-                    types::TreasuryCap::try_from_contents(&type_tag, contents)
-                {
+    enum Cap {
+        Treasury(types::TreasuryCap),
+        Metadata(types::MetadataCap),
+    }
+    seed.heights = scrape_dynamic_field_pages(
+        &client,
+        container,
+        mask,
+        "treasury",
+        metrics,
+        |field| {
+            let object_type = field.child_object().object_type();
+            let type_tag: TypeTag = match object_type.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping treasury dynamic field with unparseable type \
+                         {object_type:?}: {e}"
+                    );
+                    return Ok(None);
+                }
+            };
+            let contents = field.child_object().contents().value();
+            let wrapper_id: Address = field.field_id().parse()?;
+            let child_id: Address = field.child_object().object_id().parse()?;
+            let cap = if let Some(treasury_cap) =
+                types::TreasuryCap::try_from_contents(&type_tag, contents)
+            {
+                Cap::Treasury(treasury_cap)
+            } else if let Some(metadata_cap) =
+                types::MetadataCap::try_from_contents(&type_tag, contents)
+            {
+                Cap::Metadata(metadata_cap)
+            } else {
+                tracing::warn!("unknown type stored in treasury");
+                return Ok(None);
+            };
+            Ok(Some((
+                wrapper_id,
+                field.field_object().version(),
+                child_id,
+                field.child_object().version(),
+                cap,
+            )))
+        },
+        |(wrapper_id, wrapper_version, child_id, child_version, cap)| {
+            let kind = match cap {
+                Cap::Treasury(treasury_cap) => {
                     let coin_type = treasury_cap.coin_type.clone();
                     treasury_caps.insert(coin_type.clone(), treasury_cap);
                     route::TrackedKind::TreasuryCap(coin_type)
-                } else if let Some(metadata_cap) =
-                    types::MetadataCap::try_from_contents(&type_tag, contents)
-                {
+                }
+                Cap::Metadata(metadata_cap) => {
                     let coin_type = metadata_cap.coin_type.clone();
                     metadata_caps.insert(coin_type.clone(), metadata_cap);
                     route::TrackedKind::MetadataCap(coin_type)
-                } else {
-                    tracing::warn!("unknown type stored in treasury");
-                    continue;
-                };
-                seed.entries.push((
-                    wrapper_id,
-                    field.field_object().version(),
-                    route::TrackedKind::DofWrapper { container },
-                ));
-                seed.entries.push((child_id, child_version, kind));
-            }
-            Ok(())
-        })
-        .await?;
+                }
+            };
+            seed.entries.push((
+                wrapper_id,
+                wrapper_version,
+                route::TrackedKind::DofWrapper { container },
+            ));
+            seed.entries.push((child_id, child_version, kind));
+        },
+    )
+    .await?;
 
     Ok((
         seed,
@@ -1959,22 +2057,24 @@ async fn scrape_all_member_info(
         mask,
         "members",
         metrics,
-        |fields| {
-            for field in fields {
-                let info: move_types::MemberInfo =
-                    listed_bcs(field.value_opt(), &field, "members")?
-                        .deserialize()
-                        .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
-                let info = convert_move_member_info(info);
-                let field_id: Address = field.field_id().parse()?;
-                seed.entries.push((
-                    field_id,
-                    field.field_object().version(),
-                    route::TrackedKind::Member(info.validator_address),
-                ));
-                member_info.insert(info.validator_address, info);
-            }
-            Ok(())
+        |field| {
+            let info: move_types::MemberInfo = listed_bcs(field.value_opt(), field, "members")?
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
+            let field_id: Address = field.field_id().parse()?;
+            Ok(Some((
+                field_id,
+                field.field_object().version(),
+                convert_move_member_info(info),
+            )))
+        },
+        |(field_id, version, info)| {
+            seed.entries.push((
+                field_id,
+                version,
+                route::TrackedKind::Member(info.validator_address),
+            ));
+            member_info.insert(info.validator_address, info);
         },
     )
     .await?;
@@ -2035,56 +2135,66 @@ async fn scrape_committees(
     let mut seed = route::ContainerSeed::default();
     let mut move_committees = BTreeMap::new();
     let mut raw_handoffs = BTreeMap::new();
+    enum Entry {
+        Committee(move_types::Committee),
+        Handoff(u64, move_types::CommitteeHandoff),
+    }
     seed.heights = scrape_dynamic_field_pages(
         &client,
         committees_id,
         mask,
         "committees",
         metrics,
-        |fields| {
-            for field in fields {
-                let value = listed_bcs(field.value_opt(), &field, "committees")?;
-                let value_type: TypeTag = field
-                    .value_type_opt()
-                    .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
-                    .parse()
-                    .map_err(|e| anyhow!("invalid value_type: {e}"))?;
-                let TypeTag::Struct(struct_tag) = &value_type else {
-                    anyhow::bail!("unexpected committee bag value type: {value_type:?}");
-                };
-                let field_id: Address = field.field_id().parse()?;
-                let field_version = field.field_object().version();
-                match struct_tag.name().as_str() {
-                    "Committee" => {
-                        let committee: move_types::Committee = value
+        |field| {
+            let value = listed_bcs(field.value_opt(), field, "committees")?;
+            let value_type: TypeTag = field
+                .value_type_opt()
+                .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
+                .parse()
+                .map_err(|e| anyhow!("invalid value_type: {e}"))?;
+            let TypeTag::Struct(struct_tag) = &value_type else {
+                anyhow::bail!("unexpected committee bag value type: {value_type:?}");
+            };
+            let field_id: Address = field.field_id().parse()?;
+            let entry = match struct_tag.name().as_str() {
+                "Committee" => Entry::Committee(
+                    value
+                        .deserialize()
+                        .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?,
+                ),
+                "CommitteeHandoff" => {
+                    let key: move_types::CommitteeHandoffKey = field
+                        .name()
+                        .deserialize()
+                        .map_err(|e| anyhow!("failed to deserialize CommitteeHandoffKey: {e}"))?;
+                    Entry::Handoff(
+                        key.epoch,
+                        value
                             .deserialize()
-                            .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?;
-                        seed.entries.push((
-                            field_id,
-                            field_version,
-                            route::TrackedKind::Committee(committee.epoch),
-                        ));
-                        move_committees.insert(committee.epoch, committee);
-                    }
-                    "CommitteeHandoff" => {
-                        let key: move_types::CommitteeHandoffKey =
-                            field.name().deserialize().map_err(|e| {
-                                anyhow!("failed to deserialize CommitteeHandoffKey: {e}")
-                            })?;
-                        let handoff: move_types::CommitteeHandoff = value
-                            .deserialize()
-                            .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?;
-                        seed.entries.push((
-                            field_id,
-                            field_version,
-                            route::TrackedKind::CommitteeHandoff(key.epoch),
-                        ));
-                        raw_handoffs.insert(key.epoch, handoff);
-                    }
-                    _ => anyhow::bail!("unexpected committee bag value type: {value_type:?}"),
+                            .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?,
+                    )
                 }
+                _ => anyhow::bail!("unexpected committee bag value type: {value_type:?}"),
+            };
+            Ok(Some((field_id, field.field_object().version(), entry)))
+        },
+        |(field_id, field_version, entry)| match entry {
+            Entry::Committee(committee) => {
+                seed.entries.push((
+                    field_id,
+                    field_version,
+                    route::TrackedKind::Committee(committee.epoch),
+                ));
+                move_committees.insert(committee.epoch, committee);
             }
-            Ok(())
+            Entry::Handoff(epoch, handoff) => {
+                seed.entries.push((
+                    field_id,
+                    field_version,
+                    route::TrackedKind::CommitteeHandoff(epoch),
+                ));
+                raw_handoffs.insert(epoch, handoff);
+            }
         },
     )
     .await?;
@@ -2166,28 +2276,41 @@ where
     ]);
     let mut seed = route::ContainerSeed::default();
     let mut values = Vec::new();
-    seed.heights = scrape_dynamic_field_pages(client, container, mask, label, metrics, |fields| {
-        for field in fields {
+    seed.heights = scrape_dynamic_field_pages(
+        client,
+        container,
+        mask,
+        label,
+        metrics,
+        |field| {
             let value: T = listed_bcs(
                 field.child_object_opt().and_then(Object::contents_opt),
-                &field,
+                field,
                 label,
             )?
             .deserialize()
             .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
             let wrapper_id: Address = field.field_id().parse()?;
             let child_id: Address = field.child_object().object_id().parse()?;
-            seed.entries.push((
+            Ok(Some((
                 wrapper_id,
                 field.field_object().version(),
+                child_id,
+                field.child_object().version(),
+                value,
+            )))
+        },
+        |(wrapper_id, wrapper_version, child_id, child_version, value)| {
+            seed.entries.push((
+                wrapper_id,
+                wrapper_version,
                 route::TrackedKind::DofWrapper { container },
             ));
             seed.entries
-                .push((child_id, field.child_object().version(), kind_of(&value)));
+                .push((child_id, child_version, kind_of(&value)));
             values.push(value);
-        }
-        Ok(())
-    })
+        },
+    )
     .await?;
     Ok((seed, values))
 }
@@ -2298,21 +2421,20 @@ async fn scrape_utxo_records(
         plain_field_mask(),
         "utxo_records",
         metrics,
-        |fields| {
-            for field in fields {
-                let record: types::UtxoRecord =
-                    listed_bcs(field.value_opt(), &field, "utxo_records")?
-                        .deserialize()
-                        .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
-                let field_id: Address = field.field_id().parse()?;
-                seed.entries.push((
-                    field_id,
-                    field.field_object().version(),
-                    route::TrackedKind::UtxoRecord(record.utxo.id),
-                ));
-                utxo_records.insert(record.utxo.id, record);
-            }
-            Ok(())
+        |field| {
+            let record: types::UtxoRecord = listed_bcs(field.value_opt(), field, "utxo_records")?
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
+            let field_id: Address = field.field_id().parse()?;
+            Ok(Some((field_id, field.field_object().version(), record)))
+        },
+        |(field_id, version, record)| {
+            seed.entries.push((
+                field_id,
+                version,
+                route::TrackedKind::UtxoRecord(record.utxo.id),
+            ));
+            utxo_records.insert(record.utxo.id, record);
         },
     )
     .await?;
@@ -2374,8 +2496,13 @@ async fn scrape_proposal_bag(
     let mut seed = route::ContainerSeed::default();
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
-    seed.heights = scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics, |fields| {
-        for field in fields {
+    seed.heights = scrape_dynamic_field_pages(
+        &client,
+        bag.id,
+        mask,
+        label,
+        metrics,
+        |field| {
             // `child_object.object_type` is the fully-qualified type, e.g.
             //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
             let object_type = field.child_object().object_type();
@@ -2386,34 +2513,42 @@ async fn scrape_proposal_bag(
                         "skipping proposal dynamic object field with unparseable type \
                              {object_type:?}: {e}"
                     );
-                    continue;
+                    return Ok(None);
                 }
             };
-            if let Some(proposal) =
+            let Some(proposal) =
                 decode_proposal(&type_tag, field.child_object().contents().value())
-            {
-                let wrapper_id: Address = field.field_id().parse()?;
-                let child_id: Address = field.child_object().object_id().parse()?;
-                seed.entries.push((
-                    wrapper_id,
-                    field.field_object().version(),
-                    route::TrackedKind::DofWrapper { container: bag.id },
-                ));
-                seed.entries.push((
-                    child_id,
-                    field.child_object().version(),
-                    route::TrackedKind::Proposal {
-                        executed,
-                        id: proposal.id,
-                    },
-                ));
-                proposals.insert(proposal.id, proposal);
-            } else {
+            else {
                 tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
-            }
-        }
-        Ok(())
-    })
+                return Ok(None);
+            };
+            let wrapper_id: Address = field.field_id().parse()?;
+            let child_id: Address = field.child_object().object_id().parse()?;
+            Ok(Some((
+                wrapper_id,
+                field.field_object().version(),
+                child_id,
+                field.child_object().version(),
+                proposal,
+            )))
+        },
+        |(wrapper_id, wrapper_version, child_id, child_version, proposal)| {
+            seed.entries.push((
+                wrapper_id,
+                wrapper_version,
+                route::TrackedKind::DofWrapper { container: bag.id },
+            ));
+            seed.entries.push((
+                child_id,
+                child_version,
+                route::TrackedKind::Proposal {
+                    executed,
+                    id: proposal.id,
+                },
+            ));
+            proposals.insert(proposal.id, proposal);
+        },
+    )
     .await?;
 
     Ok((seed, proposals))
@@ -3066,6 +3201,81 @@ mod boot_scrape_retry_tests {
         }
     }
 
+    struct FlakyPagedListing {
+        tokens: Arc<std::sync::Mutex<Vec<Option<bytes::Bytes>>>>,
+    }
+
+    fn bag_field(value: u64) -> DynamicField {
+        DynamicField::default()
+            .with_field_id(Address::from_static("0xc1").to_string())
+            .with_field_object(Object::default().with_version(1))
+            .with_child_object(
+                Object::default()
+                    .with_object_id(Address::from_static("0xd1").to_string())
+                    .with_version(1)
+                    .with_contents(Bcs::serialize(&value).unwrap()),
+            )
+    }
+
+    #[tonic::async_trait]
+    impl StateService for FlakyPagedListing {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let call = {
+                let mut tokens = self.tokens.lock().unwrap();
+                tokens.push(request.into_inner().page_token);
+                tokens.len()
+            };
+            let (fields, next_page_token) = match call {
+                1 => return Err(tonic::Status::unavailable("tcp connect error")),
+                2 => (
+                    vec![bag_field(1), bag_field(2)],
+                    Some(bytes::Bytes::from_static(b"next")),
+                ),
+                3 => (
+                    vec![bag_field(3), DynamicField::default().with_field_id("0x1")],
+                    None,
+                ),
+                _ => (vec![bag_field(3), bag_field(4)], None),
+            };
+            let mut message = ListDynamicFieldsResponse::default().with_dynamic_fields(fields);
+            message.next_page_token = next_page_token;
+            let mut response = tonic::Response::new(message);
+            response.metadata_mut().insert(
+                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+                "7".parse().unwrap(),
+            );
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_is_listed_again_and_keeps_nothing_from_the_failed_attempt() {
+        let tokens = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = spawn_state_service(FlakyPagedListing {
+            tokens: tokens.clone(),
+        })
+        .await;
+        let (seed, values) = scrape_object_bag::<u64, _>(
+            &client,
+            Address::ZERO,
+            |_| route::TrackedKind::DepositRequest(Address::ZERO),
+            "deposit_requests",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+        assert_eq!(seed.entries.len(), 8);
+        let next = Some(bytes::Bytes::from_static(b"next"));
+        assert_eq!(
+            *tokens.lock().unwrap(),
+            vec![None, None, next.clone(), next]
+        );
+    }
+
     struct HungListing;
 
     #[tonic::async_trait]
@@ -3125,6 +3335,25 @@ mod boot_scrape_retry_tests {
             let err = err.expect("a vanished field must fail the scrape");
             assert!(is_inconsistent_listing(&err), "{err:#}");
         }
+    }
+
+    #[test]
+    fn a_page_is_retried_only_while_its_failures_are_quick_and_few() {
+        let quick = Duration::from_millis(100);
+        let unavailable = || anyhow::Error::from(tonic::Status::unavailable("tcp connect error"));
+        assert!(page_retry_due(0, quick, &raced()));
+        assert!(page_retry_due(2, quick, &unavailable()));
+        assert!(!page_retry_due(3, quick, &raced()));
+        assert!(!page_retry_due(
+            0,
+            Duration::from_secs(60),
+            &tonic::Status::unknown("request timed out").into()
+        ));
+        assert!(!page_retry_due(
+            0,
+            quick,
+            &anyhow!("failed to deserialize MemberInfo: invalid bool")
+        ));
     }
 
     #[test]
