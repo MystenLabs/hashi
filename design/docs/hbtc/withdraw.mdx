@@ -45,7 +45,7 @@ answer: >-
   address.
 ---
 
-To move BTC back to Bitcoin, you submit a withdrawal request on Sui that burns
+To move BTC back to Bitcoin, you submit a withdrawal request on Sui that locks
 your `hBTC` and names the Bitcoin address that receives the BTC. You can make
 the request with the Hashi CLI or with the TypeScript SDK. This page covers the
 steps. For what the committee and the Guardian do with your request, see the
@@ -60,7 +60,7 @@ steps. For what the committee and the Guardian do with your request, see the
 </TabItem>
 </Tabs>
 
-## What to know before you withdraw
+## What to know before you withdraw {#before-you-withdraw}
 
 Keep the following rules in mind:
 
@@ -80,11 +80,12 @@ Keep the following rules in mind:
   with other requests, and capacity in the Guardian's rate limiter. See
   [How long does a withdrawal take?](faq.mdx#how-long-does-a-withdrawal-take).
 
-## How to withdraw BTC with the CLI
+## How to withdraw BTC with the CLI {#withdraw-with-the-cli}
 
 CLI global options such as `-c` belong after the first-level subcommand, so
-`-c` goes directly after `withdraw` and before the `request`, `status`, or
-`list` subcommand, as in the following examples. See
+`-c` can go anywhere after `withdraw`, before or after the `request`,
+`status`, or `list` subcommand. The following examples put it directly after
+`withdraw`. See
 [Global options](../reference/cli.mdx#global-options).
 
 ##### Step 1: Submit the request
@@ -96,8 +97,8 @@ address:
 hashi withdraw -c hashi-cli.toml request --amount <sats> --btc-address <addr>
 ```
 
-The command burns the `hBTC` from your address, places the request in the
-withdrawal queue, and prints the withdrawal request ID. Keep the ID. You need
+The command moves the `hBTC` from your address into the request, places the
+request in the withdrawal queue, and prints the withdrawal request ID. Keep the ID. You need
 it to check status and to [cancel](cancel.mdx).
 
 ##### Step 2: Track the request
@@ -113,7 +114,7 @@ The request moves through the states Requested, Approved, Processing, Signed,
 and Confirmed. After Hashi commits the Bitcoin transaction, the status includes
 its txid, which you can follow in any Bitcoin explorer.
 
-## How to withdraw BTC with the TypeScript SDK
+## How to withdraw BTC with the TypeScript SDK {#withdraw-with-the-typescript-sdk}
 
 The SDK attaches to a Sui client and exposes every Hashi method under
 `client.hashi.*`. Install it and create a client as described in
@@ -185,7 +186,7 @@ const wInfo = await client.hashi.waitForWithdrawal(digest);
 // wInfo.btcTxid is populated once the committee commits the Bitcoin tx.
 ```
 
-## What if the transaction is slow to confirm?
+## What if the transaction is slow to confirm? {#if-the-transaction-is-slow-to-confirm}
 
 Hashi does not replace a slow Bitcoin transaction with a higher-fee version.
 If your withdrawal sits in the mempool, you can speed it up yourself by
