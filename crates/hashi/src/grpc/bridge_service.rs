@@ -63,6 +63,7 @@ use hashi_types::proto::SignWithdrawalTxSigningResponse;
 use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
+use super::BINARY_UNSUPPORTED_REFUSAL_MSG;
 use super::CATCHING_UP_REFUSAL_MSG;
 use super::HttpService;
 use super::PAUSED_REFUSAL_MSG;
@@ -534,7 +535,7 @@ impl HttpService {
             HaltReason::Paused => (SIGNING_REFUSAL_PAUSED, PAUSED_REFUSAL_MSG),
             HaltReason::BinaryUnsupported { .. } => (
                 SIGNING_REFUSAL_BINARY_UNSUPPORTED,
-                "binary does not support the enabled on-chain package version(s) — upgrade required",
+                BINARY_UNSUPPORTED_REFUSAL_MSG,
             ),
         };
         self.count_signing_refusal(caller, metric_reason);

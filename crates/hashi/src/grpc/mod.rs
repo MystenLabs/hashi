@@ -19,6 +19,8 @@ pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reach
 pub(crate) const PEER_CONNECTION_LIMIT_MSG: &str =
     "per-peer in-flight limit reached: too many connections";
 pub(crate) const PAUSED_REFUSAL_MSG: &str = "Hashi is paused";
+pub(crate) const BINARY_UNSUPPORTED_REFUSAL_MSG: &str =
+    "binary does not support the enabled on-chain package version(s) — upgrade required";
 pub(crate) const NOT_READY_TO_FINALIZE_MSG: &str = "not ready to finalize";
 pub(crate) const UNSIGNED_REFUSAL_MSG: &str = "a withdrawal is still unsigned";
 pub(crate) const NOT_OLDEST_REFUSAL_MSG: &str = "missing the oldest approved request";
