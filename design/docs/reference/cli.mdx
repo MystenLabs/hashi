@@ -35,6 +35,22 @@ answer: >-
   The hashi CLI has the first-level subcommands server, register, committee, config, proposal, backup, deposit, withdraw, balance, publish, and validator. Global options such as --config belong after the first-level subcommand, not after hashi itself.
 ---
 
+The `hashi` CLI has 11 first-level subcommands:
+
+- `server`
+- `register`
+- `committee`
+- `config`
+- `proposal`
+- `backup`
+- `deposit`
+- `withdraw`
+- `balance`
+- `publish`
+- `validator`
+
+Global options such as `--config` go after the first-level subcommand, not after `hashi` itself.
+
 ## Global options
 
 ```
@@ -148,7 +164,7 @@ hashi config show                      # Show effective CLI configuration
 hashi config on-chain                  # View on-chain protocol configuration
 ```
 
-## Proposals (governance)
+## How to manage governance proposals
 
 ```bash
 hashi proposal list [--type <type>] [--detailed] [--executed] [--votes] [--json]   # active proposals by default
@@ -175,11 +191,18 @@ hashi proposal create ignore-member --validator <address> [--unignore] [-m key=v
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([Outbound](../validators/configuration.mdx#outbound)). Nodes call the guardian at the `guardian_node_url` instant config key; `guardian_url` is its public endpoint (`/info`, the key-provisioner relay). Changing either is an `update-config` proposal:
+Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([Outbound](../validators/configuration.mdx#outbound)). Two config keys hold guardian URLs:
+
+- `guardian_node_url`: the instant config key with the endpoint that nodes call
+- `guardian_url`: the guardian's public endpoint (`/info`, the key-provisioner relay)
+
+Changing either is an `update-config` proposal:
 
 ```bash
 hashi proposal create update-config guardian_node_url string:<url> [-m key=value]
 ```
+
+Replace `<url>` with the full URL and keep the `string:` prefix, for example `string:https://guardian.example`.
 
 Executing the proposal changes the onchain value, but a running node keeps the guardian client it already resolved and goes on dialing the old endpoint. Restart each node after a `guardian_node_url` change for the new endpoint to take effect; nodes don't dial `guardian_url`.
 
