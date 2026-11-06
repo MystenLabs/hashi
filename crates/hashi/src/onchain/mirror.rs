@@ -162,18 +162,16 @@ async fn ensure_bootstrapped(
     let package_versions = hashi_types::move_types::PackageVersions::new(
         super::scrape_package_versions(client.clone(), state.package_id_original()).await?,
     );
-    // Always `Full` — this replaces the authoritative snapshot, and only
-    // a full scrape yields a seed to rebuild the mirror from.
     let (_, hashi, seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
         state.package_id_original(),
-        super::ScrapeScope::Full,
+        super::ScrapeFor::Mirror,
         &package_versions,
         state.metrics().map(|m| m.as_ref()),
     )
     .await?;
-    let mut seed = seed.context("a full scrape must produce a mirror seed")?;
+    let mut seed = seed.context("a mirror scrape must produce a seed")?;
     seed.heights
         .raise_ceiling(super::executed_checkpoint(client).await?);
     tracing::info!(
