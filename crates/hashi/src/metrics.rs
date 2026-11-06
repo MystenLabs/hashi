@@ -117,6 +117,8 @@ pub struct Metrics {
     pub watcher_unrouted_objects_total: IntCounter,
     pub watcher_state_watermark: IntGauge,
     pub watcher_rebootstrap_total: IntCounter,
+    pub watcher_tob_untracked_writes_total: IntCounter,
+    pub watcher_tob_fetch_recoveries_total: IntCounter,
 
     // Onchain boot-scrape metrics
     pub scrape_in_progress: IntGauge,
@@ -747,6 +749,19 @@ impl Metrics {
                 "hashi_watcher_rebootstrap_total",
                 "Times the object mirror was re-bootstrapped from a fresh scrape after a failed \
                  replay (the lossy fallback; reconnects normally recover via replay alone)",
+                registry,
+            )
+            .unwrap(),
+            watcher_tob_untracked_writes_total: register_int_counter_with_registry!(
+                "hashi_watcher_tob_untracked_writes_total",
+                "TOB bucket writes the object mirror left untracked, once it has caught up \
+                 with the stream",
+                registry,
+            )
+            .unwrap(),
+            watcher_tob_fetch_recoveries_total: register_int_counter_with_registry!(
+                "hashi_watcher_tob_fetch_recoveries_total",
+                "TOB bucket fetches whose merge applied an object the object mirror lacked",
                 registry,
             )
             .unwrap(),

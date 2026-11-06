@@ -89,10 +89,16 @@ enum ScrapeFor {
     Reader(ScrapeScope),
 }
 
+struct MirrorStart {
+    seed: route::MirrorSeed,
+    asks: tokio::sync::mpsc::Receiver<tob_fetch::TobAsk>,
+}
+
 mod apply;
 mod mirror;
 mod route;
 mod spent_utxos;
+mod tob_fetch;
 pub mod types;
 pub mod version;
 mod versioned_decode;
@@ -175,6 +181,8 @@ struct Inner {
     /// limiter immediately — a re-bootstrap can swallow the fully-signed
     /// transitions that advance it.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
+    /// `None` on a reader.
+    tob_fetch: Option<tob_fetch::TobFetch>,
 }
 
 const SCRAPE_CEILING_MARGIN: u64 = 25;
@@ -236,7 +244,7 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
-        let (state, seed) = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
+        let (state, start) = retry_boot_scrape(BOOT_SCRAPE_RETRY_WINDOW, || {
             Self::scrape_into_state(
                 sui_rpc_url,
                 ids,
@@ -247,7 +255,8 @@ impl OnchainState {
             )
         })
         .await?;
-        let mut seed = seed.context("a mirror scrape must produce a seed")?;
+        let MirrorStart { mut seed, asks } =
+            start.context("a mirror scrape must produce a seed")?;
         seed.heights
             .raise_ceiling(executed_checkpoint(&state.client()).await?);
         state.set_scrape_ceiling(seed.heights.ceiling);
@@ -262,7 +271,7 @@ impl OnchainState {
         // The watcher rebuilds its client on every reconnect, so hand it the URL.
         let sui_rpc_url = sui_rpc_url.to_owned();
         let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(sui_rpc_url, watcher_state, seed, metrics).await;
+            watcher::watcher(sui_rpc_url, watcher_state, seed, asks, metrics).await;
             Ok(())
         });
 
@@ -271,15 +280,15 @@ impl OnchainState {
 
     /// One-shot reader: scrapes once and starts no watcher, so the state
     /// never refreshes. Live state needs [`OnchainState::new`]. Readers load
-    /// no TOB buckets, even under [`ScrapeScope::Full`], so `tob_certs`,
-    /// `tob_bucket_keys` and `presig_seals` read as if none existed.
+    /// no TOB buckets, even under [`ScrapeScope::Full`]: `tob_certs` fails, and
+    /// `tob_bucket_keys` and `presig_seals` panic.
     pub async fn new_reader(
         sui_rpc_url: &str,
         ids: HashiIds,
         grpc_max_decoding_message_size: Option<usize>,
         scope: ScrapeScope,
     ) -> Result<Self> {
-        let (state, _seed) = Self::scrape_into_state(
+        let (state, _) = Self::scrape_into_state(
             sui_rpc_url,
             ids,
             ScrapeFor::Reader(scope),
@@ -300,7 +309,7 @@ impl OnchainState {
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
-    ) -> Result<(Self, Option<route::MirrorSeed>)> {
+    ) -> Result<(Self, Option<MirrorStart>)> {
         let deposit_tracker = metrics.as_ref().map_or_else(
             crate::deposit_tracker::DepositTracker::new_uninstrumented,
             |metrics| crate::deposit_tracker::DepositTracker::new(metrics.clone()),
@@ -330,6 +339,13 @@ impl OnchainState {
         } else {
             ScrapeCeiling::new(0)
         };
+        let (tob_fetch, start) = match seed {
+            Some(seed) => {
+                let (fetch, asks) = tob_fetch::TobFetch::new();
+                (Some(fetch), Some(MirrorStart { seed, asks }))
+            }
+            None => (None, None),
+        };
         let state = Inner {
             ids,
             client,
@@ -344,12 +360,46 @@ impl OnchainState {
             deposit_tracker,
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
+            tob_fetch,
         }
         .pipe(Arc::new)
         .pipe(Self);
 
         state.reconcile_deposit_tracker();
-        Ok((state, seed))
+        Ok((state, start))
+    }
+
+    fn tob_fetch(&self) -> Option<&tob_fetch::TobFetch> {
+        self.0.tob_fetch.as_ref()
+    }
+
+    pub(crate) fn tob_fetch_pending(&self, epoch: u64, batch_index: u32) -> bool {
+        self.tob_fetch()
+            .is_some_and(|fetch| fetch.pending(&tob_fetch::nonce_key(epoch, batch_index)))
+    }
+
+    pub(crate) fn ask_tob_missing_batch(&self, epoch: u64, batch_index: u32, avid_ceiling: u32) {
+        let Some(fetch) = self.tob_fetch() else {
+            return;
+        };
+        let window = {
+            let state = self.state();
+            if state.hashi.committees.epoch() != epoch
+                || state
+                    .hashi
+                    .tob
+                    .buckets()
+                    .contains_key(&tob_fetch::nonce_key(epoch, batch_index))
+            {
+                return;
+            }
+            types::tob_window(&state.hashi.config)
+        };
+        fetch.ask(
+            epoch,
+            tob_fetch::missing_batch_run(batch_index, window, avid_ceiling),
+            tokio::time::Instant::now(),
+        );
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
@@ -639,13 +689,17 @@ impl OnchainState {
         self.state().hashi.tob.id
     }
 
+    pub fn tob_bucket_field_id(&self, key: &TobKey) -> Address {
+        tob_fetch::tob_bucket_field_id(self.tob_id(), self.package_id_original(), key)
+    }
+
     /// Every TOB bucket key the mirror holds, with each bucket's
     /// submission count.
     pub fn tob_bucket_keys(&self) -> Vec<(move_types::TobKey, u64)> {
         self.state()
             .hashi
             .tob
-            .buckets
+            .buckets()
             .iter()
             .map(|(key, bucket)| (*key, bucket.nodes.len() as u64))
             .collect()
@@ -653,13 +707,6 @@ impl OnchainState {
 
     /// The dealer submissions for one TOB bucket, in on-chain insertion
     /// order (the total order the TOB guarantees), read from the mirror.
-    /// Returns `Ok(None)` when the bucket does not exist. An incomplete
-    /// link walk (a convergence gap while a bootstrap replay catches up,
-    /// retryable and recognized by [`is_inconsistent_listing`]) is an
-    /// error rather than a silent truncation, and so is a nonce bucket
-    /// whose timestamps are not monotone in TOB order. Only the nonce
-    /// accumulation window reads the timestamps, so key-generation
-    /// buckets are not checked for it.
     pub fn tob_certs(
         &self,
         epoch: u64,
@@ -672,11 +719,32 @@ impl OnchainState {
             protocol_type,
         };
         let state = self.state();
-        let Some(bucket) = state.hashi.tob.buckets.get(&key) else {
+        let buckets = state
+            .hashi
+            .tob
+            .try_buckets()
+            .context("TOB buckets are not loaded on a reader")?;
+        let walked = buckets
+            .get(&key)
+            .map(types::TobBucket::complete_certs_in_order);
+        if let Some(fetch) = self.tob_fetch()
+            && matches!(protocol_type, move_types::ProtocolType::NonceGeneration)
+            && epoch == state.hashi.committees.epoch()
+        {
+            let now = tokio::time::Instant::now();
+            match &walked {
+                Some(Ok(_)) => fetch.complete(&key),
+                None => fetch.unready(key, tob_fetch::Unready::Absent, now),
+                Some(Err(_)) if self.caught_up_with_scrape() => {
+                    fetch.unready(key, tob_fetch::Unready::Stranded, now)
+                }
+                Some(Err(_)) => fetch.unready(key, tob_fetch::Unready::Converging, now),
+            }
+        }
+        let Some(walked) = walked else {
             return Ok(None);
         };
-        let certs: Vec<(Address, move_types::DealerSubmissionV1)> = bucket
-            .complete_certs_in_order()
+        let certs: Vec<(Address, move_types::DealerSubmissionV1)> = walked
             .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
             .into_iter()
             .map(|(dealer, submission)| (dealer, submission.clone()))
@@ -689,7 +757,7 @@ impl OnchainState {
         self.state()
             .hashi
             .tob
-            .buckets
+            .buckets()
             .iter()
             .filter(|(key, _)| {
                 key.epoch == epoch && key.protocol_type == move_types::ProtocolType::NonceGeneration
@@ -1624,6 +1692,14 @@ async fn scrape_hashi(
         tob,
         num_consumed_presigs,
     } = root;
+    let config = convert_move_config(config, versioning);
+    let live = types::LiveEpochs {
+        current: committees.epoch,
+        pending: committees
+            .pending_epoch_change
+            .as_ref()
+            .map(|pending| pending.epoch),
+    };
 
     // Under `GovernanceOnly` this read is skipped along with the
     // collections: the `BitcoinState` exists only to hand them their
@@ -1649,7 +1725,7 @@ async fn scrape_hashi(
         (committee_seed, (committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
         (proposal_seed, proposals),
-        (tob_seed, tob_buckets),
+        (tob_seed, tob_mirror),
         bitcoin,
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id, metrics),
@@ -1658,9 +1734,18 @@ async fn scrape_hashi(
         scrape_proposals(client.clone(), proposals, metrics),
         async {
             if matches!(scrape_for, ScrapeFor::Mirror) {
-                scrape_tob_entries(client.clone(), tob.id, packages, metrics).await
+                let (seed, mirror) = scrape_tob_entries(
+                    client.clone(),
+                    tob.id,
+                    packages,
+                    metrics,
+                    live,
+                    types::tob_window(&config),
+                )
+                .await?;
+                Ok((seed, Some(mirror)))
             } else {
-                Ok(Default::default())
+                Ok((route::ContainerSeed::default(), None))
             }
         },
         scrape_bitcoin_collections(client.clone(), bitcoin_state, metrics),
@@ -1710,14 +1795,14 @@ async fn scrape_hashi(
         types::Hashi {
             id,
             committees: committee_set,
-            config: convert_move_config(config, versioning),
+            config,
             epoch_config,
             treasury,
             bitcoin,
             proposals,
             tob: types::Tob {
                 id: tob.id,
-                buckets: tob_buckets,
+                mirror: tob_mirror,
             },
             num_consumed_presigs,
         },
@@ -1725,19 +1810,16 @@ async fn scrape_hashi(
     ))
 }
 
-/// Scrape the tob bag: every bucket Field plus each bucket's dealer
-/// submission nodes. Until the cert GC has drained pre-GC history this
-/// walks one page-listing per accumulated bucket; at steady state the
-/// live set is a couple of epochs' worth of buckets.
+/// Scrape the tob bag: every bucket Field, then the dealer submission nodes
+/// of each bucket the mirror keeps.
 async fn scrape_tob_entries(
     client: Client,
     tob_id: Address,
     packages: &move_types::PackageVersions,
     metrics: Option<&crate::metrics::Metrics>,
-) -> Result<(
-    route::ContainerSeed,
-    BTreeMap<move_types::TobKey, types::TobBucket>,
-)> {
+    live: types::LiveEpochs,
+    window: u32,
+) -> Result<(route::ContainerSeed, types::TobMirror)> {
     let mask = FieldMask::from_paths([
         DynamicField::path_builder().name().finish(),
         DynamicField::path_builder().field_id(),
@@ -1748,14 +1830,8 @@ async fn scrape_tob_entries(
     let mut seed = route::ContainerSeed::default();
     // Bucket pages stream in, but each bucket's node listing is its own
     // paged scrape, so bucket descriptors are collected first and their
-    // interiors walked after the bag listing completes. At steady state
-    // the bag holds a couple of epochs' worth of buckets, so the
-    // collection stays small.
-    let mut to_scrape: Vec<(
-        TobKey,
-        move_types::LinkedTable<Address>,
-        Option<move_types::PresigSealV1>,
-    )> = Vec::new();
+    // interiors walked after the bag listing completes.
+    let mut to_scrape: Vec<(Address, u64, TobKey, move_types::EpochCertsV1)> = Vec::new();
     seed.heights = scrape_dynamic_field_pages(
         &client,
         tob_id,
@@ -1791,70 +1867,45 @@ async fn scrape_tob_entries(
             let field_id: Address = field.field_id().parse()?;
             Ok(Some((field_id, field.field_object().version(), key, certs)))
         },
-        |(field_id, version, key, certs)| {
-            seed.entries
-                .push((field_id, version, route::TrackedKind::TobBucket(key)));
-            seed.interior.push((certs.certs.id, route::Slot::TobCerts));
-            seed.tob_tables.push((certs.certs.id, key));
-            to_scrape.push((key, certs.certs, certs.seal));
-        },
+        |entry| to_scrape.push(entry),
     )
     .await?;
-
-    let mut buckets = BTreeMap::new();
-    for (key, certs, seal) in to_scrape {
-        let node_mask = FieldMask::from_paths([
-            DynamicField::path_builder().name().finish(),
-            DynamicField::path_builder().field_id(),
-            DynamicField::path_builder().value().finish(),
-            DynamicField::path_builder().field_object().version(),
-        ]);
+    let mut mirror = types::TobMirror::default();
+    for (.., key, certs) in &to_scrape {
+        if certs.seal.is_some() {
+            mirror.fold_seal(key);
+        }
+    }
+    mirror.frontier.retain(|epoch, _| live.contains(*epoch));
+    let listed = to_scrape.len();
+    to_scrape
+        .retain(|(.., key, _)| types::in_window(key, mirror.frontier(key.epoch), live, window));
+    tracing::info!(
+        listed,
+        kept = to_scrape.len(),
+        "TOB buckets kept within the live epochs and the window"
+    );
+    for (field_id, version, key, certs) in to_scrape {
+        let move_types::EpochCertsV1 { certs, seal, .. } = certs;
+        seed.entries
+            .push((field_id, version, route::TrackedKind::TobBucket(key)));
+        seed.interior.push((certs.id, route::Slot::TobCerts));
+        seed.tob_tables.push((certs.id, key));
         let mut nodes = BTreeMap::new();
-        let node_heights = scrape_dynamic_field_pages(
-            &client,
-            certs.id,
-            node_mask,
-            "tob",
-            metrics,
-            |node_field| {
-                // Same race as the bag listing: a destroy that lands
-                // mid-walk deletes the nodes with the bucket.
-                let Some(value) = node_field.value_opt().filter(|bcs| !bcs.value().is_empty())
-                else {
-                    tracing::warn!(
-                        field_id = node_field.field_id(),
-                        "tob node vanished mid-scrape; skipping"
-                    );
-                    return Ok(None);
-                };
-                let dealer: Address = node_field
-                    .name()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
-                let node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1> =
-                    value
-                        .deserialize()
-                        .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
-                let node_id: Address = node_field.field_id().parse()?;
-                Ok(Some((
-                    node_id,
-                    node_field.field_object().version(),
-                    dealer,
-                    node,
-                )))
-            },
-            |(node_id, version, dealer, node)| {
-                seed.entries.push((
-                    node_id,
-                    version,
-                    route::TrackedKind::TobCert { key, dealer },
-                ));
-                nodes.insert(dealer, node);
-            },
-        )
+        let node_heights = scrape_tob_nodes(&client, certs.id, "tob", metrics, |node| {
+            let TobNode {
+                id,
+                version,
+                dealer,
+                node,
+            } = node;
+            seed.entries
+                .push((id, version, route::TrackedKind::TobCert { key, dealer }));
+            nodes.insert(dealer, node);
+        })
         .await?;
         seed.heights.merge(node_heights);
-        buckets.insert(
+        mirror.buckets.insert(
             key,
             types::TobBucket {
                 certs_id: certs.id,
@@ -1865,7 +1916,61 @@ async fn scrape_tob_entries(
             },
         );
     }
-    Ok((seed, buckets))
+    Ok((seed, mirror))
+}
+
+#[derive(Debug)]
+struct TobNode {
+    id: Address,
+    version: u64,
+    dealer: Address,
+    node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
+}
+
+async fn scrape_tob_nodes(
+    client: &Client,
+    certs_id: Address,
+    container: &'static str,
+    metrics: Option<&crate::metrics::Metrics>,
+    apply: impl FnMut(TobNode),
+) -> Result<route::PageHeights> {
+    let node_mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().field_object().version(),
+    ]);
+    scrape_dynamic_field_pages(
+        client,
+        certs_id,
+        node_mask,
+        container,
+        metrics,
+        |node_field| {
+            let Some(value) = node_field.value_opt().filter(|bcs| !bcs.value().is_empty()) else {
+                tracing::warn!(
+                    field_id = node_field.field_id(),
+                    "tob node vanished mid-scrape; skipping"
+                );
+                return Ok(None);
+            };
+            let dealer: Address = node_field
+                .name()
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
+            let node: move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1> = value
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
+            Ok(Some(TobNode {
+                id: node_field.field_id().parse()?,
+                version: node_field.field_object().version(),
+                dealer,
+                node,
+            }))
+        },
+        apply,
+    )
+    .await
 }
 
 /// `None` when the caller skipped the `BitcoinState` lookup, which exists only
@@ -3485,5 +3590,124 @@ mod boot_scrape_retry_tests {
         .unwrap();
         assert_eq!(attempts, 2);
         assert!(Instant::now() > deadline);
+    }
+
+    struct TobBag {
+        tob_id: Address,
+        buckets: Vec<DynamicField>,
+        listed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[tonic::async_trait]
+    impl StateService for TobBag {
+        async fn list_dynamic_fields(
+            &self,
+            request: tonic::Request<ListDynamicFieldsRequest>,
+        ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
+            let parent = request.into_inner().parent().to_string();
+            let fields = if parent == self.tob_id.to_string() {
+                self.buckets.clone()
+            } else {
+                self.listed.lock().unwrap().push(parent);
+                Vec::new()
+            };
+            let mut response = tonic::Response::new(
+                ListDynamicFieldsResponse::default().with_dynamic_fields(fields),
+            );
+            response.metadata_mut().insert(
+                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+                "7".parse().unwrap(),
+            );
+            Ok(response)
+        }
+    }
+
+    fn bag_bucket(
+        package: Address,
+        field_id: Address,
+        key: TobKey,
+        certs: Address,
+        sealed: bool,
+    ) -> DynamicField {
+        let value = move_types::EpochCertsV1 {
+            epoch: key.epoch,
+            protocol_type: key.protocol_type,
+            certs: move_types::LinkedTable {
+                id: certs,
+                size: 0,
+                head: None,
+                tail: None,
+            },
+            seal: sealed.then(|| move_types::PresigSealV1 {
+                randomness: vec![1; 32],
+                dealer_set_digest: vec![2; 32],
+            }),
+        };
+        DynamicField::default()
+            .with_name(Bcs::serialize(&key).unwrap())
+            .with_field_id(field_id.to_string())
+            .with_value(Bcs::serialize(&value).unwrap())
+            .with_value_type(format!("{package}::tob::EpochCertsV1"))
+            .with_field_object(Object::default().with_version(1))
+    }
+
+    #[tokio::test]
+    async fn the_boot_keeps_only_live_epochs_within_the_window_and_lists_only_their_nodes() {
+        let package = Address::from_static("0x7");
+        let tob_id = Address::from_static("0x70");
+        let nonce = |epoch, batch| TobKey {
+            epoch,
+            batch_index: Some(batch),
+            protocol_type: move_types::ProtocolType::NonceGeneration,
+        };
+        let dkg = TobKey {
+            epoch: 2,
+            batch_index: None,
+            protocol_type: move_types::ProtocolType::Dkg,
+        };
+        let id = |byte: u8| Address::from_bytes([byte; 32]).unwrap();
+        let listed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = spawn_state_service(TobBag {
+            tob_id,
+            buckets: vec![
+                bag_bucket(package, id(0x10), nonce(5, 0), id(0x20), true),
+                bag_bucket(package, id(0x11), nonce(5, 3), id(0x21), false),
+                bag_bucket(package, id(0x12), nonce(5, 9), id(0x22), false),
+                bag_bucket(package, id(0x13), nonce(2, 0), id(0x23), false),
+                bag_bucket(package, id(0x14), dkg, id(0x24), false),
+            ],
+            listed: listed.clone(),
+        })
+        .await;
+        let packages = move_types::PackageVersions::new(BTreeMap::from([(1, package)]));
+        let live = types::LiveEpochs {
+            current: 5,
+            pending: None,
+        };
+
+        let (seed, mirror) = scrape_tob_entries(client, tob_id, &packages, None, live, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            mirror.buckets.keys().copied().collect::<Vec<_>>(),
+            vec![dkg, nonce(5, 0), nonce(5, 3)]
+        );
+        assert_eq!(mirror.frontier(5), 1);
+        let mut listed = listed.lock().unwrap().clone();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [id(0x20), id(0x21), id(0x24)].map(|certs| certs.to_string())
+        );
+        let mut seeded = seed
+            .entries
+            .iter()
+            .map(|(field_id, ..)| *field_id)
+            .collect::<Vec<_>>();
+        seeded.sort();
+        assert_eq!(seeded, vec![id(0x10), id(0x11), id(0x14)]);
+        assert_eq!(seed.tob_tables.len(), 3);
+        assert_eq!(seed.interior.len(), 3);
     }
 }

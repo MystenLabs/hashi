@@ -37,6 +37,7 @@ Two principles shape this list:
 | Peers shed at once      | 3 or more peers hit the request count or MPC work limits in 10m (see the rules file) | Several at once usually means your node is slow, not the peers. |
 | Signing requested while paused | A peer's `paused` refusal in the last 15m, with `hashi_paused` at 1 throughout, held 3m (see the rules file) | Your node counts the refusals; the pause flag only gates the rule. Requests in flight when a pause starts finish within about a minute, and an unpause closes the gate. Might not fire for about 18 minutes after a restart. |
 | MPC work unguarded      | `increase(hashi_mpc_unguarded_spawn_blocking_total[1h]) > 0` | A node bug. Report it to the hashi team. |
+| TOB writes untracked    | `increase(hashi_watcher_tob_untracked_writes_total[1h]) > 0` | Honest dealers write only nonce buckets near the latest sealed batch, so your mirror skipped writes far past it: a member is filling the TOB with junk, or seals have stopped landing while dealing goes on. Raise it in the operator channel. |
 | MPC peer refused        | A peer's MPC requests or responses were refused in 1h (see the rules file) | One peer usually means it is faulty or runs a broken build. A response refused for a certificate hash mismatch can also come from an honest signer that lost its stored copy. |
 | MPC peers refused at once | 3 or more peers, and more than half of `hashi_mpc_committee_members`, were refused in 10m (see the rules file) | That many at once usually means your node's checks and its peers' messages disagree, which a build mismatch causes: compare builds first. A fixed count alone would page whenever 3 members are broken. |
 | Stored rows refused     | `hashi_mpc_stored_rows_refused_total` rose in 1h (see the rules file) | Your node refused a row it stored itself: a damaged store, or a new build refusing what an earlier one accepted. Requesters see only `NotFound`, so no other alert fires. |
@@ -49,6 +50,8 @@ Dashboard-worthy but **not** alerts:
   upgrade progress is counted before the on-chain upgrade flips `active`.
 - `hashi_mpc_presig_batch_repair_total` — a nonce batch the allocation cursor
   outran, and what this node did about it, by `outcome`.
+- `hashi_watcher_tob_fetch_recoveries_total` — TOB bucket fetches whose merge
+  added objects your mirror lacked.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
 - `hashi_db_keyspace_disk_bytes` — live table bytes per keyspace. Each one

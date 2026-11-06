@@ -39,11 +39,12 @@ pub async fn watcher(
     sui_rpc_url: String,
     state: OnchainState,
     seed: super::route::MirrorSeed,
+    asks: tokio::sync::mpsc::Receiver<super::tob_fetch::TobAsk>,
     metrics: Option<Arc<Metrics>>,
 ) {
     tokio::join!(
         clock_watcher(sui_rpc_url.clone(), state.clone(), metrics.clone()),
-        super::mirror::run(sui_rpc_url, state, seed, metrics),
+        super::mirror::run(sui_rpc_url, state, seed, asks, metrics),
     );
 }
 

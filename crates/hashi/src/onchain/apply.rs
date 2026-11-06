@@ -248,6 +248,7 @@ pub(super) struct ApplyOutcome {
     /// handler decodes. Every entry is a potential mirror gap; the
     /// caller surfaces them as the lossless-coverage tripwire.
     pub unrouted: Vec<(Address, String)>,
+    pub untracked_tob_writes: u64,
 }
 
 /// Apply one successful transaction's changes to the mirror.
@@ -272,6 +273,7 @@ pub(super) fn apply_transaction(
         out.unrouted.push((*id, format!("output_state {state}")));
     }
 
+    let live_before = types::LiveEpochs::of(&hashi.committees);
     // Pass 1: the Hashi root and the BitcoinState dynamic field.
     for change in &tx.changes {
         let TxChange::Written(obj) = change else {
@@ -282,6 +284,9 @@ pub(super) fn apply_transaction(
         } else if obj.object_id() == routing.bitcoin_state_field_id() {
             apply_bitcoin_state(routing, index, obj, &mut out);
         }
+    }
+    if types::LiveEpochs::of(&hashi.committees) != live_before {
+        evict_dead_tob_epochs(hashi, routing, index);
     }
 
     // Pass 2: DOF wrappers, so values created in the same transaction
@@ -304,6 +309,14 @@ pub(super) fn apply_transaction(
     // because the child mutation bumps the embedded container's size),
     // so those children route as known-ignored instead of unrouted.
     // Committee handoffs are deferred past both rounds.
+    for change in &tx.changes {
+        if let TxChange::Written(obj) = change
+            && let Some(field) = tob_bucket_field(packages, routing, obj)
+            && field.value.seal.is_some()
+        {
+            hashi.tob.mirror_mut().fold_seal(&field.name);
+        }
+    }
     let mut handoffs: Vec<&Object> = Vec::new();
     let mut deferred: Vec<&Object> = Vec::new();
     for change in &tx.changes {
@@ -704,33 +717,25 @@ fn apply_write(
             // value-side type must be the bucket type this binary
             // decodes; any other falls through to the unrouted
             // tripwire rather than misdecoding.
-            known_tob_bucket(packages, tag).and_then(|()| {
+            match known_tob_bucket(packages, tag).and_then(|()| {
                 decode::<move_types::Field<move_types::TobKey, move_types::EpochCertsV1>>(
                     contents, &id,
                 )
-                .map(|field| {
-                    let key = field.name;
-                    let certs_id = field.value.certs.id;
-                    routing.register_interior(certs_id, Slot::TobCerts);
-                    routing.register_tob_table(certs_id, key);
-                    let bucket = hashi
-                        .tob
-                        .buckets
-                        .entry(key)
-                        .or_insert_with(|| types::TobBucket {
-                            certs_id,
-                            head: None,
-                            size: 0,
-                            nodes: std::collections::BTreeMap::new(),
-                            seal: None,
-                        });
-                    bucket.certs_id = certs_id;
-                    bucket.head = field.value.certs.head;
-                    bucket.size = field.value.certs.size;
-                    bucket.seal = field.value.seal;
-                    TrackedKind::TobBucket(key)
-                })
-            })
+            }) {
+                None => None,
+                Some(field) => {
+                    let live = types::LiveEpochs::of(&hashi.committees);
+                    let window = types::tob_window(&hashi.config);
+                    let mirror = hashi.tob.mirror_mut();
+                    // An untracked bucket leaves no routing and no index
+                    // entry, so its nodes fall to the foreign path.
+                    if !mirror.tracks(&field.name, live, window) {
+                        out.untracked_tob_writes += 1;
+                        return;
+                    }
+                    Some(upsert_tob_bucket(mirror, routing, field))
+                }
+            }
         }
         Slot::TobCerts => {
             // The owner is the bucket's LinkedTable UID; a node write is
@@ -742,7 +747,7 @@ fn apply_write(
             };
             routing.tob_key_of_table(&parent).and_then(|key| {
                 decode_tob_node(packages, tag, contents, &id).map(|(dealer, node)| {
-                    if let Some(bucket) = hashi.tob.buckets.get_mut(&key) {
+                    if let Some(bucket) = hashi.tob.mirror_mut().buckets.get_mut(&key) {
                         bucket.nodes.insert(dealer, node);
                     }
                     TrackedKind::TobCert { key, dealer }
@@ -779,6 +784,72 @@ fn apply_write(
     }
 
     index.record(id, obj.version(), new_kind);
+}
+
+pub(super) fn upsert_tob_bucket(
+    mirror: &mut types::TobMirror,
+    routing: &mut RoutingTable,
+    field: move_types::Field<move_types::TobKey, move_types::EpochCertsV1>,
+) -> TrackedKind {
+    let key = field.name;
+    let certs_id = field.value.certs.id;
+    routing.register_interior(certs_id, Slot::TobCerts);
+    routing.register_tob_table(certs_id, key);
+    let bucket = mirror
+        .buckets
+        .entry(key)
+        .or_insert_with(|| types::TobBucket {
+            certs_id,
+            head: None,
+            size: 0,
+            nodes: std::collections::BTreeMap::new(),
+            seal: None,
+        });
+    bucket.certs_id = certs_id;
+    bucket.head = field.value.certs.head;
+    bucket.size = field.value.certs.size;
+    bucket.seal = field.value.seal;
+    TrackedKind::TobBucket(key)
+}
+
+fn tob_bucket_field(
+    packages: &move_types::PackageVersions,
+    routing: &RoutingTable,
+    obj: &Object,
+) -> Option<move_types::Field<move_types::TobKey, move_types::EpochCertsV1>> {
+    let Owner::Object(parent) = obj.owner() else {
+        return None;
+    };
+    let struct_ = obj.as_struct()?;
+    (routing.slot_of_container(parent) == Some(Slot::Tob))
+        .then(|| known_tob_bucket(packages, struct_.object_type()))
+        .flatten()?;
+    bcs::from_bytes(struct_.contents()).ok()
+}
+
+fn evict_dead_tob_epochs(
+    hashi: &mut types::Hashi,
+    routing: &mut RoutingTable,
+    index: &mut ObjectIndex,
+) {
+    let live = types::LiveEpochs::of(&hashi.committees);
+    let dead = |key: &move_types::TobKey| {
+        matches!(key.protocol_type, move_types::ProtocolType::NonceGeneration)
+            && !live.contains(key.epoch)
+    };
+    let mirror = hashi.tob.mirror_mut();
+    mirror.buckets.retain(|key, bucket| {
+        if dead(key) {
+            routing.remove_tob_table(&bucket.certs_id);
+            routing.remove_interior(&bucket.certs_id);
+        }
+        !dead(key)
+    });
+    mirror.frontier.retain(|epoch, _| live.contains(*epoch));
+    mirror.marked.retain(|key| !dead(key));
+    index.retain(|kind| {
+        !matches!(kind, TrackedKind::TobBucket(key) | TrackedKind::TobCert { key, .. } if dead(key))
+    });
 }
 
 /// Insert a committee handoff, converting through the raw Move
@@ -881,7 +952,7 @@ fn retire(
             // A destroyed bucket takes its LinkedTable's routing entries
             // with it; the node deletions in the same transaction then
             // resolve through the index alone.
-            if let Some(bucket) = hashi.tob.buckets.remove(key) {
+            if let Some(bucket) = hashi.tob.mirror_mut().buckets.remove(key) {
                 routing.remove_tob_table(&bucket.certs_id);
                 routing.remove_interior(&bucket.certs_id);
             }
@@ -889,7 +960,7 @@ fn retire(
         TrackedKind::TobCert { key, dealer } => {
             // The bucket may already be retired if its deletion was
             // processed first within the same transaction.
-            if let Some(bucket) = hashi.tob.buckets.get_mut(key) {
+            if let Some(bucket) = hashi.tob.mirror_mut().buckets.get_mut(key) {
                 bucket.nodes.remove(dealer);
             }
         }
@@ -949,7 +1020,7 @@ fn dynamic_field_value_tag(tag: &sui_sdk_types::StructTag) -> Option<&sui_sdk_ty
 /// Whether a TOB bucket write carries the bucket type this binary
 /// decodes, identified from the Field's value-side type. `None` (any
 /// other type) surfaces the write as unrouted: loud, never a misdecode.
-fn known_tob_bucket(
+pub(super) fn known_tob_bucket(
     packages: &move_types::PackageVersions,
     tag: &sui_sdk_types::StructTag,
 ) -> Option<()> {
@@ -1177,7 +1248,7 @@ mod tests {
                 },
                 tob: types::Tob {
                     id: tob_id(),
-                    buckets: BTreeMap::new(),
+                    mirror: Some(types::TobMirror::default()),
                 },
                 num_consumed_presigs: 0,
             };
@@ -2286,7 +2357,7 @@ mod tests {
         ]));
         assert!(out.unrouted.is_empty());
 
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         let order: Vec<Address> = bucket
             .certs_in_order()
             .into_iter()
@@ -2332,7 +2403,7 @@ mod tests {
         ]));
         assert!(out.unrouted.is_empty());
 
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         let stamps: Vec<(Address, u64)> = bucket
             .certs_in_order()
             .into_iter()
@@ -2367,7 +2438,7 @@ mod tests {
             )),
             written(tob_node_object_at(node1, 1, d1, None, None, 1_000)),
         ]));
-        assert_eq!(fixture.hashi.tob.buckets.get(&key).unwrap().seal, None);
+        assert_eq!(fixture.hashi.tob.buckets().get(&key).unwrap().seal, None);
 
         let out = fixture.apply(&tx(vec![written(tob_bucket_object_with_value_tag(
             bucket_field,
@@ -2380,7 +2451,7 @@ mod tests {
             hashi_struct("tob", "EpochCertsV1", vec![]),
         ))]));
         assert!(out.unrouted.is_empty());
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         assert_eq!(bucket.seal, Some(seal));
         assert_eq!(bucket.certs_in_order().len(), 1);
     }
@@ -2413,7 +2484,7 @@ mod tests {
             hashi_struct("tob", "DealerSubmissionV2", vec![]),
         ))]));
         assert_eq!(out.unrouted.len(), 1);
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         assert!(bucket.nodes.is_empty());
     }
 
@@ -2435,7 +2506,7 @@ mod tests {
             hashi_struct("tob", "EpochCertsV3", vec![]),
         ))]));
         assert_eq!(out.unrouted.len(), 1);
-        assert!(fixture.hashi.tob.buckets.is_empty());
+        assert!(fixture.hashi.tob.buckets().is_empty());
     }
 
     #[test]
@@ -2459,7 +2530,7 @@ mod tests {
             )),
             written(tob_node_object(node1, 2, d1, None, Some(d2))),
         ]));
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         assert_eq!(bucket.size, 2);
         let err = bucket.complete_certs_in_order().unwrap_err();
         assert_eq!((err.walked, err.size), (1, 2));
@@ -2475,7 +2546,7 @@ mod tests {
             Some(d1),
             1,
         ))]));
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         let err = bucket.complete_certs_in_order().unwrap_err();
         assert_eq!((err.walked, err.size), (0, 1));
 
@@ -2492,7 +2563,7 @@ mod tests {
             )),
             written(tob_node_object(node1, 1, d1, None, None)),
         ]));
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         assert_eq!(bucket.complete_certs_in_order().unwrap().len(), 1);
     }
 
@@ -2519,7 +2590,7 @@ mod tests {
             written(tob_node_object(node1, 2, d1, None, Some(d2))),
             written(tob_node_object(node2, 2, d2, Some(d1), None)),
         ]));
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         assert_eq!(bucket.size, 1);
         let walked: Vec<Address> = bucket
             .complete_certs_in_order()
@@ -2564,13 +2635,454 @@ mod tests {
         ]));
         assert!(out.unrouted.is_empty());
 
-        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let bucket = fixture.hashi.tob.buckets().get(&key).unwrap();
         let order: Vec<Address> = bucket
             .certs_in_order()
             .into_iter()
             .map(|(dealer, _)| dealer)
             .collect();
         assert_eq!(order, vec![d1, d2]);
+    }
+
+    fn nonce_key(epoch: u64, batch: u32) -> move_types::TobKey {
+        move_types::TobKey {
+            epoch,
+            batch_index: Some(batch),
+            protocol_type: move_types::ProtocolType::NonceGeneration,
+        }
+    }
+
+    fn presig_seal() -> move_types::PresigSealV1 {
+        move_types::PresigSealV1 {
+            randomness: vec![1; 32],
+            dealer_set_digest: vec![2; 32],
+        }
+    }
+
+    fn certs_table(
+        certs: Address,
+        head: Option<Address>,
+        tail: Option<Address>,
+        size: u64,
+    ) -> move_types::LinkedTable<Address> {
+        move_types::LinkedTable {
+            id: certs,
+            size,
+            head,
+            tail,
+        }
+    }
+
+    fn nonce_bucket(
+        field: Address,
+        version: u64,
+        key: move_types::TobKey,
+        certs: move_types::LinkedTable<Address>,
+        seal: Option<move_types::PresigSealV1>,
+    ) -> Object {
+        let value = move_types::EpochCertsV1 {
+            epoch: key.epoch,
+            protocol_type: key.protocol_type,
+            certs,
+            seal,
+        };
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: field,
+            name: key,
+            value,
+        })
+        .unwrap();
+        obj(
+            field_tag(
+                hashi_struct("tob", "TobKey", vec![]),
+                hashi_struct("tob", "EpochCertsV1", vec![]),
+            ),
+            version,
+            Owner::Object(tob_id()),
+            contents,
+        )
+    }
+
+    fn nonce_node(
+        id: Address,
+        version: u64,
+        certs: Address,
+        dealer: Address,
+        prev: Option<Address>,
+        next: Option<Address>,
+    ) -> Object {
+        let value = move_types::LinkedTableNode {
+            prev,
+            next,
+            value: dealer_submission(dealer, 1_000),
+        };
+        let node_type = TypeTag::Struct(Box::new(tag(
+            Address::TWO,
+            "linked_table",
+            "Node",
+            vec![
+                TypeTag::Address,
+                hashi_struct("tob", "DealerSubmissionV1", vec![]),
+            ],
+        )));
+        let contents = bcs::to_bytes(&FieldEnc {
+            id,
+            name: dealer,
+            value,
+        })
+        .unwrap();
+        obj(
+            field_tag(TypeTag::Address, node_type),
+            version,
+            Owner::Object(certs),
+            contents,
+        )
+    }
+
+    fn root_at(version: u64, epoch: u64, pending: Option<u64>) -> TxChange {
+        written(obj(
+            tag(addr(PACKAGE), "hashi", "Hashi", vec![]),
+            version,
+            Owner::Shared(1),
+            root_bytes_at(epoch, vec![9u8; 4], 0, pending, None),
+        ))
+    }
+
+    fn walk(fixture: &Fixture, key: &move_types::TobKey) -> Option<Vec<Address>> {
+        let bucket = fixture.hashi.tob.buckets().get(key)?;
+        let certs = bucket.complete_certs_in_order().ok()?;
+        Some(certs.into_iter().map(|(dealer, _)| dealer).collect())
+    }
+
+    #[test]
+    fn an_untracked_nonce_bucket_leaves_no_state() {
+        let mut fixture = Fixture::new();
+        let (field, certs, node, dealer) = (addr(0x91), addr(0x92), addr(0x93), addr(0xD1));
+        let index_len = fixture.index.len();
+
+        let out = fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                1,
+                nonce_key(0, 40),
+                certs_table(certs, Some(dealer), Some(dealer), 1),
+                None,
+            )),
+            written(nonce_node(node, 1, certs, dealer, None, None)),
+        ]));
+
+        assert_eq!(out.untracked_tob_writes, 1);
+        assert!(out.unrouted.is_empty());
+        assert_eq!(fixture.index.len(), index_len);
+        assert!(fixture.hashi.tob.buckets().is_empty());
+        assert_eq!(fixture.routing.tob_key_of_table(&certs), None);
+        assert_eq!(fixture.routing.slot_of_container(&certs), None);
+    }
+
+    #[test]
+    fn a_seal_admits_a_submission_in_its_own_transaction_whatever_the_order() {
+        let mut fixture = Fixture::new();
+        let dealer = addr(0xD1);
+
+        let out = fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                addr(0x91),
+                1,
+                nonce_key(0, 45),
+                certs_table(addr(0x92), Some(dealer), Some(dealer), 1),
+                None,
+            )),
+            written(nonce_node(addr(0x93), 1, addr(0x92), dealer, None, None)),
+            written(nonce_bucket(
+                addr(0x94),
+                1,
+                nonce_key(0, 20),
+                certs_table(addr(0x95), None, None, 0),
+                Some(presig_seal()),
+            )),
+        ]));
+
+        assert_eq!(out.untracked_tob_writes, 0);
+        assert_eq!(fixture.hashi.tob.mirror().frontier(0), 21);
+        assert_eq!(walk(&fixture, &nonce_key(0, 45)), Some(vec![dealer]));
+    }
+
+    #[test]
+    fn an_epoch_change_evicts_nonce_buckets_outside_the_live_epochs() {
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![root_at(1, 5, None)]));
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                addr(0x91),
+                1,
+                nonce_key(4, 0),
+                certs_table(addr(0x92), None, None, 0),
+                Some(presig_seal()),
+            )),
+            written(nonce_bucket(
+                addr(0x93),
+                1,
+                nonce_key(5, 0),
+                certs_table(addr(0x94), None, None, 0),
+                None,
+            )),
+            written(tob_bucket_object(addr(0x95), 1, tob_key(3), None, None, 0)),
+        ]));
+        assert_eq!(fixture.hashi.tob.buckets().len(), 3);
+
+        fixture.apply(&tx(vec![root_at(2, 6, None)]));
+
+        let buckets = fixture.hashi.tob.buckets();
+        assert!(!buckets.contains_key(&nonce_key(4, 0)));
+        assert!(buckets.contains_key(&nonce_key(5, 0)));
+        assert!(buckets.contains_key(&tob_key(3)));
+        assert!(fixture.index.get(&addr(0x91)).is_none());
+        assert_eq!(fixture.routing.tob_key_of_table(&addr(0x92)), None);
+        assert_eq!(fixture.hashi.tob.mirror().frontier(4), 0);
+
+        fixture.apply(&tx(vec![root_at(3, 6, Some(7))]));
+        fixture.apply(&tx(vec![written(nonce_bucket(
+            addr(0x96),
+            1,
+            nonce_key(7, 0),
+            certs_table(addr(0x97), None, None, 0),
+            None,
+        ))]));
+        assert!(fixture.hashi.tob.buckets().contains_key(&nonce_key(7, 0)));
+
+        fixture.apply(&tx(vec![root_at(4, 6, None)]));
+
+        assert!(!fixture.hashi.tob.buckets().contains_key(&nonce_key(7, 0)));
+        assert!(fixture.index.get(&addr(0x96)).is_none());
+        assert!(fixture.hashi.tob.buckets().contains_key(&nonce_key(5, 0)));
+    }
+
+    #[test]
+    fn a_tracked_bucket_stays_tracked_when_the_window_narrows() {
+        let mut fixture = Fixture::new();
+        let (first, second) = (addr(0xD1), addr(0xD2));
+        fixture.hashi.config.config.insert(
+            "nonce_cert_batch_slack".to_string(),
+            types::ConfigValue::U64(100),
+        );
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                addr(0x91),
+                1,
+                nonce_key(0, 50),
+                certs_table(addr(0x92), Some(first), Some(first), 1),
+                None,
+            )),
+            written(nonce_node(addr(0x93), 1, addr(0x92), first, None, None)),
+        ]));
+        fixture.hashi.config.config.remove("nonce_cert_batch_slack");
+
+        let out = fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                addr(0x91),
+                2,
+                nonce_key(0, 50),
+                certs_table(addr(0x92), Some(first), Some(second), 2),
+                None,
+            )),
+            written(nonce_node(
+                addr(0x93),
+                2,
+                addr(0x92),
+                first,
+                None,
+                Some(second),
+            )),
+            written(nonce_node(
+                addr(0x94),
+                2,
+                addr(0x92),
+                second,
+                Some(first),
+                None,
+            )),
+            written(nonce_bucket(
+                addr(0x95),
+                1,
+                nonce_key(0, 51),
+                certs_table(addr(0x96), None, None, 0),
+                None,
+            )),
+        ]));
+
+        assert_eq!(out.untracked_tob_writes, 1);
+        assert_eq!(walk(&fixture, &nonce_key(0, 50)), Some(vec![first, second]));
+        assert!(!fixture.hashi.tob.buckets().contains_key(&nonce_key(0, 51)));
+        let live = types::LiveEpochs {
+            current: 0,
+            pending: None,
+        };
+        assert!(types::in_window(
+            &nonce_key(0, u32::MAX - 1),
+            u32::MAX,
+            live,
+            32
+        ));
+    }
+
+    #[test]
+    fn a_single_early_submission_heals_through_the_stream() {
+        let mut fixture = Fixture::new();
+        let (early, honest) = (addr(0xD1), addr(0xD2));
+        let (field, certs, early_node, honest_node) =
+            (addr(0x91), addr(0x92), addr(0x93), addr(0x94));
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                1,
+                nonce_key(0, 40),
+                certs_table(certs, Some(early), Some(early), 1),
+                None,
+            )),
+            written(nonce_node(early_node, 1, certs, early, None, None)),
+        ]));
+        fixture.apply(&tx(vec![written(nonce_bucket(
+            addr(0x95),
+            1,
+            nonce_key(0, 10),
+            certs_table(addr(0x96), None, None, 0),
+            Some(presig_seal()),
+        ))]));
+
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                2,
+                nonce_key(0, 40),
+                certs_table(certs, Some(early), Some(honest), 2),
+                None,
+            )),
+            written(nonce_node(early_node, 2, certs, early, None, Some(honest))),
+            written(nonce_node(honest_node, 2, certs, honest, Some(early), None)),
+        ]));
+
+        assert_eq!(walk(&fixture, &nonce_key(0, 40)), Some(vec![early, honest]));
+    }
+
+    #[test]
+    fn two_early_submissions_stay_incomplete_until_a_fetch_merges_the_bucket() {
+        let mut fixture = Fixture::new();
+        let key = nonce_key(0, 40);
+        let (a, b, c) = (addr(0xD1), addr(0xD2), addr(0xD3));
+        let (field, certs) = (addr(0x91), addr(0x92));
+        let (node_a, node_b, node_c) = (addr(0x93), addr(0x94), addr(0x95));
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                1,
+                key,
+                certs_table(certs, Some(a), Some(a), 1),
+                None,
+            )),
+            written(nonce_node(node_a, 1, certs, a, None, None)),
+        ]));
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                2,
+                key,
+                certs_table(certs, Some(a), Some(b), 2),
+                None,
+            )),
+            written(nonce_node(node_a, 2, certs, a, None, Some(b))),
+            written(nonce_node(node_b, 2, certs, b, Some(a), None)),
+        ]));
+        fixture.apply(&tx(vec![written(nonce_bucket(
+            addr(0x96),
+            1,
+            nonce_key(0, 10),
+            certs_table(addr(0x97), None, None, 0),
+            Some(presig_seal()),
+        ))]));
+        fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                field,
+                3,
+                key,
+                certs_table(certs, Some(a), Some(c), 3),
+                None,
+            )),
+            written(nonce_node(node_b, 3, certs, b, Some(a), Some(c))),
+            written(nonce_node(node_c, 3, certs, c, Some(b), None)),
+        ]));
+        assert_eq!(walk(&fixture, &key), None);
+
+        let listed_node = |id, dealer, prev, next| crate::onchain::TobNode {
+            id,
+            version: 2,
+            dealer,
+            node: move_types::LinkedTableNode {
+                prev,
+                next,
+                value: dealer_submission(dealer, 1_000),
+            },
+        };
+        let listing = crate::onchain::tob_fetch::Listing {
+            field_id: field,
+            version: 2,
+            field: move_types::Field {
+                id: field,
+                name: key,
+                value: move_types::EpochCertsV1 {
+                    epoch: 0,
+                    protocol_type: move_types::ProtocolType::NonceGeneration,
+                    certs: certs_table(certs, Some(a), Some(b), 2),
+                    seal: None,
+                },
+            },
+            nodes: vec![
+                listed_node(node_a, a, None, Some(b)),
+                listed_node(node_b, b, Some(a), None),
+            ],
+        };
+        let recovered = crate::onchain::tob_fetch::merge_listing(
+            &mut fixture.hashi,
+            &mut fixture.routing,
+            &mut fixture.index,
+            listing,
+        );
+
+        assert_eq!(recovered, Some(true));
+        assert_eq!(walk(&fixture, &key), Some(vec![a, b, c]));
+    }
+
+    #[test]
+    fn a_merge_whose_epoch_is_no_longer_current_is_dropped() {
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![root_at(1, 5, None)]));
+        let key = nonce_key(4, 0);
+        let listing = crate::onchain::tob_fetch::Listing {
+            field_id: addr(0x91),
+            version: 1,
+            field: move_types::Field {
+                id: addr(0x91),
+                name: key,
+                value: move_types::EpochCertsV1 {
+                    epoch: 4,
+                    protocol_type: move_types::ProtocolType::NonceGeneration,
+                    certs: certs_table(addr(0x92), None, None, 0),
+                    seal: None,
+                },
+            },
+            nodes: vec![],
+        };
+        let index_len = fixture.index.len();
+
+        let merged = crate::onchain::tob_fetch::merge_listing(
+            &mut fixture.hashi,
+            &mut fixture.routing,
+            &mut fixture.index,
+            listing,
+        );
+
+        assert_eq!(merged, None);
+        assert!(fixture.hashi.tob.buckets().is_empty());
+        assert_eq!(fixture.index.len(), index_len);
     }
 
     #[test]
@@ -2593,7 +3105,7 @@ mod tests {
             written(tob_node_object(node1, 1, d1, None, Some(d2))),
             written(tob_node_object(node2, 1, d2, Some(d1), None)),
         ]));
-        assert_eq!(fixture.hashi.tob.buckets.len(), 1);
+        assert_eq!(fixture.hashi.tob.buckets().len(), 1);
 
         // A destroy deletes the nodes and the bucket Field in
         // one transaction; the bucket deletion is listed first here to
@@ -2604,7 +3116,7 @@ mod tests {
             TxChange::Deleted { id: node2 },
         ]));
         assert!(out.unrouted.is_empty());
-        assert!(fixture.hashi.tob.buckets.is_empty());
+        assert!(fixture.hashi.tob.buckets().is_empty());
         assert!(fixture.index.get(&bucket_field).is_none());
         assert!(fixture.index.get(&node1).is_none());
         assert!(fixture.index.get(&node2).is_none());

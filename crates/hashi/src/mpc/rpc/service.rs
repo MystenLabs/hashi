@@ -570,7 +570,11 @@ fn check_avid_batch_ceiling(
     )))
 }
 
-fn avid_batch_ceiling(chain: Option<(u64, u64)>, epoch: u64, min_batch_presigs: u64) -> u32 {
+pub(crate) fn avid_batch_ceiling(
+    chain: Option<(u64, u64)>,
+    epoch: u64,
+    min_batch_presigs: u64,
+) -> u32 {
     let cursor = chain
         .filter(|&(chain_epoch, _)| chain_epoch == epoch)
         .map_or(0, |(_, cursor)| cursor);
