@@ -224,16 +224,29 @@ graph LR
 
 After both checks in `confirm_deposit` pass, the function:
 
-1. Mints the corresponding amount of `hBTC`. A UTXO whose `derivation_path` is
-   `None` mints nothing.
-2. Sends the `hBTC` to the Sui address in the UTXO's `derivation_path`.
-3. Adds the deposited UTXO to the Hashi-managed UTXO pool, making it available
+1. Mints the corresponding amount of `hBTC` and sends it to the Sui address
+   in the UTXO's `derivation_path`. A UTXO whose `derivation_path` is `None`
+   mints nothing.
+2. Adds the deposited UTXO to the Hashi-managed UTXO pool, making it available
    for future withdrawal coin selection.
 
 ## Default time-delay window
 
-At launch, `bitcoin_deposit_time_delay_ms` falls back to the Move package's `init_defaults` value, currently `600_000` milliseconds, unless the launch overrides it. Sui Mainnet refuses a value below this default. If the config key is missing, the node treats the delay as 0, which matches the Move side defaulting to no delay.
+`bitcoin_deposit_time_delay_ms` starts at the Move package's `init_defaults`
+value of `600_000` milliseconds (10 minutes). The `hashi launch` command can
+override it when it sends `hashi::finish_publish`. On Sui Mainnet, `hashi launch`
+refuses an override below 10 minutes, because a shorter delay shrinks the
+window to pause the service before a bad mint. After launch, governance can
+change the value through an `update_config` proposal.
 
 ## How do you get the deposit request ID?
 
-A successful `deposit` call emits a `DepositRequested` event. The event carries the `request_id` together with `utxo_id`, `amount`, `derivation_path`, `timestamp_ms`, `requester_address`, and `sui_tx_digest`. To get the ID, read the `DepositRequested` event from the deposit transaction's events. Validators observe this event to build the certificate they pass to `approve_deposit`. The later `DepositApproved`, `DepositConfirmed`, and `ExpiredDepositDeleted` events carry the same `request_id`, so you can use it to track the request through each phase.
+The deposit request ID is the object ID of the `DepositRequest` that `deposit`
+creates. A successful `deposit` call emits a `DepositRequested` event that
+carries the ID as `request_id`, together with `utxo_id`, `amount`,
+`derivation_path`, `timestamp_ms`, `requester_address`, and `sui_tx_digest`.
+To get the ID, read the `DepositRequested` event from the deposit
+transaction's events. The `hashi deposit` request commands do this for you
+and print the ID. The later `DepositApproved`, `DepositConfirmed`, and
+`ExpiredDepositDeleted` events carry the same `request_id`, so you can use it
+to track the request through each phase.
