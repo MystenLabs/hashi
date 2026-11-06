@@ -32,10 +32,10 @@ questions:
   - How do I run the hashi server?
   - How do I create a Hashi governance proposal with the CLI?
 answer: >-
-  The hashi CLI has the first-level subcommands server, register, committee, config, proposal, backup, deposit, withdraw, balance, publish, and validator. Global options such as --config belong after the first-level subcommand, not after hashi itself.
+  The hashi CLI has the first-level subcommands server, register, committee, config, proposal, backup, deposit, withdraw, balance, publish, launch, and validator. Global options such as --config belong after the first-level subcommand, not after hashi itself.
 ---
 
-The `hashi` CLI has 11 first-level subcommands:
+The `hashi` CLI has 12 first-level subcommands:
 
 - `server`
 - `register`
@@ -47,9 +47,10 @@ The `hashi` CLI has 11 first-level subcommands:
 - `withdraw`
 - `balance`
 - `publish`
+- `launch`
 - `validator`
 
-Global options such as `--config` go after the first-level subcommand, not after `hashi` itself.
+Global options such as `--config` go after the first-level subcommand, not after `hashi` itself. `server`, `register`, `publish`, and `launch` take their own options instead of the global options.
 
 ## Global options
 
@@ -164,7 +165,7 @@ hashi config show                      # Show effective CLI configuration
 hashi config on-chain                  # View on-chain protocol configuration
 ```
 
-## How to manage governance proposals
+## Proposals (governance)
 
 ```bash
 hashi proposal list [--type <type>] [--detailed] [--executed] [--votes] [--json]   # active proposals by default
@@ -191,7 +192,7 @@ hashi proposal create ignore-member --validator <address> [--unignore] [-m key=v
 
 Config values are type-prefixed: `u64:30000`, `bool:true`, `string:https://guardian.example`.
 
-Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([Outbound](../validators/configuration.mdx#outbound)). Two config keys hold guardian URLs:
+Nodes use the guardian for guardian information, limiter bootstrap, and withdrawal signing ([Outbound](../validators/configuration.mdx#outbound)). 2 config keys hold guardian URLs:
 
 - `guardian_node_url`: the instant config key with the endpoint that nodes call
 - `guardian_url`: the guardian's public endpoint (`/info`, the key-provisioner relay)

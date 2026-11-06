@@ -325,9 +325,8 @@ through the `UpdateConfig` proposal.
 The guardian's x-only BTC public key (32 bytes), pinned at launch
 (`finish_publish`). Every 2-of-2 deposit address derives from it, so it
 is write-once and not updatable through the `UpdateConfig` proposal. The
-guardian's URLs remain governable: `guardian_url`, its public endpoint, and
-`guardian_node_url`, the endpoint nodes call. A node resolves
-`guardian_node_url` once, so it picks up a change only after a restart.
+guardian's URLs, [`guardian_url`](#guardian_url) and
+[`guardian_node_url`](#guardian_node_url), remain governable.
 
 ### `guardian_url`
 
@@ -335,10 +334,12 @@ guardian's URLs remain governable: `guardian_url`, its public endpoint, and
 |---|---|
 | **Key** | `guardian_url` |
 | **Type** | `string` |
-| **Default** | Set at launch |
+| **Default** | Set at launch (`finish_publish`) |
 
-The guardian's public endpoint. Unlike `guardian_btc_public_key`, this key
-remains governable.
+The guardian's public endpoint: `/info`, the key-provisioner relay, and every
+other guardian call that is not a node RPC. Nodes don't dial it. Unlike
+`guardian_btc_public_key`, this key remains governable through the
+`UpdateConfig` proposal.
 
 ### `guardian_node_url`
 
@@ -346,9 +347,10 @@ remains governable.
 |---|---|
 | **Key** | `guardian_node_url` |
 | **Type** | `string` |
-| **Default** | Set at launch |
+| **Default** | Set at launch (`finish_publish`) |
 
-The guardian endpoint that nodes call. This key remains governable. A node
+The guardian endpoint that nodes call, presenting their registered TLS key.
+This key remains governable through the `UpdateConfig` proposal. A node
 resolves `guardian_node_url` once, so it picks up a change only after a
 restart.
 

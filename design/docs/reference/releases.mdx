@@ -36,7 +36,7 @@ Releases live at [github.com/MystenLabs/hashi/releases](https://github.com/Myste
 
 A Mainnet release is a promoted Testnet release. The release process cuts `mainnet-X.Y` at the commit `testnet-X.Y` points to, and the release run fails if its rebuilt binary differs from the Testnet release's checksum, so the two carry the same version, commit, and binary. `mainnet-1.0` and `testnet-1.0` are the same binary.
 
-## How do I verify the Hashi binary?
+## How to verify the Hashi binary
 
 Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
@@ -57,7 +57,7 @@ gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
 chmod +x hashi-linux-amd64
 ```
 
-## How do I pull and pin the Hashi container image?
+## How to pull and pin the Hashi container image
 
 The matching public image uses the same release tag:
 

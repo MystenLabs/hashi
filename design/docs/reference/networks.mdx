@@ -60,4 +60,6 @@ Each column lists the values a Hashi node or the CLI needs on that network.
 
 ## Which ports do self-hosted nodes use?
 
-> You reach a self-hosted Sui fullnode at its RPC port (default `9000`) on any network. For setup, see [Sui RPC](../validators/prerequisites.mdx#sui-rpc). The public Testnet endpoint uses port 443 instead. Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332`, which is correct only for Bitcoin Mainnet. On Signet you must set the port explicitly (default 38332), and on Mainnet you set the host when the Bitcoin node runs elsewhere.
+You reach a self-hosted Sui fullnode at its RPC port (default `9000`) on any network. The public Testnet endpoint uses port 443 instead. For setup, see [Sui RPC](../validators/prerequisites.mdx#sui-rpc).
+
+Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332`, which matches only the Bitcoin Mainnet RPC port. On Signet, set the port explicitly (default `38332`). On Mainnet, set the host when the Bitcoin node runs elsewhere.
