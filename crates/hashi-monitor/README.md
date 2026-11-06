@@ -121,12 +121,8 @@ complete example.
   its last log. A first run from genesis needs every build.
 - `sui.rpc_url`: archive endpoint for auditing Sui events from the Hashi
   package's publication.
-- `sui.transaction_rpc_url`: fullnode endpoint for reading governance state
-  and submitting pause transactions.
-- `sui.hashi_package_id` names the original Hashi package and defaults to
-  `HASHI_MAINNET_PACKAGE_ID`. `sui.hashi_object_id`
-  names the Hashi object used for pause transactions and defaults to
-  `HASHI_MAINNET_OBJECT_ID`. Set both IDs for other deployments.
+- `sui.package_id` names the original Hashi package and defaults to
+  `HASHI_MAINNET_PACKAGE_ID`. Set it for other deployments.
 - `btc.rpc_url` names the Bitcoin node. `btc.http_headers` is optional, for
   hosted providers.
 - `alert_mode` is optional. It picks the findings that alert: `strict`, the
@@ -145,11 +141,18 @@ report false findings.
 
 ## Pausing the bridge
 
-`pause_operator_key_paths` specifies the operator key files the monitor uses to
-sign the governance transactions that pause the bridge.
+Configure `pause` to allow the monitor to pause the bridge.
+
+- `pause.transaction_rpc_url`: fullnode endpoint for reading governance state
+  and submitting pause transactions.
+- `pause.object_id`: Hashi object used for pause transactions.
+  Defaults to `HASHI_MAINNET_OBJECT_ID`; set it for other deployments.
+- `pause.operator_key_paths`: operator key files the monitor uses to sign
+  the governance transactions that pause the bridge.
 
 `hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,
 then confirms the on-chain paused flag. An already-paused bridge is a no-op.
+Calling it without `pause` configured returns a configuration error.
 
 ## Alerting
 

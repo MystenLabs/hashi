@@ -20,11 +20,15 @@ use crate::config::Config;
 /// Errors after submission can mean a transaction landed: inspect the chain
 /// before retrying. This function neither resumes proposals nor unpauses Hashi.
 pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
+    let pause = config
+        .pause
+        .as_ref()
+        .context("pause configuration is required to initiate a pause")?;
     // Check on-chain state before loading any signing credentials.
     let read_config = CliConfig {
-        sui_rpc_url: config.sui.transaction_rpc_url.clone(),
-        package_id: Some(config.sui.hashi_package_id()),
-        hashi_object_id: Some(config.sui.hashi_object_id()),
+        sui_rpc_url: pause.transaction_rpc_url.clone(),
+        package_id: Some(config.sui.package_id()),
+        hashi_object_id: Some(pause.object_id()),
         ..CliConfig::default()
     };
     let reader = HashiClient::new(&read_config).await?;
@@ -32,8 +36,8 @@ pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
         return Ok(());
     }
     // The first configured operator creates the proposal and automatically votes.
-    let (first_path, remaining_paths) = config
-        .pause_operator_key_paths
+    let (first_path, remaining_paths) = pause
+        .operator_key_paths
         .split_first()
         .context("at least one pause operator key must be configured")?;
     let first_config = CliConfig {
@@ -121,6 +125,17 @@ mod tests {
     use e2e_tests::TestNetworksBuilder;
     use hashi_types::move_types::ConfigValue;
 
+    use crate::config::PauseConfig;
+
+    #[tokio::test]
+    async fn pause_requires_configuration() {
+        let error = initiate_pause(&Config::for_tests()).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "pause configuration is required to initiate a pause"
+        );
+    }
+
     #[tokio::test]
     async fn pause_with_three_operators() -> anyhow::Result<()> {
         assert_pause_with_operators(3, 4000).await
@@ -150,10 +165,12 @@ mod tests {
         }
         let mut config = Config::for_tests();
         // Keep the default unreachable audit RPC to prove pause uses only the fullnode.
-        config.sui.transaction_rpc_url = networks.sui_network().rpc_url.clone();
-        config.sui.hashi_package_id = Some(ids.package_id);
-        config.sui.hashi_object_id = Some(ids.hashi_object_id);
-        config.pause_operator_key_paths = paths;
+        config.sui.package_id = Some(ids.package_id);
+        config.pause = Some(PauseConfig {
+            transaction_rpc_url: networks.sui_network().rpc_url.clone(),
+            operator_key_paths: paths,
+            object_id: Some(ids.hashi_object_id),
+        });
         let read_config = CliConfig {
             sui_rpc_url: networks.sui_network().rpc_url.clone(),
             package_id: Some(ids.package_id),
@@ -175,7 +192,7 @@ mod tests {
 
         // An already-paused bridge needs no signing credentials.
         keys.close()?;
-        config.pause_operator_key_paths.clear();
+        config.pause.as_mut().unwrap().operator_key_paths.clear();
         initiate_pause(&config).await?;
         Ok(())
     }

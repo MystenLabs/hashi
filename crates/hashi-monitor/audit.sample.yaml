@@ -40,12 +40,9 @@ deployment:
 sui:
   # Archive endpoint for auditing Sui events.
   rpc_url: "https://fullnode.testnet.sui.io:443"
-  # Fullnode endpoint for reading governance state and submitting pause transactions.
-  transaction_rpc_url: "https://fullnode.testnet.sui.io:443"
-  # IDs default to mainnet; set both for other deployments.
+  # Defaults to mainnet; set for other deployments.
   # The package ID is the original package that defines Hashi's types.
-  hashi_package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
-  hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
   # Cargo sets CARGO_PKG_NAME for the tests that parse this file; a deployment
@@ -61,7 +58,11 @@ btc:
 # The other findings are then WARN log lines. The README lists both groups.
 # alert_mode: strict
 
-# Funded operators with enough combined voting weight to pause the bridge.
-# Defaults to an empty list.
-# pause_operator_key_paths:
-#   - "/path/to/operator.key"
+# Omit for audit-only operation.
+# pause:
+#   transaction_rpc_url: "https://fullnode.testnet.sui.io:443"
+#   # Defaults to mainnet; set for other deployments.
+#   object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+#   # Operator key files for signing pause transactions.
+#   operator_key_paths:
+#     - "/path/to/operator.key"

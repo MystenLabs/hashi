@@ -131,7 +131,7 @@ pub struct Genesis {
 /// The genesis of the Hashi package in `config`.
 pub async fn package_genesis(config: &SuiConfig) -> anyhow::Result<Genesis> {
     let mut client = connect(config)?;
-    publish_genesis(&mut client, config.hashi_package_id()).await
+    publish_genesis(&mut client, config.package_id()).await
 }
 
 /// The checkpoint and time of the transaction that published `package_id`.
@@ -192,7 +192,7 @@ pub struct HashiSettings {
 }
 
 /// Read `HashiSettings` from the Hashi object. Fail unless the object's
-/// type is from `config.hashi_package_id()`: the event filter uses that id, so a
+/// type is from `config.package_id()`: the event filter uses that id, so a
 /// wrong one reads no events.
 pub async fn read_hashi_settings(
     config: &SuiConfig,
@@ -213,7 +213,7 @@ pub async fn read_hashi_settings(
         .with_context(|| {
             format!("Sui GetObject response is missing the Hashi object {hashi_object_id}")
         })?;
-    let package_id = config.hashi_package_id();
+    let package_id = config.package_id();
     let expected_type = StructTag::new(
         package_id,
         Identifier::from_static("hashi"),
@@ -224,7 +224,7 @@ pub async fn read_hashi_settings(
     anyhow::ensure!(
         object.object_type() == expected_type,
         "the Hashi object {hashi_object_id} has type {}, not {expected_type}; \
-         sui.hashi_package_id must be the package that defines it",
+         sui.package_id must be the package that defines it",
         object.object_type(),
     );
     let hashi: Hashi = object
@@ -285,7 +285,7 @@ impl SuiPoller {
         hashi_btc_keys: HashiBTCKeys,
         start: u64,
     ) -> anyhow::Result<Self> {
-        let package_id = config.hashi_package_id();
+        let package_id = config.package_id();
 
         let package_versions = PackageVersions::new(BTreeMap::from([(1, package_id)]));
 
@@ -727,9 +727,7 @@ pub mod tests {
         );
         SuiConfig {
             rpc_url: format!("http://{addr}"),
-            transaction_rpc_url: "http://127.0.0.1:9".to_string(),
-            hashi_package_id: Some(PACKAGE_ID),
-            hashi_object_id: None,
+            package_id: Some(PACKAGE_ID),
         }
     }
 
@@ -768,7 +766,7 @@ pub mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("sui.hashi_package_id"), "{error}");
+        assert!(error.contains("sui.package_id"), "{error}");
     }
 
     #[tokio::test]
@@ -805,9 +803,7 @@ pub mod tests {
     pub fn poller_scanned(last_read_checkpoint_timestamp: UnixSeconds) -> SuiPoller {
         let config = SuiConfig {
             rpc_url: "http://127.0.0.1:9".to_string(),
-            transaction_rpc_url: "http://127.0.0.1:9".to_string(),
-            hashi_package_id: Some(PACKAGE_ID),
-            hashi_object_id: None,
+            package_id: Some(PACKAGE_ID),
         };
         let mut poller = SuiPoller::new(&config, test_hashi_btc_keys(), 0).unwrap();
         poller.last_read_checkpoint_timestamp = last_read_checkpoint_timestamp;

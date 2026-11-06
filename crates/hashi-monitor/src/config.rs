@@ -49,10 +49,28 @@ pub struct Config {
     /// The findings that alert. Omit for `strict`, where every finding alerts.
     #[serde(default)]
     pub alert_mode: AlertMode,
+    /// Configure to allow the monitor to pause the bridge.
+    pub pause: Option<PauseConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseConfig {
+    /// Fullnode RPC endpoint for pause state reads and transactions.
+    pub transaction_rpc_url: String,
+    /// Hashi shared object used for pause transactions.
+    /// Omit to use the published mainnet Hashi object.
+    pub object_id: Option<sui_sdk_types::Address>,
     /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
     /// Keys are loaded only on explicit pause invocation.
-    #[serde(default)]
-    pub pause_operator_key_paths: Vec<PathBuf>,
+    pub operator_key_paths: Vec<PathBuf>,
+}
+
+impl PauseConfig {
+    pub fn object_id(&self) -> sui_sdk_types::Address {
+        self.object_id
+            .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -61,27 +79,15 @@ pub struct SuiConfig {
     /// Sui RPC endpoint for audit reads, including historical data.
     pub rpc_url: String,
 
-    /// Fullnode RPC endpoint for pause state reads and transactions.
-    pub transaction_rpc_url: String,
-
     /// Original Hashi package: the event and object types the monitor reads keep
     /// its address across upgrades. Omit to use the published mainnet package.
-    pub hashi_package_id: Option<sui_sdk_types::Address>,
-
-    /// Hashi shared object used for pause transactions.
-    /// Omit to use the published mainnet Hashi object.
-    pub hashi_object_id: Option<sui_sdk_types::Address>,
+    pub package_id: Option<sui_sdk_types::Address>,
 }
 
 impl SuiConfig {
-    pub fn hashi_package_id(&self) -> sui_sdk_types::Address {
-        self.hashi_package_id
+    pub fn package_id(&self) -> sui_sdk_types::Address {
+        self.package_id
             .unwrap_or(hashi::constants::HASHI_MAINNET_PACKAGE_ID)
-    }
-
-    pub fn hashi_object_id(&self) -> sui_sdk_types::Address {
-        self.hashi_object_id
-            .unwrap_or(hashi::constants::HASHI_MAINNET_OBJECT_ID)
     }
 }
 
@@ -172,16 +178,14 @@ impl Config {
             }),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
-                transaction_rpc_url: "http://sui-transactions".to_string(),
-                hashi_package_id: Some(sui_sdk_types::Address::new([0x11; 32])),
-                hashi_object_id: None,
+                package_id: Some(sui_sdk_types::Address::new([0x11; 32])),
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
                 http_headers: BTreeMap::new(),
             },
             alert_mode: AlertMode::Strict,
-            pause_operator_key_paths: vec![],
+            pause: None,
         }
     }
 }
@@ -205,6 +209,7 @@ mod tests {
 
         assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
         assert!(config.s3_credentials.is_none());
+        assert!(config.pause.is_none());
         assert_eq!(config.btc.rpc_url, env!("CARGO_PKG_NAME"));
     }
 
