@@ -1107,7 +1107,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
-        let (batch_size_per_weight, params, floor) = {
+        let (batch_size_per_weight, params, floor, min_batch_presigs) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -1116,6 +1116,7 @@ impl MpcService {
                     f: mgr.mpc_config.max_faulty,
                 },
                 mgr.required_nonce_weight(),
+                mgr.shape_params().min_batch_presigs(),
             )
         };
         mpc_manager.read().unwrap().ensure_manager_epoch(epoch)?;
@@ -1136,6 +1137,15 @@ impl MpcService {
                 .await?;
             let (size, holds_cursor) = match walk_step(size, batch_start, num_consumed) {
                 WalkStep::Missing => {
+                    self.inner.onchain_state().ask_tob_missing_batch(
+                        epoch,
+                        batch_index,
+                        crate::mpc::rpc::avid_batch_ceiling(
+                            Some((epoch, num_consumed)),
+                            epoch,
+                            min_batch_presigs,
+                        ),
+                    );
                     return Ok(PresigRecovery::MissingBatch {
                         epoch,
                         batch_index,
@@ -1424,6 +1434,14 @@ impl MpcService {
         };
         if self.inner.onchain_state().epoch() != epoch {
             skip("epoch_moved");
+            return;
+        }
+        if self
+            .inner
+            .onchain_state()
+            .tob_fetch_pending(epoch, batch_index)
+        {
+            skip("fetch_pending");
             return;
         }
         {

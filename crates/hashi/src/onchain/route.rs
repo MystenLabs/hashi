@@ -275,6 +275,10 @@ impl ObjectIndex {
         self.entries.remove(id)
     }
 
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&TrackedKind) -> bool) {
+        self.entries.retain(|_, entry| keep(&entry.kind));
+    }
+
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }

@@ -45,6 +45,7 @@ mod tests {
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::subscribe_withdrawal_confirmations;
+    use crate::test_helpers::tob_bucket_exists_on_chain;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
@@ -3446,61 +3447,43 @@ mod tests {
             info!("All nodes rotated into epoch {target}");
         }
 
-        // The leader GC runs on its checkpoint tick; wait until every
-        // node's mirror shows no expired nonce bucket left.
-        info!("Waiting for the leader to prune the expired nonce buckets...");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        'wait: loop {
-            let current = state.epoch();
-            let laggard =
-                networks
-                    .hashi_network
-                    .nodes()
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, node)| {
-                        let expired: Vec<_> = node
-                            .hashi()
-                            .onchain_state()
-                            .tob_bucket_keys()
-                            .into_iter()
-                            .filter(|(key, _)| {
-                                key.protocol_type == ProtocolType::NonceGeneration
-                                    && current >= key.epoch.saturating_add(2)
-                            })
-                            .collect();
-                        (!expired.is_empty()).then_some((index, expired))
-                    });
-            let Some((index, expired)) = laggard else {
-                break 'wait;
-            };
-            if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!(
-                    "node {index}'s mirror still holds expired nonce buckets: {expired:?}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        info!("Expired nonce buckets are gone from every node's mirror");
-
-        // Chain truth: the genesis nonce buckets must be gone on-chain
-        // too, not just from the mirrors — and the genesis DKG bucket
-        // must still exist, held by the key-generation retention floor.
-        for batch_index in genesis_nonce_batches {
-            let onchain = fetch_tob_certs_from_chain(
-                &networks,
-                hashi_types::move_types::TobKey {
-                    epoch: genesis_epoch,
-                    batch_index: Some(batch_index),
-                    protocol_type: ProtocolType::NonceGeneration,
-                },
-            )
-            .await?;
+        let current = state.epoch();
+        for (index, node) in networks.hashi_network.nodes().iter().enumerate() {
+            let expired: Vec<_> = node
+                .hashi()
+                .onchain_state()
+                .tob_bucket_keys()
+                .into_iter()
+                .filter(|(key, _)| {
+                    key.protocol_type == ProtocolType::NonceGeneration
+                        && current >= key.epoch.saturating_add(2)
+                })
+                .collect();
             assert!(
-                onchain.is_none(),
-                "genesis nonce bucket (batch {batch_index}) still exists on-chain"
+                expired.is_empty(),
+                "node {index}'s mirror still holds expired nonce buckets: {expired:?}"
             );
         }
+
+        info!("Waiting for the leader to destroy the expired nonce buckets on chain...");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        for batch_index in genesis_nonce_batches {
+            let key = hashi_types::move_types::TobKey {
+                epoch: genesis_epoch,
+                batch_index: Some(batch_index),
+                protocol_type: ProtocolType::NonceGeneration,
+            };
+            while tob_bucket_exists_on_chain(&networks, key).await? {
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "genesis nonce bucket (batch {batch_index}) still exists on-chain"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        info!("Expired nonce buckets are gone from the chain");
+
         let dkg_bucket = fetch_tob_certs_from_chain(
             &networks,
             hashi_types::move_types::TobKey {
@@ -3521,6 +3504,142 @@ mod tests {
         assert_tob_mirror_parity(&networks).await?;
 
         info!("=== TOB Cert GC E2E Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_junk_past_the_tob_window_stays_untracked_until_a_reader_fetches_it() -> Result<()>
+    {
+        init_test_logging();
+        info!("=== Starting TOB Window E2E Test ===");
+
+        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let nodes = networks.hashi_network.nodes();
+        for node in nodes {
+            node.wait_for_mpc_key(Duration::from_secs(120)).await?;
+        }
+        let node0 = &nodes[0];
+        let state = node0.hashi().onchain_state().clone();
+        let epoch = state.epoch();
+        let dealer = node0.hashi().config.validator_address()?;
+
+        info!("Waiting for node 0's submission to an honest nonce bucket...");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let submission = loop {
+            let own = state
+                .tob_bucket_keys()
+                .into_iter()
+                .filter(|(key, _)| {
+                    key.epoch == epoch && key.protocol_type == ProtocolType::NonceGeneration
+                })
+                .find_map(|(key, _)| {
+                    state
+                        .tob_certs(key.epoch, key.batch_index, key.protocol_type)
+                        .ok()
+                        .flatten()?
+                        .into_iter()
+                        .find(|(submitter, _)| *submitter == dealer)
+                });
+            if let Some((_, submission)) = own {
+                break submission;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("node 0 submitted to no nonce bucket");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+
+        let junk_batch = 1_000;
+        let junk = hashi_types::move_types::TobKey {
+            epoch,
+            batch_index: Some(junk_batch),
+            protocol_type: ProtocolType::NonceGeneration,
+        };
+        let cert = hashi::mpc::types::DealerMessagesHash::from_onchain_cert(&submission, epoch)?;
+        let mut executor = hashi::sui_tx_executor::SuiTxExecutor::from_config(
+            &node0.hashi().config,
+            node0.hashi().onchain_state(),
+        )?;
+        executor
+            .execute_submit_certificate(&hashi::mpc::types::CertificateV1::NonceGeneration {
+                batch_index: junk_batch,
+                cert,
+                timestamp_ms: 0,
+            })
+            .await?;
+        anyhow::ensure!(
+            fetch_tob_certs_from_chain(&networks, junk).await?.is_some(),
+            "the junk bucket is not on chain"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !nodes.iter().all(|node| {
+            node.hashi()
+                .metrics
+                .watcher_tob_untracked_writes_total
+                .get()
+                >= 1
+        }) {
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("some node never counted the junk write as untracked");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        for (index, node) in nodes.iter().enumerate() {
+            assert!(
+                !node
+                    .hashi()
+                    .onchain_state()
+                    .tob_bucket_keys()
+                    .iter()
+                    .any(|(key, _)| *key == junk),
+                "node {index}'s mirror holds the junk bucket"
+            );
+        }
+        assert_no_unrouted_objects(&networks);
+
+        info!("Reading the junk bucket on node 0 until a fetch on need lists it...");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let fetched = loop {
+            if let Ok(Some(certs)) =
+                state.tob_certs(epoch, Some(junk_batch), ProtocolType::NonceGeneration)
+            {
+                break certs;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("node 0 never fetched the junk bucket");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
+        assert_eq!(
+            fetched
+                .iter()
+                .map(|(submitter, _)| *submitter)
+                .collect::<Vec<_>>(),
+            vec![dealer]
+        );
+        assert!(
+            node0
+                .hashi()
+                .metrics
+                .watcher_tob_fetch_recoveries_total
+                .get()
+                >= 1
+        );
+        for (index, node) in nodes.iter().enumerate().skip(1) {
+            assert!(
+                !node
+                    .hashi()
+                    .onchain_state()
+                    .tob_bucket_keys()
+                    .iter()
+                    .any(|(key, _)| *key == junk),
+                "node {index} fetched a bucket only node 0 read"
+            );
+        }
+        assert_tob_mirror_parity(&networks).await?;
+
+        info!("=== TOB Window E2E Test Passed ===");
         Ok(())
     }
 

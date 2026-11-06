@@ -325,3 +325,15 @@ groups:
           summary: "MPC work started outside the per-peer budget"
           description: >-
             A node bug. Report it to the hashi team with the node's version.
+
+      - alert: HashiTobWritesUntracked
+        expr: increase(hashi_watcher_tob_untracked_writes_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The mirror skipped TOB writes far past the latest sealed batch"
+          description: >-
+            Honest dealers write only nonce buckets near the latest sealed
+            batch, so a member is filling the TOB with junk, or seals have
+            stopped landing while dealing goes on. Raise it in the operator
+            channel.

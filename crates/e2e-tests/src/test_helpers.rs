@@ -495,6 +495,22 @@ pub async fn wait_for_withdrawal_archival(
     }
 }
 
+pub async fn tob_bucket_exists_on_chain(
+    networks: &TestNetworks,
+    key: hashi_types::move_types::TobKey,
+) -> Result<bool> {
+    let tob_id = networks.hashi_network.nodes()[0]
+        .hashi()
+        .onchain_state()
+        .tob_id();
+    let client = networks.sui_network.client.clone();
+    let key_bcs = bcs::to_bytes(&key)?;
+    Ok(list_all_dynamic_fields(&client, tob_id)
+        .await?
+        .iter()
+        .any(|field| field.name().value() == key_bcs.as_slice()))
+}
+
 /// Chain-truth oracle for one TOB bucket, reading over RPC rather than
 /// the mirror (production cert readers are mirror reads, so the tests
 /// need an independent source): find the bucket Field in the tob bag,
@@ -505,10 +521,8 @@ pub async fn fetch_tob_certs_from_chain(
     networks: &TestNetworks,
     key: hashi_types::move_types::TobKey,
 ) -> Result<Option<Vec<(Address, DealerSubmissionV1)>>> {
-    let tob_id = networks.hashi_network.nodes()[0]
-        .hashi()
-        .onchain_state()
-        .tob_id();
+    let onchain_state = networks.hashi_network.nodes()[0].hashi().onchain_state();
+    let tob_id = onchain_state.tob_id();
     let client = networks.sui_network.client.clone();
     let key_bcs = bcs::to_bytes(&key)?;
 
@@ -519,6 +533,11 @@ pub async fn fetch_tob_certs_from_chain(
     else {
         return Ok(None);
     };
+    anyhow::ensure!(
+        field.field_id().parse::<Address>()? == onchain_state.tob_bucket_field_id(&key),
+        "TOB bucket {key:?} sits at {}, not at its derived id",
+        field.field_id()
+    );
     let value_type: StructTag = field
         .value_type_opt()
         .ok_or_else(|| anyhow!("TOB bucket field carried no value_type"))?
@@ -556,7 +575,7 @@ pub async fn fetch_tob_certs_from_chain(
     Ok(Some(certs))
 }
 
-/// Page through every dynamic field of `parent` with name, value, and
+/// Page through every dynamic field of `parent` with name, id, value, and
 /// value type.
 async fn list_all_dynamic_fields(
     client: &sui_rpc::Client,
@@ -570,6 +589,7 @@ async fn list_all_dynamic_fields(
             .with_page_size(1_000)
             .with_read_mask(FieldMask::from_paths([
                 DynamicField::path_builder().name().finish(),
+                DynamicField::path_builder().field_id(),
                 DynamicField::path_builder().value().finish(),
                 DynamicField::path_builder().value_type(),
             ]));

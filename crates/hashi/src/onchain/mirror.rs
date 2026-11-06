@@ -51,6 +51,7 @@ use super::Notification;
 use super::OnchainState;
 use super::apply;
 use super::route;
+use super::tob_fetch;
 use super::types;
 
 /// Reconnect if the stream goes silent this long. The filtered stream
@@ -91,6 +92,7 @@ struct Mirror {
     /// `None` until the first watermark arrives (replay then starts
     /// from `watermark_checkpoint`).
     watermark_cursor: Option<bytes::Bytes>,
+    caught_up: bool,
 }
 
 impl Mirror {
@@ -103,7 +105,17 @@ impl Mirror {
             // replayed transaction at or before it.
             applied_position: (seed.heights.floor, u64::MAX),
             watermark_cursor: None,
+            caught_up: false,
         }
+    }
+}
+
+fn set_caught_up(state: &OnchainState, mirror: &mut Option<Mirror>, caught_up: bool) {
+    if let Some(mirror) = mirror {
+        mirror.caught_up = caught_up;
+    }
+    if let Some(fetch) = state.tob_fetch() {
+        fetch.set_caught_up(caught_up);
     }
 }
 
@@ -112,18 +124,28 @@ pub(super) async fn run(
     sui_rpc_url: String,
     state: OnchainState,
     seed: route::MirrorSeed,
+    mut asks: tokio::sync::mpsc::Receiver<tob_fetch::TobAsk>,
     metrics: Option<std::sync::Arc<Metrics>>,
 ) {
     // The boot scrape seeded both the mirrored state and this
     // bookkeeping; `None` after a failed replay forces a re-bootstrap
     // from a fresh scrape.
     let mut mirror = Some(Mirror::from_seed(seed));
+    let mut fetcher = tob_fetch::Fetcher::new();
     loop {
-        if let Err(e) =
-            run_transactions(&sui_rpc_url, &state, &mut mirror, metrics.as_deref()).await
+        if let Err(e) = run_transactions(
+            &sui_rpc_url,
+            &state,
+            &mut mirror,
+            &mut asks,
+            &mut fetcher,
+            metrics.as_deref(),
+        )
+        .await
         {
             tracing::warn!("state watcher stream ended: {e:#}; reconnecting");
         }
+        set_caught_up(&state, &mut mirror, false);
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }
@@ -150,6 +172,7 @@ async fn ensure_bootstrapped(
     client: &Client,
     state: &OnchainState,
     mirror: &mut Option<Mirror>,
+    fetcher: &mut tob_fetch::Fetcher,
 ) -> Result<()> {
     if mirror.is_some() {
         return Ok(());
@@ -201,6 +224,7 @@ async fn ensure_bootstrapped(
     state.reset_state_watermark(seed.heights.floor);
     state.set_scrape_ceiling(seed.heights.ceiling);
     *mirror = Some(Mirror::from_seed(seed));
+    fetcher.reset(state);
     state.request_limiter_reconcile();
     if let Some(metrics) = state.metrics() {
         metrics.watcher_rebootstrap_total.inc();
@@ -218,8 +242,11 @@ async fn run_transactions(
     sui_rpc_url: &str,
     state: &OnchainState,
     mirror: &mut Option<Mirror>,
+    asks: &mut tokio::sync::mpsc::Receiver<tob_fetch::TobAsk>,
+    fetcher: &mut tob_fetch::Fetcher,
     metrics: Option<&Metrics>,
 ) -> Result<()> {
+    set_caught_up(state, mirror, false);
     let mut client = build_client(sui_rpc_url, state)?;
     let filter = TransactionFilter::matching(tx_filter::affected_object(state.hashi_id()));
 
@@ -250,7 +277,7 @@ async fn run_transactions(
         .as_ref()
         .and_then(|watermark| watermark.checkpoint)
         .context("the first transaction frame carried no watermark checkpoint")?;
-    ensure_bootstrapped(&client, state, mirror).await?;
+    ensure_bootstrapped(&client, state, mirror, fetcher).await?;
 
     if let Err(e) = replay_transactions(&mut client, &filter, state, mirror, metrics, target).await
     {
@@ -271,22 +298,33 @@ async fn run_transactions(
         first.watermark.as_ref(),
         metrics,
     )?;
+    set_caught_up(state, mirror, true);
+    let mut stall = std::pin::pin!(tokio::time::sleep(STREAM_STALL_TIMEOUT));
     loop {
-        let item = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
-            .await
-            .context("transaction stream stalled")?;
-        let response = item.context("transaction stream closed")??;
-        handle_tx_frame(
-            state,
-            require_mirror(mirror)?,
-            response.transaction.as_ref(),
-            response.watermark.as_ref(),
-            metrics,
-        )?;
-        // Coverage advances from the server's own watermark claims:
-        // progress frames carry `Watermark.checkpoint` periodically
-        // (observed every 25 checkpoints on quiet filters) — plus each
-        // applied transaction's own checkpoint.
+        tokio::select! {
+            item = subscription.next() => {
+                let response = item.context("transaction stream closed")??;
+                handle_tx_frame(
+                    state,
+                    require_mirror(mirror)?,
+                    response.transaction.as_ref(),
+                    response.watermark.as_ref(),
+                    metrics,
+                )?;
+                stall
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + STREAM_STALL_TIMEOUT);
+            }
+            () = &mut stall => anyhow::bail!("transaction stream stalled"),
+            Some(ask) = asks.recv() => {
+                let mirror = require_mirror(mirror)?;
+                fetcher.ask(state, mirror.applied_position.0, ask);
+            }
+            Some(fetched) = fetcher.results.recv() => {
+                let mirror = require_mirror(mirror)?;
+                fetcher.merge(state, &mut mirror.routing, &mut mirror.index, fetched);
+            }
+        }
     }
 }
 
@@ -440,6 +478,11 @@ fn apply_tx_frame(
     advance_watermark(state, mirror, view.checkpoint.saturating_sub(1));
     if let Some(metrics) = metrics {
         metrics.watcher_applied_txns_total.inc();
+        if mirror.caught_up {
+            metrics
+                .watcher_tob_untracked_writes_total
+                .inc_by(out.untracked_tob_writes);
+        }
     }
     handle_effects(state, view.timestamp_ms, out.effects);
     Ok(())
