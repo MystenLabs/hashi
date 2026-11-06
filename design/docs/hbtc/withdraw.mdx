@@ -60,7 +60,7 @@ steps. For what the committee and the Guardian do with your request, see the
 </TabItem>
 </Tabs>
 
-## Before you withdraw
+## What to know before you withdraw
 
 Keep the following rules in mind:
 
@@ -80,10 +80,11 @@ Keep the following rules in mind:
   with other requests, and capacity in the Guardian's rate limiter. See
   [How long does a withdrawal take?](faq.mdx#how-long-does-a-withdrawal-take).
 
-## Withdraw with the CLI
+## How to withdraw BTC with the CLI
 
 CLI global options such as `-c` belong after the first-level subcommand, so
-`-c` goes after `withdraw`. See
+`-c` goes directly after `withdraw` and before the `request`, `status`, or
+`list` subcommand, as in the following examples. See
 [Global options](../reference/cli.mdx#global-options).
 
 ##### Step 1: Submit the request
@@ -97,7 +98,7 @@ hashi withdraw -c hashi-cli.toml request --amount <sats> --btc-address <addr>
 
 The command burns the `hBTC` from your address, places the request in the
 withdrawal queue, and prints the withdrawal request ID. Keep the ID. You need
-it to check status and to cancel.
+it to check status and to [cancel](cancel.mdx).
 
 ##### Step 2: Track the request
 
@@ -112,7 +113,7 @@ The request moves through the states Requested, Approved, Processing, Signed,
 and Confirmed. After Hashi commits the Bitcoin transaction, the status includes
 its txid, which you can follow in any Bitcoin explorer.
 
-## Withdraw with the TypeScript SDK
+## How to withdraw BTC with the TypeScript SDK
 
 The SDK attaches to a Sui client and exposes every Hashi method under
 `client.hashi.*`. Install it and create a client as described in
@@ -120,8 +121,9 @@ The SDK attaches to a Sui client and exposes every Hashi method under
 
 ##### Step 1: Check fees and limiter capacity
 
-Before you submit, you can read the worst-case miner fee, the onchain minimum,
-and whether the Guardian's rate limiter can sign your amount right now:
+Before you submit, you can read the worst-case [miner fee](../fees.mdx), the
+onchain [minimum](../config.mdx#bitcoin_withdrawal_minimum), and whether the
+Guardian's rate limiter can sign your amount right now:
 
 ```ts
 // Withdrawal: worst-case BTC network fee + on-chain minimum. Pass a sender
@@ -160,6 +162,11 @@ const evt = result.Transaction.events?.find((e) =>
 const requestId = (evt as { json?: { request_id?: string } } | undefined)?.json?.request_id;
 ```
 
+The last 2 statements find the `WithdrawalRequested` event in the transaction
+events and read `request_id` from the event's `json` payload. The type cast
+describes the shape of that payload, so the optional chaining returns
+`undefined` if the event or the field is missing.
+
 Keep `requestId` if you might [cancel the withdrawal](cancel.mdx).
 
 ##### Step 3: Track the request
@@ -178,7 +185,7 @@ const wInfo = await client.hashi.waitForWithdrawal(digest);
 // wInfo.btcTxid is populated once the committee commits the Bitcoin tx.
 ```
 
-## If the transaction is slow to confirm
+## What if the transaction is slow to confirm?
 
 Hashi does not replace a slow Bitcoin transaction with a higher-fee version.
 If your withdrawal sits in the mempool, you can speed it up yourself by
