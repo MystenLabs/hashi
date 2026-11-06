@@ -1,0 +1,550 @@
+# Hashi Node Backups
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> How node operators encrypt and restore essential node data with armored PGP backups, including YubiKey restore paths.
+
+Hashi automatically backs up the data a node needs to rejoin the committee after
+data loss. Every epoch, Hashi writes the node config, referenced key files,
+and database snapshot to a tar archive, then compresses and encrypts it as an
+ASCII-armored PGP message. The backup files use the suffix `.tar.asc`.
+The key files and database snapshot can contain the node's operator, TLS, and
+MPC private keys (see [Suspected node compromise](#suspected-node-compromise)),
+so treat a decrypted backup as sensitive key material.
+
+Encryption only needs the public PGP certificate, so the backup key does not
+need to be present on the server during normal operation. Restore needs access
+to the matching private key, either as a local PGP secret-key file or through
+`gpg-agent` for YubiKey-backed keys. Because `gpg-agent` can be forwarded over
+SSH, you can restore on a remote server using a YubiKey plugged into your laptop
+instead of plugging the YubiKey into the server itself.
+
+## Prerequisites
+
+The section that uses each item describes it in detail:
+
+- For a YubiKey backup key: a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/)
+  key with firmware 5.7 or newer, a USB-capable machine,
+  [oct](https://codeberg.org/openpgp-card/openpgp-card-tools), [GnuPG](https://gnupg.org/),
+  [YubiKey Manager](https://docs.yubico.com/software/yubikey/tools/ykman/), [jq](https://jqlang.org/),
+  and a checkout of the [Hashi repository](https://github.com/MystenLabs/hashi).
+- For a local backup key file: [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq).
+- For S3 backups: AWS credentials from the default credential chain, a node role
+  restricted to `s3:PutObject` within its prefix, and recovery credentials with
+  `s3:GetObject` (or `s3:GetObjectVersion` for a pinned version, plus
+  `s3:ListBucketVersions` to inspect version history). See [Back up to S3](#back-up-to-s3)
+  for the full Mainnet baseline.
+
+## Create a backup key
+
+### Option 1: Create a private key on a YubiKey (recommended)
+
+We recommend generating a PGP private key entirely on one YubiKey and using its
+public key to encrypt the node backup. This makes it practically impossible for
+anyone to decrypt the backup without physical access to the YubiKey.
+
+:::warning
+
+Do not lose the YubiKey. Without it, you cannot decrypt backups encrypted to
+its public key.
+
+:::
+
+Use a USB-capable machine and a new
+[YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/) with
+firmware **5.7 or newer**. Connect only this YubiKey; disconnect other smartcards.
+Normal backups need only its public certificate, not a connected YubiKey.
+
+1. Install [oct](https://codeberg.org/openpgp-card/openpgp-card-tools),
+   [GnuPG](https://gnupg.org/) (`gpg` and `gpgconf`),
+   [YubiKey Manager](https://docs.yubico.com/software/yubikey/tools/ykman/) (`ykman`),
+   and [jq](https://jqlang.org/). Ensure your system's smartcard service is available.
+2. From a checkout of the [Hashi repository](https://github.com/MystenLabs/hashi),
+   run the setup script in an interactive terminal:
+
+```sh
+bash scripts/node-operator/provision-yubikey-backup.sh --output-dir ./backup-key
+```
+
+3. Follow the prompts for an optional User ID (Enter to omit),
+   PIN changes, and physical touches.
+   The script refuses cards that already contain keys, generates the private keys
+   on-device, enables touch for decryption, exports public artifacts, and checks
+   encryption/decryption. Keep the new User and Admin PINs in a secure password
+   manager. Do not replace the factory attestation (ATT) key or certificate.
+4. Save these **4 public files**. `<fingerprint>` is the full encryption subkey
+   fingerprint:
+   - `yubikey-backup-<fingerprint>.asc`
+   - `yubikey-backup-<fingerprint>.attestation-device.pem`
+   - `yubikey-backup-<fingerprint>.attestation-dec.pem`
+   - `yubikey-backup-<fingerprint>.fingerprints.txt`
+
+Use the `.asc` file directly as `backup-pgp-cert` in your node configuration.
+The script also creates YubiKey attestation evidence. If desired, share all 4
+public files to [assemble a multi-recipient backup certificate](#assemble-a-multi-recipient-backup-certificate),
+which can verify the attestations.
+
+For YubiKey restores with `--use-gpg-agent`, import the public certificate and
+link the card in your normal GnuPG home (the script's test keyring is temporary):
+
+```sh
+gpg --import "./backup-key/yubikey-backup-<fingerprint>.asc"
+gpg --card-status
+```
+
+Replace `<fingerprint>` with the generated filename's fingerprint and keep the
+YubiKey connected; if using a separate recovery GnuPG home, use it for both commands.
+
+Preserve the filenames. Store the YubiKey securely; do not share it or the PINs.
+If setup fails, retain the public files and inspect the card before retrying.
+You can restart provisioning if no data depends on any newly generated keys.
+Otherwise, preserve the keys and follow the script's public-artifact recovery
+guidance: wiping or regenerating them would destroy access to existing backups.
+
+### Option 2: Create a local private key file
+
+If you do not want to use a YubiKey, you can generate a PGP private key locally
+and encrypt with it. Because the private key is stored in a normal file instead
+of on a YubiKey, there is a greater risk of unauthorized use of the private key.
+Store the file carefully.
+
+1. Install tools:
+   - [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq), Sequoia PGP.
+
+2. Generate a new key pair. Be sure to update the name and email to real
+values.
+
+```sh
+sq key generate \
+  --own-key \
+  --name "Your Name" \
+  --email "you@example.com" \
+  --expiration never \
+  --without-password \
+  --output private-key.asc \
+  --rev-cert revocation-cert.asc
+```
+
+3. Export the public key to a file. Note that despite the name, this doesn't
+   actually delete the private key, it just extracts the public key.
+
+```sh
+sq key delete \
+  --cert-file private-key.asc \
+  --output public-key.asc
+```
+
+4. Test encrypting a file to the public key:
+
+```sh
+echo "test message" > test.txt
+sq encrypt \
+  --for-file public-key.asc \
+  --without-signature \
+  --output test.txt.asc \
+  test.txt
+```
+
+5. Test decrypting the file with the private key:
+
+```sh
+sq decrypt --recipient-file private-key.asc test.txt.asc
+```
+
+Confirm the output matches the original file contents, then delete the test
+files.
+
+6. Save the revocation, public key, and private key files in a secure location.
+
+## Assemble a multi-recipient backup certificate
+
+You can combine multiple YubiKey recipients into one OpenPGP certificate.
+**Any selected recipient can independently decrypt the backup**; this is 1-of-n,
+not threshold recovery. Only public certificates are exchanged, so the YubiKeys
+never need to be in the same location. Software-key recipients are also supported.
+
+This command requires the optional `backup-assemble-cert` feature. Build it with
+`cargo build -p hashi --release --features backup-assemble-cert`; the binary is
+`target/release/hashi`. Normal node builds omit this command and its GPG-agent dependencies.
+
+The certifier's primary key must support certification and signing and be
+available through `gpg-agent`. Pass its **public** certificate to `--primary-cert`:
+
+```sh
+hashi backup assemble-cert \
+  --primary-cert certifier-public.asc \
+  --recipient alice-public.asc \
+  --recipient bob-public.asc \
+  --output hashi-backup-cert.asc
+```
+
+Repeat `--recipient` for each public recipient certificate. If a certificate has
+multiple usable encryption subkeys, select one with
+`--recipient "alice-public.asc=FULL_ENCRYPTION_SUBKEY_FINGERPRINT"`.
+The certifier is not automatically a recipient; list it explicitly if needed.
+Use `--gpg-homedir PATH` to select a different GnuPG home. The output must not
+already exist; configure it as `backup-pgp-cert` below.
+
+The command reports each key's expiry. A finite certifier expiry limits the whole
+certificate: replace it before then to avoid backup and node-startup failures.
+If the certifier advertises SEIPDv2, every recipient must support it; a v1-only
+certifier can include recipients that also support v2.
+
+To verify a recipient's YubiKey provenance, add
+`--recipient-attestation SUBKEY_FINGERPRINT DEVICE_PEM DEC_PEM`, supplying the
+device attestation certificate and DEC statement. Repeat for each attested
+recipient. Supplied evidence is always verified; add
+`--require-recipient-attestation` to require it for every recipient.
+
+For example, using the files exported during YubiKey setup (replace
+`FULL_ENCRYPTION_SUBKEY_FINGERPRINT` with the `[E]` subkey fingerprint from the
+recipient's `.fingerprints.txt` file, without spaces). Replace the recipient
+paths with the matching files produced by the script:
+
+```sh
+hashi backup assemble-cert \
+  --primary-cert certifier-public.asc \
+  --recipient yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.asc \
+  --recipient-attestation FULL_ENCRYPTION_SUBKEY_FINGERPRINT \
+    yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.attestation-device.pem \
+    yubikey-backup-FULL_ENCRYPTION_SUBKEY_FINGERPRINT.attestation-dec.pem \
+  --require-recipient-attestation \
+  --output hashi-backup-cert.asc
+```
+
+For multiple YubiKeys, collect each recipient's public certificate, device PEM,
+DEC PEM, and `.fingerprints.txt` file under distinct filenames. Repeat both
+`--recipient` and `--recipient-attestation` for each recipient. With
+`--require-recipient-attestation`, software-generated keys cannot be recipients.
+
+Verification checks the device certificate against pinned Yubico issuers and
+checks that the DEC statement attests on-device generation of the selected key.
+It does not establish current possession of the YubiKey or enforce a touch
+policy, and it does not check X.509 expiry or revocation.
+
+Before relying on the certificate, make a backup and confirm that each recipient
+can restore that same archive independently.
+
+Run `hashi backup test --backup-pgp-cert hashi-backup-cert.asc --use-gpg-agent`
+for a temporary-message round trip with a YubiKey or GnuPG key, or replace
+`--use-gpg-agent` with `--backup-pgp-secret-key private.asc` for a local private key.
+Test files are automatically cleaned up on success or error.
+
+## Configure Hashi backups
+
+Every node config must provide `backup-pgp-cert` (a certificate file path or inline
+armored text) and `backup-dir`:
+
+```toml
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+backup-dir = "/var/lib/hashi/backups"
+```
+
+The `backup-pgp-cert` file is the public key you created in
+[Create a backup key](#create-a-backup-key): the `yubikey-backup-<fingerprint>.asc`
+file from Option 1, `public-key.asc` from Option 2, or a certificate from
+[Assemble a multi-recipient backup certificate](#assemble-a-multi-recipient-backup-certificate). It is the public half of the backup key pair.
+Restore uses the matching private half, passed as `--backup-pgp-secret-key`
+(for example, `private-key.asc` from Option 2) or reached through
+`--use-gpg-agent` for YubiKey-backed keys.
+
+Use a persistent, node-specific backup directory outside the database directory,
+with write access restricted to the node's user.
+
+### Automatic cleanup
+
+On epoch housekeeping, before the save, Hashi applies these rules in `backup-dir`:
+
+1. Hashi deletes archives older than 14 days by filename timestamp, but keeps
+   the newest current-epoch MPC recovery archive until it saves a newer one or
+   that epoch ends. Ordinary backups cannot replace that recovery copy. Hashi
+   keeps the newest archive of any kind while the node is still attempting
+   saves, or up to 30 days otherwise. Archives that manual backups place in
+   `backup-dir` follow the same policy.
+2. Hashi removes abandoned `.hashi-backup-*` files and `.hashi-restore-*`
+   directories older than 14 days by modification time, without retaining the
+   newest staging entry.
+3. Hashi leaves recent staging entries, symlinks, and unrelated files alone.
+4. Entry errors do not stop the sweep, and a cleanup failure does not prevent
+   the backup attempt.
+
+Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`
+counts; expiring the newest archive also warns.
+
+Archives are staged in `backup-dir`, finalized and synced to disk before publication;
+the directory is synced afterward on a best-effort basis. A directory sync failure
+is logged at error level without failing the already-published backup. Failed saves
+remove their temporary files and never overwrite existing archives.
+
+### What operators must clean up
+
+Automatic cleanup does not cover the following; handle them yourself:
+
+- A powered-off node sweeps nothing, so delete a decommissioned host's archives
+  yourself.
+- Manual backups do not trigger cleanup. Apply [backup expiry](#backup-expiry)
+  to all copies except the [monthly off-machine copies](#monthly-off-machine-copy).
+- Restore staging and completed restore output contain decrypted keys and
+  database data; use a private restore output directory. Automatic backup
+  cleanup does not sweep completed restores, `.hashi-db-restore-*` staging
+  directories beside the destination database, or restore output elsewhere.
+  Remove these plaintext copies when you no longer need them.
+
+### Backup expiry
+
+Use a **14-day retention target**, measured from the archive's original creation,
+for every backup copy except the [monthly off-machine copies](#monthly-off-machine-copy):
+local archives (including the newest), other off-machine copies, and all versions of
+the node's S3 uploads. Copying or re-uploading must not reset this target; S3's
+versioning and deletion timing are described [below](#back-up-to-s3).
+
+Active nodes check daily and refresh their current-epoch MPC recovery backup once
+it is 3 days old, even during stalled reconfiguration. This intentionally preserves
+recovery of the active shares; it does not extend retention for historical epochs.
+If refresh is failing, preserve the last usable recovery copy and follow the
+incident guidance below rather than deleting it to meet the target.
+
+Old shares can still reconstruct the active MPC key after resharing. Keeping
+backups indefinitely gives an attacker more time to collect enough decryptable
+backups from the same epoch to recover that key. Expiry limits this opportunity
+while preserving a recent disaster-recovery window. The monthly off-machine copies
+are kept longer, for three months, so that the key can be recovered even if an
+attacker wipes every node.
+
+Operators must configure deletion in each storage location, leaving out only the
+[monthly copies](#monthly-off-machine-copy), which you destroy by hand under their
+own rule; Hashi's newest-backup exception alone does not enforce this policy.
+Account for Object Lock and monitor deletion failures or delays. Remove temporary
+decrypted copies immediately after use.
+
+During an incident, pause expiry for backups needed for recovery: disable the
+applicable S3 lifecycle rules and other off-machine deletion jobs, and stop
+destroying monthly copies. Hashi's local cleanup still runs, so preserve encrypted
+copies outside `backup-dir` in a restricted location exempt from deletion. Confirm
+the copies are accessible; changing lifecycle rules is not instantaneous. Resume
+expiry and remove incident copies when recovery no longer needs them.
+
+### Monthly off-machine copy
+
+Once a month, copy the backup from the first epoch that starts in that month (UTC)
+to storage that none of your nodes can reach, since anyone who takes over a node
+can delete what it can reach. Do not put it in the S3 bucket that receives
+automatic backups. Use that epoch's `-mpc-` archive, which holds the
+node's [recovery record](#catastrophic-mpc-key-recovery). Recovery only combines
+records from the same epoch, so every operator should copy the same epoch. Copy it
+within 14 days, before local cleanup and S3 lifecycle rules remove it.
+
+Test each copy when you make it, on a machine outside the validator fleet, by
+exporting its recovery record with
+[`hashi backup export-mpc-recovery-record`](#sharing-recovery-records) to your
+`backup-pgp-cert`, then delete the export. If that epoch has no `-mpc-` archive or the
+
+instead.
+
+Keep each copy for three months after its epoch, then destroy it everywhere it is
+stored, including old versions, replicas and snapshots. Destroy expired copies only
+after this month's copy passes its test, unless your node has left the committee.
+Keep a way to decrypt every copy you still hold, even after you replace
+`backup-pgp-cert`.
+
+## Restore from a backup
+
+`hashi backup restore` decrypts an archive and extracts it into a directory you
+choose. It installs nothing. The full procedure, from choosing a backup to
+restarting the node, is in the
+[operator runbook](node-operator-runbook.mdx#102-restoring-a-node).
+For S3 restore commands and an on-page recovery checklist, see
+[Restore and infrastructure limits](#restore-and-infrastructure-limits) and
+[Machine-loss recovery](#machine-loss-recovery) below.
+
+## Back up to S3
+
+Enable S3 uploads with this optional node-config table; both values are required.
+Use a bucket name, not an S3 URI. Omit the table for local-only backups.
+
+```toml
+[backup-s3]
+bucket = "my-hashi-backups"
+region = "us-east-1"
+```
+
+Uploads and restores use the AWS default credential chain (environment, profiles,
+or IAM roles), not credentials in the node config. The secure Mainnet baseline
+requires operators to configure:
+
+- A private bucket with S3 Versioning and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+  with **bucket-default retention**; Hashi does not set retention per object.
+- A bucket policy explicitly denying object-creation `s3:PutObject` requests
+  without `If-None-Match: *` (`s3:if-none-match`), rather than relying on the
+  client's header alone.
+- A node role restricted to `s3:PutObject` within its prefix, without object
+  read/delete, bucket/retention administration, or governance-retention bypass.
+  Restrict reads to approved recovery roles and keep their credentials off-node.
+- CloudTrail **read and write object data events** scoped to the backup bucket,
+  retained in an independent audit store outside backup writers' permissions.
+  Use per-node credentials for attribution: events identify the credential
+  principal, not a trusted archive creator.
+- A **14-day remote retention target**, using [lifecycle expiration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html):
+  - Expire current objects after **14 days** (`Expiration.Days: 14`).
+  - Delete noncurrent versions after **1 day** (`NoncurrentVersionExpiration.NoncurrentDays: 1`),
+    without retaining a minimum number of newer versions.
+  - Remove expired delete markers with a separate rule
+    (`Expiration.ExpiredObjectDeleteMarker: true`).
+  Apply these rules to the backup prefix (or the whole dedicated backup bucket).
+  Current expiry creates a delete marker; the data becomes noncurrent and is
+  eligible for deletion 1 day later, not another 14 days later. Lifecycle uses S3
+  upload time, so late uploads need separate expiry tracking. Object Lock can delay
+  deletion, and lifecycle processing is asynchronous: this is not a hard deadline
+  or a guaranteed recovery window.
+
+Hashi neither provisions nor preflights these controls. Mysten Testnet's Pulumi
+configuration defines the bucket and audit safeguards, but leaves read access
+unchanged. Recovery-only reads remain Mainnet rollout work; node credential
+provisioning is separate.
+
+The destination is derived from the node identity, with no custom prefix:
+
+```text
+s3://<bucket>/<sui-chain-id>/<hashi-object-id>/<validator-address>/hashi-backup-epoch-<epoch>-<timestamp>.tar.asc
+```
+
+If the `-mpc-` marker is present after the epoch number, it identifies backups
+containing MPC key-recovery information.
+
+Scheduled backups upload the completed encrypted local archive once, without
+retries or a queue. Failures preserve local backups and retention, and log the
+local path and S3 URI.
+
+### Manual backups
+
+Stop the node before opening its database for a manual backup:
+
+```bash
+hashi backup save /path/to/validator.toml --output-dir /var/lib/hashi/backups
+```
+
+Replace `/path/to/validator.toml` with the path to your node config, and
+`/var/lib/hashi/backups` with the directory to write the archive to (for
+example, your configured `backup-dir`).
+
+This saves locally, then uploads if configured. Add `--local-only` to skip S3.
+Upload failure returns a nonzero exit status while preserving the local archive.
+With S3 configured, a `--backup-pgp-cert` override with different usable encryption recipients requires `--local-only` or updating the configured certificate.
+
+### Restore and infrastructure limits
+
+Restore from a full S3 URI without the original node configuration:
+
+```bash
+hashi backup restore s3://my-bucket/<namespace>/hashi-backup-<timestamp>.tar.asc \
+  --region us-east-1 --backup-pgp-secret-key /secure/secret-key.asc \
+  --output-dir /private/restore
+```
+
+Here `<namespace>` is the `<sui-chain-id>/<hashi-object-id>/<validator-address>`
+path from the destination template above, and `<timestamp>` is the timestamp in
+the archive's filename. Take the full URI from the URI and version receipts you keep for each backup.
+
+Use `--version-id '<version-id>'` to select an exact object version. Keys are
+literal object keys, not URL-decoded paths. Recovery credentials need
+`s3:GetObject` for the current object or `s3:GetObjectVersion` for a pinned version;
+inspecting version history also requires `s3:ListBucketVersions`.
+
+S3 restore accepts only encrypted `.tar.asc` archives. Choose
+`--backup-pgp-secret-key` or `--use-gpg-agent` (with optional `--gpg-homedir`).
+Local restores also accept plaintext `.tar` archives, which need neither decryptor.
+`--region` is required for S3; it and `--version-id` are invalid for local restores.
+
+Downloads use private temporary storage under `--output-dir` and are removed
+afterward. Restore publishes a complete extraction, refuses an existing
+destination, and does not install files at their original paths.
+
+Keep backup URI and version receipts, the region, and decryption-key access outside
+the node. Use independently retained receipts and audit history to select an
+exact version, then pin it with `--version-id`. Neither the newest object nor
+successful decryption proves its origin: encryption does not authenticate the
+creator. Unexpected versions or delete markers warrant investigation, but
+lifecycle rules and authorized administrators can also create them.
+
+### Machine-loss recovery
+
+Use this path for accidental machine or disk loss without suspected compromise.
+For suspected compromise, use the separate procedure below, not a snapshot restore.
+
+1. Stop or fence the old node. Restore on a trusted replacement host into a
+   private directory (`umask 077`); no original config or database is needed.
+2. Verify the restored chain, Hashi object, and validator identity against trusted
+   records. Install the config and key files at trusted paths, not paths taken
+   blindly from the manifest. Put `hashi-db-snapshot` at the configured `db` path;
+   never merge it into an existing database.
+3. Update config paths and endpoints, restrict permissions to the node user, and
+   start the node. Check chain catch-up and committee participation.
+4. Remove plaintext recovery output and temporary key copies when finished.
+   Keep decryption-key access independent of the replacement host.
+
+### Suspected node compromise
+
+Assume host-held operator, TLS, and MPC private keys are exposed. Even a known
+pre-compromise snapshot can contain those same keys; its age does not make them
+safe to restore.
+
+For a **single compromised node with sufficient healthy peers**:
+
+1. Fence the old host. From trusted infrastructure, use the validator account
+   authority to revoke the old operator delegation and register fresh operator
+   and TLS identities in onchain metadata. Follow the runbook's
+   [key generation and registration](node-operator-runbook.mdx#22-tls-key-dedicated)
+   and [operator revocation](node-operator-runbook.mdx#24-operator-key-day-to-day-signing)
+   procedures with the replacement config; do not authorize recovery with the
+   compromised operator key.
+2. Provision a fresh machine with an **empty database**, not restored key material.
+   Startup generates fresh node encryption/signing keys and registers them;
+   see [server startup](node-operator-runbook.mdx#54-step-3-start-the-server).
+3. Rejoin through [reconfiguration](node-operator-runbook.mdx#9-epoch-changes-reconfiguration)
+   with the healthy peers, and confirm the replacement identities and participation.
+
+Suspected quorum-wide or global MPC key compromise requires coordinated incident
+response, not this single-node procedure. Resharing preserves the global Bitcoin
+key; it does not repair a stolen global private key.
+
+## Catastrophic MPC key recovery
+
+A zero-day compromise could steal and delete MPC key shares across the validator
+fleet. Catastrophic data loss could also leave every node without its shares.
+Backups allow the existing MPC key to be recovered when no functioning committee
+remains.
+
+Scheduled backups with the `-mpc-` marker include `hashi-mpc-recovery.bcs`.
+This file contains the node's shares and the information needed to combine them
+with other nodes' backups to recover the MPC key. Recovery needs a sufficient set
+of backups from the same epoch and works even after old onchain certificates have
+been deleted. Manual backups do not include this file.
+
+Operators should keep their [monthly off-machine copies](#monthly-off-machine-copy)
+and keep access to their backup decryption keys separate from the validator fleet.
+MPC key recovery is an incident-response operation, not part of ordinary node
+restoration.
+
+Recovery assembles the full MPC private key and writes it PGP-encrypted. It must
+still be handled as a highly sensitive secret. Recovering it does not invalidate
+a copy already stolen by an attacker.
+
+### Sharing recovery records
+
+For a coordinated recovery, use `hashi backup export-mpc-recovery-record` to
+decrypt your backup locally and export only its recovery information, encrypted
+to the coordinator's public PGP certificate. The command prints the recipient
+certificate's fingerprint; verify it through a trusted channel before sharing
+the export.
+
+```bash
+hashi backup export-mpc-recovery-record backup.tar.asc \
+  --backup-pgp-secret-key /secure/operator-secret.asc \
+  --output-pgp-cert coordinator.asc --output recovery-record.bcs.asc
+```
+
+Use `--use-gpg-agent` instead of `--backup-pgp-secret-key` for agent-backed keys.
+Send only the encrypted `.bcs.asc` file; neither your backup decryption key nor
+the full backup needs to be shared. The command never writes a plaintext record.
+The coordinator can pass these files to `hashi backup recover-mpc-key` and decrypt
+them with their own key.

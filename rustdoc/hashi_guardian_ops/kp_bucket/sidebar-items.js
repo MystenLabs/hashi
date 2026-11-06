@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CONFIG_PREFIX","REGION","ROTATION_PREFIX"],"enum":["DigestScheme"],"fn":["format_fingerprint","group_by_four","holds_access_key","identity","kp_bucket","manifest_digest"]};
