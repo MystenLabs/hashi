@@ -652,6 +652,7 @@ fn is_expected_refusal(status: &tonic::Status) -> bool {
     status.code() == tonic::Code::FailedPrecondition
         && [
             crate::grpc::PAUSED_REFUSAL_MSG,
+            crate::grpc::BINARY_UNSUPPORTED_REFUSAL_MSG,
             crate::grpc::NOT_READY_TO_FINALIZE_MSG,
             crate::grpc::UNSIGNED_REFUSAL_MSG,
             crate::grpc::NOT_OLDEST_REFUSAL_MSG,

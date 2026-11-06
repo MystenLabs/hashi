@@ -11,6 +11,7 @@ use tracing::Instrument;
 
 use crate::btc_monitor::limits::BitcoindBusy;
 use crate::deposits::UnapprovedDepositError;
+use crate::metrics::SIGNING_REFUSAL_BINARY_UNSUPPORTED;
 use crate::metrics::SIGNING_REFUSAL_BUSY;
 use crate::metrics::SIGNING_REFUSAL_CAP;
 use crate::metrics::SIGNING_REFUSAL_CATCHING_UP;
@@ -20,6 +21,7 @@ use crate::metrics::SIGNING_REFUSAL_OVER_CAPACITY;
 use crate::metrics::SIGNING_REFUSAL_PAUSED;
 use crate::metrics::SIGNING_REFUSAL_SHAPE;
 use crate::metrics::SIGNING_REFUSAL_UNSIGNED;
+use crate::onchain::HaltReason;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -61,9 +63,11 @@ use hashi_types::proto::SignWithdrawalTxSigningResponse;
 use hashi_types::proto::bridge_service_server::BridgeService;
 use sui_sdk_types::Address;
 
+use super::BINARY_UNSUPPORTED_REFUSAL_MSG;
 use super::CATCHING_UP_REFUSAL_MSG;
 use super::HttpService;
 use super::PAUSED_REFUSAL_MSG;
+use super::SIGNING_MANAGER_NOT_READY_MSG;
 use super::UNSIGNED_REFUSAL_MSG;
 use super::peer_limit::CallerTaskSlot;
 use super::peer_limit::SigningPlace;
@@ -312,7 +316,7 @@ impl BridgeService for HttpService {
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
         let inner = self.inner.clone();
         let work_seconds = self.work_seconds(caller);
-        let paused_refusals = self.signing_refusals(caller, SIGNING_REFUSAL_PAUSED);
+        let service = self.clone();
         tokio::spawn(
             async move {
                 let _slot = slot;
@@ -322,12 +326,9 @@ impl BridgeService for HttpService {
                     () = tx.closed() => return,
                     run = place.run() => run,
                 };
-                if inner.onchain_state().state().hashi().config.paused() {
-                    paused_refusals.inc();
-                    tracing::info!("Refusing sign_withdrawal_transaction: {PAUSED_REFUSAL_MSG}");
-                    let _ = tx
-                        .send(Err(Status::failed_precondition(PAUSED_REFUSAL_MSG)))
-                        .await;
+                if let Err(refusal) = service.ensure_signing_available(caller) {
+                    tracing::info!("Refusing sign_withdrawal_transaction: {refusal}");
+                    let _ = tx.send(Err(refusal)).await;
                     return;
                 }
                 let job_inner = inner.clone();
@@ -503,28 +504,42 @@ impl HttpService {
     }
 
     fn admit_committee_member(&self, caller: Address) -> Result<Member, Status> {
-        let (refusal, paused) = {
+        let refusal = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
             let epoch = hashi.committees.epoch();
-            let refusal = match hashi.committees.current_committee() {
+            match hashi.committees.current_committee() {
                 Some(committee) if committee.index_of(&caller).is_some() => None,
                 Some(_) => Some(format!("caller is not in the epoch {epoch} committee")),
                 None => Some(format!(
                     "this node does not know the epoch {epoch} committee"
                 )),
-            };
-            (refusal, hashi.config.paused())
+            }
         };
         if let Some(refusal) = refusal {
             self.count_signing_refusal(caller, SIGNING_REFUSAL_COMMITTEE);
             return Err(Status::permission_denied(refusal));
         }
-        if paused {
-            self.count_signing_refusal(caller, SIGNING_REFUSAL_PAUSED);
-            return Err(Status::failed_precondition(PAUSED_REFUSAL_MSG));
-        }
+        self.ensure_signing_available(caller)?;
         Ok(Member(caller))
+    }
+
+    pub(crate) fn ensure_signing_available(&self, caller: Address) -> Result<(), Status> {
+        let onchain_state = self
+            .onchain_state_opt()
+            .ok_or_else(|| Status::unavailable(SIGNING_MANAGER_NOT_READY_MSG))?;
+        let Some(reason) = onchain_state.autonomous_halt_reason() else {
+            return Ok(());
+        };
+        let (metric_reason, message) = match reason {
+            HaltReason::Paused => (SIGNING_REFUSAL_PAUSED, PAUSED_REFUSAL_MSG),
+            HaltReason::BinaryUnsupported { .. } => (
+                SIGNING_REFUSAL_BINARY_UNSUPPORTED,
+                BINARY_UNSUPPORTED_REFUSAL_MSG,
+            ),
+        };
+        self.count_signing_refusal(caller, metric_reason);
+        Err(Status::failed_precondition(message))
     }
 
     fn admit_construction(&self, member: &Member) -> Result<(), Status> {

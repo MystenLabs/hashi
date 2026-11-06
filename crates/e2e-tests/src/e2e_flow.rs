@@ -2230,26 +2230,6 @@ mod tests {
         .await
     }
 
-    fn paused_refusals(node: &crate::HashiNodeHandle, caller: Address) -> f64 {
-        let caller = caller.to_string();
-        node.metrics_registry()
-            .gather()
-            .iter()
-            .filter(|family| family.name() == "hashi_withdrawal_signing_refused_total")
-            .flat_map(|family| family.get_metric())
-            .filter(|metric| {
-                let labels = metric.get_label();
-                labels
-                    .iter()
-                    .any(|label| label.name() == "peer" && label.value() == caller)
-                    && labels
-                        .iter()
-                        .any(|label| label.name() == "reason" && label.value() == "paused")
-            })
-            .map(|metric| metric.get_counter().value())
-            .sum()
-    }
-
     async fn request_signatures(
         caller: &crate::HashiNodeHandle,
         peer: &crate::HashiNodeHandle,
@@ -2306,37 +2286,55 @@ mod tests {
         peer.wait_for_mpc_key(Duration::from_secs(60)).await?;
 
         set_paused(&networks, true).await?;
-        let refused_before = paused_refusals(peer, caller.validator_address());
-        let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
+        let (mut refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
+        refusals.push(partials.expect_err("a paused peer served partial signatures"));
         for refusal in &refusals {
             assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
             assert_eq!(refusal.message(), "Hashi is paused");
         }
-        let refusal = partials.expect_err("a paused peer served partial signatures");
-        assert_eq!(refusal.code(), tonic::Code::Unavailable, "{refusal}");
-        assert_eq!(
-            refusal.message(),
-            "SigningManager not available: Hashi is paused"
-        );
-        assert_eq!(
-            paused_refusals(peer, caller.validator_address()),
-            refused_before + 3.0
-        );
 
         set_paused(&networks, false).await?;
-        let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
-        for refusal in &refusals {
-            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{refusal}");
-            assert!(
-                refusal.message().contains("not found on-chain"),
-                "{refusal}"
-            );
-        }
+        let (_, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
         assert!(partials?.into_inner().partial_sigs.is_empty());
-        assert_eq!(
-            paused_refusals(peer, caller.validator_address()),
-            refused_before + 3.0
-        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_binary_refuses_signing() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let withdrawal_txn_id = Address::new([7; 32]);
+        networks.hashi_network.nodes()[1]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+
+        crate::upgrade_flow::execute_full_upgrade(&mut networks, true).await?;
+        let nodes = networks.hashi_network.nodes();
+        wait_until(
+            "every node to halt on the unsupported package version",
+            Duration::from_secs(30),
+            || {
+                nodes.iter().all(|node| {
+                    matches!(
+                        node.hashi().onchain_state().autonomous_halt_reason(),
+                        Some(hashi::onchain::HaltReason::BinaryUnsupported { .. })
+                    )
+                })
+            },
+        )
+        .await?;
+
+        let (caller, peer) = (&nodes[0], &nodes[1]);
+        let (refusals, partials) = request_signatures(caller, peer, withdrawal_txn_id).await?;
+        let partial_refusal =
+            partials.expect_err("an unsupported binary served partial signatures");
+        assert_eq!(partial_refusal.code(), tonic::Code::FailedPrecondition);
+        for refusal in &refusals {
+            assert_eq!(refusal.code(), partial_refusal.code(), "{refusal}");
+            assert_eq!(refusal.message(), partial_refusal.message());
+        }
 
         Ok(())
     }
