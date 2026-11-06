@@ -229,7 +229,7 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
 const DEFAULT_START_HEIGHT: u32 = 800_000;
 
 /// Anchors Signet nodes below the Hashi Testnet deployment (~height 313343).
-/// Only ever lower this; deposits below the anchor are never seen.
+/// Only ever lower this; deposits at or below the anchor are never seen.
 const SIGNET_DEFAULT_START_HEIGHT: u32 = 300_000;
 
 /// Networks without a deployment anchor start at genesis, which is always valid
