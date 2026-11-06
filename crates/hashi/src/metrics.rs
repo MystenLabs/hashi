@@ -336,6 +336,7 @@ pub const SIGNING_REFUSAL_CAP: &str = "cap";
 pub const SIGNING_REFUSAL_BUSY: &str = "busy";
 pub const SIGNING_REFUSAL_SHAPE: &str = "shape";
 pub const SIGNING_REFUSAL_PAUSED: &str = "paused";
+pub const SIGNING_REFUSAL_BINARY_UNSUPPORTED: &str = "binary_unsupported";
 pub const SIGNING_REFUSAL_UNSIGNED: &str = "unsigned";
 pub const SIGNING_REFUSAL_NOT_OLDEST: &str = "not_oldest";
 pub const SIGNING_REFUSAL_CATCHING_UP: &str = "catching_up";
