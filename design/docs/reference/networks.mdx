@@ -35,7 +35,13 @@ answer: >-
 
 Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints all differ per deployment. Testnet pairs Sui Testnet with Bitcoin Signet, and Mainnet pairs Sui Mainnet with Bitcoin Mainnet. The tabbed examples in the Validators pages already carry the values from the matching column.
 
+## How does Hashi enforce network pairing?
+
 Hashi enforces the pairing rather than just documenting it: Bitcoin Mainnet goes with Sui Mainnet and nothing else. `hashi launch` refuses to build the launch transaction when its `--bitcoin-chain-id` does not match the chain the fullnode reports under that rule, and a node refuses to start (as does `hashi register`) when the validator config's `bitcoin-chain-id` is Mainnet on any other Sui network or is not Mainnet on Sui Mainnet.
+
+## What values does each network use?
+
+Each column lists the values a Hashi node or the CLI needs on that network.
 
 | Parameter | Testnet | Mainnet |
 |-----------|---------|---------|
@@ -52,4 +58,6 @@ Hashi enforces the pairing rather than just documenting it: Bitcoin Mainnet goes
 | `[metrics-push].push-url` | `https://metrics-proxy.testnet.sui.io:8443/publish/metrics` | `https://metrics-proxy.mainnet.sui.io:8443/publish/metrics` |
 | Release tags | `testnet-X.Y` | `mainnet-X.Y` |
 
-> You reach a self-hosted Sui fullnode at its RPC port (default `9000`) on any network. Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332` (the Mainnet port), so on Signet you must set the port explicitly, and on Mainnet you set the host when the Bitcoin node runs elsewhere.
+## Which ports do self-hosted nodes use?
+
+> You reach a self-hosted Sui fullnode at its RPC port (default `9000`) on any network. For setup, see [Sui RPC](../validators/prerequisites.mdx#sui-rpc). The public Testnet endpoint uses port 443 instead. Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332`, which is correct only for Bitcoin Mainnet. On Signet you must set the port explicitly (default 38332), and on Mainnet you set the host when the Bitcoin node runs elsewhere.
