@@ -410,8 +410,8 @@ It:
 4. Reads the latest `committee-update/` or `genesis/` record, recovers the
    limiter state from successful withdrawal logs, computes the expected
    `ActivationState` hash, and calls `OperatorActivate`.
-5. Verifies the guardian reports the expected active committee epoch and limiter
-   state.
+5. Verifies the guardian reports the expected (or a later) committee epoch and
+   limiter state.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
