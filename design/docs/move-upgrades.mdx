@@ -114,8 +114,9 @@ Use this sequence for every upgrade:
    **weight**, not merely two thirds of node count.
 5. Reach proposal quorum, then separately execute and publish the upgrade with
    `hashi proposal execute-upgrade <proposal-id> --package-path <dir>`, built
-   from the same commit and `sui` binary as the proposal's digest. Votes never
-   auto-publish a package.
+   from the same commit and `sui` binary as the proposal's digest. The
+   `<proposal-id>` value is the ID of the upgrade proposal you created in
+   step 1. Votes never auto-publish a package.
 6. Verify the package-upgrade checkpoint, enabled-version set, active routing,
    and validator health before resuming ordinary rollout work.
 
