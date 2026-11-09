@@ -746,15 +746,6 @@ impl MpcManager {
         Ok(RetrieveOutcome::NeedsStore)
     }
 
-    /// Answers a complaint, subject to `complaint_response_policy`.
-    ///
-    /// The complaint is verified before the policy is applied, so an invalid
-    /// complaint is always an error, unless the response is already cached
-    /// from an earlier verified complaint about the same dealer: a cache hit
-    /// does not verify the caller. A complaint about a dealer the policy does
-    /// not allow is withheld: the response reveals this node's share, and a
-    /// bug in the complaint flow must not let a handful of parties extract
-    /// it. This is the only place a complaint response is released.
     pub fn handle_complain_request(
         &mut self,
         caller: Address,
@@ -885,126 +876,147 @@ impl MpcManager {
             }
             return Ok(response);
         }
-        if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
-            return Err(MpcError::InvalidMessage {
-                sender: caller,
-                reason: "nonce complaints must be AVID complaints".into(),
-            });
-        }
-        let cached_messages = cache_is_current
-            .then(|| self.get_dealer_messages(request.protocol_type, &request.dealer))
-            .flatten();
-        let messages = if let Some(m) = cached_messages {
-            m
-        } else {
-            let from_db = match request.protocol_type {
-                ProtocolTypeIndicator::Dkg => self
-                    .read_dkg_message(request.epoch, &request.dealer)?
-                    .map(Messages::Dkg),
-                ProtocolTypeIndicator::KeyRotation => self
-                    .read_rotation_messages(request.epoch, &request.dealer)?
-                    .map(Messages::Rotation),
-                ProtocolTypeIndicator::NonceGeneration => None,
-            };
-            from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
-        };
-        let responses = match &messages {
-            Messages::Dkg(message) => {
-                let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
-                let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
-                let session_id = self
-                    .base_session_id_for_epoch(request.epoch, &ProtocolType::Dkg)
-                    .dealer_session_id(&request.dealer);
-                let partial_output = self.get_or_derive_dkg_output(
-                    &request.dealer,
-                    message,
-                    request.epoch,
-                    &session_id,
-                )?;
-                let receiver = avss::Receiver::new(
-                    nodes,
-                    party_id,
-                    params,
-                    session_id.to_vec(),
-                    None,
-                    self.encryption_key_for_epoch(request.epoch)?
-                        .inner()
-                        .clone(),
-                )?;
-                let ProtocolComplaint::Avss(complaint) = &request.complaint else {
-                    return Err(MpcError::InvalidMessage {
-                        sender: request.dealer,
-                        reason: "DKG complaint requires an AVSS complaint".into(),
-                    });
-                };
-                let complaint_response =
-                    receiver.handle_complaint(message, accuser_id, complaint, &partial_output)?;
-                ComplaintResponse::Dkg(complaint_response)
+        let responses = match cache_key {
+            ComplaintResponsesKey::Dkg { .. } => {
+                self.dkg_complaint_response(caller, request, cache_is_current)?
             }
-            Messages::Rotation(rotation_messages) => {
-                let complained_share_index =
-                    request
-                        .share_index
-                        .ok_or_else(|| MpcError::InvalidMessage {
-                            sender: request.dealer,
-                            reason: "Rotation complaint requires share_index".into(),
-                        })?;
-                let complained_message = rotation_messages
-                    .get(&complained_share_index)
-                    .ok_or_else(|| {
-                        MpcError::ProtocolFailed(format!(
-                            "No rotation message for complained share_index {}",
-                            complained_share_index
-                        ))
-                    })?;
-                let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
-                let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
-                let session_id = self
-                    .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
-                    .rotation_session_id(&request.dealer, complained_share_index);
-                let complained_output = self.get_or_derive_rotation_output(
-                    &request.dealer,
-                    complained_share_index,
-                    complained_message,
-                    request.epoch,
-                    &session_id,
-                )?;
-                let receiver = avss::Receiver::new(
-                    nodes,
-                    party_id,
-                    params,
-                    session_id.to_vec(),
-                    None,
-                    self.encryption_key_for_epoch(request.epoch)?
-                        .inner()
-                        .clone(),
-                )?;
-                let ProtocolComplaint::Avss(complaint) = &request.complaint else {
-                    return Err(MpcError::InvalidMessage {
-                        sender: request.dealer,
-                        reason: "Rotation complaint requires an AVSS complaint".into(),
-                    });
-                };
-                let response = receiver.handle_complaint(
-                    complained_message,
-                    accuser_id,
-                    complaint,
-                    &complained_output,
-                )?;
-                ComplaintResponse::Rotation(response)
+            ComplaintResponsesKey::Rotation { share_index, .. } => {
+                self.rotation_complaint_response(caller, request, share_index, cache_is_current)?
             }
-            Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
-                return Err(MpcError::ProtocolFailed(
-                    "AVID nonce generation complaint handling is not yet implemented".into(),
-                ));
+            ComplaintResponsesKey::NonceGeneration { .. } => {
+                return Err(MpcError::InvalidMessage {
+                    sender: caller,
+                    reason: "nonce complaints must be AVID complaints".into(),
+                });
             }
         };
-        log_verified_complaint(caller, request, &messages);
         if cache_is_current {
             self.complaint_responses
                 .insert(cache_key, responses.clone());
         }
         Ok(responses)
+    }
+
+    fn dkg_complaint_response(
+        &self,
+        caller: Address,
+        request: &ComplainRequest,
+        cache_is_current: bool,
+    ) -> MpcResult<ComplaintResponse> {
+        let cached_message = cache_is_current
+            .then(|| self.current_dkg_messages.get(&request.dealer).cloned())
+            .flatten();
+        let message = match cached_message {
+            Some(message) => message,
+            None => self
+                .read_dkg_message(request.epoch, &request.dealer)?
+                .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?,
+        };
+        let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
+        let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
+        let session_id = self
+            .base_session_id_for_epoch(request.epoch, &ProtocolType::Dkg)
+            .dealer_session_id(&request.dealer);
+        let partial_output =
+            self.get_or_derive_dkg_output(&request.dealer, &message, request.epoch, &session_id)?;
+        let receiver = avss::Receiver::new(
+            nodes,
+            party_id,
+            params,
+            session_id.to_vec(),
+            None,
+            self.encryption_key_for_epoch(request.epoch)?
+                .inner()
+                .clone(),
+        )?;
+        let ProtocolComplaint::Avss(complaint) = &request.complaint else {
+            return Err(MpcError::InvalidMessage {
+                sender: request.dealer,
+                reason: "DKG complaint requires an AVSS complaint".into(),
+            });
+        };
+        let complaint_response =
+            receiver.handle_complaint(&message, accuser_id, complaint, &partial_output)?;
+        log_verified_complaint(caller, request, &Messages::Dkg(message));
+        Ok(ComplaintResponse::Dkg(complaint_response))
+    }
+
+    fn rotation_complaint_response(
+        &self,
+        caller: Address,
+        request: &ComplainRequest,
+        share_index: ShareIndex,
+        cache_is_current: bool,
+    ) -> MpcResult<ComplaintResponse> {
+        let cached = cache_is_current
+            .then(|| {
+                self.current_rotation_messages
+                    .get_entry(&request.dealer)
+                    .cloned()
+            })
+            .flatten();
+        let stored;
+        let (complained_message, row) = match &cached {
+            Some(entry) => (entry.get(&share_index), &entry.bytes()[..]),
+            None => {
+                let bytes = self
+                    .public_messages_store
+                    .get_rotation_messages(request.epoch, &request.dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?;
+                let message = stored_rows::rotation_message(
+                    &self.shape_params(),
+                    request.epoch,
+                    &request.dealer,
+                    &bytes,
+                    share_index,
+                )?;
+                stored = (bytes, message);
+                (stored.1.as_ref(), stored.0.as_slice())
+            }
+        };
+        let complained_message = complained_message.ok_or_else(|| {
+            MpcError::ProtocolFailed(format!(
+                "No rotation message for complained share_index {}",
+                share_index
+            ))
+        })?;
+        let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
+        let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
+        let session_id = self
+            .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
+            .rotation_session_id(&request.dealer, share_index);
+        let complained_output = self.get_or_derive_rotation_output(
+            &request.dealer,
+            share_index,
+            complained_message,
+            request.epoch,
+            &session_id,
+        )?;
+        let receiver = avss::Receiver::new(
+            nodes,
+            party_id,
+            params,
+            session_id.to_vec(),
+            None,
+            self.encryption_key_for_epoch(request.epoch)?
+                .inner()
+                .clone(),
+        )?;
+        let ProtocolComplaint::Avss(complaint) = &request.complaint else {
+            return Err(MpcError::InvalidMessage {
+                sender: request.dealer,
+                reason: "Rotation complaint requires an AVSS complaint".into(),
+            });
+        };
+        let response = receiver.handle_complaint(
+            complained_message,
+            accuser_id,
+            complaint,
+            &complained_output,
+        )?;
+        log_verified_rotation_complaint(caller, request, row);
+        Ok(ComplaintResponse::Rotation(response))
     }
 
     pub fn handle_get_public_mpc_output_request(
@@ -6734,24 +6746,6 @@ impl MpcManager {
         }
     }
 
-    fn get_dealer_messages(
-        &self,
-        protocol_type: ProtocolTypeIndicator,
-        dealer: &Address,
-    ) -> Option<Messages> {
-        match protocol_type {
-            ProtocolTypeIndicator::Dkg => self
-                .current_dkg_messages
-                .get(dealer)
-                .map(|m| Messages::Dkg(m.clone())),
-            ProtocolTypeIndicator::KeyRotation => self
-                .current_rotation_messages
-                .get(dealer)
-                .map(|m| Messages::Rotation(m.clone())),
-            ProtocolTypeIndicator::NonceGeneration => None,
-        }
-    }
-
     fn accepted_messages_hash(
         &mut self,
         protocol_type: ProtocolTypeIndicator,
@@ -7009,13 +7003,26 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
     }
 }
 
-/// Logs a freshly verified complaint together with the dealer message it
-/// was verified against, both BCS-encoded as hex, so it can be checked
-/// independently from the logs.
 fn log_verified_complaint(
     caller: Address,
     request: &ComplainRequest,
     dealer_message: &impl serde::Serialize,
+) {
+    log_verified_complaint_bcs(caller, request, || {
+        bcs::to_bytes(dealer_message).expect(EXPECT_SERIALIZATION_SUCCESS)
+    });
+}
+
+fn log_verified_rotation_complaint(caller: Address, request: &ComplainRequest, row: &[u8]) {
+    log_verified_complaint_bcs(caller, request, || {
+        [&[Messages::ROTATION_VARIANT][..], row].concat()
+    });
+}
+
+fn log_verified_complaint_bcs(
+    caller: Address,
+    request: &ComplainRequest,
+    dealer_message_bcs: impl Fn() -> Vec<u8>,
 ) {
     tracing::debug!(
         "Verified complaint from {caller:?}: dealer {:?}, epoch {}, protocol {:?}, \
@@ -7024,7 +7031,7 @@ fn log_verified_complaint(
         request.epoch,
         request.protocol_type,
         hex::encode(bcs::to_bytes(request).expect(EXPECT_SERIALIZATION_SUCCESS)),
-        hex::encode(bcs::to_bytes(dealer_message).expect(EXPECT_SERIALIZATION_SUCCESS)),
+        hex::encode(dealer_message_bcs()),
     );
 }
 
