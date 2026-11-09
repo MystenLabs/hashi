@@ -29,7 +29,9 @@ use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
 use sui_rpc::proto::sui::rpc::v2::GetBalanceRequest;
+use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
+use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsResponse;
 use sui_sdk_types::Address;
@@ -509,6 +511,31 @@ pub async fn tob_bucket_exists_on_chain(
         .await?
         .iter()
         .any(|field| field.name().value() == key_bcs.as_slice()))
+}
+
+pub async fn tob_bucket_object_exists(
+    networks: &TestNetworks,
+    key: hashi_types::move_types::TobKey,
+) -> Result<bool> {
+    let field_id = networks.hashi_network.nodes()[0]
+        .hashi()
+        .onchain_state()
+        .tob_bucket_field_id(&key);
+    let response = networks
+        .sui_network
+        .client
+        .clone()
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id)
+                .with_read_mask(FieldMask::from_paths([Object::path_builder().object_id()])),
+        )
+        .await;
+    match response {
+        Ok(_) => Ok(true),
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
+        Err(status) => Err(status.into()),
+    }
 }
 
 /// Chain-truth oracle for one TOB bucket, reading over RPC rather than

@@ -1778,6 +1778,8 @@ impl Hashi {
                 &result_tx,
             )
         });
+        self.onchain_state()
+            .ask_tob_unsealed_batches(epoch, &local.unsealed);
         LocalWithdrawalSigning {
             epoch,
             signing_manager,
