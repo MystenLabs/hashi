@@ -200,6 +200,33 @@ pub fn avss_complaint_response_size(responder_weight: u16) -> usize {
     uleb128_len(weight) + weight * SHARE
 }
 
+pub struct AvssCiphertexts {
+    lengths: Vec<usize>,
+    shared_components: Vec<u8>,
+}
+
+impl AvssCiphertexts {
+    pub fn length(&self, party: PartyId) -> Option<usize> {
+        self.lengths.get(usize::from(party)).copied()
+    }
+
+    pub fn shared_components(&self) -> &[u8] {
+        &self.shared_components
+    }
+}
+
+pub fn avss_ciphertexts(bytes: &[u8], shape: AvssShape) -> CountCheckResult<AvssCiphertexts> {
+    let mut cursor = Cursor::new(bytes);
+    let mut lengths = Vec::with_capacity(shape.num_nodes.into());
+    let [ephemeral_keys, proof] =
+        walk_avss_message_with(&mut cursor, shape, |len| lengths.push(len))?;
+    cursor.finish()?;
+    Ok(AvssCiphertexts {
+        lengths,
+        shared_components: [ephemeral_keys, proof].concat(),
+    })
+}
+
 pub fn check_avss_complaint_response(bytes: &[u8], responder_weight: u16) -> CountCheckResult<()> {
     const FIELD: &str = "complaint_response.shares";
     let mut cursor = Cursor::new(bytes);
@@ -340,19 +367,27 @@ pub fn check_held_avid_echoes(
 }
 
 fn walk_avss_message(cursor: &mut Cursor<'_>, shape: AvssShape) -> CountCheckResult<()> {
+    walk_avss_message_with(cursor, shape, |_| ()).map(drop)
+}
+
+fn walk_avss_message_with<'a>(
+    cursor: &mut Cursor<'a>,
+    shape: AvssShape,
+    mut ciphertext_len: impl FnMut(usize),
+) -> CountCheckResult<[&'a [u8]; 2]> {
     const COMMITMENT: &str = "feldman_commitment";
     const ENCS: &str = "ciphertext.encs";
     let points = cursor.length(COMMITMENT)?;
     expect_count(COMMITMENT, points, shape.threshold.into())?;
     cursor.skip_elements(COMMITMENT, points, POINT)?;
-    cursor.take("ciphertext", 2 * EG_POINT)?;
+    let ephemeral_keys = cursor.take("ciphertext", 2 * EG_POINT)?;
     let encs = cursor.length(ENCS)?;
     expect_count(ENCS, encs, shape.num_nodes.into())?;
     for _ in 0..encs {
-        walk_bytes(cursor, ENCS)?;
+        ciphertext_len(walk_bytes(cursor, ENCS)?);
     }
-    cursor.take("ciphertext.proof", DDH_NIZK)?;
-    Ok(())
+    let proof = cursor.take("ciphertext.proof", DDH_NIZK)?;
+    Ok([ephemeral_keys, proof])
 }
 
 fn walk_avss_common_message(
@@ -464,9 +499,10 @@ fn walk_u16_map<'a>(
     Ok(())
 }
 
-fn walk_bytes(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckResult<()> {
+fn walk_bytes(cursor: &mut Cursor<'_>, field: &'static str) -> CountCheckResult<usize> {
     let len = cursor.length(field)?;
-    cursor.take(field, len).map(drop)
+    cursor.take(field, len)?;
+    Ok(len)
 }
 
 fn expect_count(field: &'static str, found: usize, expected: usize) -> CountCheckResult<()> {

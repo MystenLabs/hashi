@@ -361,10 +361,28 @@ fn dealer_messages_of_random_shapes_pass(
     prop_assume!(total >= 2);
     let t = 1 + t_seed % (total - 1);
     let (message, shape) = dealer_message(&weights, t, 1);
-    prop_assert_eq!(
-        check_avss_message(&bcs::to_bytes(&message).unwrap(), shape),
-        Ok(())
-    );
+    let bytes = bcs::to_bytes(&message).unwrap();
+    prop_assert_eq!(check_avss_message(&bytes, shape), Ok(()));
+    let ciphertexts = avss_ciphertexts(&bytes, shape).unwrap();
+    for (party, &weight) in weights.iter().enumerate() {
+        prop_assert_eq!(
+            ciphertexts.length(party as PartyId),
+            Some(avss_complaint_response_size(weight))
+        );
+    }
+}
+
+#[test]
+fn every_ciphertext_has_its_recipients_complaint_response_length() {
+    let weights = [0, 1, 127, 128, 300];
+    let (message, shape) = dealer_message(&weights, 2, 1);
+    let ciphertexts = avss_ciphertexts(&bcs::to_bytes(&message).unwrap(), shape).unwrap();
+    for (party, &weight) in weights.iter().enumerate() {
+        assert_eq!(
+            ciphertexts.length(party as PartyId),
+            Some(avss_complaint_response_size(weight))
+        );
+    }
 }
 
 #[proptest]
