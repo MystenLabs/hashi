@@ -226,8 +226,8 @@ pub fn key_generation_certificates(
     let certificates = tob_certificates_if_present(onchain_state, epoch, None, protocol_type)?
         .ok_or_else(|| {
             TobError::InvalidState(format!(
-                "epoch {epoch}: {protocol_type:?} certificate bucket not found — either absent or \
-                 the tob listing was incomplete (earliest committee epoch \
+                "epoch {epoch}: {protocol_type:?} certificate bucket not found — either absent on \
+                 chain or not in the mirror (earliest committee epoch \
                  {earliest_committee_epoch:?})"
             ))
         })?;

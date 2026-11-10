@@ -93,6 +93,7 @@ struct Mirror {
     /// from `watermark_checkpoint`).
     watermark_cursor: Option<bytes::Bytes>,
     caught_up: bool,
+    nonce_bucket_id_checked: bool,
 }
 
 impl Mirror {
@@ -106,6 +107,7 @@ impl Mirror {
             applied_position: (seed.heights.floor, u64::MAX),
             watermark_cursor: None,
             caught_up: false,
+            nonce_bucket_id_checked: false,
         }
     }
 }
@@ -463,6 +465,23 @@ fn apply_tx_frame(
             "object mirror could not route a changed object");
         if let Some(metrics) = metrics {
             metrics.watcher_unrouted_objects_total.inc();
+        }
+    }
+    if !mirror.nonce_bucket_id_checked
+        && let Some(&(id, key)) = out.tob_nonce_fields.first()
+    {
+        mirror.nonce_bucket_id_checked = true;
+        let derived = state.tob_bucket_field_id(&key);
+        if derived != id {
+            tracing::error!(
+                %id,
+                %derived,
+                ?key,
+                "a nonce TOB bucket sits away from the object id derived from its key"
+            );
+            if let Some(metrics) = metrics {
+                metrics.watcher_tob_bucket_id_mismatch.set(1);
+            }
         }
     }
     mirror.applied_position = view.position();

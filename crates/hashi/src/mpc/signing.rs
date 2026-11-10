@@ -23,6 +23,7 @@ use itertools::Itertools;
 use prometheus::Histogram;
 use prometheus::IntCounterVec;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -707,6 +708,7 @@ impl SigningManager {
         let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
         let mut request_changed: Vec<Address> = Vec::new();
         let mut seal_mismatched: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut unsealed = BTreeSet::new();
         for input in inputs {
             match self.prepare_local_partial_signatures(
                 input.signing_id,
@@ -738,6 +740,9 @@ impl SigningManager {
                         SigningError::SealDealerSetMismatch { batch_index } => {
                             *seal_mismatched.entry(*batch_index).or_default() += 1
                         }
+                        SigningError::PresigBatchNotSealed { batch_index } => {
+                            unsealed.insert(*batch_index);
+                        }
                         _ => {}
                     }
                     let _ = result_tx.send((input.signing_id, Err(e)));
@@ -758,7 +763,11 @@ impl SigningManager {
                  (batch index: inputs): {seal_mismatched:?}",
             );
         }
-        LocalSigning { pending, deadline }
+        LocalSigning {
+            pending,
+            deadline,
+            unsealed,
+        }
     }
 
     pub(crate) async fn complete(
@@ -772,6 +781,7 @@ impl SigningManager {
         let LocalSigning {
             mut pending,
             deadline,
+            ..
         } = local;
         let threshold = self.config.params.t;
         let t = threshold as usize;
@@ -1091,6 +1101,7 @@ pub struct SignInput {
 pub(crate) struct LocalSigning {
     pending: Vec<InputSigningState>,
     deadline: Instant,
+    pub(crate) unsealed: BTreeSet<u32>,
 }
 
 struct InputSigningState {
@@ -3369,6 +3380,30 @@ pub(crate) mod tests {
         for id in &ids {
             assert!(state.partial_signing_outputs.contains_key(id));
         }
+    }
+
+    #[test]
+    fn test_prepare_local_reports_the_batches_it_found_unsealed() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let (result_tx, _result_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let local = mgr.prepare_local(
+            vec![SignInput {
+                signing_id: test_address(100),
+                message: b"unsealed".to_vec(),
+                global_presig_index: 0,
+                derivation_address: None,
+                message_delta: S::from(5u128),
+            }],
+            &BTreeMap::new(),
+            Duration::from_secs(5),
+            &test_metrics(),
+            &result_tx,
+        );
+
+        assert!(local.pending.is_empty());
+        assert_eq!(local.unsealed, BTreeSet::from([0]));
     }
 
     #[tokio::test(start_paused = true)]

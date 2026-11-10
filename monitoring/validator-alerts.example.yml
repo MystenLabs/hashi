@@ -337,3 +337,18 @@ groups:
             batch, so a member is filling the TOB with junk, or seals have
             stopped landing while dealing goes on. Raise it in the operator
             channel.
+
+      - alert: HashiTobBucketIdMismatch
+        expr: hashi_watcher_tob_bucket_id_mismatch > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A TOB bucket id check failed"
+          description: >-
+            The node found a nonce bucket away from the object id it derives
+            from the bucket's key, or found no key-generation bucket at the
+            current epoch's derived ids though the committee has a key. The
+            error log says which. The first is a node bug: report it to the
+            hashi team. The second can also follow a key recovery that left
+            the current epoch without a key-generation bucket. Only a restart
+            clears it, and only once the cause is gone.

@@ -46,6 +46,7 @@ mod tests {
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::subscribe_withdrawal_confirmations;
     use crate::test_helpers::tob_bucket_exists_on_chain;
+    use crate::test_helpers::tob_bucket_object_exists;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
@@ -3481,6 +3482,10 @@ mod tests {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+            anyhow::ensure!(
+                !tob_bucket_object_exists(&networks, key).await?,
+                "destroyed genesis nonce bucket (batch {batch_index}) still reads at its derived id"
+            );
         }
         info!("Expired nonce buckets are gone from the chain");
 

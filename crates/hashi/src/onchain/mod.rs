@@ -8,6 +8,7 @@ use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -22,6 +23,7 @@ use sui_rpc::Client;
 use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsRequest;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
@@ -30,6 +32,7 @@ use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+use sui_rpc::proto::sui::rpc::v2::get_object_result;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -56,6 +59,10 @@ const SCRAPE_PAGE_SIZE: u32 = 1000;
 const SCRAPE_PAGE_RETRIES: u32 = 3;
 const SCRAPE_PAGE_MIN_BACKOFF: Duration = Duration::from_millis(250);
 const SCRAPE_PAGE_RETRY_WINDOW: Duration = Duration::from_secs(10);
+
+/// The server's `BatchGetObjects` limit.
+const TOB_READ_CHUNK: u32 = 1_000;
+const TOB_READ_CAP: u32 = 100_000;
 
 const BOOT_SCRAPE_RETRY_WINDOW: Duration = Duration::from_secs(5 * 60);
 const BOOT_SCRAPE_MIN_BACKOFF: Duration = Duration::from_secs(1);
@@ -400,6 +407,29 @@ impl OnchainState {
             tob_fetch::missing_batch_run(batch_index, window, avid_ceiling),
             tokio::time::Instant::now(),
         );
+    }
+
+    /// Ask for the unsealed batches whose bucket the mirror lacks.
+    pub(crate) fn ask_tob_unsealed_batches(&self, epoch: u64, batches: &BTreeSet<u32>) {
+        let Some(fetch) = self.tob_fetch().filter(|_| !batches.is_empty()) else {
+            return;
+        };
+        let absent = {
+            let state = self.state();
+            if state.hashi.committees.epoch() != epoch {
+                return;
+            }
+            let buckets = state.hashi.tob.buckets();
+            batches
+                .iter()
+                .copied()
+                .filter(|&batch| !buckets.contains_key(&tob_fetch::nonce_key(epoch, batch)))
+                .collect::<Vec<_>>()
+        };
+        let now = tokio::time::Instant::now();
+        for batch in absent {
+            fetch.ask(epoch, batch..=batch, now);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
@@ -1722,32 +1752,52 @@ async fn scrape_hashi(
 
     let (
         (member_seed, member_info),
-        (committee_seed, (committees_per_epoch, committee_handoffs)),
+        (committee_seed, committees_per_epoch, committee_handoffs, (tob_seed, tob_mirror)),
         (treasury_seed, treasury),
         (proposal_seed, proposals),
-        (tob_seed, tob_mirror),
         bitcoin,
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id, metrics),
-        scrape_committees(client.clone(), committees.committees.id, metrics),
+        async {
+            let (committee_seed, (committees_per_epoch, committee_handoffs)) =
+                scrape_committees(client.clone(), committees.committees.id, metrics).await?;
+            let tob_scrape = match scrape_for {
+                ScrapeFor::Mirror => {
+                    let keygen_epochs = committees_per_epoch
+                        .keys()
+                        .copied()
+                        .chain([live.current])
+                        .chain(live.pending)
+                        .collect();
+                    let keyed_epoch =
+                        (!committees.mpc_public_key.is_empty()).then_some(committees.epoch);
+                    let (seed, mirror) = scrape_tob_by_key(
+                        &TobReader {
+                            client: &client,
+                            tob_id: tob.id,
+                            package_original: package_id,
+                            packages,
+                            metrics,
+                        },
+                        live,
+                        types::tob_window(&config),
+                        &keygen_epochs,
+                        keyed_epoch,
+                    )
+                    .await?;
+                    (seed, Some(mirror))
+                }
+                ScrapeFor::Reader(_) => (route::ContainerSeed::default(), None),
+            };
+            anyhow::Ok((
+                committee_seed,
+                committees_per_epoch,
+                committee_handoffs,
+                tob_scrape,
+            ))
+        },
         scrape_treasury(client.clone(), treasury, metrics),
         scrape_proposals(client.clone(), proposals, metrics),
-        async {
-            if matches!(scrape_for, ScrapeFor::Mirror) {
-                let (seed, mirror) = scrape_tob_entries(
-                    client.clone(),
-                    tob.id,
-                    packages,
-                    metrics,
-                    live,
-                    types::tob_window(&config),
-                )
-                .await?;
-                Ok((seed, Some(mirror)))
-            } else {
-                Ok((route::ContainerSeed::default(), None))
-            }
-        },
         scrape_bitcoin_collections(client.clone(), bitcoin_state, metrics),
     )?;
     for container_seed in [
@@ -1810,100 +1860,93 @@ async fn scrape_hashi(
     ))
 }
 
-/// Scrape the tob bag: every bucket Field, then the dealer submission nodes
-/// of each bucket the mirror keeps.
-async fn scrape_tob_entries(
-    client: Client,
-    tob_id: Address,
-    packages: &move_types::PackageVersions,
-    metrics: Option<&crate::metrics::Metrics>,
+/// Read key-gen and current/pending nonce buckets by derived id.
+async fn scrape_tob_by_key(
+    reader: &TobReader<'_>,
     live: types::LiveEpochs,
     window: u32,
+    keygen_epochs: &BTreeSet<u64>,
+    keyed_epoch: Option<u64>,
 ) -> Result<(route::ContainerSeed, types::TobMirror)> {
-    let mask = FieldMask::from_paths([
-        DynamicField::path_builder().name().finish(),
-        DynamicField::path_builder().field_id(),
-        DynamicField::path_builder().value().finish(),
-        DynamicField::path_builder().value_type(),
-        DynamicField::path_builder().field_object().version(),
-    ]);
     let mut seed = route::ContainerSeed::default();
-    // Bucket pages stream in, but each bucket's node listing is its own
-    // paged scrape, so bucket descriptors are collected first and their
-    // interiors walked after the bag listing completes.
-    let mut to_scrape: Vec<(Address, u64, TobKey, move_types::EpochCertsV1)> = Vec::new();
-    seed.heights = scrape_dynamic_field_pages(
-        &client,
-        tob_id,
-        mask,
-        "tob",
-        metrics,
-        |field| {
-            // The leader's TOB GC destroys dead buckets concurrently with this
-            // scan, and the RPC's defaulting accessor hands back an EMPTY value
-            // for an entry that vanished between page assembly and read (which
-            // would decode as "unexpected end of input"). A destroyed bucket
-            // needs no seeding; skip it — the replay covers its deletion.
-            let Some(value) = field.value_opt().filter(|bcs| !bcs.value().is_empty()) else {
-                tracing::warn!(
-                    field_id = field.field_id(),
-                    "tob entry vanished mid-scrape; skipping"
-                );
-                return Ok(None);
-            };
-            let key: TobKey = field
-                .name()
-                .deserialize()
-                .map_err(|e| anyhow!("failed to deserialize TobKey: {e}"))?;
-            // Decode only a bucket whose chain-reported value type is the
-            // one this binary implements; any other type fails the scrape.
-            versioned_decode::ensure_tob_cert_bucket(
-                packages,
-                &versioned_decode::field_value_type(field)?,
-            )?;
-            let certs: move_types::EpochCertsV1 = value
-                .deserialize()
-                .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
-            let field_id: Address = field.field_id().parse()?;
-            Ok(Some((field_id, field.field_object().version(), key, certs)))
-        },
-        |entry| to_scrape.push(entry),
-    )
-    .await?;
-    let mut mirror = types::TobMirror::default();
-    for (.., key, certs) in &to_scrape {
-        if certs.seal.is_some() {
-            mirror.fold_seal(key);
+    let keygen_keys = keygen_epochs
+        .iter()
+        .flat_map(|&epoch| {
+            [
+                move_types::ProtocolType::Dkg,
+                move_types::ProtocolType::KeyRotation,
+            ]
+            .map(|protocol_type| TobKey {
+                epoch,
+                batch_index: None,
+                protocol_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut read = Vec::new();
+    for keys in keygen_keys.chunks(TOB_READ_CHUNK as usize) {
+        read.extend(reader.read(keys, &mut seed.heights).await?);
+    }
+    if !keygen_bucket_resolved(keyed_epoch, &read) {
+        tracing::error!(
+            ?keyed_epoch,
+            "no key-generation TOB bucket at the current epoch's derived ids, though the \
+             committee has a key"
+        );
+        if let Some(metrics) = reader.metrics {
+            metrics.watcher_tob_bucket_id_mismatch.set(1);
         }
     }
-    mirror.frontier.retain(|epoch, _| live.contains(*epoch));
-    let listed = to_scrape.len();
-    to_scrape
-        .retain(|(.., key, _)| types::in_window(key, mirror.frontier(key.epoch), live, window));
-    tracing::info!(
-        listed,
-        kept = to_scrape.len(),
-        "TOB buckets kept within the live epochs and the window"
-    );
-    for (field_id, version, key, certs) in to_scrape {
+    for epoch in BTreeSet::from_iter(std::iter::once(live.current).chain(live.pending)) {
+        read.extend(
+            reader
+                .scan_nonce(
+                    epoch,
+                    window,
+                    TOB_READ_CHUNK,
+                    TOB_READ_CAP,
+                    &mut seed.heights,
+                )
+                .await?,
+        );
+    }
+    let mut mirror = types::TobMirror::default();
+    for bucket in &read {
+        if bucket.certs.seal.is_some() {
+            mirror.fold_seal(&bucket.key);
+        }
+    }
+    let found = read.len();
+    read.retain(|bucket| {
+        types::in_window(&bucket.key, mirror.frontier(bucket.key.epoch), live, window)
+    });
+    tracing::info!(found, kept = read.len(), "TOB buckets read by key");
+    for TobBucketRead {
+        field_id,
+        version,
+        key,
+        certs,
+    } in read
+    {
         let move_types::EpochCertsV1 { certs, seal, .. } = certs;
         seed.entries
             .push((field_id, version, route::TrackedKind::TobBucket(key)));
         seed.interior.push((certs.id, route::Slot::TobCerts));
         seed.tob_tables.push((certs.id, key));
         let mut nodes = BTreeMap::new();
-        let node_heights = scrape_tob_nodes(&client, certs.id, "tob", metrics, |node| {
-            let TobNode {
-                id,
-                version,
-                dealer,
-                node,
-            } = node;
-            seed.entries
-                .push((id, version, route::TrackedKind::TobCert { key, dealer }));
-            nodes.insert(dealer, node);
-        })
-        .await?;
+        let node_heights =
+            scrape_tob_nodes(reader.client, certs.id, "tob", reader.metrics, |node| {
+                let TobNode {
+                    id,
+                    version,
+                    dealer,
+                    node,
+                } = node;
+                seed.entries
+                    .push((id, version, route::TrackedKind::TobCert { key, dealer }));
+                nodes.insert(dealer, node);
+            })
+            .await?;
         seed.heights.merge(node_heights);
         mirror.buckets.insert(
             key,
@@ -1917,6 +1960,213 @@ async fn scrape_tob_entries(
         );
     }
     Ok((seed, mirror))
+}
+
+fn keygen_bucket_resolved(keyed_epoch: Option<u64>, read: &[TobBucketRead]) -> bool {
+    keyed_epoch.is_none_or(|epoch| {
+        read.iter()
+            .any(|bucket| bucket.key.epoch == epoch && bucket.key.batch_index.is_none())
+    })
+}
+
+struct TobReader<'a> {
+    client: &'a Client,
+    tob_id: Address,
+    package_original: Address,
+    packages: &'a move_types::PackageVersions,
+    metrics: Option<&'a crate::metrics::Metrics>,
+}
+
+#[derive(Debug)]
+struct TobBucketRead {
+    field_id: Address,
+    version: u64,
+    key: TobKey,
+    certs: move_types::EpochCertsV1,
+}
+
+impl TobReader<'_> {
+    /// Read `chunk` batches at a time until frontier + window or `cap`.
+    async fn scan_nonce(
+        &self,
+        epoch: u64,
+        window: u32,
+        chunk: u32,
+        cap: u32,
+        heights: &mut route::PageHeights,
+    ) -> Result<Vec<TobBucketRead>> {
+        let mut read = Vec::new();
+        let mut frontier = 0u32;
+        let mut start = 0u32;
+        while start < cap.min(frontier.saturating_add(window)) {
+            let end = start.saturating_add(chunk.max(1)).min(cap);
+            let keys = (start..end)
+                .map(|batch| tob_fetch::nonce_key(epoch, batch))
+                .collect::<Vec<_>>();
+            for bucket in self.read(&keys, heights).await? {
+                if bucket.certs.seal.is_some()
+                    && let Some(batch) = bucket.key.batch_index
+                {
+                    frontier = frontier.max(batch.saturating_add(1));
+                }
+                read.push(bucket);
+            }
+            start = end;
+        }
+        Ok(read)
+    }
+
+    /// Halves a call the server refuses as invalid, e.g. over its batch limit.
+    async fn read(
+        &self,
+        keys: &[TobKey],
+        heights: &mut route::PageHeights,
+    ) -> Result<Vec<TobBucketRead>> {
+        let mut read = Vec::new();
+        let mut refused = 0usize;
+        let mut calls = vec![keys];
+        while let Some(call) = calls.pop() {
+            match self.read_batch(call, heights).await {
+                Ok(batch) => read.extend(batch),
+                Err(error)
+                    if call.len() > 1
+                        && error.downcast_ref::<tonic::Status>().is_some_and(|status| {
+                            status.code() == tonic::Code::InvalidArgument
+                        }) =>
+                {
+                    refused += 1;
+                    let (head, tail) = call.split_at(call.len() / 2);
+                    calls.extend([tail, head]);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if refused > 0 {
+            tracing::warn!(
+                refused,
+                keys = keys.len(),
+                "TOB bucket reads refused as invalid were halved; the server's batch limit \
+                 may be lower"
+            );
+        }
+        Ok(read)
+    }
+
+    /// Only `NotFound` means absent; other per-id errors retry like a failed page.
+    async fn read_batch(
+        &self,
+        keys: &[TobKey],
+        heights: &mut route::PageHeights,
+    ) -> Result<Vec<TobBucketRead>> {
+        let first_attempt = tokio::time::Instant::now();
+        let mut retries = 0;
+        let mut backoff = SCRAPE_PAGE_MIN_BACKOFF;
+        loop {
+            match self.read_once(keys, heights).await {
+                Ok(read) => {
+                    if let Some(metrics) = self.metrics {
+                        metrics.scrape_pages_total.with_label_values(&["tob"]).inc();
+                        metrics
+                            .scrape_entries_total
+                            .with_label_values(&["tob"])
+                            .inc_by(read.len() as u64);
+                    }
+                    return Ok(read);
+                }
+                Err(error) if page_retry_due(retries, first_attempt.elapsed(), &error) => {
+                    retries += 1;
+                    tracing::warn!(
+                        retries,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "TOB bucket read failed: {error:#}; retrying the read"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                }
+                Err(error) => {
+                    return Err(error.context(format!(
+                        "tob: bucket read failed after {retries} retries in {:.1?}",
+                        first_attempt.elapsed()
+                    )));
+                }
+            }
+        }
+    }
+
+    async fn read_once(
+        &self,
+        keys: &[TobKey],
+        heights: &mut route::PageHeights,
+    ) -> Result<Vec<TobBucketRead>> {
+        let field_ids = keys
+            .iter()
+            .map(|key| tob_fetch::tob_bucket_field_id(self.tob_id, self.package_original, key))
+            .collect::<Vec<_>>();
+        let request = BatchGetObjectsRequest::default()
+            .with_requests(field_ids.iter().map(GetObjectRequest::new).collect())
+            .with_read_mask(FieldMask::from_paths([
+                Object::path_builder().object_id(),
+                Object::path_builder().version(),
+                Object::path_builder().object_type(),
+                Object::path_builder().contents().finish(),
+            ]));
+        let response = self
+            .client
+            .clone()
+            .ledger_client()
+            .batch_get_objects(request)
+            .await?;
+        heights.observe(
+            response
+                .checkpoint_height()
+                .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?,
+        );
+        let results = response.into_inner().objects;
+        anyhow::ensure!(
+            results.len() == keys.len(),
+            "asked for {} TOB buckets and got {} results",
+            keys.len(),
+            results.len()
+        );
+        let mut read = Vec::new();
+        for ((key, field_id), result) in keys.iter().zip(field_ids).zip(results) {
+            match result.result {
+                Some(get_object_result::Result::Object(object)) => {
+                    read.push(self.decode(*key, field_id, &object)?)
+                }
+                Some(get_object_result::Result::Error(status))
+                    if status.code == tonic::Code::NotFound as i32 => {}
+                Some(get_object_result::Result::Error(status)) => {
+                    return Err(inconsistent_listing(format!(
+                        "TOB bucket {key:?} read failed: {:?} {}",
+                        tonic::Code::from(status.code),
+                        status.message
+                    )));
+                }
+                _ => anyhow::bail!("no result for the TOB bucket {key:?}"),
+            }
+        }
+        Ok(read)
+    }
+
+    fn decode(&self, key: TobKey, field_id: Address, object: &Object) -> Result<TobBucketRead> {
+        let tag: StructTag = object.object_type().parse()?;
+        apply::known_tob_bucket(self.packages, &tag)
+            .ok_or_else(|| anyhow!("unknown TOB bucket type {tag}"))?;
+        let field: move_types::Field<TobKey, move_types::EpochCertsV1> =
+            object.contents().deserialize()?;
+        anyhow::ensure!(
+            field.name == key,
+            "the Field at {field_id} holds {:?}, not {key:?}",
+            field.name
+        );
+        Ok(TobBucketRead {
+            field_id,
+            version: object.version(),
+            key,
+            certs: field.value,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -3130,7 +3380,11 @@ mod inconsistent_listing_tests {
 #[cfg(test)]
 mod boot_scrape_retry_tests {
     use super::*;
+    use sui_rpc::proto::sui::rpc::v2::BatchGetObjectsResponse;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectResult;
     use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsResponse;
+    use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerService;
+    use sui_rpc::proto::sui::rpc::v2::ledger_service_server::LedgerServiceServer;
     use sui_rpc::proto::sui::rpc::v2::state_service_server::StateService;
     use sui_rpc::proto::sui::rpc::v2::state_service_server::StateServiceServer;
     use tokio::time::Instant;
@@ -3592,113 +3846,220 @@ mod boot_scrape_retry_tests {
         assert!(Instant::now() > deadline);
     }
 
-    struct TobBag {
-        tob_id: Address,
-        buckets: Vec<DynamicField>,
+    #[derive(serde_derive::Serialize)]
+    struct FieldEnc<N: serde::Serialize, V: serde::Serialize> {
+        id: Address,
+        name: N,
+        value: V,
+    }
+
+    #[derive(Clone, Default)]
+    struct TobChain {
+        buckets: BTreeMap<String, Object>,
+        max_batch: Option<usize>,
+        fail_once: Arc<std::sync::Mutex<Option<(String, tonic::Code)>>>,
+        asked: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
         listed: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
+    impl TobChain {
+        fn with_bucket(
+            mut self,
+            package: Address,
+            tob_id: Address,
+            key: TobKey,
+            certs: Address,
+            seal: Option<move_types::PresigSealV1>,
+        ) -> Self {
+            let field_id = tob_fetch::tob_bucket_field_id(tob_id, package, &key);
+            let tag = |name: &str| {
+                TypeTag::Struct(Box::new(StructTag::new(
+                    package,
+                    Identifier::from_static("tob"),
+                    Identifier::new(name).unwrap(),
+                    vec![],
+                )))
+            };
+            let field_type = StructTag::new(
+                Address::TWO,
+                Identifier::from_static("dynamic_field"),
+                Identifier::from_static("Field"),
+                vec![tag("TobKey"), tag("EpochCertsV1")],
+            );
+            let value = move_types::EpochCertsV1 {
+                epoch: key.epoch,
+                protocol_type: key.protocol_type,
+                certs: move_types::LinkedTable {
+                    id: certs,
+                    size: 0,
+                    head: None,
+                    tail: None,
+                },
+                seal,
+            };
+            let object = Object::default()
+                .with_object_id(field_id.to_string())
+                .with_version(1)
+                .with_object_type(field_type.to_string())
+                .with_contents(
+                    Bcs::serialize(&FieldEnc {
+                        id: field_id,
+                        name: key,
+                        value,
+                    })
+                    .unwrap(),
+                );
+            self.buckets.insert(field_id.to_string(), object);
+            self
+        }
+
+        fn take_asked(&self) -> Vec<Vec<String>> {
+            std::mem::take(&mut *self.asked.lock().unwrap())
+        }
+    }
+
+    fn at_height<T>(message: T) -> tonic::Response<T> {
+        let mut response = tonic::Response::new(message);
+        response.metadata_mut().insert(
+            sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
+            "7".parse().unwrap(),
+        );
+        response
+    }
+
     #[tonic::async_trait]
-    impl StateService for TobBag {
+    impl LedgerService for TobChain {
+        async fn batch_get_objects(
+            &self,
+            request: tonic::Request<BatchGetObjectsRequest>,
+        ) -> Result<tonic::Response<BatchGetObjectsResponse>, tonic::Status> {
+            let ids = request
+                .into_inner()
+                .requests
+                .into_iter()
+                .map(|request| request.object_id.unwrap_or_default())
+                .collect::<Vec<_>>();
+            self.asked.lock().unwrap().push(ids.clone());
+            if self.max_batch.is_some_and(|max| ids.len() > max) {
+                return Err(tonic::Status::invalid_argument("too many requests"));
+            }
+            let mut fail_once = self.fail_once.lock().unwrap();
+            let objects = ids
+                .iter()
+                .map(|id| {
+                    let error = |code: tonic::Code| {
+                        GetObjectResult::new_error(
+                            sui_rpc::proto::google::rpc::Status::default().with_code(code as i32),
+                        )
+                    };
+                    if fail_once.as_ref().is_some_and(|(failing, _)| failing == id) {
+                        let (_, code) = fail_once.take().unwrap();
+                        return error(code);
+                    }
+                    match self.buckets.get(id) {
+                        Some(object) => GetObjectResult::new_object(object.clone()),
+                        None => error(tonic::Code::NotFound),
+                    }
+                })
+                .collect();
+            Ok(at_height(BatchGetObjectsResponse::new(objects)))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl StateService for TobChain {
         async fn list_dynamic_fields(
             &self,
             request: tonic::Request<ListDynamicFieldsRequest>,
         ) -> Result<tonic::Response<ListDynamicFieldsResponse>, tonic::Status> {
             let parent = request.into_inner().parent().to_string();
-            let fields = if parent == self.tob_id.to_string() {
-                self.buckets.clone()
-            } else {
-                self.listed.lock().unwrap().push(parent);
-                Vec::new()
-            };
-            let mut response = tonic::Response::new(
-                ListDynamicFieldsResponse::default().with_dynamic_fields(fields),
-            );
-            response.metadata_mut().insert(
-                sui_rpc::headers::X_SUI_CHECKPOINT_HEIGHT,
-                "7".parse().unwrap(),
-            );
-            Ok(response)
+            self.listed.lock().unwrap().push(parent);
+            Ok(at_height(ListDynamicFieldsResponse::default()))
         }
     }
 
-    fn bag_bucket(
-        package: Address,
-        field_id: Address,
-        key: TobKey,
-        certs: Address,
-        sealed: bool,
-    ) -> DynamicField {
-        let value = move_types::EpochCertsV1 {
-            epoch: key.epoch,
-            protocol_type: key.protocol_type,
-            certs: move_types::LinkedTable {
-                id: certs,
-                size: 0,
-                head: None,
-                tail: None,
-            },
-            seal: sealed.then(|| move_types::PresigSealV1 {
-                randomness: vec![1; 32],
-                dealer_set_digest: vec![2; 32],
-            }),
-        };
-        DynamicField::default()
-            .with_name(Bcs::serialize(&key).unwrap())
-            .with_field_id(field_id.to_string())
-            .with_value(Bcs::serialize(&value).unwrap())
-            .with_value_type(format!("{package}::tob::EpochCertsV1"))
-            .with_field_object(Object::default().with_version(1))
+    async fn spawn_tob_chain(chain: TobChain) -> Client {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let result = listener.accept().await.map(|(stream, _)| stream);
+            Some((result, listener))
+        });
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(LedgerServiceServer::new(chain.clone()))
+                .add_service(StateServiceServer::new(chain))
+                .serve_with_incoming(incoming),
+        );
+        Client::new(format!("http://{addr}").as_str()).unwrap()
+    }
+
+    fn seal() -> Option<move_types::PresigSealV1> {
+        Some(move_types::PresigSealV1 {
+            randomness: vec![1; 32],
+            dealer_set_digest: vec![2; 32],
+        })
+    }
+
+    fn keygen(epoch: u64, protocol_type: move_types::ProtocolType) -> TobKey {
+        TobKey {
+            epoch,
+            batch_index: None,
+            protocol_type,
+        }
     }
 
     #[tokio::test]
-    async fn the_boot_keeps_only_live_epochs_within_the_window_and_lists_only_their_nodes() {
+    async fn the_boot_reads_buckets_by_key_and_keeps_only_those_within_the_window() {
         let package = Address::from_static("0x7");
         let tob_id = Address::from_static("0x70");
-        let nonce = |epoch, batch| TobKey {
-            epoch,
-            batch_index: Some(batch),
-            protocol_type: move_types::ProtocolType::NonceGeneration,
-        };
-        let dkg = TobKey {
-            epoch: 2,
-            batch_index: None,
-            protocol_type: move_types::ProtocolType::Dkg,
-        };
+        let nonce = tob_fetch::nonce_key;
         let id = |byte: u8| Address::from_bytes([byte; 32]).unwrap();
-        let listed = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let client = spawn_state_service(TobBag {
-            tob_id,
-            buckets: vec![
-                bag_bucket(package, id(0x10), nonce(5, 0), id(0x20), true),
-                bag_bucket(package, id(0x11), nonce(5, 3), id(0x21), false),
-                bag_bucket(package, id(0x12), nonce(5, 9), id(0x22), false),
-                bag_bucket(package, id(0x13), nonce(2, 0), id(0x23), false),
-                bag_bucket(package, id(0x14), dkg, id(0x24), false),
-            ],
-            listed: listed.clone(),
-        })
-        .await;
+        let dkg = keygen(2, move_types::ProtocolType::Dkg);
+        let rotation = keygen(5, move_types::ProtocolType::KeyRotation);
+        let chain = TobChain::default()
+            .with_bucket(package, tob_id, dkg, id(0x20), None)
+            .with_bucket(package, tob_id, rotation, id(0x21), None)
+            .with_bucket(package, tob_id, nonce(5, 0), id(0x22), seal())
+            .with_bucket(package, tob_id, nonce(5, 3), id(0x23), None)
+            .with_bucket(package, tob_id, nonce(5, 9), id(0x24), None)
+            .with_bucket(package, tob_id, nonce(6, 0), id(0x25), None)
+            .with_bucket(package, tob_id, nonce(4, 0), id(0x26), None);
+        let client = spawn_tob_chain(chain.clone()).await;
         let packages = move_types::PackageVersions::new(BTreeMap::from([(1, package)]));
+        let reader = TobReader {
+            client: &client,
+            tob_id,
+            package_original: package,
+            packages: &packages,
+            metrics: None,
+        };
         let live = types::LiveEpochs {
             current: 5,
-            pending: None,
+            pending: Some(6),
         };
 
-        let (seed, mirror) = scrape_tob_entries(client, tob_id, &packages, None, live, 4)
-            .await
-            .unwrap();
+        let (seed, mirror) =
+            scrape_tob_by_key(&reader, live, 4, &BTreeSet::from([2, 5, 6]), Some(5))
+                .await
+                .unwrap();
 
         assert_eq!(
             mirror.buckets.keys().copied().collect::<Vec<_>>(),
-            vec![dkg, nonce(5, 0), nonce(5, 3)]
+            vec![dkg, rotation, nonce(5, 0), nonce(5, 3), nonce(6, 0)]
         );
         assert_eq!(mirror.frontier(5), 1);
-        let mut listed = listed.lock().unwrap().clone();
+        let asked = chain.take_asked().concat();
+        assert!(
+            !asked.contains(
+                &tob_fetch::tob_bucket_field_id(tob_id, package, &nonce(4, 0)).to_string()
+            )
+        );
+        let mut listed = chain.listed.lock().unwrap().clone();
         listed.sort();
         assert_eq!(
             listed,
-            [id(0x20), id(0x21), id(0x24)].map(|certs| certs.to_string())
+            [id(0x20), id(0x21), id(0x22), id(0x23), id(0x25)].map(|certs| certs.to_string())
         );
         let mut seeded = seed
             .entries
@@ -3706,8 +4067,168 @@ mod boot_scrape_retry_tests {
             .map(|(field_id, ..)| *field_id)
             .collect::<Vec<_>>();
         seeded.sort();
-        assert_eq!(seeded, vec![id(0x10), id(0x11), id(0x14)]);
-        assert_eq!(seed.tob_tables.len(), 3);
-        assert_eq!(seed.interior.len(), 3);
+        let mut kept = [dkg, rotation, nonce(5, 0), nonce(5, 3), nonce(6, 0)]
+            .map(|key| tob_fetch::tob_bucket_field_id(tob_id, package, &key));
+        kept.sort();
+        assert_eq!(seeded, kept);
+        assert_eq!(seed.tob_tables.len(), 5);
+        assert_eq!(seed.interior.len(), 5);
+        assert_eq!(
+            seed.heights,
+            route::PageHeights {
+                floor: 7,
+                ceiling: 7
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_nonce_scan_reads_on_past_a_seal_in_its_chunk_and_stops_at_the_cap() {
+        let package = Address::from_static("0x7");
+        let tob_id = Address::from_static("0x70");
+        let nonce = tob_fetch::nonce_key;
+        let id = |byte: u8| Address::from_bytes([byte; 32]).unwrap();
+        let chain = TobChain::default()
+            .with_bucket(package, tob_id, nonce(5, 3), id(0x20), seal())
+            .with_bucket(package, tob_id, nonce(5, 7), id(0x21), seal())
+            .with_bucket(package, tob_id, nonce(5, 11), id(0x22), seal())
+            .with_bucket(package, tob_id, nonce(7, 1), id(0x23), seal());
+        let client = spawn_tob_chain(chain.clone()).await;
+        let packages = move_types::PackageVersions::new(BTreeMap::from([(1, package)]));
+        let reader = TobReader {
+            client: &client,
+            tob_id,
+            package_original: package,
+            packages: &packages,
+            metrics: None,
+        };
+        let batches_of = |asked: Vec<Vec<String>>, epoch| {
+            asked
+                .into_iter()
+                .map(|call| {
+                    call.into_iter()
+                        .map(|asked_id| {
+                            (0..32)
+                                .find(|&batch| {
+                                    tob_fetch::tob_bucket_field_id(
+                                        tob_id,
+                                        package,
+                                        &nonce(epoch, batch),
+                                    )
+                                    .to_string()
+                                        == asked_id
+                                })
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut heights = route::PageHeights::default();
+
+        let read = reader.scan_nonce(5, 2, 4, 12, &mut heights).await.unwrap();
+
+        assert_eq!(read.len(), 3);
+        assert_eq!(
+            batches_of(chain.take_asked(), 5),
+            vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9, 10, 11]]
+        );
+
+        reader.scan_nonce(7, 2, 4, 12, &mut heights).await.unwrap();
+
+        assert_eq!(batches_of(chain.take_asked(), 7), vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[tokio::test]
+    async fn a_per_id_error_other_than_not_found_fails_the_read_which_retries() {
+        let package = Address::from_static("0x7");
+        let tob_id = Address::from_static("0x70");
+        let key = tob_fetch::nonce_key(5, 0);
+        let field_id = tob_fetch::tob_bucket_field_id(tob_id, package, &key).to_string();
+        let chain = TobChain::default().with_bucket(
+            package,
+            tob_id,
+            key,
+            Address::from_static("0x71"),
+            None,
+        );
+        let client = spawn_tob_chain(chain.clone()).await;
+        let packages = move_types::PackageVersions::new(BTreeMap::from([(1, package)]));
+        let reader = TobReader {
+            client: &client,
+            tob_id,
+            package_original: package,
+            packages: &packages,
+            metrics: None,
+        };
+        let mut heights = route::PageHeights::default();
+
+        *chain.fail_once.lock().unwrap() = Some((field_id, tonic::Code::PermissionDenied));
+        let read = reader.read(&[key], &mut heights).await.unwrap();
+
+        assert_eq!(read.len(), 1);
+        assert_eq!(chain.take_asked().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_call_the_server_refuses_as_invalid_is_halved_until_it_fits() {
+        let package = Address::from_static("0x7");
+        let tob_id = Address::from_static("0x70");
+        let nonce = tob_fetch::nonce_key;
+        let id = |byte: u8| Address::from_bytes([byte; 32]).unwrap();
+        let chain = TobChain {
+            max_batch: Some(2),
+            ..TobChain::default()
+        }
+        .with_bucket(package, tob_id, nonce(5, 0), id(0x20), None)
+        .with_bucket(package, tob_id, nonce(5, 2), id(0x21), None)
+        .with_bucket(package, tob_id, nonce(5, 4), id(0x22), None);
+        let client = spawn_tob_chain(chain.clone()).await;
+        let packages = move_types::PackageVersions::new(BTreeMap::from([(1, package)]));
+        let reader = TobReader {
+            client: &client,
+            tob_id,
+            package_original: package,
+            packages: &packages,
+            metrics: None,
+        };
+        let keys = (0..5).map(|batch| nonce(5, batch)).collect::<Vec<_>>();
+
+        let read = reader
+            .read(&keys, &mut route::PageHeights::default())
+            .await
+            .unwrap();
+
+        assert_eq!(read.len(), 3);
+        assert_eq!(
+            chain.take_asked().iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![5, 2, 3, 1, 2]
+        );
+    }
+
+    #[test]
+    fn the_derivation_check_wants_a_key_gen_bucket_at_the_keyed_epoch() {
+        let read = |key| TobBucketRead {
+            field_id: Address::ZERO,
+            version: 1,
+            key,
+            certs: move_types::EpochCertsV1 {
+                epoch: 0,
+                protocol_type: move_types::ProtocolType::Dkg,
+                certs: move_types::LinkedTable {
+                    id: Address::ZERO,
+                    size: 0,
+                    head: None,
+                    tail: None,
+                },
+                seal: None,
+            },
+        };
+        let rotation = [read(keygen(5, move_types::ProtocolType::KeyRotation))];
+        let previous = [read(keygen(4, move_types::ProtocolType::Dkg))];
+
+        assert!(keygen_bucket_resolved(Some(5), &rotation));
+        assert!(!keygen_bucket_resolved(Some(5), &previous));
+        assert!(keygen_bucket_resolved(None, &[]));
     }
 }

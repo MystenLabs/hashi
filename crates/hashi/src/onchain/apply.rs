@@ -249,6 +249,7 @@ pub(super) struct ApplyOutcome {
     /// caller surfaces them as the lossless-coverage tripwire.
     pub unrouted: Vec<(Address, String)>,
     pub untracked_tob_writes: u64,
+    pub tob_nonce_fields: Vec<(Address, move_types::TobKey)>,
 }
 
 /// Apply one successful transaction's changes to the mirror.
@@ -732,6 +733,9 @@ fn apply_write(
                     if !mirror.tracks(&field.name, live, window) {
                         out.untracked_tob_writes += 1;
                         return;
+                    }
+                    if field.name.protocol_type == move_types::ProtocolType::NonceGeneration {
+                        out.tob_nonce_fields.push((id, field.name));
                     }
                     Some(upsert_tob_bucket(mirror, routing, field))
                 }
@@ -2777,6 +2781,31 @@ mod tests {
         assert!(fixture.hashi.tob.buckets().is_empty());
         assert_eq!(fixture.routing.tob_key_of_table(&certs), None);
         assert_eq!(fixture.routing.slot_of_container(&certs), None);
+    }
+
+    #[test]
+    fn only_a_tracked_nonce_bucket_field_is_reported_for_the_id_check() {
+        let mut fixture = Fixture::new();
+
+        let out = fixture.apply(&tx(vec![
+            written(nonce_bucket(
+                addr(0x91),
+                1,
+                nonce_key(0, 0),
+                certs_table(addr(0x92), None, None, 0),
+                None,
+            )),
+            written(nonce_bucket(
+                addr(0x93),
+                1,
+                nonce_key(0, 40),
+                certs_table(addr(0x94), None, None, 0),
+                None,
+            )),
+            written(tob_bucket_object(addr(0x95), 1, tob_key(0), None, None, 0)),
+        ]));
+
+        assert_eq!(out.tob_nonce_fields, vec![(addr(0x91), nonce_key(0, 0))]);
     }
 
     #[test]

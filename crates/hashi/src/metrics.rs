@@ -119,6 +119,7 @@ pub struct Metrics {
     pub watcher_rebootstrap_total: IntCounter,
     pub watcher_tob_untracked_writes_total: IntCounter,
     pub watcher_tob_fetch_recoveries_total: IntCounter,
+    pub watcher_tob_bucket_id_mismatch: IntGauge,
 
     // Onchain boot-scrape metrics
     pub scrape_in_progress: IntGauge,
@@ -763,6 +764,12 @@ impl Metrics {
             watcher_tob_fetch_recoveries_total: register_int_counter_with_registry!(
                 "hashi_watcher_tob_fetch_recoveries_total",
                 "TOB bucket fetches whose merge applied an object the object mirror lacked",
+                registry,
+            )
+            .unwrap(),
+            watcher_tob_bucket_id_mismatch: register_int_gauge_with_registry!(
+                "hashi_watcher_tob_bucket_id_mismatch",
+                "1 once a TOB bucket id check failed; only a restart clears it",
                 registry,
             )
             .unwrap(),
