@@ -12,7 +12,7 @@ use crate::committee::SignedMessage;
 use crate::intent::IntentMessage;
 use crate::move_types::Config;
 use fastcrypto::groups::HashToGroupElement;
-use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_threshold::nodes::Nodes;
 use serde::Serialize;
 use std::sync::LazyLock;
 use sui_crypto::SignatureError;

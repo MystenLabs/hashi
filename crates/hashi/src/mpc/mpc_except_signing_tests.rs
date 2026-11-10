@@ -46,12 +46,12 @@ use crate::onchain::types::MemberInfo;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
 use fastcrypto::groups::Scalar;
-use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
-use fastcrypto_tbls::nizk::DdhTupleNizk;
-use fastcrypto_tbls::polynomial::Poly;
-use fastcrypto_tbls::random_oracle::RandomOracle;
-use fastcrypto_tbls::threshold_schnorr::Parameters;
-use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_threshold::ecies_v1::MultiRecipientEncryption;
+use fastcrypto_threshold::nizk::DdhTupleNizk;
+use fastcrypto_threshold::polynomial::Poly;
+use fastcrypto_threshold::random_oracle::RandomOracle;
+use fastcrypto_threshold::threshold_schnorr::Parameters;
+use fastcrypto_threshold::threshold_schnorr::avss;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::EncryptionPrivateKey;
@@ -5147,7 +5147,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
     // no longer be verified (party IDs not in the nodes list), so they are skipped.
     // The retained set must still satisfy `t < W`, so shrink the threshold with it.
     let config = setup.dkg_config();
-    let smaller_nodes = fastcrypto_tbls::nodes::Nodes::new(
+    let smaller_nodes = fastcrypto_threshold::nodes::Nodes::new(
         config
             .nodes
             .iter()
@@ -19674,7 +19674,7 @@ fn output_with_key(public_key: G) -> MpcOutput {
 #[test]
 fn get_public_mpc_output_answers_while_the_mpc_write_lock_is_held() {
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_threshold::threshold_schnorr::S;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .max_blocking_threads(1)
@@ -19734,7 +19734,7 @@ fn get_public_mpc_output_answers_while_the_mpc_write_lock_is_held() {
 #[test]
 fn installs_keep_the_epochs_the_incoming_manager_serves() {
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_threshold::threshold_schnorr::S;
     let setup = TestSetup::new(4);
     let epoch = setup.epoch();
     let committee = |epoch: u64| {

@@ -22,7 +22,7 @@ use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::serde_helpers::ToFromByteArray;
-use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
+use fastcrypto_threshold::threshold_schnorr::key_derivation::derive_verifying_key;
 use miniscript::Descriptor;
 use miniscript::descriptor::Tr;
 use std::str::FromStr;
@@ -428,7 +428,7 @@ mod bitcoin_tests {
     #[test]
     fn two_of_two_leaf_embeds_mpc_signed_child_for_odd_y_master() {
         use fastcrypto::groups::GroupElement;
-        use fastcrypto_tbls::threshold_schnorr::S;
+        use fastcrypto_threshold::threshold_schnorr::S;
 
         // Find a master G with ODD y so we exercise the formerly-broken branch.
         let raw_g = loop {
@@ -503,7 +503,7 @@ mod bitcoin_tests {
 
     fn deposit_address_vectors_json() -> String {
         use fastcrypto::groups::GroupElement;
-        use fastcrypto_tbls::threshold_schnorr::S;
+        use fastcrypto_threshold::threshold_schnorr::S;
 
         let guardian = BitcoinKeypair::from_seckey_slice(&BTC_LIB, &TEST_ENCLAVE_BTC_SK)
             .expect("valid test secret key")

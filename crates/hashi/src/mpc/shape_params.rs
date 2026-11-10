@@ -7,9 +7,9 @@ use crate::mpc::count_check::DispersalShape;
 use crate::mpc::count_check::PartyWeights;
 use crate::mpc::types::EncryptionGroupElement;
 use crate::mpc::types::ProtocolType;
-use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::nodes::PartyId;
-use fastcrypto_tbls::types::ShareIndex;
+use fastcrypto_threshold::nodes::Nodes;
+use fastcrypto_threshold::nodes::PartyId;
+use fastcrypto_threshold::types::ShareIndex;
 use hashi_types::committee::RuntimeCommittee;
 use sui_sdk_types::Address;
 

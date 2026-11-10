@@ -8,19 +8,19 @@ use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
-use fastcrypto_tbls::ecies_v1::Ciphertext;
-use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::nodes::PartyId;
-use fastcrypto_tbls::polynomial::Eval;
-use fastcrypto_tbls::random_oracle::RandomOracle;
-use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
-use fastcrypto_tbls::threshold_schnorr::Certificate;
-use fastcrypto_tbls::threshold_schnorr::G;
-use fastcrypto_tbls::threshold_schnorr::S;
-use fastcrypto_tbls::threshold_schnorr::VerifiedCertificate;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-use fastcrypto_tbls::types::ShareIndex;
+use fastcrypto_threshold::ecies_v1::Ciphertext;
+use fastcrypto_threshold::nodes::Nodes;
+use fastcrypto_threshold::nodes::PartyId;
+use fastcrypto_threshold::polynomial::Eval;
+use fastcrypto_threshold::random_oracle::RandomOracle;
+use fastcrypto_threshold::threshold_schnorr::Address as DerivationAddress;
+use fastcrypto_threshold::threshold_schnorr::Certificate;
+use fastcrypto_threshold::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::S;
+use fastcrypto_threshold::threshold_schnorr::VerifiedCertificate;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
@@ -1543,7 +1543,7 @@ mod tests {
     const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use super::*;
 
-    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_threshold::nodes::Node;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
@@ -1677,8 +1677,8 @@ mod tests {
     }
 
     fn mint_avid_vote(voters: &[u16]) -> batch_avss_avid::AvidVote {
-        use fastcrypto_tbls::ecies_v1;
-        use fastcrypto_tbls::threshold_schnorr::Parameters;
+        use fastcrypto_threshold::ecies_v1;
+        use fastcrypto_threshold::threshold_schnorr::Parameters;
         let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
@@ -1768,8 +1768,8 @@ mod tests {
 
     #[test]
     fn process_avid_message_accepts_a_real_confirm_cert() {
-        use fastcrypto_tbls::ecies_v1;
-        use fastcrypto_tbls::threshold_schnorr::Parameters;
+        use fastcrypto_threshold::ecies_v1;
+        use fastcrypto_threshold::threshold_schnorr::Parameters;
         let (t, f, n, batch, epoch) = (3u16, 3u16, 10u16, 3u16, 9u64);
         let mut rng = rand::thread_rng();
 

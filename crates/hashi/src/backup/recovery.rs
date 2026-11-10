@@ -5,11 +5,11 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use fastcrypto::groups::GroupElement;
-use fastcrypto_tbls::polynomial::Poly;
-use fastcrypto_tbls::threshold_schnorr::G;
-use fastcrypto_tbls::threshold_schnorr::S;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::types::ShareIndex;
+use fastcrypto_threshold::polynomial::Poly;
+use fastcrypto_threshold::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::S;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::types::ShareIndex;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -225,8 +225,8 @@ pub fn reconstruct_root_scalar(
 
 #[cfg(test)]
 pub(super) fn test_record() -> MpcRecoveryRecord {
-    use fastcrypto_tbls::polynomial::Eval;
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_threshold::polynomial::Eval;
+    use fastcrypto_threshold::threshold_schnorr::S;
 
     // Degree-one polynomial 7 + 3*x: one local share is less than the quorum of two.
     let index = ShareIndex::new(1).unwrap();
@@ -261,7 +261,7 @@ pub(super) fn test_record() -> MpcRecoveryRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_threshold::threshold_schnorr::S;
 
     #[test]
     fn local_shares_need_not_meet_threshold() {

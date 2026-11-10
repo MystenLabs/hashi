@@ -45,6 +45,6 @@ name = "hashi-localnet"
 path = "src/main.rs"
 
 [dev-dependencies]
-fastcrypto-tbls.workspace = true
+fastcrypto-threshold.workspace = true
 hashi-guardian-proxy = { path = "../hashi-guardian-proxy" }
 tracing-subscriber.workspace = true

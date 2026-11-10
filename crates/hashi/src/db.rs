@@ -6,8 +6,8 @@ use std::path::Path;
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
 use fjall::Result;
@@ -804,14 +804,14 @@ fn prune_pubkey_keyspace(
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::mpc::EncryptionGroupElement;
-    use fastcrypto_tbls::ecies_v1;
-    use fastcrypto_tbls::nodes::Node;
-    use fastcrypto_tbls::nodes::Nodes;
-    use fastcrypto_tbls::nodes::PartyId;
-    use fastcrypto_tbls::threshold_schnorr::Certificate;
-    use fastcrypto_tbls::threshold_schnorr::Parameters;
-    use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+    use fastcrypto_threshold::ecies_v1;
+    use fastcrypto_threshold::nodes::Node;
+    use fastcrypto_threshold::nodes::Nodes;
+    use fastcrypto_threshold::nodes::PartyId;
+    use fastcrypto_threshold::threshold_schnorr::Certificate;
+    use fastcrypto_threshold::threshold_schnorr::Parameters;
+    use fastcrypto_threshold::threshold_schnorr::avss;
+    use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::EncryptionPrivateKey;
     use std::collections::BTreeSet;
@@ -846,7 +846,7 @@ pub(crate) mod tests {
         let dealer = avss::Dealer::new(
             None,
             nodes,
-            fastcrypto_tbls::threshold_schnorr::Parameters { t: 3, f: 1 },
+            fastcrypto_threshold::threshold_schnorr::Parameters { t: 3, f: 1 },
             b"test-session".to_vec(),
             &mut rand::thread_rng(),
         )

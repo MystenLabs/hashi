@@ -43,7 +43,7 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
-use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
+use fastcrypto_threshold::threshold_schnorr::G as HashiMasterG;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::RuntimeCommittee;
 use hashi_types::committee::SignedMessage;
@@ -3143,9 +3143,9 @@ mod tests {
             Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
         let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
         let encryption_private_key =
-            fastcrypto_tbls::ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+            fastcrypto_threshold::ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng);
         let encryption_public_key =
-            fastcrypto_tbls::ecies_v1::PublicKey::from_private_key(&encryption_private_key);
+            fastcrypto_threshold::ecies_v1::PublicKey::from_private_key(&encryption_private_key);
 
         let move_committee_member = move_types::CommitteeMember {
             validator_address,

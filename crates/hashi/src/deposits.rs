@@ -19,7 +19,7 @@ use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::ProjectivePoint;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::G;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
@@ -332,11 +332,12 @@ impl Hashi {
             .unwrap_or_else(|| self.onchain_state().onchain_verifying_key_g())
             .context("MPC public key not available yet")?;
         let derivation_path = normalized_derivation_path(derivation_path).into_inner();
-        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-            &verifying_key,
-            &derivation_path,
-        )
-        .context("derive child verifying key")?;
+        let derived =
+            fastcrypto_threshold::threshold_schnorr::key_derivation::derive_verifying_key(
+                &verifying_key,
+                &derivation_path,
+            )
+            .context("derive child verifying key")?;
         XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 

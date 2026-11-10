@@ -4,17 +4,17 @@
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
-use fastcrypto_tbls::polynomial::Eval;
-use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
-use fastcrypto_tbls::threshold_schnorr::G;
-use fastcrypto_tbls::threshold_schnorr::Parameters;
-use fastcrypto_tbls::threshold_schnorr::S;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-use fastcrypto_tbls::threshold_schnorr::signing::Blame;
-use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
-use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
-use fastcrypto_tbls::types::ShareIndex;
+use fastcrypto_threshold::polynomial::Eval;
+use fastcrypto_threshold::threshold_schnorr::Address as DerivationAddress;
+use fastcrypto_threshold::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::Parameters;
+use fastcrypto_threshold::threshold_schnorr::S;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::presigning::Presignatures;
+use fastcrypto_threshold::threshold_schnorr::signing::Blame;
+use fastcrypto_threshold::threshold_schnorr::signing::aggregate_signatures;
+use fastcrypto_threshold::threshold_schnorr::signing::generate_partial_signatures;
+use fastcrypto_threshold::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::RuntimeCommittee;
@@ -1644,10 +1644,10 @@ pub(crate) mod tests {
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::AllowedRng;
-    use fastcrypto_tbls::polynomial::Poly;
-    use fastcrypto_tbls::threshold_schnorr::Parameters;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-    use fastcrypto_tbls::types::ShareIndex;
+    use fastcrypto_threshold::polynomial::Poly;
+    use fastcrypto_threshold::threshold_schnorr::Parameters;
+    use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
+    use fastcrypto_threshold::types::ShareIndex;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
@@ -5370,9 +5370,11 @@ pub(crate) mod tests {
         let derived = *vk + G::generator() * S::from_bytes_mod_order(&tweak);
         assert_eq!(
             derived.x_as_be_bytes().unwrap(),
-            fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(vk, address)
-                .unwrap()
-                .to_byte_array()
+            fastcrypto_threshold::threshold_schnorr::key_derivation::derive_verifying_key(
+                vk, address
+            )
+            .unwrap()
+            .to_byte_array()
         );
         derived
     }
@@ -5721,7 +5723,7 @@ pub(crate) mod tests {
             .iter()
             .map(|input| {
                 hex::encode(
-                    fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+                    fastcrypto_threshold::threshold_schnorr::key_derivation::derive_verifying_key(
                         &setup.verifying_key,
                         &crate::withdrawals::withdrawal_input_derivation_address(input),
                     )
