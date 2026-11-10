@@ -82,13 +82,15 @@ impl Hashi {
     }
 }
 
+const TOB_NOT_MIRRORED: &str = "TOB buckets are not loaded on a reader (OnchainState::new_reader)";
+
 /// The mirrored TOB certificate store: one bucket per
 /// `(epoch, batch_index, protocol_type)`.
 #[derive(Debug)]
 pub struct Tob {
     /// Id of the root's `tob` bag.
     pub id: Address,
-    pub buckets: BTreeMap<move_types::TobKey, TobBucket>,
+    pub(super) mirror: Option<TobMirror>,
 }
 
 impl Tob {
@@ -96,8 +98,99 @@ impl Tob {
         self.id
     }
 
+    #[track_caller]
     pub fn buckets(&self) -> &BTreeMap<move_types::TobKey, TobBucket> {
-        &self.buckets
+        &self.mirror().buckets
+    }
+
+    pub fn try_buckets(&self) -> Option<&BTreeMap<move_types::TobKey, TobBucket>> {
+        self.mirror.as_ref().map(|mirror| &mirror.buckets)
+    }
+
+    #[track_caller]
+    pub(super) fn mirror(&self) -> &TobMirror {
+        self.mirror.as_ref().expect(TOB_NOT_MIRRORED)
+    }
+
+    #[track_caller]
+    pub(super) fn mirror_mut(&mut self) -> &mut TobMirror {
+        self.mirror.as_mut().expect(TOB_NOT_MIRRORED)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct TobMirror {
+    pub(super) buckets: BTreeMap<move_types::TobKey, TobBucket>,
+    pub(super) frontier: BTreeMap<u64, u32>,
+    pub(super) marked: BTreeSet<move_types::TobKey>,
+}
+
+const TOB_WINDOW_FLOOR: u32 = 32;
+
+impl TobMirror {
+    pub(super) fn frontier(&self, epoch: u64) -> u32 {
+        self.frontier.get(&epoch).copied().unwrap_or(0)
+    }
+
+    pub(super) fn fold_seal(&mut self, key: &move_types::TobKey) {
+        fold_seal(&mut self.frontier, key);
+    }
+
+    pub(super) fn tracks(&self, key: &move_types::TobKey, live: LiveEpochs, window: u32) -> bool {
+        self.buckets.contains_key(key)
+            || self.marked.contains(key)
+            || in_window(key, self.frontier(key.epoch), live, window)
+    }
+}
+
+pub(super) fn tob_window(config: &Config) -> u32 {
+    u32::try_from(config.nonce_cert_batch_slack())
+        .unwrap_or(u32::MAX)
+        .max(TOB_WINDOW_FLOOR)
+}
+
+pub(super) fn fold_seal(frontier: &mut BTreeMap<u64, u32>, key: &move_types::TobKey) {
+    if let (move_types::ProtocolType::NonceGeneration, Some(batch)) =
+        (key.protocol_type, key.batch_index)
+    {
+        let past = frontier.entry(key.epoch).or_default();
+        *past = (*past).max(batch.saturating_add(1));
+    }
+}
+
+pub(super) fn in_window(
+    key: &move_types::TobKey,
+    frontier: u32,
+    live: LiveEpochs,
+    window: u32,
+) -> bool {
+    match (key.protocol_type, key.batch_index) {
+        (move_types::ProtocolType::NonceGeneration, Some(batch)) => {
+            live.contains(key.epoch) && batch < frontier.saturating_add(window)
+        }
+        (move_types::ProtocolType::NonceGeneration, None) => false,
+        _ => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct LiveEpochs {
+    pub(super) current: u64,
+    pub(super) pending: Option<u64>,
+}
+
+impl LiveEpochs {
+    pub(super) fn of(committees: &CommitteeSet) -> Self {
+        Self {
+            current: committees.epoch(),
+            pending: committees.pending_epoch_change(),
+        }
+    }
+
+    pub(super) fn contains(&self, epoch: u64) -> bool {
+        epoch == self.current
+            || epoch.checked_add(1) == Some(self.current)
+            || Some(epoch) == self.pending
     }
 }
 
@@ -124,8 +217,7 @@ pub struct TobBucket {
 }
 
 /// A mirror walk that did not cover the bucket's full on-chain census —
-/// a convergence gap between the bucket Field and its node writes;
-/// retryable once the replay catches up.
+/// a convergence gap between the bucket Field and its node writes.
 #[derive(Debug, thiserror::Error)]
 #[error("the mirror walks {walked} of the bucket's {size} on-chain nodes")]
 pub struct IncompleteTobWalk {
@@ -168,7 +260,7 @@ impl TobBucket {
             && ordered.len() < self.nodes.len()
         {
             let Some(node) = self.nodes.get(&dealer) else {
-                tracing::error!(
+                tracing::debug!(
                     %dealer,
                     certs_id = %self.certs_id,
                     "TOB bucket link points at a node the mirror does not hold"
@@ -775,6 +867,8 @@ pub struct Config {
 // This constant mirrors the value in btc_config.move and must be kept in sync.
 pub(crate) const DUST_RELAY_MIN_VALUE: u64 = 546;
 
+const DEFAULT_NONCE_CERT_BATCH_SLACK: u64 = 16;
+
 pub use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -816,6 +910,13 @@ impl Config {
             self.config.get("reconfig_hold"),
             Some(ConfigValue::Bool(true))
         )
+    }
+
+    pub fn nonce_cert_batch_slack(&self) -> u64 {
+        match self.config.get("nonce_cert_batch_slack") {
+            Some(ConfigValue::U64(v)) => *v,
+            _ => DEFAULT_NONCE_CERT_BATCH_SLACK,
+        }
     }
 
     pub fn bitcoin_chain_id(&self) -> Option<Address> {

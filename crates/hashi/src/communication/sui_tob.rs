@@ -135,10 +135,9 @@ fn tob_read_error(e: anyhow::Error) -> TobError {
 }
 
 /// Read one TOB bucket's certificates from the object mirror, in TOB
-/// order. Returns an empty vector when the bucket does not exist (yet):
-/// a lagging mirror shows up as certificates arriving slightly later,
-/// and every caller sits in a retry or poll loop, so freshness needs no
-/// extra gating here.
+/// order. Returns an empty vector when the mirror holds no such bucket: it
+/// doesn't exist yet, or the mirror doesn't track it, in which case a
+/// current-epoch nonce bucket read for 30 s is fetched.
 pub fn tob_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
@@ -386,8 +385,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 Ok(certs) => certs,
                 Err(TobError::IncompleteRead(msg)) => {
                     tracing::debug!(
-                        "{:?} TOB cert read for epoch {} raced the mirror's replay ({msg}); \
-                         retrying",
+                        "{:?} TOB cert read for epoch {} found the mirror's bucket incomplete \
+                         ({msg}); retrying",
                         self.protocol_type,
                         self.epoch,
                     );
