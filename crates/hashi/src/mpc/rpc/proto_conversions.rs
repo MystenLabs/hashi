@@ -737,7 +737,7 @@ mod avid_conversion_tests {
         batch_avss_avid::Dispersal,
         batch_avss_avid::Echo,
     ) {
-        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let (t, f, n, batch) = (4u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
             .map(|_| ecies_v1::PrivateKey::<types::EncryptionGroupElement>::new(&mut rng))

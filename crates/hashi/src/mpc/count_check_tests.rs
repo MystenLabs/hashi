@@ -358,8 +358,8 @@ fn dealer_messages_of_random_shapes_pass(
     t_seed: u16,
 ) {
     let total: u16 = weights.iter().sum();
-    prop_assume!(total >= 2);
-    let t = 1 + t_seed % (total - 1);
+    prop_assume!(total >= 3);
+    let t = 2 + t_seed % (total - 2);
     let (message, shape) = dealer_message(&weights, t, 1);
     let bytes = bcs::to_bytes(&message).unwrap();
     prop_assert_eq!(check_avss_message(&bytes, shape), Ok(()));

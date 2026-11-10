@@ -1679,7 +1679,7 @@ mod tests {
     fn mint_avid_vote(voters: &[u16]) -> batch_avss_avid::AvidVote {
         use fastcrypto_threshold::ecies_v1;
         use fastcrypto_threshold::threshold_schnorr::Parameters;
-        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let (t, f, n, batch) = (4u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
             .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
@@ -1770,7 +1770,7 @@ mod tests {
     fn process_avid_message_accepts_a_real_confirm_cert() {
         use fastcrypto_threshold::ecies_v1;
         use fastcrypto_threshold::threshold_schnorr::Parameters;
-        let (t, f, n, batch, epoch) = (3u16, 3u16, 10u16, 3u16, 9u64);
+        let (t, f, n, batch, epoch) = (4u16, 3u16, 10u16, 3u16, 9u64);
         let mut rng = rand::thread_rng();
 
         let sks: Vec<_> = (0..n)

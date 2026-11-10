@@ -878,7 +878,7 @@ pub(crate) mod tests {
         batch_avss_avid::Receiver,
         batch_avss_avid::AvidVote,
     ) {
-        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let (t, f, n, batch) = (4u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
             .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
@@ -1332,7 +1332,7 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
 
-        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let (t, f, n, batch) = (4u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
             .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
