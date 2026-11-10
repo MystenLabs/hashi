@@ -47,6 +47,7 @@ use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
 use fastcrypto::groups::Scalar;
 use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
+use fastcrypto_tbls::nizk::DdhTupleNizk;
 use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
@@ -10253,11 +10254,19 @@ fn test_rotation_output_lookup_is_not_shared_across_dealers() {
     let own_session_id = responder_manager
         .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
+    let own_ciphertexts = stored_rows::avss_ciphertexts(
+        &responder_manager.shape_params(),
+        responder_manager.mpc_config.epoch,
+        &dealer_addr,
+        &bcs::to_bytes(&dealer_message).unwrap(),
+    )
+    .unwrap();
     let own_lookup = responder_manager
         .get_or_derive_rotation_output(
             &dealer_addr,
             share_index,
             &dealer_message,
+            &own_ciphertexts,
             responder_manager.mpc_config.epoch,
             &own_session_id,
         )
@@ -10296,11 +10305,19 @@ fn test_rotation_output_lookup_is_not_shared_across_dealers() {
     let other_session_id = responder_manager
         .current_session_id()
         .rotation_session_id(&other_dealer, share_index);
+    let other_ciphertexts = stored_rows::avss_ciphertexts(
+        &responder_manager.shape_params(),
+        responder_manager.mpc_config.epoch,
+        &other_dealer,
+        &bcs::to_bytes(&other_dealer_message).unwrap(),
+    )
+    .unwrap();
     let derived = responder_manager
         .get_or_derive_rotation_output(
             &other_dealer,
             share_index,
             &other_dealer_message,
+            &other_ciphertexts,
             responder_manager.mpc_config.epoch,
             &other_session_id,
         )
@@ -12771,6 +12788,353 @@ fn a_rotation_complaint_decodes_only_the_complained_entry() {
         .handle_complain_request(rotation_setup.setup.address(victim_idx), &request)
         .unwrap();
     assert!(matches!(response, ComplaintResponse::Rotation(_)));
+}
+
+const PADDED_DEALER: usize = 0;
+const PADDED_DEPARTING: usize = 1;
+const PADDED_ACCUSER: usize = 2;
+const PADDED_RESPONDER: usize = 4;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PaddableAvssMessage {
+    feldman_commitment: Poly<G>,
+    c: EncryptionGroupElement,
+    c_hat: EncryptionGroupElement,
+    encs: Vec<Vec<u8>>,
+    proof: DdhTupleNizk<EncryptionGroupElement>,
+}
+
+fn pad_ciphertext(message: &avss::Message, party: usize) -> avss::Message {
+    let mut paddable: PaddableAvssMessage =
+        bcs::from_bytes(&bcs::to_bytes(message).unwrap()).unwrap();
+    paddable.encs[party].push(0);
+    bcs::from_bytes(&bcs::to_bytes(&paddable).unwrap()).unwrap()
+}
+
+fn complaint_from(
+    accuser: &MpcManager,
+    session_id: &SessionId,
+    commitment: Option<G>,
+    message: &avss::Message,
+) -> avss::Complaint {
+    let receiver = avss::Receiver::new(
+        accuser.mpc_config.nodes.clone(),
+        accuser.party_id().unwrap(),
+        Parameters {
+            t: accuser.mpc_config.threshold,
+            f: accuser.mpc_config.max_faulty,
+        },
+        session_id.to_vec(),
+        commitment,
+        accuser.encryption_key().unwrap().inner().clone(),
+    )
+    .unwrap();
+    match receiver
+        .process_message(message, &mut rand::thread_rng())
+        .unwrap()
+    {
+        avss::ProcessedMessage::Complaint(complaint) => complaint,
+        avss::ProcessedMessage::Valid(_) => panic!("expected a complaint"),
+    }
+}
+
+struct PaddedComplaintFixture {
+    rotation_setup: RotationTestSetup,
+    responder_dkg_output: MpcOutput,
+    protocol_type: ProtocolTypeIndicator,
+    dealer: Address,
+    share_index: Option<ShareIndex>,
+    rotation_map: RotationMessages,
+    honest: avss::Message,
+    valid_complaint: avss::Complaint,
+    invalid_complaint: avss::Complaint,
+    previous_epoch: u64,
+}
+
+impl PaddedComplaintFixture {
+    fn rotation() -> Self {
+        let mut rotation_setup = RotationTestSetup::new();
+        let (_, responder_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(PADDED_RESPONDER);
+        let (accuser, accuser_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(PADDED_ACCUSER);
+        let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(PADDED_DEALER);
+        let Messages::Rotation(rotation_map) = rotation_messages else {
+            panic!("expected rotation messages");
+        };
+        let dealer = rotation_setup.setup.address(PADDED_DEALER);
+        let mut share_indices = rotation_map.keys().copied();
+        let share_index = share_indices.next().unwrap();
+        let other_share_index = share_indices.next().unwrap();
+        let complaint_about = |index: ShareIndex| {
+            complaint_from(
+                &accuser,
+                &accuser
+                    .current_session_id()
+                    .rotation_session_id(&dealer, index),
+                accuser_dkg_output.commitments.get(&index).copied(),
+                &pad_ciphertext(&rotation_map[&index], PADDED_ACCUSER),
+            )
+        };
+        let valid_complaint = complaint_about(share_index);
+        let invalid_complaint = complaint_about(other_share_index);
+        let honest = rotation_map[&share_index].clone();
+        let previous_epoch = rotation_setup.setup.committee_set.epoch();
+        rotation_setup.shrink_to_next_epoch(PADDED_DEPARTING);
+        Self {
+            rotation_setup,
+            responder_dkg_output,
+            protocol_type: ProtocolTypeIndicator::KeyRotation,
+            dealer,
+            share_index: Some(share_index),
+            rotation_map,
+            honest,
+            valid_complaint,
+            invalid_complaint,
+            previous_epoch,
+        }
+    }
+
+    fn dkg() -> Self {
+        let mut rotation_setup = RotationTestSetup::new();
+        let (_, responder_dkg_output) =
+            rotation_setup.create_receiver_with_completed_dkg(PADDED_RESPONDER);
+        let accuser = rotation_setup.setup.create_manager(PADDED_ACCUSER);
+        let dkg_message = |dealer_idx: usize| {
+            let position = rotation_setup
+                .dealer_indices
+                .iter()
+                .position(|&idx| idx == dealer_idx)
+                .unwrap();
+            match &rotation_setup.dealer_messages[position] {
+                Messages::Dkg(message) => message.clone(),
+                _ => panic!("expected a DKG message"),
+            }
+        };
+        let complaint_about = |dealer_idx: usize| {
+            complaint_from(
+                &accuser,
+                &accuser
+                    .current_session_id()
+                    .dealer_session_id(&rotation_setup.setup.address(dealer_idx)),
+                None,
+                &pad_ciphertext(&dkg_message(dealer_idx), PADDED_ACCUSER),
+            )
+        };
+        let valid_complaint = complaint_about(PADDED_DEALER);
+        let invalid_complaint = complaint_about(PADDED_DEPARTING);
+        let honest = dkg_message(PADDED_DEALER);
+        let dealer = rotation_setup.setup.address(PADDED_DEALER);
+        let previous_epoch = rotation_setup.setup.committee_set.epoch();
+        rotation_setup.shrink_to_next_epoch(PADDED_DEPARTING);
+        Self {
+            rotation_setup,
+            responder_dkg_output,
+            protocol_type: ProtocolTypeIndicator::Dkg,
+            dealer,
+            share_index: None,
+            rotation_map: RotationMessages::new(),
+            honest,
+            valid_complaint,
+            invalid_complaint,
+            previous_epoch,
+        }
+    }
+
+    fn responder_with(&self, entry: avss::Message) -> MpcManager {
+        let store = Arc::new(InMemoryPublicMessagesStore::new());
+        match self.share_index {
+            Some(share_index) => {
+                let mut rotation_map = self.rotation_map.clone();
+                rotation_map.insert(share_index, entry);
+                store
+                    .store_rotation_messages(self.previous_epoch, &self.dealer, &rotation_map)
+                    .unwrap();
+            }
+            None => store
+                .store_dealer_message(self.previous_epoch, &self.dealer, &entry)
+                .unwrap(),
+        }
+        self.rotation_setup.rotation_manager_at_target(
+            PADDED_RESPONDER,
+            self.responder_dkg_output.clone(),
+            store,
+        )
+    }
+
+    fn complain(
+        &self,
+        responder: &mut MpcManager,
+        complaint: &avss::Complaint,
+    ) -> MpcResult<ComplaintResponse> {
+        responder.handle_complain_request(
+            self.rotation_setup.setup.address(PADDED_ACCUSER),
+            &ComplainRequest {
+                dealer: self.dealer,
+                share_index: self.share_index,
+                batch_index: None,
+                complaint: ProtocolComplaint::Avss(complaint.clone()),
+                protocol_type: self.protocol_type,
+                epoch: self.previous_epoch,
+            },
+        )
+    }
+}
+
+#[test]
+fn a_padded_own_ciphertext_is_refused_by_its_length() {
+    for fixture in [
+        PaddedComplaintFixture::rotation(),
+        PaddedComplaintFixture::dkg(),
+    ] {
+        let mut responder =
+            fixture.responder_with(pad_ciphertext(&fixture.honest, PADDED_RESPONDER));
+        let result = fixture.complain(&mut responder, &fixture.valid_complaint);
+        assert!(
+            matches!(&result, Err(MpcError::NotFound(reason)) if reason == WRONG_LENGTH_OWN_CIPHERTEXT),
+            "{:?}: {result:?}",
+            fixture.protocol_type
+        );
+    }
+}
+
+#[test]
+fn a_cached_rotation_row_with_a_padded_own_ciphertext_is_refused_by_its_length() {
+    let rotation_setup = RotationTestSetup::new();
+    let (accuser, accuser_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(PADDED_ACCUSER);
+    let (mut responder, responder_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(PADDED_RESPONDER);
+    responder.set_previous_output(responder_dkg_output);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(PADDED_DEALER);
+    let Messages::Rotation(mut rotation_map) = rotation_messages else {
+        panic!("expected rotation messages");
+    };
+    let dealer = rotation_setup.setup.address(PADDED_DEALER);
+    let share_index = *rotation_map.keys().next().unwrap();
+    let complaint = complaint_from(
+        &accuser,
+        &accuser
+            .current_session_id()
+            .rotation_session_id(&dealer, share_index),
+        accuser_dkg_output.commitments.get(&share_index).copied(),
+        &pad_ciphertext(&rotation_map[&share_index], PADDED_ACCUSER),
+    );
+    let padded = pad_ciphertext(&rotation_map[&share_index], PADDED_RESPONDER);
+    rotation_map.insert(share_index, padded);
+    responder
+        .current_rotation_messages
+        .insert(dealer, rotation_map);
+    let result = responder.handle_complain_request(
+        rotation_setup.setup.address(PADDED_ACCUSER),
+        &ComplainRequest {
+            dealer,
+            share_index: Some(share_index),
+            batch_index: None,
+            complaint: ProtocolComplaint::Avss(complaint),
+            protocol_type: ProtocolTypeIndicator::KeyRotation,
+            epoch: responder.mpc_config.epoch,
+        },
+    );
+    assert!(
+        matches!(&result, Err(MpcError::NotFound(reason)) if reason == WRONG_LENGTH_OWN_CIPHERTEXT),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_responder_holding_its_output_answers_although_its_own_ciphertext_is_padded() {
+    let rotation_setup = RotationTestSetup::new();
+    let (accuser, accuser_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(PADDED_ACCUSER);
+    let (mut responder, responder_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(PADDED_RESPONDER);
+    responder.set_previous_output(responder_dkg_output.clone());
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(PADDED_DEALER);
+    let dealer = rotation_setup.setup.address(PADDED_DEALER);
+    responder
+        .try_sign_rotation_messages(&responder_dkg_output, dealer, &rotation_messages)
+        .unwrap();
+    let Messages::Rotation(mut rotation_map) = rotation_messages else {
+        panic!("expected rotation messages");
+    };
+    let share_index = *rotation_map.keys().next().unwrap();
+    let complaint = complaint_from(
+        &accuser,
+        &accuser
+            .current_session_id()
+            .rotation_session_id(&dealer, share_index),
+        accuser_dkg_output.commitments.get(&share_index).copied(),
+        &pad_ciphertext(&rotation_map[&share_index], PADDED_ACCUSER),
+    );
+    let padded = pad_ciphertext(
+        &pad_ciphertext(&rotation_map[&share_index], PADDED_ACCUSER),
+        PADDED_RESPONDER,
+    );
+    rotation_map.insert(share_index, padded);
+    responder
+        .current_rotation_messages
+        .insert(dealer, rotation_map);
+    let result = responder.handle_complain_request(
+        rotation_setup.setup.address(PADDED_ACCUSER),
+        &ComplainRequest {
+            dealer,
+            share_index: Some(share_index),
+            batch_index: None,
+            complaint: ProtocolComplaint::Avss(complaint),
+            protocol_type: ProtocolTypeIndicator::KeyRotation,
+            epoch: responder.mpc_config.epoch,
+        },
+    );
+    assert!(
+        matches!(&result, Ok(ComplaintResponse::Rotation(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_padded_accuser_ciphertext_is_answered_only_with_a_valid_proof() {
+    for fixture in [
+        PaddedComplaintFixture::rotation(),
+        PaddedComplaintFixture::dkg(),
+    ] {
+        let mut responder = fixture.responder_with(pad_ciphertext(&fixture.honest, PADDED_ACCUSER));
+        let rejected = fixture.complain(&mut responder, &fixture.invalid_complaint);
+        assert!(
+            matches!(
+                &rejected,
+                Err(MpcError::CryptoError(reason)) if reason.starts_with(WRONG_LENGTH_ACCUSER_CIPHERTEXT)
+            ),
+            "{:?}: {rejected:?}",
+            fixture.protocol_type
+        );
+        let answered = fixture.complain(&mut responder, &fixture.valid_complaint);
+        assert!(
+            answered.is_ok(),
+            "{:?}: {answered:?}",
+            fixture.protocol_type
+        );
+    }
+}
+
+#[test]
+fn an_honest_accuser_ciphertext_keeps_todays_complaint_check() {
+    for fixture in [
+        PaddedComplaintFixture::rotation(),
+        PaddedComplaintFixture::dkg(),
+    ] {
+        let mut responder = fixture.responder_with(fixture.honest.clone());
+        let result = fixture.complain(&mut responder, &fixture.valid_complaint);
+        assert!(
+            matches!(
+                &result,
+                Err(MpcError::CryptoError(reason))
+                    if *reason == FastCryptoError::InvalidProof.to_string()
+            ),
+            "{:?}: {result:?}",
+            fixture.protocol_type
+        );
+    }
 }
 
 #[test]

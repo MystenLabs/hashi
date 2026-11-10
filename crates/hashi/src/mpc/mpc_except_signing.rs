@@ -18,6 +18,8 @@ use crate::metrics::Metrics;
 use crate::metrics::RefusalCounters;
 use crate::metrics::STORED_ROW_LOAD;
 use crate::metrics::STORED_ROW_READ;
+use crate::mpc::count_check;
+use crate::mpc::count_check::AvssCiphertexts;
 use crate::mpc::fair_rwlock::FairRwLock;
 use crate::mpc::identified_bad_nodes::IdentifiedBadNodes;
 use crate::mpc::message_cache::Cached;
@@ -96,15 +98,20 @@ use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use bytes::Bytes;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
+use fastcrypto::encoding::Encoding;
+use fastcrypto::encoding::Hex;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto_tbls::ecies_v1::Ciphertext;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::ecies_v1::PublicKey;
+use fastcrypto_tbls::ecies_v1::SharedComponents;
 use fastcrypto_tbls::nodes::Node;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
+use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
@@ -903,41 +910,81 @@ impl MpcManager {
         request: &ComplainRequest,
         cache_is_current: bool,
     ) -> MpcResult<ComplaintResponse> {
-        let cached_message = cache_is_current
-            .then(|| self.current_dkg_messages.get(&request.dealer).cloned())
+        let shape = self.shape_params();
+        let cached = cache_is_current
+            .then(|| {
+                self.current_dkg_messages
+                    .get_entry(&request.dealer)
+                    .cloned()
+            })
             .flatten();
-        let message = match cached_message {
-            Some(message) => message,
-            None => self
-                .read_dkg_message(request.epoch, &request.dealer)?
-                .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?,
+        let stored;
+        let (message, bytes, ciphertexts): (&avss::Message, &[u8], _) = match &cached {
+            Some(entry) => (
+                entry,
+                entry.bytes(),
+                stored_rows::avss_ciphertexts(
+                    &shape,
+                    request.epoch,
+                    &request.dealer,
+                    entry.bytes(),
+                )?,
+            ),
+            None => {
+                let bytes = self
+                    .public_messages_store
+                    .get_dealer_message(request.epoch, &request.dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?;
+                let (message, ciphertexts) = stored_rows::avss_message_with_ciphertexts(
+                    &shape,
+                    request.epoch,
+                    &request.dealer,
+                    &bytes,
+                )?;
+                stored = (bytes, message);
+                (&stored.1, &stored.0, ciphertexts)
+            }
         };
         let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
         let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
         let session_id = self
             .base_session_id_for_epoch(request.epoch, &ProtocolType::Dkg)
             .dealer_session_id(&request.dealer);
-        let partial_output =
-            self.get_or_derive_dkg_output(&request.dealer, &message, request.epoch, &session_id)?;
-        let receiver = avss::Receiver::new(
-            nodes,
-            party_id,
-            params,
-            session_id.to_vec(),
-            None,
-            self.encryption_key_for_epoch(request.epoch)?
-                .inner()
-                .clone(),
+        let partial_output = self.get_or_derive_dkg_output(
+            &request.dealer,
+            message,
+            &ciphertexts,
+            request.epoch,
+            &session_id,
         )?;
+        let encryption_key = self.encryption_key_for_epoch(request.epoch)?;
         let ProtocolComplaint::Avss(complaint) = &request.complaint else {
             return Err(MpcError::InvalidMessage {
                 sender: request.dealer,
                 reason: "DKG complaint requires an AVSS complaint".into(),
             });
         };
-        let complaint_response =
-            receiver.handle_complaint(&message, accuser_id, complaint, &partial_output)?;
-        log_verified_complaint(caller, request, &Messages::Dkg(message));
+        let complaint_response = match wrong_length_accuser_complaint_response(
+            &nodes,
+            accuser_id,
+            &ciphertexts,
+            &session_id,
+            complaint,
+            &partial_output,
+        )? {
+            Some(response) => response,
+            None => avss::Receiver::new(
+                nodes,
+                party_id,
+                params,
+                session_id.to_vec(),
+                None,
+                encryption_key.inner().clone(),
+            )?
+            .handle_complaint(message, accuser_id, complaint, &partial_output)?,
+        };
+        log_verified_messages_complaint(caller, request, Messages::DKG_VARIANT, bytes);
         Ok(ComplaintResponse::Dkg(complaint_response))
     }
 
@@ -948,6 +995,7 @@ impl MpcManager {
         share_index: ShareIndex,
         cache_is_current: bool,
     ) -> MpcResult<ComplaintResponse> {
+        let shape = self.shape_params();
         let cached = cache_is_current
             .then(|| {
                 self.current_rotation_messages
@@ -955,32 +1003,44 @@ impl MpcManager {
                     .cloned()
             })
             .flatten();
-        let stored;
-        let (complained_message, row) = match &cached {
-            Some(entry) => (entry.get(&share_index), &entry.bytes()[..]),
+        let stored_row;
+        let row: &[u8] = match &cached {
+            Some(entry) => entry.bytes(),
             None => {
-                let bytes = self
+                stored_row = self
                     .public_messages_store
                     .get_rotation_messages(request.epoch, &request.dealer)
                     .map_err(|e| MpcError::StorageError(e.to_string()))?
                     .ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?;
-                let message = stored_rows::rotation_message(
-                    &self.shape_params(),
-                    request.epoch,
-                    &request.dealer,
-                    &bytes,
-                    share_index,
-                )?;
-                stored = (bytes, message);
-                (stored.1.as_ref(), stored.0.as_slice())
+                &stored_row
             }
         };
-        let complained_message = complained_message.ok_or_else(|| {
+        let no_message = || {
             MpcError::ProtocolFailed(format!(
                 "No rotation message for complained share_index {}",
                 share_index
             ))
-        })?;
+        };
+        let entry =
+            stored_rows::rotation_entry(&shape, request.epoch, &request.dealer, row, share_index)?
+                .ok_or_else(no_message)?;
+        let decoded;
+        let (complained_message, ciphertexts) = match &cached {
+            Some(cached_row) => (
+                cached_row.get(&share_index).ok_or_else(no_message)?,
+                stored_rows::avss_ciphertexts(&shape, request.epoch, &request.dealer, entry)?,
+            ),
+            None => {
+                let (message, ciphertexts) = stored_rows::avss_message_with_ciphertexts(
+                    &shape,
+                    request.epoch,
+                    &request.dealer,
+                    entry,
+                )?;
+                decoded = message;
+                (&decoded, ciphertexts)
+            }
+        };
         let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
         let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
         let session_id = self
@@ -990,32 +1050,42 @@ impl MpcManager {
             &request.dealer,
             share_index,
             complained_message,
+            &ciphertexts,
             request.epoch,
             &session_id,
         )?;
-        let receiver = avss::Receiver::new(
-            nodes,
-            party_id,
-            params,
-            session_id.to_vec(),
-            None,
-            self.encryption_key_for_epoch(request.epoch)?
-                .inner()
-                .clone(),
-        )?;
+        let encryption_key = self.encryption_key_for_epoch(request.epoch)?;
         let ProtocolComplaint::Avss(complaint) = &request.complaint else {
             return Err(MpcError::InvalidMessage {
                 sender: request.dealer,
                 reason: "Rotation complaint requires an AVSS complaint".into(),
             });
         };
-        let response = receiver.handle_complaint(
-            complained_message,
+        let response = match wrong_length_accuser_complaint_response(
+            &nodes,
             accuser_id,
+            &ciphertexts,
+            &session_id,
             complaint,
             &complained_output,
-        )?;
-        log_verified_rotation_complaint(caller, request, row);
+        )? {
+            Some(response) => response,
+            None => avss::Receiver::new(
+                nodes,
+                party_id,
+                params,
+                session_id.to_vec(),
+                None,
+                encryption_key.inner().clone(),
+            )?
+            .handle_complaint(
+                complained_message,
+                accuser_id,
+                complaint,
+                &complained_output,
+            )?,
+        };
+        log_verified_messages_complaint(caller, request, Messages::ROTATION_VARIANT, row);
         Ok(ComplaintResponse::Rotation(response))
     }
 
@@ -6690,6 +6760,7 @@ impl MpcManager {
         &self,
         dealer: &Address,
         message: &avss::Message,
+        ciphertexts: &AvssCiphertexts,
         epoch: u64,
         session_id: &SessionId,
     ) -> MpcResult<avss::AvssOutput> {
@@ -6698,8 +6769,10 @@ impl MpcManager {
         }
         // Cross-epoch fallback: re-derive from message
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
+        let encryption_key = self.encryption_key_for_epoch(epoch)?;
+        refuse_wrong_length_own_ciphertext(&nodes, party_id, ciphertexts)?;
         match process_avss_message(
-            self.encryption_key_for_epoch(epoch)?,
+            encryption_key,
             nodes,
             party_id,
             params,
@@ -6719,6 +6792,7 @@ impl MpcManager {
         dealer: &Address,
         share_index: ShareIndex,
         message: &avss::Message,
+        ciphertexts: &AvssCiphertexts,
         epoch: u64,
         session_id: &SessionId,
     ) -> MpcResult<avss::AvssOutput> {
@@ -6730,8 +6804,10 @@ impl MpcManager {
             return Ok(output.clone());
         }
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
+        let encryption_key = self.encryption_key_for_epoch(epoch)?;
+        refuse_wrong_length_own_ciphertext(&nodes, party_id, ciphertexts)?;
         match process_avss_message(
-            self.encryption_key_for_epoch(epoch)?,
+            encryption_key,
             nodes,
             party_id,
             params,
@@ -7013,10 +7089,13 @@ fn log_verified_complaint(
     });
 }
 
-fn log_verified_rotation_complaint(caller: Address, request: &ComplainRequest, row: &[u8]) {
-    log_verified_complaint_bcs(caller, request, || {
-        [&[Messages::ROTATION_VARIANT][..], row].concat()
-    });
+fn log_verified_messages_complaint(
+    caller: Address,
+    request: &ComplainRequest,
+    variant: u8,
+    payload: &[u8],
+) {
+    log_verified_complaint_bcs(caller, request, || [&[variant][..], payload].concat());
 }
 
 fn log_verified_complaint_bcs(
@@ -7205,6 +7284,66 @@ fn required_previous_commitment(
                  (owned by dealer {dealer}); cannot verify the dealt share reshares the existing key"
             ))
         })
+}
+
+const WRONG_LENGTH_OWN_CIPHERTEXT: &str =
+    "Peer is also a victim of this dealer: its ciphertext for this node has the wrong length";
+const WRONG_LENGTH_ACCUSER_CIPHERTEXT: &str =
+    "the accuser's ciphertext has the wrong length, and its recovery proof is invalid";
+
+fn has_honest_ciphertext_length(
+    nodes: &Nodes<EncryptionGroupElement>,
+    party_id: PartyId,
+    ciphertexts: &AvssCiphertexts,
+) -> MpcResult<bool> {
+    let honest = count_check::avss_complaint_response_size(nodes.weight_of(party_id)?);
+    let length = ciphertexts
+        .length(party_id)
+        .ok_or(FastCryptoError::InvalidInput)?;
+    Ok(length == honest)
+}
+
+fn refuse_wrong_length_own_ciphertext(
+    nodes: &Nodes<EncryptionGroupElement>,
+    party_id: PartyId,
+    ciphertexts: &AvssCiphertexts,
+) -> MpcResult<()> {
+    has_honest_ciphertext_length(nodes, party_id, ciphertexts)?
+        .then_some(())
+        .ok_or_else(|| MpcError::NotFound(WRONG_LENGTH_OWN_CIPHERTEXT.into()))
+}
+
+fn wrong_length_accuser_complaint_response(
+    nodes: &Nodes<EncryptionGroupElement>,
+    accuser_id: PartyId,
+    ciphertexts: &AvssCiphertexts,
+    session_id: &SessionId,
+    complaint: &avss::Complaint,
+    output: &avss::AvssOutput,
+) -> MpcResult<Option<avss::ComplaintResponse>> {
+    (!has_honest_ciphertext_length(nodes, accuser_id, ciphertexts)?)
+        .then(|| -> MpcResult<avss::ComplaintResponse> {
+            let shared: SharedComponents<EncryptionGroupElement> =
+                bcs::from_bytes(ciphertexts.shared_components())
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+            complaint
+                .proof
+                .check(
+                    accuser_id,
+                    &nodes.node_id_to_node(accuser_id)?.pk,
+                    &Ciphertext(Vec::new()),
+                    &shared,
+                    &RandomOracle::new(&Hex::encode(session_id.to_vec())),
+                    |_: &avss::SharesForNode| Err(FastCryptoError::InvalidInput),
+                )
+                .map_err(|e| {
+                    MpcError::CryptoError(format!("{WRONG_LENGTH_ACCUSER_CIPHERTEXT}: {e}"))
+                })?;
+            Ok(avss::ComplaintResponse {
+                shares: output.my_shares.clone(),
+            })
+        })
+        .transpose()
 }
 
 fn process_avss_message(

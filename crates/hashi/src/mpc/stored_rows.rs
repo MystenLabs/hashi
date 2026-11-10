@@ -51,22 +51,42 @@ pub(crate) fn rotation_messages(
     bcs::from_bytes(bytes).map_err(|e| refused(dealer, e.to_string()))
 }
 
-pub(crate) fn rotation_message(
+pub(crate) fn rotation_entry<'a>(
+    shape: &ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+    bytes: &'a [u8],
+    share_index: ShareIndex,
+) -> MpcResult<Option<&'a [u8]>> {
+    rotation_entries(shape, epoch, dealer, bytes)?
+        .get(&share_index)
+        .map(|range| {
+            bytes
+                .get(range.clone())
+                .ok_or_else(|| refused(dealer, format!("entry {share_index} is out of range")))
+        })
+        .transpose()
+}
+
+pub(crate) fn avss_ciphertexts(
     shape: &ShapeParams,
     epoch: u64,
     dealer: &Address,
     bytes: &[u8],
-    share_index: ShareIndex,
-) -> MpcResult<Option<avss::Message>> {
-    rotation_entries(shape, epoch, dealer, bytes)?
-        .get(&share_index)
-        .map(|range| -> MpcResult<avss::Message> {
-            let entry = bytes
-                .get(range.clone())
-                .ok_or_else(|| refused(dealer, format!("entry {share_index} is out of range")))?;
-            bcs::from_bytes(entry).map_err(|e| refused(dealer, e.to_string()))
-        })
-        .transpose()
+) -> MpcResult<count_check::AvssCiphertexts> {
+    count_check::avss_ciphertexts(bytes, avss_shape(shape, epoch, dealer)?)
+        .map_err(|e| refused(dealer, format!("count check: {e}")))
+}
+
+pub(crate) fn avss_message_with_ciphertexts(
+    shape: &ShapeParams,
+    epoch: u64,
+    dealer: &Address,
+    bytes: &[u8],
+) -> MpcResult<(avss::Message, count_check::AvssCiphertexts)> {
+    let ciphertexts = avss_ciphertexts(shape, epoch, dealer, bytes)?;
+    let message = bcs::from_bytes(bytes).map_err(|e| refused(dealer, e.to_string()))?;
+    Ok((message, ciphertexts))
 }
 
 pub(crate) fn rotation_entries(
