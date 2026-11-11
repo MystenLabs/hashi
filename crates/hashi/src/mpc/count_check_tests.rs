@@ -440,6 +440,15 @@ impl AvidPayloads {
     fn dispersal_shape(&self) -> DispersalShape<'_> {
         DispersalShape::new(PartyWeights(&self.weights), 0, 64, 1).unwrap()
     }
+
+    fn echo_shard_bytes(&self) -> usize {
+        let shape = self.dispersal_shape();
+        avid_shard_bytes(
+            usize::from(self.weights[3]),
+            shape.batch_size,
+            shape.data_shards,
+        )
+    }
 }
 
 static AVID: LazyLock<AvidPayloads> =
@@ -569,7 +578,12 @@ fn avid_payloads_pass_and_are_consumed_exactly() {
         );
     }
     assert_eq!(
-        check_echo(&bcs::to_bytes(&avid.echo).unwrap(), shape.weights, 0),
+        check_echo(
+            &bcs::to_bytes(&avid.echo).unwrap(),
+            shape.weights,
+            0,
+            avid.echo_shard_bytes()
+        ),
         Ok(())
     );
     assert_eq!(
@@ -638,7 +652,12 @@ fn avid_counts_follow_the_dealer_holder_and_sender() {
         })
     );
     assert_eq!(
-        check_echo(&bcs::to_bytes(&avid.echo).unwrap(), shape.weights, 4),
+        check_echo(
+            &bcs::to_bytes(&avid.echo).unwrap(),
+            shape.weights,
+            4,
+            avid.echo_shard_bytes()
+        ),
         Err(CountCheckError::WrongCount {
             field: "shards",
             found: 2,
@@ -715,6 +734,40 @@ fn dispersals_and_confirm_certificates_are_held_to_their_honest_lengths() {
 }
 
 #[test]
+fn echoes_are_held_to_the_exact_shard_size() {
+    let weights = PartyWeights(&[3, 2, 2, 1]);
+    let expected = avid_shard_bytes(2, 30, NonZeroUsize::new(4).unwrap());
+    let echo = |shard_lens: [usize; 3]| {
+        let mut bytes = uleb128(shard_lens.len());
+        for len in shard_lens {
+            bytes.extend(uleb128(len));
+            bytes.resize(bytes.len() + len, 0);
+        }
+        bytes.extend(uleb128(0));
+        bytes.extend(uleb128(0));
+        bytes
+    };
+    assert_eq!(
+        check_echo(&echo([expected; 3]), weights, 0, expected),
+        Ok(())
+    );
+    for found in [expected + 1, expected - 1] {
+        for wrong_shard in 0..3 {
+            let mut shard_lens = [expected; 3];
+            shard_lens[wrong_shard] = found;
+            assert_eq!(
+                check_echo(&echo(shard_lens), weights, 0, expected),
+                Err(CountCheckError::WrongBytes {
+                    field: "shards",
+                    found,
+                    expected,
+                })
+            );
+        }
+    }
+}
+
+#[test]
 fn merkle_paths_are_refused_where_bcs_or_compute_root_refuse_them() {
     let weights = PartyWeights(&[2, 2, 2, 1, 0]);
     let echo = |row_proof: &[u8]| {
@@ -729,7 +782,7 @@ fn merkle_paths_are_refused_where_bcs_or_compute_root_refuse_them() {
         let proof: merkle::MerkleProof =
             merkle::MerkleProof::new(&vec![merkle::Node::Empty; nodes]);
         (
-            check_echo(&echo(&path), weights, 0),
+            check_echo(&echo(&path), weights, 0, 0),
             proof.compute_root(&[], 0).is_some(),
         )
     };
@@ -748,7 +801,7 @@ fn merkle_paths_are_refused_where_bcs_or_compute_root_refuse_them() {
     let unknown = echo(&[1, 2]);
     assert!(bcs::from_bytes::<batch_avss_avid::Echo>(&unknown).is_err());
     assert_eq!(
-        check_echo(&unknown, weights, 0),
+        check_echo(&unknown, weights, 0, 0),
         Err(CountCheckError::BadVariant {
             field: "row_proof",
             variant: 2,
@@ -891,7 +944,7 @@ fn mutated_avid_payloads_never_panic(position: prop::sample::Index, byte: u8, cu
         let _ = check_avid_avss_message(&mutated, shape, 0);
         let _ = check_dispersal(&mutated, avid.dispersal_shape(), 0);
         let _ = check_confirm_certificate(&mutated, shape.weights);
-        let _ = check_echo(&mutated, shape.weights, 0);
+        let _ = check_echo(&mutated, shape.weights, 0, avid.echo_shard_bytes());
         let _ = check_avid_vote(&mutated, shape.weights);
         let _ = check_protocol_complaint(&mutated, shape.weights);
         let _ = check_avid_complaint_response(&mutated);
@@ -908,6 +961,7 @@ fn arbitrary_bytes_never_panic_in_avid_layouts(
     threshold: u16,
     batch_size_per_weight: u16,
     #[strategy(0u16..8)] party: u16,
+    #[strategy(0usize..1 << 16)] shard_bytes: usize,
 ) {
     let shape = AvidShape {
         threshold,
@@ -923,7 +977,7 @@ fn arbitrary_bytes_never_panic_in_avid_layouts(
     let _ = check_avid_avss_message(&bytes, shape, party);
     let _ = check_dispersal(&bytes, dispersal_shape, party);
     let _ = check_confirm_certificate(&bytes, shape.weights);
-    let _ = check_echo(&bytes, shape.weights, party);
+    let _ = check_echo(&bytes, shape.weights, party, shard_bytes);
     let _ = check_avid_vote(&bytes, shape.weights);
     let _ = check_protocol_complaint(&bytes, shape.weights);
     let _ = check_avid_complaint_response(&bytes);

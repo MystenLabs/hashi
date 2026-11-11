@@ -34,6 +34,8 @@ pub(crate) enum Refused {
     Hash,
     #[error("{0}")]
     Decode(String),
+    #[error("{0}")]
+    Config(String),
 }
 
 impl Refused {
@@ -45,6 +47,7 @@ impl Refused {
             Self::Member => "member",
             Self::Hash => "hash",
             Self::Decode(_) => "decode",
+            Self::Config(_) => "config",
         }
     }
 }
@@ -82,22 +85,16 @@ pub(crate) fn avid_bundle(
     };
     let current = shape.current();
     let responder = current.party_of(&signer).ok_or(Refused::Member)?;
-    bundle
-        .common
-        .as_ref()
-        .map_or(Ok(()), |common| {
-            count_check::check_avss_common_message(bytes(common), shape.avid_shape(), dealer)
-        })
-        .and_then(|()| {
-            bundle.echo.as_ref().map_or(Ok(()), |echo| {
-                count_check::check_echo(bytes(echo), current.weights(), responder)
-            })
-        })
-        .and_then(|()| {
-            bundle.avid_vote.as_ref().map_or(Ok(()), |vote| {
-                count_check::check_avid_vote(bytes(vote), current.weights())
-            })
-        })?;
+    if let Some(common) = &bundle.common {
+        count_check::check_avss_common_message(bytes(common), shape.avid_shape(), dealer)?;
+    }
+    if let Some(echo) = &bundle.echo {
+        let shard_bytes = own_echo_shard_bytes(shape, dealer)?;
+        count_check::check_echo(bytes(echo), current.weights(), responder, shard_bytes)?;
+    }
+    if let Some(vote) = &bundle.avid_vote {
+        count_check::check_avid_vote(bytes(vote), current.weights())?;
+    }
     match RetrieveMessagesResponse::try_from(response)
         .map_err(|e| Refused::Decode(e.to_string()))?
         .messages
@@ -105,6 +102,24 @@ pub(crate) fn avid_bundle(
         Messages::AvidNonceRetrieval(bundle) => Ok(bundle),
         _ => Err(not_avid()),
     }
+}
+
+fn own_echo_shard_bytes(shape: &ShapeParams, dealer: PartyId) -> Result<usize, Refused> {
+    let current = shape.current();
+    let own_party = current
+        .own_party()
+        .ok_or_else(|| Refused::Config("this node has no row in the committee".into()))?;
+    let dispersal = shape.avid_dispersal_shape(dealer).ok_or_else(|| {
+        Refused::Config(format!(
+            "epoch {} has no AVID data shards: reduced weight is at most twice max_faulty",
+            shape.epoch()
+        ))
+    })?;
+    Ok(count_check::avid_shard_bytes(
+        current.weight_of(own_party).into(),
+        dispersal.batch_size,
+        dispersal.data_shards,
+    ))
 }
 
 pub(crate) fn avss_complaint_response(
@@ -216,15 +231,412 @@ fn bytes(bcs: &Bcs) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE;
     use crate::mpc::rpc::public_output_response_limit;
+    use crate::mpc::shape_params::CommitteeShape;
+    use crate::mpc::types::AvidVoteMessagesHash;
     use crate::mpc::types::ComplaintResponse;
+    use crate::mpc::types::EncryptionGroupElement;
+    use crate::mpc::types::ProtocolComplaint;
+    use crate::mpc::types::ProtocolType;
     use crate::mpc::types::PublicMpcOutput;
+    use fastcrypto::error::FastCryptoResult;
     use fastcrypto::groups::GroupElement;
+    use fastcrypto::hash::Blake2b256;
+    use fastcrypto::merkle::MerkleProof;
+    use fastcrypto::merkle::MerkleTree;
+    use fastcrypto::traits::ToFromBytes as _;
+    use fastcrypto_tbls::ecies_v1::PrivateKey;
+    use fastcrypto_tbls::ecies_v1::PublicKey;
+    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::polynomial::Eval;
+    use fastcrypto_tbls::threshold_schnorr::Certificate;
     use fastcrypto_tbls::threshold_schnorr::G;
+    use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_tbls::threshold_schnorr::VerifiedCertificate;
     use fastcrypto_tbls::types::ShareIndex;
+    use hashi_types::committee::BLS12381AggregateSignature;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::RuntimeCommittee;
+    use hashi_types::committee::SignedMessage;
     use prost::Message;
+    use std::collections::BTreeSet;
+
+    const WEIGHTS: [u16; 7] = [2; 7];
+    const THRESHOLD: u16 = 10;
+    const MAX_FAULTY: u16 = 2;
+    const BATCH_SIZE_PER_WEIGHT: u16 = 3;
+    const RECIPIENT: PartyId = 0;
+    const DEALER: PartyId = 1;
+    const WRONG_SIZE_SENDER: PartyId = 2;
+
+    #[derive(Clone)]
+    struct TestCert<P> {
+        signers: BTreeSet<PartyId>,
+        payload: P,
+    }
+
+    impl<P> Certificate for TestCert<P> {
+        type Payload = P;
+
+        fn signers(&self) -> &BTreeSet<PartyId> {
+            &self.signers
+        }
+
+        fn payload(&self) -> &P {
+            &self.payload
+        }
+
+        fn verify(&self) -> FastCryptoResult<()> {
+            Ok(())
+        }
+    }
+
+    struct Retrieval {
+        committee: RuntimeCommittee,
+        nodes: Nodes<EncryptionGroupElement>,
+        receivers: Vec<batch_avss_avid::Receiver>,
+        avss_messages: Vec<batch_avss_avid::AvssMessage>,
+        verified_commons: BTreeMap<PartyId, batch_avss_avid::VerifiedAvssCommonMessage>,
+        responses: BTreeMap<PartyId, proto::RetrieveMessagesResponse>,
+        avid_cert: VerifiedCertificate<TestCert<batch_avss_avid::AvidVote>>,
+    }
+
+    impl Retrieval {
+        fn shape(&self, own_address: Address, max_faulty: u16) -> ShapeParams {
+            ShapeParams::new(
+                1,
+                0,
+                ProtocolType::NonceGeneration { batch_index: 0 },
+                BATCH_SIZE_PER_WEIGHT,
+                1,
+                max_faulty,
+                CommitteeShape::new(&self.committee, &self.nodes, THRESHOLD, &own_address),
+                None,
+                None,
+            )
+        }
+    }
+
+    fn address(party: PartyId) -> Address {
+        Address::new([party as u8; 32])
+    }
+
+    fn avid_response(common: Bcs, echo: Option<Bcs>, vote: Bcs) -> proto::RetrieveMessagesResponse {
+        proto::RetrieveMessagesResponse {
+            messages: Some(
+                proto::retrieve_messages_response::Messages::AvidNonceRetrievalMessage(
+                    proto::AvidNonceRetrievalMessage {
+                        common: Some(common),
+                        echo,
+                        avid_vote: Some(vote),
+                    },
+                ),
+            ),
+        }
+    }
+
+    fn with_committed_shard_of_len(
+        dispersals: &[batch_avss_avid::Dispersal],
+        disperser: usize,
+        len: usize,
+    ) -> Vec<batch_avss_avid::Dispersal> {
+        type Row = (Vec<Vec<u8>>, MerkleProof, MerkleProof);
+        let mut leaves: Vec<Vec<Vec<u8>>> = dispersals
+            .iter()
+            .map(|dispersal| {
+                let row: Row =
+                    bcs::from_bytes(&bcs::to_bytes(&dispersal[&RECIPIENT]).unwrap()).unwrap();
+                row.0
+            })
+            .collect();
+        leaves[disperser][0] = vec![0; len];
+        let row_tree = MerkleTree::<Blake2b256>::build_from_unserialized(leaves.iter()).unwrap();
+        let top_tree =
+            MerkleTree::<Blake2b256>::build_from_unserialized([row_tree.root()].iter()).unwrap();
+        leaves
+            .iter()
+            .enumerate()
+            .map(|(leaf, shards)| {
+                let row = (
+                    shards,
+                    row_tree.get_proof(leaf).unwrap(),
+                    top_tree.get_proof(0).unwrap(),
+                );
+                BTreeMap::from([(
+                    RECIPIENT,
+                    bcs::from_bytes(&bcs::to_bytes(&row).unwrap()).unwrap(),
+                )])
+            })
+            .collect()
+    }
+
+    fn retrieval(committed_shard_len: Option<usize>) -> Retrieval {
+        let mut rng = rand::thread_rng();
+        let keys: Vec<PrivateKey<EncryptionGroupElement>> =
+            WEIGHTS.iter().map(|_| PrivateKey::new(&mut rng)).collect();
+        let public_keys: Vec<_> = keys.iter().map(PublicKey::from_private_key).collect();
+        let nodes = Nodes::new(
+            WEIGHTS
+                .iter()
+                .zip(&public_keys)
+                .enumerate()
+                .map(|(id, (&weight, pk))| Node {
+                    id: id as u16,
+                    pk: pk.clone(),
+                    weight,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let committee = RuntimeCommittee::from(Committee::new(
+            public_keys
+                .iter()
+                .enumerate()
+                .map(|(party, pk)| {
+                    CommitteeMember::new(
+                        address(party as PartyId),
+                        Bls12381PrivateKey::generate(&mut rng).public_key(),
+                        pk.clone(),
+                        1,
+                    )
+                })
+                .collect(),
+            1,
+            0,
+            3333,
+        ));
+        let params = Parameters {
+            t: THRESHOLD,
+            f: MAX_FAULTY,
+        };
+        let sid = b"response-checks-avid".to_vec();
+        let dealer = batch_avss_avid::Dealer::new(
+            nodes.clone(),
+            DEALER,
+            params,
+            sid.clone(),
+            BATCH_SIZE_PER_WEIGHT,
+        )
+        .unwrap();
+        let receivers: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(id, key)| {
+                batch_avss_avid::Receiver::new(
+                    nodes.clone(),
+                    id as PartyId,
+                    DEALER,
+                    params,
+                    sid.clone(),
+                    key.clone(),
+                    BATCH_SIZE_PER_WEIGHT,
+                )
+                .unwrap()
+            })
+            .collect();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+        let avss_messages: Vec<_> = (0..WEIGHTS.len() as PartyId)
+            .map(|id| builder.message_for(id).unwrap())
+            .collect();
+        let signers: BTreeSet<PartyId> = (0..WEIGHTS.len() as PartyId)
+            .filter(|id| *id != RECIPIENT)
+            .collect();
+        let mut verified_commons = BTreeMap::new();
+        let mut avss_vote = None;
+        for &id in &signers {
+            let (_, vote, verified_common) = receivers[usize::from(id)]
+                .process_avss_message(&avss_messages[usize::from(id)])
+                .unwrap();
+            avss_vote = Some(vote);
+            verified_commons.insert(id, verified_common);
+        }
+        let avid_builder = dealer
+            .create_avid_messages(
+                &builder,
+                TestCert {
+                    signers: signers.clone(),
+                    payload: avss_vote.unwrap(),
+                },
+            )
+            .unwrap();
+        let mut messages: Vec<_> = (0..WEIGHTS.len() as PartyId)
+            .map(|id| avid_builder.message_for(id).unwrap())
+            .collect();
+        if let Some(len) = committed_shard_len {
+            let dispersals: Vec<_> = messages.iter().map(|m| m.dispersal.clone()).collect();
+            let recommitted =
+                with_committed_shard_of_len(&dispersals, usize::from(WRONG_SIZE_SENDER), len);
+            for (message, dispersal) in messages.iter_mut().zip(recommitted) {
+                message.dispersal = dispersal;
+            }
+        }
+        let common = Bcs::from(bcs::to_bytes(&avss_messages[0].common).unwrap());
+        let mut votes = Vec::new();
+        let mut responses = BTreeMap::new();
+        for message in messages.into_iter().skip(1).zip(signers.iter().copied()) {
+            let (message, id) = message;
+            let (echo_builder, vote) = receivers[usize::from(id)]
+                .process_avid_message(&verified_commons[&id], message)
+                .unwrap();
+            let echo = echo_builder.create_echo(RECIPIENT).unwrap();
+            responses.insert(
+                id,
+                avid_response(
+                    common.clone(),
+                    Some(Bcs::from(bcs::to_bytes(&echo).unwrap())),
+                    Bcs::from(bcs::to_bytes(&vote).unwrap()),
+                ),
+            );
+            votes.push(vote);
+        }
+        let avid_cert = TestCert {
+            signers,
+            payload: votes.remove(0),
+        }
+        .to_verified()
+        .unwrap();
+        Retrieval {
+            committee,
+            nodes,
+            receivers,
+            avss_messages,
+            verified_commons,
+            responses,
+            avid_cert,
+        }
+    }
+
+    fn with_echo(
+        response: &proto::RetrieveMessagesResponse,
+        echo: Option<Vec<u8>>,
+    ) -> proto::RetrieveMessagesResponse {
+        let Some(proto::retrieve_messages_response::Messages::AvidNonceRetrievalMessage(bundle)) =
+            &response.messages
+        else {
+            panic!("not an AVID bundle");
+        };
+        avid_response(
+            bundle.common.clone().unwrap(),
+            echo.map(Bcs::from),
+            bundle.avid_vote.clone().unwrap(),
+        )
+    }
+
+    #[test]
+    fn avid_bundles_with_an_echo_fail_closed_without_a_row_size() {
+        let session = retrieval(None);
+        let sender = 3;
+        let honest = &session.responses[&sender];
+        let refused = |shape: &ShapeParams, response: &proto::RetrieveMessagesResponse| {
+            avid_bundle(address(sender), shape, DEALER, response)
+                .err()
+                .map(|refused| refused.label())
+        };
+        let no_data_shards = session.shape(address(RECIPIENT), 7);
+        let no_row = session.shape(Address::new([0xee; 32]), MAX_FAULTY);
+        for shape in [&no_data_shards, &no_row] {
+            assert_eq!(refused(shape, honest), Some("config"));
+            assert_eq!(refused(shape, &with_echo(honest, None)), None);
+        }
+    }
+
+    #[test]
+    fn a_retrieval_with_one_wrong_sized_echo_still_recovers_the_shares() {
+        let limit = DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE;
+        let session = retrieval(Some(limit));
+        let shape = session.shape(address(RECIPIENT), MAX_FAULTY);
+        let receiver = &session.receivers[usize::from(RECIPIENT)];
+        let mut refused = Vec::new();
+        let mut bundles = Vec::new();
+        for (&sender, response) in &session.responses {
+            match avid_bundle(address(sender), &shape, DEALER, response) {
+                Ok(bundle) => bundles.push((sender, bundle)),
+                Err(Refused::Count(CountCheckError::WrongBytes { .. })) => refused.push(sender),
+                Err(other) => panic!("unexpected refusal: {other}"),
+            }
+        }
+        assert_eq!(refused, [WRONG_SIZE_SENDER]);
+
+        let verified_common = receiver
+            .verify_common_message(&session.avid_cert, bundles[0].1.common.clone().unwrap())
+            .unwrap();
+        let echoes: Vec<_> = bundles
+            .iter()
+            .map(|(sender, bundle)| {
+                receiver
+                    .verify_avid_echo_message(
+                        bundle.echo.clone().unwrap(),
+                        *sender,
+                        &session.avid_cert,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let mut rng = rand::thread_rng();
+        let batch_avss_avid::DecodeAndDecryptOutcome::InvalidDispersal(complaint) = receiver
+            .decode_and_decrypt(&echoes, &verified_common, &mut rng)
+            .unwrap()
+        else {
+            panic!("expected a dispersal complaint");
+        };
+
+        let protocol_complaint = bcs::to_bytes(&ProtocolComplaint::AvidBlame {
+            complaint: complaint.clone(),
+            vote_cert: SignedMessage::new(
+                1,
+                AvidVoteMessagesHash {
+                    dealer_address: address(DEALER),
+                    messages_hash: MessagesHash::from([7; 32]),
+                    batch_index: 0,
+                },
+                BLS12381AggregateSignature::default().as_bytes(),
+                &[0b0111_1111],
+            )
+            .unwrap(),
+        })
+        .unwrap();
+        count_check::check_protocol_complaint(&protocol_complaint, shape.current().weights())
+            .unwrap();
+        let request = proto::ComplainRequest {
+            complaint: Some(Bcs::from(protocol_complaint)),
+            ..Default::default()
+        };
+        assert!(request.encoded_len() < limit);
+
+        let responses = bundles
+            .iter()
+            .map(|(sender, _)| {
+                let response = session.receivers[usize::from(*sender)]
+                    .handle_avid_complaint(
+                        &complaint,
+                        RECIPIENT,
+                        &session.verified_commons[sender],
+                        &session.avid_cert,
+                        session.avss_messages[usize::from(*sender)]
+                            .ciphertext
+                            .clone(),
+                        &mut rng,
+                    )
+                    .unwrap();
+                receiver
+                    .verify_complaint_response(*sender, response, &verified_common)
+                    .unwrap()
+            })
+            .collect();
+        let recovered = receiver.recover(&verified_common, responses).unwrap();
+        let (dealt, _, _) = receiver
+            .process_avss_message(&session.avss_messages[usize::from(RECIPIENT)])
+            .unwrap();
+        assert_eq!(
+            bcs::to_bytes(&recovered.my_shares).unwrap(),
+            bcs::to_bytes(&dealt.my_shares).unwrap()
+        );
+    }
 
     fn honest_public_output(total_weight: u16) -> proto::GetPublicMpcOutputResponse {
         proto::GetPublicMpcOutputResponse::from(&GetPublicMpcOutputResponse {

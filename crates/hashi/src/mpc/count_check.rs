@@ -151,11 +151,11 @@ impl<'a> DispersalShape<'a> {
 #[derive(Clone, Copy)]
 struct ExactShards {
     shard_bytes: usize,
-    row_depth: usize,
-    top_depth: usize,
+    row_depth: Option<usize>,
+    top_depth: Option<usize>,
 }
 
-fn avid_shard_bytes(row_weight: usize, batch_size: usize, data_shards: NonZeroUsize) -> usize {
+pub fn avid_shard_bytes(row_weight: usize, batch_size: usize, data_shards: NonZeroUsize) -> usize {
     let share_batch = uleb128_len(batch_size) + (batch_size + 1) * SCALAR;
     let payload = uleb128_len(row_weight) + row_weight * share_batch;
     (RS_LENGTH_PREFIX + payload).div_ceil(RS_ELEMENT * data_shards.get()) * RS_ELEMENT
@@ -237,8 +237,8 @@ pub fn check_dispersal(
 ) -> CountCheckResult<()> {
     const FIELD: &str = "dispersal";
     let shards = shape.weights.weight_of(FIELD, holder)?;
-    let row_depth = merkle_depth(shape.weights.num_nodes());
-    let top_depth = merkle_depth(Cursor::new(bytes).length(FIELD)?);
+    let row_depth = Some(merkle_depth(shape.weights.num_nodes()));
+    let top_depth = Some(merkle_depth(Cursor::new(bytes).length(FIELD)?));
     let mut cursor = Cursor::new(bytes);
     walk_u16_map(
         &mut cursor,
@@ -263,10 +263,20 @@ pub fn check_confirm_certificate(bytes: &[u8], weights: PartyWeights<'_>) -> Cou
     cursor.finish()
 }
 
-pub fn check_echo(bytes: &[u8], weights: PartyWeights<'_>, sender: u16) -> CountCheckResult<()> {
+pub fn check_echo(
+    bytes: &[u8],
+    weights: PartyWeights<'_>,
+    sender: u16,
+    shard_bytes: usize,
+) -> CountCheckResult<()> {
     let shards = weights.weight_of("echo", sender)?;
+    let exact = ExactShards {
+        shard_bytes,
+        row_depth: None,
+        top_depth: None,
+    };
     let mut cursor = Cursor::new(bytes);
-    walk_authenticated_shards(&mut cursor, shards, None)?;
+    walk_authenticated_shards(&mut cursor, shards, Some(exact))?;
     cursor.finish()
 }
 
@@ -391,8 +401,8 @@ fn walk_authenticated_shards(
         exact.map_or(Ok(()), |exact| expect_bytes(SHARDS, len, exact.shard_bytes))?;
         cursor.take(SHARDS, len)?;
     }
-    walk_merkle_path(cursor, "row_proof", exact.map(|exact| exact.row_depth))?;
-    walk_merkle_path(cursor, "top_proof", exact.map(|exact| exact.top_depth))
+    walk_merkle_path(cursor, "row_proof", exact.and_then(|exact| exact.row_depth))?;
+    walk_merkle_path(cursor, "top_proof", exact.and_then(|exact| exact.top_depth))
 }
 
 fn walk_merkle_path(
