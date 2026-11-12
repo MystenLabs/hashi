@@ -23,7 +23,7 @@
 //!       This step is first, so each later step sees only open machines and a current pool.
 //!    2. Check Bitcoin when the daily pool check is due.
 //!    3. Check that the UTXO pool backs the hBTC supply.
-//!    4. Report timing violations and judge suspect spends. These two have no order rule.
+//!    4. Report timing violations and stalled deposit approvals, and judge suspect spends. These have no order rule.
 //!    5. Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
 //!       This step comes after steps 2 and 3, so a check that succeeds in this tick is not stale.
 //!    6. Save the snapshot once `SNAPSHOT_SAVE_INTERVAL` seconds have passed since the last save.
@@ -163,6 +163,8 @@ pub struct Auditor {
     hbtc_supply_above_pool_since: Option<UnixSeconds>,
     /// When the hBTC supply was last read. Startup reads it.
     last_hbtc_supply_read: UnixSeconds,
+    /// Move's time of the latest Sui `DepositApproved`.
+    last_deposit_approval: Option<UnixSeconds>,
 }
 
 impl Auditor {
@@ -219,6 +221,7 @@ impl Auditor {
             last_snapshot_save: 0,
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: 0,
+            last_deposit_approval: None,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -261,6 +264,7 @@ impl Auditor {
             deposits: self.pending_deposits.values().cloned().collect(),
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
             hbtc_supply_above_pool_since: self.hbtc_supply_above_pool_since,
+            last_deposit_approval: self.last_deposit_approval,
         }
     }
 
@@ -274,6 +278,7 @@ impl Auditor {
         }
         self.suspect_spends.extend(state.suspect_spends);
         self.hbtc_supply_above_pool_since = state.hbtc_supply_above_pool_since;
+        self.last_deposit_approval = state.last_deposit_approval;
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
@@ -310,6 +315,7 @@ impl Auditor {
     /// the approval. Once it closed, the pool has its answer.
     fn ingest_deposit_approved(&mut self, event: SuiDepositApprovedEvent) -> Vec<MonitorFinding> {
         self.note_fresh_approval(&event, now_timestamp_secs());
+        self.last_deposit_approval = self.last_deposit_approval.max(Some(event.timestamp_secs));
         match self.pending_deposits.get_mut(&event.request_id) {
             Some(sm) => sm.add_sui_approval(event, &self.cfg.timing),
             None => self
@@ -442,6 +448,16 @@ impl Auditor {
         self.report_findings("timing", &violations);
     }
 
+    /// Report a stall of deposit approvals.
+    fn check_deposit_approvals(&self) {
+        let stall = self.utxo_pool.approval_stall(
+            self.last_deposit_approval,
+            self.rpc_pollers.sui_read_until(),
+            &self.cfg.timing,
+        );
+        self.report_findings("deposits", stall.as_slice());
+    }
+
     /// Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
     fn check_staleness(&self) {
         let now = now_timestamp_secs();
@@ -467,8 +483,9 @@ impl Auditor {
         self.gc_and_update_pool();
         self.check_utxo_pool_if_due();
         self.check_hbtc_supply().await;
-        // These two have no order rule.
+        // These have no order rule.
         self.check_timing();
+        self.check_deposit_approvals();
         self.check_suspect_spends();
         // After the checks, so a check that succeeds in this tick is not stale.
         self.check_staleness();
@@ -646,6 +663,7 @@ mod tests {
             last_snapshot_save: approved_at,
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: approved_at,
+            last_deposit_approval: None,
         }
     }
 
@@ -861,6 +879,7 @@ mod tests {
             last_snapshot_save: cursor,
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: cursor,
+            last_deposit_approval: None,
         }
     }
 
@@ -900,15 +919,11 @@ mod tests {
     }
 
     #[test]
-    fn a_late_deposit_is_essential_and_an_unapproved_one_is_not() {
+    fn a_late_deposit_is_essential_and_a_stall_is_not() {
         let sui = approval_of(&deposit_request(), 200);
-        let not_approved = MonitorFinding::DepositNotApproved {
-            outpoint: sui.deposit_id.into(),
-            requested_amount: 1_000,
-            paid_amount: 1_000,
-            requested_at: 100,
-            block_time: 200,
-            causes: vec![],
+        let stalled = MonitorFinding::DepositApprovalStalled {
+            outpoints: vec![sui.deposit_id.into()],
+            last_approval: None,
         };
         let late = MonitorFinding::DepositLate {
             sui: sui.clone(),
@@ -917,7 +932,7 @@ mod tests {
         };
 
         assert!(late.is_essential());
-        assert!(!not_approved.is_essential());
+        assert!(!stalled.is_essential());
         assert!(MonitorFinding::DepositUnbacked { sui }.is_essential());
     }
 

@@ -76,6 +76,8 @@ pub struct AuditState {
     pub suspect_spends: Vec<(OutPoint, SuspectSpend)>,
     /// Since when the hBTC supply has exceeded the pool value, if it does.
     pub hbtc_supply_above_pool_since: Option<UnixSeconds>,
+    /// Move's time of the latest Sui `DepositApproved`.
+    pub last_deposit_approval: Option<UnixSeconds>,
 }
 
 impl Snapshot {
@@ -244,6 +246,7 @@ mod tests {
                 },
             )],
             hbtc_supply_above_pool_since: Some(1_700_000_600),
+            last_deposit_approval: Some(1_700_000_500),
         }
     }
 
