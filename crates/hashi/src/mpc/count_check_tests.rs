@@ -463,9 +463,13 @@ impl AvidPayloads {
 static AVID: LazyLock<AvidPayloads> =
     LazyLock::new(|| avid_payloads(vec![2, 2, 2, 1, 0], BTreeSet::from([0, 1, 2])));
 
-fn avid_payloads(weights: Vec<u16>, signers: BTreeSet<PartyId>) -> AvidPayloads {
+fn avid_nodes(
+    weights: &[u16],
+) -> (
+    Vec<PrivateKey<EncryptionGroupElement>>,
+    Nodes<EncryptionGroupElement>,
+) {
     let mut rng = rand::thread_rng();
-    let params = Parameters { t: 4, f: 1 };
     let keys: Vec<PrivateKey<EncryptionGroupElement>> =
         weights.iter().map(|_| PrivateKey::new(&mut rng)).collect();
     let nodes = Nodes::new(
@@ -481,6 +485,13 @@ fn avid_payloads(weights: Vec<u16>, signers: BTreeSet<PartyId>) -> AvidPayloads 
             .collect(),
     )
     .unwrap();
+    (keys, nodes)
+}
+
+fn avid_payloads(weights: Vec<u16>, signers: BTreeSet<PartyId>) -> AvidPayloads {
+    let mut rng = rand::thread_rng();
+    let params = Parameters { t: 4, f: 1 };
+    let (keys, nodes) = avid_nodes(&weights);
     let sid = b"count-check-avid".to_vec();
     let dealer = batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), 64).unwrap();
     let receiver =
@@ -733,27 +744,12 @@ fn dispersals_and_confirm_certificates_are_held_to_their_honest_lengths() {
 }
 
 fn avid_round_one_messages(weights: &[u16], dealer: PartyId) -> Vec<batch_avss_avid::AvssMessage> {
-    let mut rng = rand::thread_rng();
-    let keys: Vec<PrivateKey<EncryptionGroupElement>> =
-        weights.iter().map(|_| PrivateKey::new(&mut rng)).collect();
-    let nodes = Nodes::new(
-        weights
-            .iter()
-            .zip(&keys)
-            .enumerate()
-            .map(|(id, (&weight, key))| Node {
-                id: id as u16,
-                pk: PublicKey::from_private_key(key),
-                weight,
-            })
-            .collect(),
-    )
-    .unwrap();
+    let (_, nodes) = avid_nodes(weights);
     let params = Parameters { t: 4, f: 1 };
     let builder =
         batch_avss_avid::Dealer::new(nodes, dealer, params, b"count-check-avid".to_vec(), 64)
             .unwrap()
-            .create_avss_messages(&mut rng)
+            .create_avss_messages(&mut rand::thread_rng())
             .unwrap();
     (0..weights.len() as u16)
         .map(|receiver| builder.message_for(receiver).unwrap())
