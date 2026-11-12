@@ -1795,6 +1795,7 @@ struct InMemoryPublicMessagesStore {
     avid_round_stored: std::sync::Mutex<HashMap<(u32, Address), AvidRoundState>>,
     avid_held_echoes_stored: std::sync::Mutex<HashMap<(u32, Address), HeldAvidEchoes>>,
     avid_dealer_builder_stored: std::sync::Mutex<HashMap<u32, batch_avss_avid::AvssMessageBuilder>>,
+    avid_round_state_reads: AtomicUsize,
     fail_avid_round_state_reads: bool,
     fail_avid_held_echoes_reads: bool,
     fail_avid_round_state_writes: bool,
@@ -1808,6 +1809,7 @@ impl InMemoryPublicMessagesStore {
             avid_round_stored: std::sync::Mutex::new(HashMap::new()),
             avid_held_echoes_stored: std::sync::Mutex::new(HashMap::new()),
             avid_dealer_builder_stored: std::sync::Mutex::new(HashMap::new()),
+            avid_round_state_reads: AtomicUsize::new(0),
             fail_avid_round_state_reads: false,
             fail_avid_held_echoes_reads: false,
             fail_avid_round_state_writes: false,
@@ -1899,6 +1901,7 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        self.avid_round_state_reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_avid_round_state_reads {
             return Err(anyhow::anyhow!("avid round state read failure"));
         }
@@ -15877,6 +15880,71 @@ fn a_dealer_over_the_avid_cap_loses_its_lowest_unprotected_index() {
             .read_avid_round_state(3, &dealer_addr)
             .unwrap()
             .is_some()
+    );
+}
+
+#[test]
+fn an_evicted_avid_round_is_read_once_and_cached_under_the_cap() {
+    let setup = TestSetup::new(6);
+    let store = Arc::new(InMemoryPublicMessagesStore::new());
+    let mut voter = setup.create_manager_with_store(1, store.clone());
+    let dealt: Vec<_> = (0..5)
+        .map(|batch_index| {
+            let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+            voter
+                .handle_send_messages_request(
+                    fx.dealer_addr,
+                    &SendMessagesRequest {
+                        messages: fx.optimistic[1].1.clone(),
+                    },
+                )
+                .unwrap();
+            fx
+        })
+        .collect();
+    let dealer_addr = dealt[0].dealer_addr;
+    let rounds_in_memory = |manager: &MpcManager| {
+        let mut rounds: Vec<u32> = manager
+            .current_avid_round_state
+            .keys()
+            .filter(|(_, dealer)| *dealer == dealer_addr)
+            .map(|(batch_index, _)| *batch_index)
+            .collect();
+        rounds.sort_unstable();
+        rounds
+    };
+    assert_eq!(rounds_in_memory(&voter), [1, 2, 3, 4]);
+
+    let dispersals = dealt[0]
+        .dealer
+        .create_avid_nonce_dispersal_messages(&dealt[0].builder, dealt[0].confirm_cert.clone(), 0)
+        .unwrap();
+    let reads_before = store.avid_round_state_reads.load(Ordering::Relaxed);
+    voter
+        .handle_send_messages_request(
+            dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.avid_round_state_reads.load(Ordering::Relaxed) - reads_before,
+        1,
+        "a dispersal for a round out of memory must read its stored state once"
+    );
+    assert_eq!(rounds_in_memory(&voter), [0, 2, 3, 4]);
+
+    assert!(
+        voter
+            .get_and_cache_avid_round_state(1, &dealer_addr)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        rounds_in_memory(&voter),
+        [1, 2, 3, 4],
+        "a round read back from the store must stay under the per-dealer cap"
     );
 }
 
