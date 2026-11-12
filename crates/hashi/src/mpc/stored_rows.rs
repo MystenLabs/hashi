@@ -127,7 +127,7 @@ pub(crate) fn avid_round_state(
     decode(
         dealer,
         bytes,
-        count_check::check_avid_avss_message(bytes, shape.avid_shape(), dealer_party),
+        count_check::check_avid_round_state(bytes, shape.avid_shape(), dealer_party),
     )
 }
 

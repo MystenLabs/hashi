@@ -20389,6 +20389,120 @@ fn send_messages_count_checks_before_the_manager_lock() {
 }
 
 #[test]
+fn send_messages_refuses_a_wrong_length_avid_ciphertext_before_the_manager_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
+    let batch_index = 1;
+    let voter = 3;
+    let voter_addr = setup.address(voter);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 4]);
+    let manager = setup.create_manager(voter);
+    let nodes = &manager.mpc_config.nodes;
+    assert_ne!(
+        nodes.weight_of(0).unwrap(),
+        nodes.weight_of(voter as u16).unwrap()
+    );
+    let epoch = manager.mpc_config.epoch;
+    let addressed = |messages: &[(Address, Messages)]| {
+        messages
+            .iter()
+            .find(|(addr, _)| *addr == voter_addr)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let honest_round_one = addressed(&fx.optimistic);
+    let honest_dispersal = addressed(
+        &fx.dealer
+            .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+            .unwrap(),
+    );
+    let honest_len = extract_optimistic(&honest_round_one).ciphertext.0.len();
+    let mut padded = extract_optimistic(&honest_round_one).clone();
+    padded.ciphertext.0.push(0);
+    let padded_dispersal = with_optimistic_message(&honest_dispersal, Some(padded.clone()));
+    let padded_round_one = Messages::NonceGenerationAvid(AvidNonceMessage {
+        batch_index,
+        kind: AvidNonceMessageKind::Optimistic(padded),
+    });
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let metrics = hashi.metrics.clone();
+    let service = crate::grpc::HttpService::new(hashi);
+    let send = |messages: Messages| {
+        let mut request = tonic::Request::new(SendMessagesRequest { messages }.to_proto(epoch));
+        request.extensions_mut().insert(fx.dealer_addr);
+        let service = service.clone();
+        rt.spawn(async move {
+            use proto::mpc_service_server::MpcService;
+            service.send_messages(request).await
+        })
+    };
+
+    let held = mpc_lock.write().unwrap();
+    let refusals = [padded_round_one, padded_dispersal].map(|messages| {
+        let handler = send(messages);
+        rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), handler).await })
+    });
+    drop(held);
+    for refused in refusals {
+        let refused = refused
+            .expect("the refusal waited for the manager lock")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert!(
+            refused.message().contains(&format!(
+                "ciphertext: {} bytes, expected {honest_len}",
+                honest_len + 1
+            )),
+            "{}",
+            refused.message()
+        );
+    }
+    assert_eq!(
+        metrics
+            .mpc_peer_refusals_total
+            .with_label_values(&[&fx.dealer_addr.to_string(), "request"])
+            .get(),
+        2
+    );
+    assert_eq!(
+        metrics
+            .mpc_refusals_total
+            .with_label_values(&[
+                "request",
+                "send_messages",
+                crate::metrics::MPC_LABEL_NONCE_GENERATION,
+                "count",
+            ])
+            .get(),
+        2
+    );
+
+    for messages in [honest_round_one, honest_dispersal] {
+        let accepted = rt.block_on(send(messages)).unwrap();
+        assert!(accepted.is_ok(), "{accepted:?}");
+    }
+}
+
+#[test]
 fn a_rotation_map_is_checked_before_the_manager_lock() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

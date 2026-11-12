@@ -106,7 +106,12 @@ fn check_avid_nonce_message(
         encoded.map_or(Ok(()), |payload| {
             count_checked(
                 sender,
-                count_check::check_avid_avss_message(bytes(payload), shape.avid_shape(), dealer),
+                count_check::check_avid_avss_message(
+                    bytes(payload),
+                    shape.avid_shape(),
+                    dealer,
+                    holder,
+                ),
             )
         })
     };
