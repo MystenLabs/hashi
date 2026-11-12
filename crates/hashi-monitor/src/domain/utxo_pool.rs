@@ -28,8 +28,8 @@
 //!    it.
 //! 7. Once a day, `check` asks Bitcoin about every held UTXO. It reports
 //!    spent and missing UTXOs, and old ones in Move's pool.
-//!    `unapproved_past_deadline` lists the unapproved deposits that are past
-//!    their deadline. `approval_stall` reports overdue ones that look valid.
+//!    `log_unapproved_past_deadline` logs the unapproved deposits that are
+//!    past their deadline. `approval_stall` reports overdue ones that look valid.
 //! 8. The pool keeps no record of spent UTXOs. Move refuses a request after
 //!    the first DC, so every add for a UTXO comes before its spend.
 //!
@@ -228,17 +228,16 @@ impl UtxoPool {
         }
     }
 
-    /// The unapproved deposits whose latest request is more than
+    /// Log each unapproved deposit whose latest request is more than
     /// `deposit_request_watch` before `sui_cursor`. The Sui cursor makes sure
-    /// that an approval not yet read is not counted as missing.
-    pub fn unapproved_past_deadline(
-        &self,
-        sui_cursor: UnixSeconds,
-        timing: &Timing,
-    ) -> Vec<DepositNotApproved> {
-        self.unapproved_deposits(timing)
+    /// that an approval not yet read is not logged as missing.
+    pub fn log_unapproved_past_deadline(&self, sui_cursor: UnixSeconds, timing: &Timing) {
+        for deposit in self
+            .unapproved_deposits(timing)
             .filter(|deposit| deposit.requested_at + timing.deposit_request_watch < sui_cursor)
-            .collect()
+        {
+            tracing::info!(%deposit, "deposit not approved");
+        }
     }
 
     /// A `DepositApprovalStalled` if at least `MIN_STALLED_DEPOSITS` deposits
@@ -1037,28 +1036,6 @@ mod tests {
         // A later unapproved add does not undo the approval.
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 400)).is_empty());
         assert_eq!(pool.get(&outpoint(1)).unwrap().origin, UtxoOrigin::Deposit);
-    }
-
-    #[test]
-    fn an_unapproved_deposit_past_the_watch_at_the_sui_cursor_is_listed() {
-        // `Timing::for_tests` watches a request for 1_000 s.
-        let mut pool = pool_with_one();
-        assert!(pool.add_deposit(&unapproved(2, 2_000, 0, 100)).is_empty());
-        let timing = Timing::for_tests();
-
-        assert!(pool.unapproved_past_deadline(1_100, &timing).is_empty());
-        let not_approved = vec![DepositNotApproved {
-            outpoint: outpoint(2),
-            requested_amount: 2_000,
-            paid_amount: 2_000,
-            requested_at: 100,
-            block_time: 0,
-            causes: vec![UnapprovedCause::SanctionOrWithheld],
-        }];
-        assert_eq!(pool.unapproved_past_deadline(1_101, &timing), not_approved);
-
-        pool.mark_approved(DepositId::new(txid(2), 0));
-        assert!(pool.unapproved_past_deadline(1_101, &timing).is_empty());
     }
 
     #[test]

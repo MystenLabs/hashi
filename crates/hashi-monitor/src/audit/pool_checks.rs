@@ -63,11 +63,7 @@ impl Auditor {
         // Record completion time so Sui polling must cover the whole lookup period.
         let now = now_timestamp_secs();
         let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
-        for deposit in
-            pool.unapproved_past_deadline(self.rpc_pollers.sui_read_until(), &self.cfg.timing)
-        {
-            tracing::info!(%deposit, "deposit not approved");
-        }
+        pool.log_unapproved_past_deadline(self.rpc_pollers.sui_read_until(), &self.cfg.timing);
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),
