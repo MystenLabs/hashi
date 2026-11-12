@@ -380,10 +380,10 @@ threshold. With defaults: `30,000 - 546 = 29,454 sats` per request.
 
 ## Adding a parameter without a package upgrade
 
-The Move package reads only the keys documented on this page; any other key
-is opaque to it, and the node software consumes it. To make a node-side
-setting governable, pass an `AddConfig` proposal naming the key, its initial
-value (which fixes the key's type for later updates), and the store: the epoch
-config when every node must agree on the value for the whole epoch, the
-instant config otherwise. A node reads an absent key as its built-in default,
-so you can add the key before or after the node release that consumes it.
+The Move package reads only the keys documented in the preceding sections; any
+other key is opaque to it, and the node software consumes it. To make a
+node-side setting governable, pass an `AddConfig` proposal naming the key, its
+initial value (which fixes the key's type for later updates), and the store: the
+epoch config when every node must agree on the value for the whole epoch, the
+instant config otherwise. A node reads an absent key as its built-in default, so
+you can add the key before or after the node release that consumes it.
