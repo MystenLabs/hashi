@@ -155,9 +155,13 @@ struct ExactShards {
     top_depth: usize,
 }
 
-fn avid_shard_bytes(row_weight: usize, batch_size: usize, data_shards: NonZeroUsize) -> usize {
+fn avid_ciphertext_bytes(weight: usize, batch_size: usize) -> usize {
     let share_batch = uleb128_len(batch_size) + (batch_size + 1) * SCALAR;
-    let payload = uleb128_len(row_weight) + row_weight * share_batch;
+    uleb128_len(weight) + weight * share_batch
+}
+
+fn avid_shard_bytes(row_weight: usize, batch_size: usize, data_shards: NonZeroUsize) -> usize {
+    let payload = avid_ciphertext_bytes(row_weight, batch_size);
     (RS_LENGTH_PREFIX + payload).div_ceil(RS_ELEMENT * data_shards.get()) * RS_ELEMENT
 }
 
@@ -247,6 +251,22 @@ pub fn check_avss_common_message(
 }
 
 pub fn check_avid_avss_message(
+    bytes: &[u8],
+    shape: AvidShape<'_>,
+    dealer: u16,
+    recipient: u16,
+) -> CountCheckResult<()> {
+    const FIELD: &str = "ciphertext";
+    let mut cursor = Cursor::new(bytes);
+    let batch_size = walk_avss_common_message(&mut cursor, shape, dealer)?;
+    let weight = shape.weights.weight_of(FIELD, recipient)?;
+    let len = cursor.length(FIELD)?;
+    expect_bytes(FIELD, len, avid_ciphertext_bytes(weight, batch_size))?;
+    cursor.take(FIELD, len)?;
+    cursor.finish()
+}
+
+pub fn check_avid_round_state(
     bytes: &[u8],
     shape: AvidShape<'_>,
     dealer: u16,
@@ -394,7 +414,7 @@ fn walk_avss_common_message(
     cursor: &mut Cursor<'_>,
     shape: AvidShape<'_>,
     dealer: u16,
-) -> CountCheckResult<()> {
+) -> CountCheckResult<usize> {
     const KEYS: &str = "full_public_keys";
     const HASHES: &str = "ciphertext_hashes";
     const POLYNOMIAL: &str = "response_polynomial";
@@ -410,7 +430,8 @@ fn walk_avss_common_message(
     cursor.skip_elements(HASHES, hashes, HASH)?;
     let coefficients = cursor.length(POLYNOMIAL)?;
     expect_count(POLYNOMIAL, coefficients, shape.threshold.into())?;
-    cursor.skip_elements(POLYNOMIAL, coefficients, SCALAR)
+    cursor.skip_elements(POLYNOMIAL, coefficients, SCALAR)?;
+    Ok(batch_size)
 }
 
 fn walk_authenticated_shards(

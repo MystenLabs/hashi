@@ -564,7 +564,7 @@ fn avid_payloads_pass_and_are_consumed_exactly() {
     assert_eq!(&avid.common[..2], uleb128(128).as_slice());
     assert_eq!(check_avss_common_message(&avid.common, shape, 0), Ok(()));
     assert_eq!(
-        check_avid_avss_message(&avid.avss_message, shape, 0),
+        check_avid_avss_message(&avid.avss_message, shape, 0, 0),
         Ok(())
     );
     let message: batch_avss_avid::AvssMessage = bcs::from_bytes(&avid.avss_message).unwrap();
@@ -573,7 +573,7 @@ fn avid_payloads_pass_and_are_consumed_exactly() {
         own_ciphertext: message.ciphertext,
     };
     assert_eq!(
-        check_avid_avss_message(&bcs::to_bytes(&round_state).unwrap(), shape, 0),
+        check_avid_round_state(&bcs::to_bytes(&round_state).unwrap(), shape, 0),
         Ok(())
     );
     for (holder, dispersal) in avid.dispersals.iter().enumerate() {
@@ -730,6 +730,83 @@ fn dispersals_and_confirm_certificates_are_held_to_their_honest_lengths() {
             max: 1,
         })
     );
+}
+
+fn avid_round_one_messages(weights: &[u16], dealer: PartyId) -> Vec<batch_avss_avid::AvssMessage> {
+    let mut rng = rand::thread_rng();
+    let keys: Vec<PrivateKey<EncryptionGroupElement>> =
+        weights.iter().map(|_| PrivateKey::new(&mut rng)).collect();
+    let nodes = Nodes::new(
+        weights
+            .iter()
+            .zip(&keys)
+            .enumerate()
+            .map(|(id, (&weight, key))| Node {
+                id: id as u16,
+                pk: PublicKey::from_private_key(key),
+                weight,
+            })
+            .collect(),
+    )
+    .unwrap();
+    let params = Parameters { t: 4, f: 1 };
+    let builder =
+        batch_avss_avid::Dealer::new(nodes, dealer, params, b"count-check-avid".to_vec(), 64)
+            .unwrap()
+            .create_avss_messages(&mut rng)
+            .unwrap();
+    (0..weights.len() as u16)
+        .map(|receiver| builder.message_for(receiver).unwrap())
+        .collect()
+}
+
+#[test]
+fn avid_round_one_ciphertexts_are_held_to_their_recipients_honest_lengths() {
+    let weights: [u16; 5] = [2, 2, 2, 1, 0];
+    let shape = AvidShape {
+        threshold: 4,
+        weights: PartyWeights(&weights),
+        batch_size_per_weight: 64,
+    };
+    for (dealer, batch_size) in [(0, 128), (3, 64)] {
+        let messages = avid_round_one_messages(&weights, dealer);
+        let common = bcs::to_bytes(&messages[0].common).unwrap();
+        assert_eq!(
+            &common[..uleb128(batch_size).len()],
+            uleb128(batch_size).as_slice()
+        );
+        for (recipient, message) in (0u16..).zip(&messages) {
+            let bytes = bcs::to_bytes(message).unwrap();
+            let honest = message.ciphertext.0.len();
+            assert_eq!(
+                check_avid_avss_message(&bytes, shape, dealer, recipient),
+                Ok(())
+            );
+            for found in [honest + 1, honest - 1] {
+                let mut resized = message.clone();
+                resized.ciphertext.0.resize(found, 0);
+                assert_eq!(
+                    check_avid_avss_message(
+                        &bcs::to_bytes(&resized).unwrap(),
+                        shape,
+                        dealer,
+                        recipient
+                    ),
+                    Err(CountCheckError::WrongBytes {
+                        field: "ciphertext",
+                        found,
+                        expected: honest,
+                    })
+                );
+            }
+            for (other, &other_weight) in (0u16..).zip(&weights) {
+                assert_eq!(
+                    check_avid_avss_message(&bytes, shape, dealer, other).is_ok(),
+                    other_weight == weights[usize::from(recipient)]
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -906,7 +983,8 @@ fn mutated_avid_payloads_never_panic(position: prop::sample::Index, byte: u8, cu
         mutated[position.index(bytes.len())] = byte;
         mutated.truncate(bytes.len().saturating_sub(cut as usize % 64));
         let _ = check_avss_common_message(&mutated, shape, 0);
-        let _ = check_avid_avss_message(&mutated, shape, 0);
+        let _ = check_avid_avss_message(&mutated, shape, 0, 0);
+        let _ = check_avid_round_state(&mutated, shape, 0);
         let _ = check_dispersal(&mutated, avid.dispersal_shape(), 0);
         let _ = check_confirm_certificate(&mutated, shape.weights);
         let _ = check_echo(&mutated, shape.weights, 0);
@@ -938,7 +1016,8 @@ fn arbitrary_bytes_never_panic_in_avid_layouts(
         data_shards: NonZeroUsize::new(data_shards).unwrap(),
     };
     let _ = check_avss_common_message(&bytes, shape, party);
-    let _ = check_avid_avss_message(&bytes, shape, party);
+    let _ = check_avid_avss_message(&bytes, shape, party, party);
+    let _ = check_avid_round_state(&bytes, shape, party);
     let _ = check_dispersal(&bytes, dispersal_shape, party);
     let _ = check_confirm_certificate(&bytes, shape.weights);
     let _ = check_echo(&bytes, shape.weights, party);
