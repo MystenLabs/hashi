@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["BtcConfirmedDeposit","DepositId","FinishedDeposit","SuiDepositApprovedEvent","SuiDepositRequestedEvent"]};

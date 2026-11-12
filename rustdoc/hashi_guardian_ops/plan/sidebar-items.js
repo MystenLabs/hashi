@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["preview","preview_slot","require_pulumi_version","up","up_slot","urn_type"],"struct":["Change","Plan","Step"]};

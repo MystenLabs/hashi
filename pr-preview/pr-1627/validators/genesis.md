@@ -1,0 +1,104 @@
+# Genesis and Joining the Committee
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> The Hashi genesis procedure from package publication through registration, launch, and DKG, and how a validator joins the committee after launch.
+
+Genesis forms the initial Hashi committee and generates the shared Bitcoin master key through Distributed Key Generation (DKG).
+
+## Timeline
+
+```
+Package Published → Validators Register → Launch (Admin) → DKG (Automatic) → End Reconfig → Presignatures → Operational
+```
+
+From DKG trigger to operational typically takes 30 to 120 seconds, assuming validators are online and reachable.
+
+## Step 1: package publication (admin)
+
+The admin publishes the Hashi Move package. This produces the `package-id` and `hashi-object-id` you need in both configs; the [Networks](../reference/networks.mdx) table records the values for each network.
+
+At this point the deploy is **not yet configured**: the package `UpgradeCap` stays in the publisher's wallet, and the chain id and guardian parameters are not onchain yet. They land later with the launch step (`hashi::finish_publish`), the **launch switch** that unlocks genesis.
+
+## Step 2: register your validator
+
+Your **Sui validator account key** must authorize registration (see [Registration must be signed by the account key](keys.mdx#registration-must-be-signed-by-the-account-key)). Use the offline flow:
+
+```bash
+hashi register --config /path/to/validator.toml \
+  --operator-address 0x<operator-address> \
+  --serialize-unsigned-transaction
+# sign the printed base64 tx with the account key and broadcast; see Keys and Security for
+# the sui keytool sign / sui client execute-signed-tx commands
+```
+
+The registration transaction records your validator address and writes your endpoint URL, Ed25519 TLS public key, and operator address to the chain. Your node writes its BLS12-381 and ECIES encryption public keys when it starts ([Step 3: start the server](#step-3-start-the-server)); until then `hashi launch` lists you as missing next-epoch keys. [Committee](../committee.mdx#registration-information) explains how the protocol uses each of these fields, and [why the committee is not exactly the set of Sui validators](../committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators).
+
+## Step 3: start the server
+
+```bash
+hashi server --config /path/to/validator.toml
+```
+
+The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P2P), registers its next-epoch keys onchain, and begins monitoring for the genesis trigger.
+
+You must boot **before the launch step** because the launch only happens once every validator has finished key registration, which nodes do on startup. In this pre-launch window the onchain config is not finalized yet, so the node logs two benign warnings: it skips the `bitcoin_chain_id` cross-check (it re-verifies on any restart after launch), and it defers the guardian client (it resolves automatically from onchain config once the launch lands).
+
+**This is the last genesis step that operators perform.** The admin and the network handle steps 4 through 6; keep your node running and watch the logs.
+
+## Step 4: launch (admin)
+
+An explicit launch step gates genesis. Once every expected validator has registered and started its node, the publisher runs:
+
+```bash
+hashi launch \
+  --sui-rpc-url https://fullnode.testnet.sui.io:443 \
+  --bitcoin-chain-id <genesis block hash> \
+  --guardian-url <guardian public URL> \
+  --guardian-node-url <guardian node URL> \
+  --guardian-btc-public-key <x-only hex> \
+  --keypair /path/to/publisher.pem   # reads ./hashi_ids.json from publish
+```
+
+`--sui-rpc-url` (or `SUI_RPC_URL`) defaults to Mainnet. `--bitcoin-confirmation-threshold` and `--bitcoin-deposit-time-delay-ms` override the Move defaults (6 and 600,000 ms); on Sui Mainnet the command refuses values below them.
+
+This sends `hashi::finish_publish`: it finalizes the deploy configuration (chain id, guardian) and hands the package `UpgradeCap` into onchain custody, the launch switch that `start_reconfig` requires before it forms the initial committee. Before sending, the command lists the registered validators and flags any that have not finished key registration (the genesis committee would exclude them). The **initial committee is exactly the set of fully-registered validators at this moment**, so the admin should confirm the roster before launching. Multisig publishers can use `--serialize-unsigned-transaction` (with `--sender`) to produce the transaction for offline signing. `--dry-run` builds and simulates the launch transaction without executing it (also keyless with `--sender`), reporting the gas estimate. Automation can poll `hashi launch --status` (no key pair or guardian parameters needed) for a single machine-readable readiness line instead of parsing the human output.
+
+**No operator action needed**, but your validator must be registered and running before the admin launches; otherwise the genesis committee excludes it.
+
+## Step 5: DKG (automatic)
+
+Once the launch transaction lands, every node submits `start_reconfig` and the first to land forms the committee. All registered validators then run DKG concurrently. **No operator action needed**; monitor logs for `Genesis start_reconfig submitted successfully` (only on the node whose transaction landed), `run_dkg=true` (DKG running), and `MPC key ready for epoch <N>` (DKG done). An attempt fails after 600 s without DKG messages and retries while the reconfiguration is still pending.
+
+## Step 6: end reconfig (automatic)
+
+After DKG, validators exchange BLS signatures over the result. Once 2/3 of committee weight has signed, a node submits `end_reconfig` onchain and the committee generates presignatures. **No operator action needed**; monitor logs for `submitting end_reconfig`, `end_reconfig complete for epoch <N>`, and presignature generation.
+
+## Post-genesis verification
+
+```bash
+hashi committee -c hashi-cli.toml list
+hashi committee -c hashi-cli.toml epoch
+hashi committee -c hashi-cli.toml view 0x<your-validator-address>
+hashi config -c hashi-cli.toml on-chain
+
+curl -s http://localhost:9180/metrics | grep -E 'hashi_epoch|hashi_reconfig_in_progress|hashi_presig_pool_remaining'
+```
+
+Expected after success: `hashi_epoch` > 0, `hashi_reconfig_in_progress` = 0, `hashi_presig_pool_remaining` > 0.
+
+## Joining after launch
+
+A validator that registers after the launch is not in the genesis committee. It joins at a later committee formation, which happens at each Sui epoch change (see [Epoch Changes](epoch-changes.mdx)). The steps are steps 2 and 3 above, and their order matters:
+
+1. **Register** with the offline flow in [Step 2: register your validator](#step-2-register-your-validator).
+2. **Then start the node**, or restart it if it was already running. `hashi register` records your registration but not your node's next-epoch BLS and encryption keys; the node writes those when it starts.
+3. **Confirm** after the next epoch change that you are seated: `hashi committee -c hashi-cli.toml view 0x<your-validator-address>`.
+
+After launch, a node that starts before you register its validator does not register itself. It logs:
+
+```
+validator 0x... has no readable on-chain registration, and a node only registers itself before genesis. Run `hashi register` if it is meant to join.
+```
+
+If you then register and leave that node running, its keys are not onchain yet, so it can miss the next committee formation and take its seat an epoch (about a day) late. Restart it right after registering.

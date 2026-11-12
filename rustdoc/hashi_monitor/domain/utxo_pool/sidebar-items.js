@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["UnapprovedCause"],"struct":["DepositNotApproved","SuspectSpend","Utxo","UtxoPool","UtxoWire"]};
