@@ -26,9 +26,10 @@
 //! 6. A `DepositApproved` must match a held deposit's amount and script. It
 //!    marks the deposit approved, also when it does not match: Move mints on
 //!    it.
-//! 7. Once a day, `check` asks Bitcoin about every held UTXO. It reports old,
-//!    spent and missing UTXOs. `unapproved_past_deadline` reports the
-//!    unapproved deposits that are past their deadline.
+//! 7. Once a day, `check` asks Bitcoin about every held UTXO. It reports
+//!    spent and missing UTXOs, and old ones in Move's pool.
+//!    `unapproved_past_deadline` lists the unapproved deposits that are past
+//!    their deadline. `approval_stall` reports overdue ones that look valid.
 //! 8. The pool keeps no record of spent UTXOs. Move refuses a request after
 //!    the first DC, so every add for a UTXO comes before its spend.
 //!
@@ -37,8 +38,8 @@
 //! stays an unapproved deposit.
 //!
 //! UTXOs in Move's pool: the pool value and the pool gauges use only these.
-//! The daily check looks up every held UTXO, and `UtxoTooOld` covers every
-//! held UTXO.
+//! The daily check looks up every held UTXO, but `UtxoTooOld` covers only
+//! these.
 //! - A deposit enters Move's pool when the monitor has seen both its Bitcoin
 //!   confirmation and its Sui `DepositApproved`.
 //! - A change output enters Move's pool at the Bitcoin confirmation of its
@@ -52,6 +53,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt;
 
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
@@ -69,7 +71,12 @@ use crate::domain::UtxoOrigin;
 use crate::findings::BtcRpcInconsistency;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::OutpointState;
+use crate::time::utc_timestamp;
 use crate::timing::Timing;
+
+/// Overdue deposits that look valid for a `DepositApprovalStalled`. Two, so
+/// one sanctioned deposit is not a finding.
+const MIN_STALLED_DEPOSITS: usize = 2;
 
 /// A UTXO the bridge holds, by Bitcoin's account.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -89,6 +96,44 @@ pub struct SuspectSpend {
     /// When the Bitcoin lookups finished.
     pub checked_at: UnixSeconds,
     pub amount: u64,
+}
+
+/// Why a paid deposit has no approval, as far as the monitor can infer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnapprovedCause {
+    /// Bitcoin paid another amount than the request claims.
+    AmountMismatch,
+    /// The block is more than `DEPOSIT_REQUEST_EXPIRY` after the request.
+    PaidAfterExpiry,
+    /// Neither of the above: a sanction, or a committee that withholds the
+    /// approval. The monitor cannot tell them apart.
+    SanctionOrWithheld,
+}
+
+/// A held unapproved deposit, with the causes the monitor can infer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DepositNotApproved {
+    pub outpoint: OutPoint,
+    pub requested_amount: u64,
+    pub paid_amount: u64,
+    pub requested_at: UnixSeconds,
+    pub block_time: UnixSeconds,
+    pub causes: Vec<UnapprovedCause>,
+}
+
+impl fmt::Display for DepositNotApproved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "DepositNotApproved(outpoint={}, requested_amount={}, paid_amount={}, requested_at={}, block_time={}, causes={:?})",
+            self.outpoint,
+            self.requested_amount,
+            self.paid_amount,
+            utc_timestamp(self.requested_at),
+            utc_timestamp(self.block_time),
+            self.causes,
+        )
+    }
 }
 
 /// The UTXOs the bridge holds, by Bitcoin's account.
@@ -183,25 +228,79 @@ impl UtxoPool {
         }
     }
 
-    /// A `DepositNotApproved` for each unapproved deposit whose latest
-    /// request is more than `deposit_request_watch` before `sui_cursor`. The
-    /// Sui cursor makes sure that an approval not yet read gives no finding.
+    /// The unapproved deposits whose latest request is more than
+    /// `deposit_request_watch` before `sui_cursor`. The Sui cursor makes sure
+    /// that an approval not yet read is not counted as missing.
     pub fn unapproved_past_deadline(
         &self,
         sui_cursor: UnixSeconds,
         timing: &Timing,
-    ) -> Vec<MonitorFinding> {
+    ) -> Vec<DepositNotApproved> {
+        self.unapproved_deposits(timing)
+            .filter(|deposit| deposit.requested_at + timing.deposit_request_watch < sui_cursor)
+            .collect()
+    }
+
+    /// A `DepositApprovalStalled` if at least `MIN_STALLED_DEPOSITS` deposits
+    /// that look valid became overdue after `last_approval` and before
+    /// `sui_cursor`.
+    pub fn approval_stall(
+        &self,
+        last_approval: Option<UnixSeconds>,
+        sui_cursor: UnixSeconds,
+        timing: &Timing,
+    ) -> Option<MonitorFinding> {
+        let outpoints: Vec<_> = self
+            .unapproved_deposits(timing)
+            .filter(|deposit| {
+                let overdue_at =
+                    deposit.requested_at.max(deposit.block_time) + timing.deposit_approval_overdue;
+                deposit.causes == [UnapprovedCause::SanctionOrWithheld]
+                    && last_approval.is_none_or(|approved_at| approved_at < overdue_at)
+                    && overdue_at < sui_cursor
+            })
+            .map(|deposit| deposit.outpoint)
+            .collect();
+        (outpoints.len() >= MIN_STALLED_DEPOSITS).then_some(
+            MonitorFinding::DepositApprovalStalled {
+                outpoints,
+                last_approval,
+            },
+        )
+    }
+
+    fn unapproved_deposits<'a>(
+        &'a self,
+        timing: &'a Timing,
+    ) -> impl Iterator<Item = DepositNotApproved> + 'a {
         self.utxos
             .iter()
-            .filter_map(|(outpoint, utxo)| match utxo.origin {
-                UtxoOrigin::UnapprovedDeposit { requested_at, .. }
-                    if requested_at + timing.deposit_request_watch < sui_cursor =>
-                {
-                    MonitorFinding::deposit_not_approved(*outpoint, utxo, timing)
+            .filter_map(move |(outpoint, utxo)| match utxo.origin {
+                UtxoOrigin::UnapprovedDeposit {
+                    requested_at,
+                    requested_amount,
+                } => {
+                    let mut causes = Vec::new();
+                    if utxo.amount != requested_amount {
+                        causes.push(UnapprovedCause::AmountMismatch);
+                    }
+                    if utxo.first_seen > requested_at + timing.deposit_request_expiry {
+                        causes.push(UnapprovedCause::PaidAfterExpiry);
+                    }
+                    if causes.is_empty() {
+                        causes.push(UnapprovedCause::SanctionOrWithheld);
+                    }
+                    Some(DepositNotApproved {
+                        outpoint: *outpoint,
+                        requested_amount,
+                        paid_amount: utxo.amount,
+                        requested_at,
+                        block_time: utxo.first_seen,
+                        causes,
+                    })
                 }
-                _ => None,
+                UtxoOrigin::Deposit | UtxoOrigin::Change => None,
             })
-            .collect()
     }
 
     /// Check the Sui `DepositApproved` against the pool: the UTXO must be a
@@ -327,7 +426,7 @@ impl UtxoPool {
             match states.get(outpoint) {
                 Some(OutpointState::Unspent { block_time }) => {
                     let age_secs = now.saturating_sub(*block_time);
-                    if age_secs >= timing.utxo_max_age {
+                    if utxo.origin.in_move_pool() && age_secs >= timing.utxo_max_age {
                         findings.push(MonitorFinding::UtxoTooOld {
                             outpoint: *outpoint,
                             age_secs,
@@ -376,7 +475,6 @@ mod tests {
 
     use crate::domain::BtcConfirmation;
     use crate::domain::SuiDepositRequestedEvent;
-    use crate::findings::UnapprovedCause;
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use crate::test_utils::txid;
@@ -801,20 +899,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unapproved_deposit_is_reported_at_the_max_age() {
+    fn an_unapproved_deposit_is_not_reported_at_the_max_age() {
         let mut pool = UtxoPool::default();
         assert!(pool.add_deposit(&unapproved(1, 1_000, 0, 0)).is_empty());
         let state = OutpointState::Unspent { block_time: 0 };
-        assert!(findings_one(&pool, Some(state.clone()), MAX_AGE - 1).is_empty());
 
-        assert_eq!(
-            findings_one(&pool, Some(state), MAX_AGE),
-            vec![MonitorFinding::UtxoTooOld {
-                outpoint: outpoint(1),
-                age_secs: MAX_AGE,
-                threshold_secs: MAX_AGE,
-            }]
-        );
+        assert!(findings_one(&pool, Some(state), MAX_AGE).is_empty());
     }
 
     #[test]
@@ -950,14 +1040,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unapproved_deposit_past_the_watch_at_the_sui_cursor_is_a_finding() {
+    fn an_unapproved_deposit_past_the_watch_at_the_sui_cursor_is_listed() {
         // `Timing::for_tests` watches a request for 1_000 s.
         let mut pool = pool_with_one();
         assert!(pool.add_deposit(&unapproved(2, 2_000, 0, 100)).is_empty());
         let timing = Timing::for_tests();
 
         assert!(pool.unapproved_past_deadline(1_100, &timing).is_empty());
-        let not_approved = vec![MonitorFinding::DepositNotApproved {
+        let not_approved = vec![DepositNotApproved {
             outpoint: outpoint(2),
             requested_amount: 2_000,
             paid_amount: 2_000,
@@ -966,26 +1056,53 @@ mod tests {
             causes: vec![UnapprovedCause::SanctionOrWithheld],
         }];
         assert_eq!(pool.unapproved_past_deadline(1_101, &timing), not_approved);
-        // The report repeats until an approval comes.
-        assert_eq!(pool.unapproved_past_deadline(1_101, &timing), not_approved);
 
         pool.mark_approved(DepositId::new(txid(2), 0));
         assert!(pool.unapproved_past_deadline(1_101, &timing).is_empty());
     }
 
+    #[test]
+    fn valid_deposits_overdue_since_the_last_approval_are_a_stall() {
+        // `Timing::for_tests` gives an approval 50 s. Overdue at 150 and 250:
+        // the later of the request and the block counts.
+        let mut pool = UtxoPool::default();
+        assert!(pool.add_deposit(&unapproved(1, 1_000, 100, 0)).is_empty());
+        assert!(pool.add_deposit(&unapproved(2, 1_000, 0, 200)).is_empty());
+        let mismatch = FinishedDeposit::new(deposit(3, 999, 0), unapproved_origin(0, 1_000));
+        assert!(pool.add_deposit(&mismatch).is_empty());
+        let timing = Timing::for_tests();
+        let stall = |last_approval| {
+            Some(MonitorFinding::DepositApprovalStalled {
+                outpoints: vec![outpoint(1), outpoint(2)],
+                last_approval,
+            })
+        };
+
+        assert_eq!(pool.approval_stall(None, 250, &timing), None);
+        assert_eq!(pool.approval_stall(None, 251, &timing), stall(None));
+        assert_eq!(
+            pool.approval_stall(Some(149), 251, &timing),
+            stall(Some(149))
+        );
+        // An approval since one became overdue leaves too few.
+        assert_eq!(pool.approval_stall(Some(150), 251, &timing), None);
+
+        pool.mark_approved(DepositId::new(txid(2), 0));
+        assert_eq!(pool.approval_stall(None, 251, &timing), None);
+    }
+
     /// The causes of `DepositNotApproved` for a request of 1_000 at 100.
     /// `Timing::for_tests` expires a request after 500 s.
     fn causes(paid_amount: u64, block_time: UnixSeconds) -> Vec<UnapprovedCause> {
+        let mut pool = UtxoPool::default();
         let paid = FinishedDeposit::new(
             deposit(1, paid_amount, block_time),
             unapproved_origin(100, 1_000),
         );
-        let finding =
-            MonitorFinding::deposit_not_approved(outpoint(1), &paid.utxo, &Timing::for_tests());
-        let Some(MonitorFinding::DepositNotApproved { causes, .. }) = finding else {
-            unreachable!("an unapproved deposit gives a DepositNotApproved");
-        };
-        causes
+        assert!(pool.add_deposit(&paid).is_empty());
+        let timing = Timing::for_tests();
+        let mut deposits = pool.unapproved_deposits(&timing);
+        deposits.next().expect("one unapproved deposit").causes
     }
 
     #[test]

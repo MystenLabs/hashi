@@ -52,11 +52,11 @@ act on the other findings. They show a delay or a fault that moves no Bitcoin.
 | `DepositUnbacked` | Yes | An approved deposit's outpoint holds no unspent Bitcoin output. |
 | `DepositMismatch` | Yes | Two events of one deposit request disagree: the approval and the Bitcoin payment, the approval and its request, or two requests. |
 | `DepositLate` | Yes | An approved deposit's Bitcoin block is more than 2 hours after the approval. A miner can date a block at most 2 hours ahead, so Hashi approved before Bitcoin confirmed the payment. |
-| `DepositNotApproved` | No | A paid deposit has no approval 2 days after its latest request. The finding names the causes that the monitor can infer: a wrong amount, or a block more than 1 day after the request. If neither is true, the cause is a sanction or a committee that withholds the approval. The daily pool check reports it again until an approval comes. |
+| `DepositApprovalStalled` | No | At least 2 deposits that look valid have no approval 3 hours after the later of their latest request and their Bitcoin block, and no deposit was approved since. A sanction leaves one valid-looking deposit unapproved, so 1 alone is not a finding. Unapproved deposits are logged as `deposit not approved` at each daily pool check, with the causes the monitor can infer: a wrong amount, a block more than 1 day after the request, or a sanction or withheld approval. |
 | `UtxoUnexpectedSpend` | Yes | A pool UTXO was spent outside a Hashi withdrawal. This includes an input of a pending withdrawal that another transaction spent. The monitor asks Bitcoin if the withdrawal's own transaction is in a block. |
 | `UtxoOutsideMovePoolSpent` | Yes | A withdrawal spent a UTXO that is not in Move's pool: the pool never held it, or held it as a deposit with no approval. The monitor missed an event, or Move has a fault. |
 | `UtxoOriginConflict` | Yes | A deposit and a withdrawal's change claim one outpoint. Move refuses a request for held change, so an insider or a Move fault is the cause. |
-| `UtxoTooOld` | Yes | A pool UTXO is older than 40 days, approved or not. The committee can spend it alone at 60. |
+| `UtxoTooOld` | Yes | A UTXO in Move's pool is older than 40 days. The committee can spend it alone at 60. |
 | `HbtcSupplyExceedsPool` | Yes | The hBTC supply has exceeded the pool value for 3 hours. |
 | `GuardianInconsistency` | Yes | Two logs for one `seq`, a missing `seq`, a skip of more than 10 seqs, or a log with an output address that the monitor cannot read. |
 | `GuardianClockSkew` | No | A guardian log's signed time differs from S3's time by more than 30 s. The cause is the guardian's clock or a slow S3 write. |

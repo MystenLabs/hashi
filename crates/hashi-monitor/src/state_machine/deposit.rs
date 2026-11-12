@@ -77,7 +77,7 @@ enum BtcAnswer {
 ///   lapses is not a finding.
 /// - E2 does not expect E3. Sanctions and user mistakes leave valid
 ///   deposits unapproved. The machine does not report a missing E3. The
-///   pool reports it as `DepositNotApproved`.
+///   pool reports overdue deposits that look valid as `DepositApprovalStalled`.
 /// - E3 expects E2 already. `EMPTY_LOOKUPS_BEFORE_ALERT` lookups after E3
 ///   that find no E2 report E3 unbacked, before the machine closes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

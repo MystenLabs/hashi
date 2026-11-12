@@ -20,9 +20,9 @@
 //!    input that two pending withdrawals list is a `WithdrawalInvalid`.
 //! 5. Report the remaining spends as `UtxoUnexpectedSpend`. This includes an
 //!    input of a pending withdrawal that another transaction spent.
-//! 6. Report `DepositNotApproved` for each unapproved deposit whose latest
+//! 6. Log `DepositNotApproved` for each unapproved deposit whose latest
 //!    request is more than `DEPOSIT_REQUEST_WATCH` before the Sui cursor.
-//!    The report repeats at each check until an approval comes.
+//!    The log repeats at each check until an approval comes.
 //! 7. Report `SourceStale` for the pool check when none has succeeded for
 //!    `UTXO_CHECK_INTERVAL` plus `SOURCE_STALE_LIMIT`. Before the first
 //!    success, count from the start of the audit loop, after the first
@@ -62,10 +62,12 @@ impl Auditor {
         // The pool check does not use one Bitcoin snapshot and can see spends from newer blocks.
         // Record completion time so Sui polling must cover the whole lookup period.
         let now = now_timestamp_secs();
-        let (mut findings, suspects) = pool.check(&states, now, &self.cfg.timing);
-        findings.extend(
-            pool.unapproved_past_deadline(self.rpc_pollers.sui_read_until(), &self.cfg.timing),
-        );
+        let (findings, suspects) = pool.check(&states, now, &self.cfg.timing);
+        for deposit in
+            pool.unapproved_past_deadline(self.rpc_pollers.sui_read_until(), &self.cfg.timing)
+        {
+            tracing::info!(%deposit, "deposit not approved");
+        }
         tracing::info!(
             utxos = outpoints.len(),
             findings = findings.len(),

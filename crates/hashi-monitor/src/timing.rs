@@ -23,9 +23,9 @@
 //! - Deposit requests: Bitcoin is asked about a request's transaction for
 //!   the watch period. The monitor assumes an honest deposit confirms on
 //!   Bitcoin within it.
-//! - Unapproved deposits: a paid deposit with no approval is a finding when
-//!   no approval comes within the watch period of its latest request. A
-//!   block after the request expiry is one cause that the finding names.
+//! - Unapproved deposits: a paid deposit with no approval is logged when no
+//!   approval comes within the watch period of its latest request. Deposits
+//!   that look valid and miss the approval bound report a stalled bridge.
 //! - The UTXO pool: a UTXO the bridge holds is reported by its age on
 //!   Bitcoin, and at once by its absence from Bitcoin.
 //!
@@ -67,13 +67,18 @@ pub const DEPOSIT_APPROVAL_SKEW: u64 = 2 * 60 * 60;
 /// watch. But Move does not refuse to approve an old request. A UTXO that
 /// confirms after the watch never enters the UTXO pool, so an approval of
 /// it is reported as `DepositUnbacked`. A paid deposit with no approval
-/// this long after its latest request is reported as `DepositNotApproved`.
+/// this long after its latest request is logged as `DepositNotApproved`.
 pub const DEPOSIT_REQUEST_WATCH: u64 = 2 * 24 * 60 * 60;
 
 /// The age at which Move lets the leader delete a deposit request
 /// (`MAX_DEPOSIT_REQUEST_AGE_MS` in `deposit_queue.move`). A block after it
 /// is a likely cause of a missing approval. It is not a rule of Move.
 pub const DEPOSIT_REQUEST_EXPIRY: u64 = 24 * 60 * 60;
+
+/// How long after the later of its latest request and its Bitcoin event a
+/// deposit that looks valid may wait for its Hashi approval. Hashi approves
+/// about ten minutes after the confirmation threshold.
+pub const DEPOSIT_APPROVAL_OVERDUE: u64 = 3 * 60 * 60;
 
 /// Age of an unspent bridge UTXO that is a finding. The committee can spend
 /// it alone at 60 days, so the finding leaves 20 days to act. Coin selection
@@ -98,6 +103,8 @@ pub struct Timing {
     pub deposit_request_watch: u64,
     /// The age at which Move lets the leader delete a deposit request.
     pub deposit_request_expiry: u64,
+    /// How long a deposit that looks valid may wait for its approval.
+    pub deposit_approval_overdue: u64,
     /// Age of an unspent bridge UTXO that is a finding.
     pub utxo_max_age: u64,
 }
@@ -130,6 +137,7 @@ impl Default for Timing {
             deposit_approval_skew: DEPOSIT_APPROVAL_SKEW,
             deposit_request_watch: DEPOSIT_REQUEST_WATCH,
             deposit_request_expiry: DEPOSIT_REQUEST_EXPIRY,
+            deposit_approval_overdue: DEPOSIT_APPROVAL_OVERDUE,
             utxo_max_age: UTXO_MAX_AGE,
         }
     }
@@ -175,6 +183,7 @@ impl Timing {
             deposit_approval_skew: 10,
             deposit_request_watch: 1_000,
             deposit_request_expiry: 500,
+            deposit_approval_overdue: 50,
             utxo_max_age: 100,
         }
     }

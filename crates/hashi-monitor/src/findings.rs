@@ -29,11 +29,9 @@ use crate::domain::SuiDepositApprovedEvent;
 use crate::domain::SuiDepositRequestedEvent;
 use crate::domain::UtxoOrigin;
 use crate::domain::WithdrawalEventType;
-use crate::domain::utxo_pool::Utxo;
 use crate::time::human_duration;
 use crate::time::human_timestamp_delta;
 use crate::time::utc_timestamp;
-use crate::timing::Timing;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::Txid;
@@ -63,42 +61,6 @@ pub enum AlertMode {
 pub enum EventRelation {
     Predecessor,
     Successor,
-}
-
-/// Why a paid deposit has no approval, as far as the monitor can infer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UnapprovedCause {
-    /// Bitcoin paid another amount than the request claims.
-    AmountMismatch,
-    /// The block is more than `DEPOSIT_REQUEST_EXPIRY` after the request.
-    PaidAfterExpiry,
-    /// Neither of the above: a sanction, or a committee that withholds the
-    /// approval. The monitor cannot tell them apart.
-    SanctionOrWithheld,
-}
-
-impl UnapprovedCause {
-    /// The causes for a payment of `paid_amount` in a block at `block_time`,
-    /// for a request of `requested_amount` at `requested_at`.
-    fn infer(
-        requested_amount: u64,
-        paid_amount: u64,
-        requested_at: UnixSeconds,
-        block_time: UnixSeconds,
-        timing: &Timing,
-    ) -> Vec<Self> {
-        let mut causes = Vec::new();
-        if paid_amount != requested_amount {
-            causes.push(Self::AmountMismatch);
-        }
-        if block_time > requested_at + timing.deposit_request_expiry {
-            causes.push(Self::PaidAfterExpiry);
-        }
-        if causes.is_empty() {
-            causes.push(Self::SanctionOrWithheld);
-        }
-        causes
-    }
 }
 
 /// How a withdrawal event broke its deadline.
@@ -233,16 +195,13 @@ pub enum MonitorFinding {
         deadline: UnixSeconds,
         block_time: UnixSeconds,
     },
-    /// E2 found, but no E3 `DEPOSIT_REQUEST_WATCH` after the latest request.
-    /// `causes` gives what the monitor can infer. The daily pool check
-    /// repeats it until an approval comes.
-    DepositNotApproved {
-        outpoint: OutPoint,
-        requested_amount: u64,
-        paid_amount: u64,
-        requested_at: UnixSeconds,
-        block_time: UnixSeconds,
-        causes: Vec<UnapprovedCause>,
+    /// At least `MIN_STALLED_DEPOSITS` deposits that look valid are unapproved
+    /// `deposit_approval_overdue` after their latest request and E2, and no
+    /// deposit was approved since. A sanction also leaves one such deposit
+    /// unapproved, so a single one is not a finding.
+    DepositApprovalStalled {
+        outpoints: Vec<OutPoint>,
+        last_approval: Option<UnixSeconds>,
     },
 
     // ========================================================================
@@ -266,10 +225,8 @@ pub enum MonitorFinding {
         held: UtxoOrigin,
         new: UtxoOrigin,
     },
-    /// A UTXO in the monitor's UTXO pool has sat unspent on Bitcoin past the
-    /// warn age. The committee can spend a UTXO alone 60 days after it
-    /// confirms. This includes an unapproved deposit: a committee that
-    /// withholds the approval can take it then.
+    /// A UTXO in Move's pool has sat unspent on Bitcoin past the warn age.
+    /// The committee can spend a UTXO alone 60 days after it confirms.
     UtxoTooOld {
         outpoint: OutPoint,
         age_secs: u64,
@@ -345,38 +302,11 @@ impl MonitorFinding {
         }
     }
 
-    /// A `DepositNotApproved` for the held `utxo` at `outpoint`, with the
-    /// causes that the monitor can infer. `None` if `utxo` is not an
-    /// unapproved deposit.
-    pub fn deposit_not_approved(outpoint: OutPoint, utxo: &Utxo, timing: &Timing) -> Option<Self> {
-        let UtxoOrigin::UnapprovedDeposit {
-            requested_at,
-            requested_amount,
-        } = utxo.origin
-        else {
-            return None;
-        };
-        Some(Self::DepositNotApproved {
-            outpoint,
-            requested_amount,
-            paid_amount: utxo.amount,
-            requested_at,
-            block_time: utxo.first_seen,
-            causes: UnapprovedCause::infer(
-                requested_amount,
-                utxo.amount,
-                requested_at,
-                utxo.first_seen,
-                timing,
-            ),
-        })
-    }
-
     /// Whether every operator must act on the finding. See the module doc.
     pub fn is_essential(&self) -> bool {
         match self {
-            // No hBTC was minted. A user waits for it.
-            Self::DepositNotApproved { .. } => false,
+            // No hBTC was minted. Users wait for it.
+            Self::DepositApprovalStalled { .. } => false,
             // A bad guardian clock or a slow S3 write. The checks still run.
             Self::GuardianClockSkew { .. } => false,
             // A user waits for Bitcoin. A spend with no guardian log is a
@@ -413,7 +343,7 @@ impl MonitorFinding {
             Self::DepositUnbacked { .. } => "DepositUnbacked",
             Self::DepositLate { .. } => "DepositLate",
             Self::DepositMismatch { .. } => "DepositMismatch",
-            Self::DepositNotApproved { .. } => "DepositNotApproved",
+            Self::DepositApprovalStalled { .. } => "DepositApprovalStalled",
             Self::BtcRpcInconsistency(_) => "BtcRpcInconsistency",
             Self::UtxoTooOld { .. } => "UtxoTooOld",
             Self::UtxoUnexpectedSpend { .. } => "UtxoUnexpectedSpend",
@@ -649,19 +579,21 @@ impl fmt::Display for MonitorFinding {
             Self::DepositMismatch { request_id, reason } => {
                 write!(f, "DepositMismatch(request_id={request_id}, {reason})")
             }
-            Self::DepositNotApproved {
-                outpoint,
-                requested_amount,
-                paid_amount,
-                requested_at,
-                block_time,
-                causes,
-            } => write!(
-                f,
-                "DepositNotApproved(outpoint={outpoint}, requested_amount={requested_amount}, paid_amount={paid_amount}, requested_at={}, block_time={}, causes={causes:?})",
-                utc_timestamp(*requested_at),
-                utc_timestamp(*block_time),
-            ),
+            Self::DepositApprovalStalled {
+                outpoints,
+                last_approval,
+            } => {
+                let outpoints = outpoints.iter().map(ToString::to_string);
+                write!(
+                    f,
+                    "DepositApprovalStalled(outpoints=[{}], last_approval=",
+                    outpoints.collect::<Vec<_>>().join(", "),
+                )?;
+                match last_approval {
+                    Some(time) => write!(f, "{})", utc_timestamp(*time)),
+                    None => write!(f, "none)"),
+                }
+            }
             Self::BtcRpcInconsistency(inconsistency) => {
                 write!(f, "BtcRpcInconsistency({inconsistency})")
             }
