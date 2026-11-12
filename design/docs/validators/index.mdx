@@ -42,7 +42,7 @@ The pages cover both Hashi deployments, Testnet and Mainnet. The [Networks](../r
 
 ## Joining the committee
 
-Onboarding takes 6 steps. The pages in this section cover the detail, the defaults, and the failure modes:
+Onboarding takes 6 steps:
 
 1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. On Mainnet, run the Sui fullnode yourself; running the Bitcoin node yourself is strongly encouraged. For a Mainnet Bitcoin node, provision 2TB of SSD storage. See [External service dependencies](prerequisites.mdx#external-service-dependencies), [Sui RPC](prerequisites.mdx#sui-rpc), and [Bitcoin node](prerequisites.mdx#bitcoin-node).
 2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [TLS key (dedicated)](keys.mdx#tls-key-dedicated), [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing), and [Backup key (OpenPGP)](keys.mdx#backup-key-openpgp).
@@ -59,8 +59,6 @@ These details trip up most operators:
 - Fund the operator address with at least 2 SUI. With exactly 1 SUI, the node's gas bootstrap fails with `InsufficientCoinBalance` and retries every 10 minutes until you add SUI. See [Operator key (day-to-day signing)](keys.mdx#operator-key-day-to-day-signing).
 
 ## Common questions
-
-These answers summarize details from the pages in this section.
 
 ### Does the Hashi node connect to your Sui validator?
 
@@ -90,9 +88,9 @@ A Mainnet node depends on:
 
 See [External service dependencies](prerequisites.mdx#external-service-dependencies), [Sui RPC](prerequisites.mdx#sui-rpc), [Bitcoin node](prerequisites.mdx#bitcoin-node), and [Keys and Security](keys.mdx).
 
-## Pages in this section
+## Validator guides {#pages-in-this-section}
 
-Each card links to one guide in this section.
+Each card links to one validator guide.
 
 import DocCardList from '@theme/DocCardList';
 

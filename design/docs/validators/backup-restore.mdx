@@ -35,7 +35,7 @@ answer: >-
   A Hashi node writes an OpenPGP-encrypted backup every epoch holding the validator config, key files, a database snapshot, a manifest, and MPC recovery data. To restore after machine loss, stop the node, extract the archive with hashi backup restore, move the database into place, fix permissions, and start the node. Never restore keys from a possibly compromised node.
 ---
 
-Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node Backups](../node-backup.mdx) guide. This section covers what the node backs up and how to restore a node from a backup.
+A Hashi node writes an encrypted backup every epoch, and you can restore a node from one. Backup key generation, including YubiKey setup with `oct`, is in the [Hashi Node Backups](../node-backup.mdx) guide.
 
 ## What a backup holds
 
