@@ -7,9 +7,9 @@ use crate::mpc::stored_rows;
 use crate::mpc::types;
 use bytes::Bytes;
 use fastcrypto::traits::ToFromBytes;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-use fastcrypto_tbls::types::ShareIndex;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::proto;
 use serde::Deserialize;
@@ -43,7 +43,7 @@ const MAX_PARTIAL_SIGS_BLOB_BYTES: usize = 3 + u16::MAX as usize * 34;
 
 pub(crate) fn public_output_response_limit(total_weight: u16) -> usize {
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::threshold_schnorr::G;
+    use fastcrypto_threshold::threshold_schnorr::G;
     use prost::Message;
     let entry = proto::GetPublicMpcOutputResponse {
         public_key: None,
@@ -555,7 +555,7 @@ impl TryFrom<&proto::GetPublicMpcOutputResponse> for types::GetPublicMpcOutputRe
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::GetPublicMpcOutputResponse) -> Result<Self, Self::Error> {
-        use fastcrypto_tbls::threshold_schnorr::G;
+        use fastcrypto_threshold::threshold_schnorr::G;
 
         let public_key = deserialize_bcs(
             required(value.public_key.as_ref(), "public_key")?,
@@ -626,7 +626,7 @@ impl From<&types::GetPartialSignaturesResponse> for proto::GetPartialSignaturesR
                     (
                         id.to_string(),
                         Bcs::from(nonce.clone()).with_name(std::any::type_name::<
-                            fastcrypto_tbls::threshold_schnorr::G,
+                            fastcrypto_threshold::threshold_schnorr::G,
                         >()),
                     )
                 })
@@ -699,12 +699,12 @@ mod avid_conversion_tests {
     use crate::mpc::types;
     use fastcrypto::hash::Blake2b256;
     use fastcrypto::hash::HashFunction;
-    use fastcrypto_tbls::ecies_v1;
-    use fastcrypto_tbls::nodes::Node;
-    use fastcrypto_tbls::nodes::Nodes;
-    use fastcrypto_tbls::nodes::PartyId;
-    use fastcrypto_tbls::threshold_schnorr::Certificate;
-    use fastcrypto_tbls::threshold_schnorr::Parameters;
+    use fastcrypto_threshold::ecies_v1;
+    use fastcrypto_threshold::nodes::Node;
+    use fastcrypto_threshold::nodes::Nodes;
+    use fastcrypto_threshold::nodes::PartyId;
+    use fastcrypto_threshold::threshold_schnorr::Certificate;
+    use fastcrypto_threshold::threshold_schnorr::Parameters;
     use hashi_types::committee::BLS12381AggregateSignature;
     use hashi_types::committee::SignedMessage;
     use std::collections::BTreeSet;
@@ -737,7 +737,7 @@ mod avid_conversion_tests {
         batch_avss_avid::Dispersal,
         batch_avss_avid::Echo,
     ) {
-        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let (t, f, n, batch) = (4u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
             .map(|_| ecies_v1::PrivateKey::<types::EncryptionGroupElement>::new(&mut rng))
@@ -842,8 +842,8 @@ mod avid_conversion_tests {
 mod partial_sigs_limit_tests {
     use super::*;
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::polynomial::Eval;
-    use fastcrypto_tbls::threshold_schnorr::S;
+    use fastcrypto_threshold::polynomial::Eval;
+    use fastcrypto_threshold::threshold_schnorr::S;
     use prost::Message;
     use sui_sdk_types::Address;
 

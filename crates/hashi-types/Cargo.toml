@@ -22,7 +22,7 @@ bytes.workspace = true
 # crypto deps
 blst.workspace = true
 fastcrypto.workspace = true
-fastcrypto-tbls.workspace = true
+fastcrypto-threshold.workspace = true
 
 anyhow.workspace = true
 base64ct.workspace = true

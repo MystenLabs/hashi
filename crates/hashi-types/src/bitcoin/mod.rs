@@ -13,7 +13,7 @@ pub use bitcoin::Address as BitcoinAddress;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
-pub use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
+pub use fastcrypto_threshold::threshold_schnorr::G as HashiMasterG;
 pub use taproot::taproot_2of2_witness_artifacts;
 pub use taproot::taproot_address;
 pub use taproot::taproot_script_spend_sighashes;

@@ -280,7 +280,7 @@ impl Hashi {
         self.signing_manager_for(epoch)
     }
 
-    pub fn signing_verifying_key(&self) -> Option<fastcrypto_tbls::threshold_schnorr::G> {
+    pub fn signing_verifying_key(&self) -> Option<fastcrypto_threshold::threshold_schnorr::G> {
         self.signing_manager
             .read()
             .unwrap()

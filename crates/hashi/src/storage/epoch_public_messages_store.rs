@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
 use crate::db::Database;

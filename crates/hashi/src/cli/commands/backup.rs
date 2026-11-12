@@ -8,7 +8,7 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::G;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::armored_encrypt_writer;
 use hashi_types::pgp::decrypt_with_gpg;

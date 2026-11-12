@@ -48,9 +48,9 @@ use crate::mpc::types::ProtocolType;
 use crate::mpc::types::ReconfigOutcome;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
-use fastcrypto_tbls::threshold_schnorr::G;
-use fastcrypto_tbls::threshold_schnorr::Parameters;
-use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
+use fastcrypto_threshold::threshold_schnorr::G;
+use fastcrypto_threshold::threshold_schnorr::Parameters;
+use fastcrypto_threshold::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::RuntimeCommittee;
@@ -1039,7 +1039,7 @@ impl MpcService {
         &self,
         epoch: u64,
     ) -> anyhow::Result<
-        std::collections::HashMap<fastcrypto_tbls::types::ShareIndex, sui_sdk_types::Address>,
+        std::collections::HashMap<fastcrypto_threshold::types::ShareIndex, sui_sdk_types::Address>,
     > {
         let mpc_manager = self
             .inner
@@ -2823,8 +2823,8 @@ mod presig_count_tests {
     fn matches_fastcrypto_presignature_count() {
         use fastcrypto::groups::GroupElement;
         use fastcrypto::groups::Scalar;
-        use fastcrypto_tbls::threshold_schnorr::S;
-        use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+        use fastcrypto_threshold::threshold_schnorr::S;
+        use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
 
         use super::G;
         use super::Presignatures;

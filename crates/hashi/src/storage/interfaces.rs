@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
 pub use crate::mpc::types::AvidRoundState;

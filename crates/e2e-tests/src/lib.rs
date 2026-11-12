@@ -869,14 +869,14 @@ mod tests {
     use fastcrypto::groups::Scalar;
     use fastcrypto::hash::HashFunction;
     use fastcrypto::serde_helpers::ToFromByteArray;
-    use fastcrypto_tbls::polynomial::Poly;
-    use fastcrypto_tbls::threshold_schnorr::G;
-    use fastcrypto_tbls::threshold_schnorr::Parameters;
-    use fastcrypto_tbls::threshold_schnorr::S;
-    use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-    use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-    use fastcrypto_tbls::types::ShareIndex;
+    use fastcrypto_threshold::polynomial::Poly;
+    use fastcrypto_threshold::threshold_schnorr::G;
+    use fastcrypto_threshold::threshold_schnorr::Parameters;
+    use fastcrypto_threshold::threshold_schnorr::S;
+    use fastcrypto_threshold::threshold_schnorr::avss;
+    use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
+    use fastcrypto_threshold::threshold_schnorr::presigning::Presignatures;
+    use fastcrypto_threshold::types::ShareIndex;
 
     fn authenticated_client(node: &HashiNodeHandle) -> Result<hashi::grpc::Client> {
         let key = node.config().tls_private_key()?;
@@ -1039,7 +1039,7 @@ mod tests {
         secret: S,
         t: u16,
         n: u16,
-    ) -> Vec<fastcrypto_tbls::types::IndexedValue<S>> {
+    ) -> Vec<fastcrypto_threshold::types::IndexedValue<S>> {
         let p = Poly::rand_fixed_c0(t - 1, secret, rng);
         (1..=n)
             .map(|i| p.eval(ShareIndex::new(i).unwrap()))

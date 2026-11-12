@@ -7,7 +7,7 @@ use crate::mpc::types::EXPECT_SERIALIZATION_SUCCESS;
 use crate::mpc::types::MessagesHash;
 use crate::mpc::types::RotationMessages;
 use bytes::Bytes;
-use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::avss;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;

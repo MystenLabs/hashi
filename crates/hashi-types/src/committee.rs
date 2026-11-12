@@ -21,7 +21,7 @@ use fastcrypto::traits::KeyPair;
 use fastcrypto::traits::Signer;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto::traits::VerifyingKey;
-use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_threshold::nodes::Nodes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -50,7 +50,7 @@ pub fn certificate_threshold(total_weight: u64) -> u64 {
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct EncryptionPrivateKey(fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>);
+pub struct EncryptionPrivateKey(fastcrypto_threshold::ecies_v1::PrivateKey<EncryptionGroupElement>);
 
 impl fmt::Debug for EncryptionPrivateKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,10 +60,10 @@ impl fmt::Debug for EncryptionPrivateKey {
 
 impl EncryptionPrivateKey {
     pub fn new<R: AllowedRng>(rng: &mut R) -> Self {
-        Self(fastcrypto_tbls::ecies_v1::PrivateKey::new(rng))
+        Self(fastcrypto_threshold::ecies_v1::PrivateKey::new(rng))
     }
 
-    pub fn inner(&self) -> &fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement> {
+    pub fn inner(&self) -> &fastcrypto_threshold::ecies_v1::PrivateKey<EncryptionGroupElement> {
         &self.0
     }
 
@@ -72,18 +72,20 @@ impl EncryptionPrivateKey {
     }
 }
 
-impl From<fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>> for EncryptionPrivateKey {
-    fn from(key: fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>) -> Self {
+impl From<fastcrypto_threshold::ecies_v1::PrivateKey<EncryptionGroupElement>>
+    for EncryptionPrivateKey
+{
+    fn from(key: fastcrypto_threshold::ecies_v1::PrivateKey<EncryptionGroupElement>) -> Self {
         Self(key)
     }
 }
 
 impl From<fastcrypto::groups::ristretto255::RistrettoScalar> for EncryptionPrivateKey {
     fn from(scalar: fastcrypto::groups::ristretto255::RistrettoScalar) -> Self {
-        Self(fastcrypto_tbls::ecies_v1::PrivateKey::from(scalar))
+        Self(fastcrypto_threshold::ecies_v1::PrivateKey::from(scalar))
     }
 }
-pub type EncryptionPublicKey = fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>;
+pub type EncryptionPublicKey = fastcrypto_threshold::ecies_v1::PublicKey<EncryptionGroupElement>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
@@ -1030,7 +1032,7 @@ mod test {
     }
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
-    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_threshold::nodes::Node;
 
     const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
     const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;

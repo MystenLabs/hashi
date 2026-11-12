@@ -3453,7 +3453,7 @@ mod tests {
         let avid_state = crate::db::tests::create_test_avid_round_state();
         let mut rotation_msgs: BTreeMap<
             NonZeroU16,
-            fastcrypto_tbls::threshold_schnorr::avss::Message,
+            fastcrypto_threshold::threshold_schnorr::avss::Message,
         > = BTreeMap::new();
         rotation_msgs.insert(
             NonZeroU16::new(1).unwrap(),

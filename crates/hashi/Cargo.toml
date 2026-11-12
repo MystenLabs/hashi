@@ -85,7 +85,7 @@ fjall.workspace = true
 
 # DKG dependencies
 fastcrypto.workspace = true
-fastcrypto-tbls.workspace = true
+fastcrypto-threshold.workspace = true
 
 # Metrics push dependencies
 snap.workspace = true

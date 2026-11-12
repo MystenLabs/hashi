@@ -12,9 +12,9 @@ use crate::mpc::types::Messages;
 use crate::mpc::types::MessagesHash;
 use crate::mpc::types::ProtocolTypeIndicator;
 use crate::mpc::types::RetrieveMessagesResponse;
-use fastcrypto_tbls::nodes::PartyId;
-use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
+use fastcrypto_threshold::nodes::PartyId;
+use fastcrypto_threshold::threshold_schnorr::avss;
+use fastcrypto_threshold::threshold_schnorr::batch_avss_avid;
 use hashi_types::proto;
 use std::collections::BTreeMap;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
@@ -220,10 +220,10 @@ mod tests {
     use crate::mpc::types::ComplaintResponse;
     use crate::mpc::types::PublicMpcOutput;
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::polynomial::Eval;
-    use fastcrypto_tbls::threshold_schnorr::G;
-    use fastcrypto_tbls::threshold_schnorr::S;
-    use fastcrypto_tbls::types::ShareIndex;
+    use fastcrypto_threshold::polynomial::Eval;
+    use fastcrypto_threshold::threshold_schnorr::G;
+    use fastcrypto_threshold::threshold_schnorr::S;
+    use fastcrypto_threshold::types::ShareIndex;
     use prost::Message;
 
     fn honest_public_output(total_weight: u16) -> proto::GetPublicMpcOutputResponse {

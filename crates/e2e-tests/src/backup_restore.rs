@@ -23,7 +23,7 @@ mod tests {
     use anyhow::Context;
     use anyhow::Result;
     use fastcrypto::groups::GroupElement;
-    use fastcrypto_tbls::threshold_schnorr::G;
+    use fastcrypto_threshold::threshold_schnorr::G;
     use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
     use hashi::backup::MPC_RECOVERY_FILE_NAME;
     use hashi::backup::MpcRecoveryRecord;

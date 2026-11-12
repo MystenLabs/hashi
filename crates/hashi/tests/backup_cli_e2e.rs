@@ -14,10 +14,10 @@ use std::process::Command;
 use std::process::Output;
 use std::time::Duration;
 
-use fastcrypto_tbls::nodes::Node;
-use fastcrypto_tbls::nodes::Nodes;
-use fastcrypto_tbls::threshold_schnorr::Parameters;
-use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_threshold::nodes::Node;
+use fastcrypto_threshold::nodes::Nodes;
+use fastcrypto_threshold::threshold_schnorr::Parameters;
+use fastcrypto_threshold::threshold_schnorr::avss;
 use hashi::backup::BACKUP_MANIFEST_FILE_NAME;
 use hashi::backup::DB_SNAPSHOT_TAR_PREFIX;
 use hashi::backup::extract_dir_name;
