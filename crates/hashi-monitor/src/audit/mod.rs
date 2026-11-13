@@ -167,11 +167,8 @@ pub struct Auditor {
     last_hbtc_supply_read: UnixSeconds,
     /// Move's time of the latest Sui `DepositApproved`.
     last_deposit_approval: Option<UnixSeconds>,
-    /// Set after the initial catch-up. Only later findings autopause.
-    caught_up: bool,
-    autopause_fired_generation: Option<u64>,
-    /// Set when autopause fired and its generation is not saved yet.
-    autopause_unsaved: bool,
+    /// The running or last autopause. See `autopause`.
+    pause_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Auditor {
@@ -229,14 +226,11 @@ impl Auditor {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: 0,
             last_deposit_approval: None,
-            caught_up: false,
-            autopause_fired_generation: None,
-            autopause_unsaved: false,
+            pause_task: None,
         };
         if let Some(state) = state {
             auditor.restore(state);
         }
-        auditor.export_autopause_armed();
         // A pruned start leaves the pool incomplete.
         auditor.rpc_pollers.ensure_sui_serves_start().await?;
         // A setup that cannot read the supply fails here, not silently later.
@@ -276,7 +270,6 @@ impl Auditor {
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
             hbtc_supply_above_pool_since: self.hbtc_supply_above_pool_since,
             last_deposit_approval: self.last_deposit_approval,
-            autopause_fired_generation: self.autopause_fired_generation,
         }
     }
 
@@ -291,7 +284,6 @@ impl Auditor {
         self.suspect_spends.extend(state.suspect_spends);
         self.hbtc_supply_above_pool_since = state.hbtc_supply_above_pool_since;
         self.last_deposit_approval = state.last_deposit_approval;
-        self.autopause_fired_generation = state.autopause_fired_generation;
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
@@ -447,13 +439,13 @@ impl Auditor {
         )
     }
 
-    /// Log the findings, record the alerting ones, and autopause if due.
+    /// Log the findings, record the alerting ones, and autopause on them.
     fn report_findings(&mut self, phase: &'static str, findings: &[MonitorFinding]) {
         let mode = self.cfg.alert_mode;
         log_findings("continuous", phase, findings, mode);
         let alerts = findings.iter().filter(|finding| finding.alerts_in(mode));
         self.metrics.record_findings(alerts, now_timestamp_secs());
-        self.note_autopause(findings);
+        self.autopause(findings);
     }
 
     /// Report the open withdrawals that missed a timing bound.
@@ -519,7 +511,6 @@ impl Auditor {
         self.save_snapshot().await;
         // A first run can catch up for hours. That time is not a stale check.
         self.started_at = now_timestamp_secs();
-        self.caught_up = true;
         tracing::info!(
             sui_cursor = %utc_timestamp(self.rpc_pollers.sui_read_until()),
             guardian_cursor = %utc_timestamp(self.rpc_pollers.guardian_read_until()),
@@ -563,7 +554,6 @@ impl Auditor {
                     self.tick_maintenance().await;
                 }
             }
-            self.save_autopause_latch().await;
         }
     }
 }
@@ -680,9 +670,7 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: approved_at,
             last_deposit_approval: None,
-            caught_up: true,
-            autopause_fired_generation: None,
-            autopause_unsaved: false,
+            pause_task: None,
         }
     }
 
@@ -899,9 +887,7 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: cursor,
             last_deposit_approval: None,
-            caught_up: true,
-            autopause_fired_generation: None,
-            autopause_unsaved: false,
+            pause_task: None,
         }
     }
 

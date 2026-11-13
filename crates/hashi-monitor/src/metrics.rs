@@ -51,8 +51,6 @@ pub struct MonitorMetrics {
     /// successful save.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
-    /// 1 if autopause is armed, 0 if it fired. No series if it is disabled.
-    autopause_armed: IntGauge,
     /// Unix time of the latest autopause of each result.
     autopause_last_timestamp_seconds: IntGaugeVec,
 }
@@ -109,11 +107,6 @@ impl MonitorMetrics {
         let hbtc_supply_sats = IntGauge::new(
             "hashi_monitor_hbtc_supply_sats",
             "Total supply of hBTC on Sui, in satoshis",
-        )
-        .expect("valid metric");
-        let autopause_armed = IntGauge::new(
-            "hashi_monitor_autopause_armed",
-            "1 if autopause is armed, 0 if it fired; absent if autopause is disabled",
         )
         .expect("valid metric");
         let autopause_last_timestamp_seconds = IntGaugeVec::new(
@@ -174,7 +167,6 @@ impl MonitorMetrics {
             open_flows,
             last_finding_timestamp_seconds,
             checked_through_timestamp_seconds,
-            autopause_armed,
             autopause_last_timestamp_seconds,
         }
     }
@@ -217,15 +209,6 @@ impl MonitorMetrics {
                 .with_label_values(&[kind])
                 .set(i64::try_from(count).unwrap_or(i64::MAX));
         }
-    }
-
-    /// Export whether autopause is armed. Call only if it is enabled.
-    pub fn set_autopause_armed(&self, armed: bool) {
-        // Registered on first use, so a disabled autopause has no series.
-        let _ = self
-            .registry
-            .register(Box::new(self.autopause_armed.clone()));
-        self.autopause_armed.set(i64::from(armed));
     }
 
     pub fn record_autopause(&self, result: &str, now: UnixSeconds) {

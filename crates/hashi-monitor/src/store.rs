@@ -78,8 +78,6 @@ pub struct AuditState {
     pub hbtc_supply_above_pool_since: Option<UnixSeconds>,
     /// Move's time of the latest Sui `DepositApproved`.
     pub last_deposit_approval: Option<UnixSeconds>,
-    /// The autopause generation that last fired, even if its pause failed.
-    pub autopause_fired_generation: Option<u64>,
 }
 
 impl Snapshot {
@@ -249,7 +247,6 @@ mod tests {
             )],
             hbtc_supply_above_pool_since: Some(1_700_000_600),
             last_deposit_approval: Some(1_700_000_500),
-            autopause_fired_generation: Some(1),
         }
     }
 

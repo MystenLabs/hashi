@@ -21,11 +21,12 @@ use crate::config::Config;
 /// operator that fails is logged and skipped, so one bad key cannot block the
 /// pause. The chain checks the quorum on execution.
 ///
-/// Nothing calls this on monitor startup. Success means the on-chain paused flag
-/// was observed, not that nodes acknowledged it or Bitcoin broadcasts stopped.
+/// Returns whether this call paused Hashi: `false` if it was already paused.
+/// Success means the on-chain paused flag was observed, not that nodes
+/// acknowledged it or Bitcoin broadcasts stopped.
 /// Errors after submission can mean a transaction landed: inspect the chain
 /// before retrying. This function neither resumes proposals nor unpauses Hashi.
-pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
+pub async fn initiate_pause(config: &Config) -> anyhow::Result<bool> {
     let pause = config
         .pause
         .as_ref()
@@ -39,7 +40,7 @@ pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
     };
     let reader = HashiClient::new(&read_config).await?;
     if reader.onchain_state().state().hashi().config.paused() {
-        return Ok(());
+        return Ok(false);
     }
     ensure!(
         !pause.operator_key_paths.is_empty(),
@@ -91,7 +92,7 @@ pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
         confirmed.onchain_state().state().hashi().config.paused(),
         "on-chain paused flag was not observed after executing pause proposal {proposal_id}"
     );
-    Ok(())
+    Ok(true)
 }
 
 const TX_OPTIONS: TxOptions = TxOptions {
@@ -194,7 +195,7 @@ mod tests {
             transaction_rpc_url: networks.sui_network().rpc_url.clone(),
             operator_key_paths: paths,
             object_id: Some(ids.hashi_object_id),
-            autopause_generation: None,
+            autopause: false,
         });
         let read_config = CliConfig {
             sui_rpc_url: networks.sui_network().rpc_url.clone(),
@@ -204,7 +205,7 @@ mod tests {
         };
         let before = HashiClient::new(&read_config).await?;
         assert!(!before.onchain_state().state().hashi().config.paused());
-        initiate_pause(&config).await?;
+        assert!(initiate_pause(&config).await?);
         let paused = HashiClient::new(&read_config).await?;
         assert!(paused.onchain_state().state().hashi().config.paused());
         let executed = paused.fetch_executed_proposals();
@@ -218,7 +219,7 @@ mod tests {
         // An already-paused bridge needs no signing credentials.
         keys.close()?;
         config.pause.as_mut().unwrap().operator_key_paths.clear();
-        initiate_pause(&config).await?;
+        assert!(!initiate_pause(&config).await?);
         Ok(())
     }
 }

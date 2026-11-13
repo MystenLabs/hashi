@@ -64,8 +64,9 @@ pub struct PauseConfig {
     /// Funded operator key files for distinct seated validators, in any format
     /// the Hashi CLI loads. Keys are loaded only when pausing.
     pub operator_key_paths: Vec<PathBuf>,
-    /// Autopause at most once per generation; bump it to re-arm. Omit to disable.
-    pub autopause_generation: Option<u64>,
+    /// Pause Hashi when a finding that autopauses is reported.
+    #[serde(default)]
+    pub autopause: bool,
 }
 
 impl PauseConfig {
