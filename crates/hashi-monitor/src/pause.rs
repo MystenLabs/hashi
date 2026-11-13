@@ -194,6 +194,7 @@ mod tests {
             transaction_rpc_url: networks.sui_network().rpc_url.clone(),
             operator_key_paths: paths,
             object_id: Some(ids.hashi_object_id),
+            autopause_generation: None,
         });
         let read_config = CliConfig {
             sui_rpc_url: networks.sui_network().rpc_url.clone(),

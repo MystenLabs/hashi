@@ -64,6 +64,8 @@ pub struct PauseConfig {
     /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
     /// Keys are loaded only on explicit pause invocation.
     pub operator_key_paths: Vec<PathBuf>,
+    /// Autopause at most once per generation; bump it to re-arm. Omit to disable.
+    pub autopause_generation: Option<u64>,
 }
 
 impl PauseConfig {

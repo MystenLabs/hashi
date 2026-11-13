@@ -334,6 +334,38 @@ impl MonitorFinding {
         mode == AlertMode::Strict || self.is_essential()
     }
 
+    /// Whether the finding pauses Hashi when autopause is armed.
+    pub fn autopauses(&self) -> bool {
+        match self {
+            Self::DepositUnbacked { .. }
+            | Self::DepositMismatch {
+                reason: DepositMismatchReason::PaymentDiffers { .. },
+                ..
+            }
+            | Self::WithdrawalUnapproved { .. }
+            | Self::UtxoUnexpectedSpend { .. } => true,
+            Self::DepositMismatch {
+                reason:
+                    DepositMismatchReason::ApprovalDiffers { .. }
+                    | DepositMismatchReason::RequestDiffers { .. },
+                ..
+            }
+            | Self::WithdrawalStuck { .. }
+            | Self::WithdrawalInvalid { .. }
+            | Self::DepositLate { .. }
+            | Self::DepositApprovalStalled { .. }
+            | Self::BtcRpcInconsistency(_)
+            | Self::UtxoTooOld { .. }
+            | Self::UtxoOutsideMovePoolSpent { .. }
+            | Self::UtxoOriginConflict { .. }
+            | Self::HbtcSupplyExceedsPool { .. }
+            | Self::SourceStale { .. }
+            | Self::SnapshotStale { .. }
+            | Self::GuardianClockSkew { .. }
+            | Self::GuardianInconsistency(_) => false,
+        }
+    }
+
     /// The variant name. Alerting labels each finding with it.
     pub fn kind(&self) -> &'static str {
         match self {

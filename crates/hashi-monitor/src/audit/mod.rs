@@ -74,6 +74,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
 
+mod autopause;
 mod fresh_approvals;
 mod hbtc_supply;
 mod pool_checks;
@@ -165,6 +166,11 @@ pub struct Auditor {
     last_hbtc_supply_read: UnixSeconds,
     /// Move's time of the latest Sui `DepositApproved`.
     last_deposit_approval: Option<UnixSeconds>,
+    /// Set after the initial catch-up. Only later findings autopause.
+    caught_up: bool,
+    autopause_fired_generation: Option<u64>,
+    /// Set when autopause fired and has not paused yet.
+    autopause_due: bool,
 }
 
 impl Auditor {
@@ -222,6 +228,9 @@ impl Auditor {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: 0,
             last_deposit_approval: None,
+            caught_up: false,
+            autopause_fired_generation: None,
+            autopause_due: false,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -265,6 +274,7 @@ impl Auditor {
             suspect_spends: self.suspect_spends.clone().into_iter().collect(),
             hbtc_supply_above_pool_since: self.hbtc_supply_above_pool_since,
             last_deposit_approval: self.last_deposit_approval,
+            autopause_fired_generation: self.autopause_fired_generation,
         }
     }
 
@@ -279,6 +289,7 @@ impl Auditor {
         self.suspect_spends.extend(state.suspect_spends);
         self.hbtc_supply_above_pool_since = state.hbtc_supply_above_pool_since;
         self.last_deposit_approval = state.last_deposit_approval;
+        self.autopause_fired_generation = state.autopause_fired_generation;
     }
 
     fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
@@ -434,22 +445,23 @@ impl Auditor {
         )
     }
 
-    /// Log the findings, and record the ones that alert in the metrics.
-    fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
+    /// Log the findings, record the alerting ones, and autopause if due.
+    fn report_findings(&mut self, phase: &'static str, findings: &[MonitorFinding]) {
         let mode = self.cfg.alert_mode;
         log_findings("continuous", phase, findings, mode);
         let alerts = findings.iter().filter(|finding| finding.alerts_in(mode));
         self.metrics.record_findings(alerts, now_timestamp_secs());
+        self.note_autopause(findings);
     }
 
     /// Report the open withdrawals that missed a timing bound.
-    fn check_timing(&self) {
+    fn check_timing(&mut self) {
         let violations = self.detect_timing_violations();
         self.report_findings("timing", &violations);
     }
 
     /// Report a stall of deposit approvals.
-    fn check_deposit_approvals(&self) {
+    fn check_deposit_approvals(&mut self) {
         let stall = self.utxo_pool.approval_stall(
             self.last_deposit_approval,
             self.rpc_pollers.sui_read_until(),
@@ -459,7 +471,7 @@ impl Auditor {
     }
 
     /// Report a source, the daily pool check, or the hBTC supply read that is behind its limit.
-    fn check_staleness(&self) {
+    fn check_staleness(&mut self) {
         let now = now_timestamp_secs();
         let mut stale = self.rpc_pollers.stale_sources(now);
         stale.extend(self.stale_pool_check(now));
@@ -505,6 +517,7 @@ impl Auditor {
         self.save_snapshot().await;
         // A first run can catch up for hours. That time is not a stale check.
         self.started_at = now_timestamp_secs();
+        self.caught_up = true;
         tracing::info!(
             sui_cursor = %utc_timestamp(self.rpc_pollers.sui_read_until()),
             guardian_cursor = %utc_timestamp(self.rpc_pollers.guardian_read_until()),
@@ -548,6 +561,7 @@ impl Auditor {
                     self.tick_maintenance().await;
                 }
             }
+            self.run_due_autopause().await;
         }
     }
 }
@@ -664,6 +678,9 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: approved_at,
             last_deposit_approval: None,
+            caught_up: true,
+            autopause_fired_generation: None,
+            autopause_due: false,
         }
     }
 
@@ -880,6 +897,9 @@ mod tests {
             hbtc_supply_above_pool_since: None,
             last_hbtc_supply_read: cursor,
             last_deposit_approval: None,
+            caught_up: true,
+            autopause_fired_generation: None,
+            autopause_due: false,
         }
     }
 
@@ -889,7 +909,7 @@ mod tests {
         let mut cfg = Config::for_tests();
         cfg.alert_mode = mode;
         let metrics = Arc::new(MonitorMetrics::new());
-        let auditor = auditor_with(&cfg, metrics.clone());
+        let mut auditor = auditor_with(&cfg, metrics.clone());
         let skew = MonitorFinding::GuardianClockSkew {
             session_id: SessionID::from("session"),
             object_key: "log".to_string(),
