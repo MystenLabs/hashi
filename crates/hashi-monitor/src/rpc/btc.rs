@@ -22,12 +22,13 @@
 //!    stops the monitor.
 //! 2. Before a pass, `synced_height` checks the node and returns its height.
 //!    The node must follow `deployment.bitcoin_network`, be out of initial
-//!    block download, and have a tip no older than `max_tip_age`, which the
-//!    auditor sets to its `SOURCE_STALE_LIMIT`. At the first check, a node
-//!    that reports its indexes must have a synced `txindex`. A failed check
-//!    fails the pass, so a wrong node, or one with an older tip, becomes a
-//!    `SourceStale` finding. Until its tip passes that age, a frozen node
-//!    still gives lookup findings.
+//!    block download, have a tip no older than `max_tip_age`, which the
+//!    auditor sets to its `SOURCE_STALE_LIMIT`, and have a peer. A node
+//!    with no peers hears of no new blocks, so its tip can look current
+//!    while it is not. Regtest has no peers and skips that check. At the
+//!    first check, a node that reports its indexes must have a synced
+//!    `txindex`. A failed check fails the pass, so a wrong node, or one
+//!    with an older tip or no peers, becomes a `SourceStale` finding.
 //!    All batches use this height to calculate confirmation depth.
 //!    Blocks that arrive during the pass count on the next pass.
 //! 3. `prefetch_confirmations` looks all pending txids up in batches of
@@ -320,11 +321,39 @@ impl BtcRpcClient {
         )
         .context("failed to parse bitcoin blockchain info")?;
         info.ensure_synced(self.network, self.max_tip_age, now_timestamp_secs())?;
+        if self.network != Network::Regtest {
+            self.ensure_peers()?;
+        }
         if !self.txindex_checked.get() {
             self.check_txindex()?;
             self.txindex_checked.set(true);
         }
         Ok(info.blocks)
+    }
+
+    /// Fail unless the node has a peer. See the module doc.
+    fn ensure_peers(&self) -> anyhow::Result<()> {
+        let response = self
+            .transport
+            .call("getnetworkinfo", serde_json::json!([]))?;
+        if let Some(error) = response.error {
+            anyhow::bail!(
+                "bitcoin getnetworkinfo failed: {} ({})",
+                error.message,
+                error.code
+            );
+        }
+        let connections = response
+            .result
+            .as_ref()
+            .and_then(|info| info.get("connections"))
+            .and_then(Value::as_u64)
+            .context("bitcoin getnetworkinfo has no connections")?;
+        anyhow::ensure!(
+            connections > 0,
+            "bitcoind has no peers, so its tip may be stale"
+        );
+        Ok(())
     }
 
     /// Fail unless the node has a synced `txindex`. A node that does not
@@ -1349,6 +1378,17 @@ mod tests {
         );
         client.check_txindex().unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_node_with_no_peers_is_not_synced() {
+        let (client, server) = client_answered_by(
+            "HTTP/1.1 200 OK\r\nContent-Length: 48\r\n\r\n\
+             {\"result\":{\"connections\":0},\"error\":null,\"id\":1}",
+        );
+        let error = client.ensure_peers().unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("no peers"), "{error}");
     }
 
     #[test]
