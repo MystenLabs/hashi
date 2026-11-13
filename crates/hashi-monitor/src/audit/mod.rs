@@ -170,8 +170,8 @@ pub struct Auditor {
     /// Set after the initial catch-up. Only later findings autopause.
     caught_up: bool,
     autopause_fired_generation: Option<u64>,
-    /// Set when autopause fired and has not paused yet.
-    autopause_due: bool,
+    /// Set when autopause fired and its generation is not saved yet.
+    autopause_unsaved: bool,
 }
 
 impl Auditor {
@@ -231,7 +231,7 @@ impl Auditor {
             last_deposit_approval: None,
             caught_up: false,
             autopause_fired_generation: None,
-            autopause_due: false,
+            autopause_unsaved: false,
         };
         if let Some(state) = state {
             auditor.restore(state);
@@ -520,8 +520,6 @@ impl Auditor {
         // A first run can catch up for hours. That time is not a stale check.
         self.started_at = now_timestamp_secs();
         self.caught_up = true;
-        // A fresh-approval finding can fire autopause during the catch-up.
-        self.run_due_autopause().await;
         tracing::info!(
             sui_cursor = %utc_timestamp(self.rpc_pollers.sui_read_until()),
             guardian_cursor = %utc_timestamp(self.rpc_pollers.guardian_read_until()),
@@ -565,7 +563,7 @@ impl Auditor {
                     self.tick_maintenance().await;
                 }
             }
-            self.run_due_autopause().await;
+            self.save_autopause_latch().await;
         }
     }
 }
@@ -684,7 +682,7 @@ mod tests {
             last_deposit_approval: None,
             caught_up: true,
             autopause_fired_generation: None,
-            autopause_due: false,
+            autopause_unsaved: false,
         }
     }
 
@@ -903,7 +901,7 @@ mod tests {
             last_deposit_approval: None,
             caught_up: true,
             autopause_fired_generation: None,
-            autopause_due: false,
+            autopause_unsaved: false,
         }
     }
 

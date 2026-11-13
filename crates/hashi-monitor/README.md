@@ -166,8 +166,9 @@ With autopause enabled, the monitor pauses the bridge on a security violation:
 - Only findings after the initial catch-up autopause. A finding replayed at
   startup does not, except a fresh-approval `DepositUnbacked`: its mint is
   still ahead, so it is live.
-- Autopause fires once per generation. The fired generation is saved in the
-  snapshot before the pause, so a restart does not fire again.
+- Autopause fires once per generation. The pause starts as soon as the
+  finding fires. The fired generation is saved in the snapshot right after
+  the tick, so a restart does not fire again.
 - The pause is tried once. On failure, pause the bridge by hand.
 
 To re-arm after an autopause, unpause the bridge, then deploy the config with

@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pause Hashi on a live finding that autopauses, at most once per configured
-//! generation. The fired generation is saved before pausing, so a restart
-//! cannot fire again. Findings replayed by the catch-up never fire, but a
-//! fresh-approval finding is live even during the catch-up.
+//! generation. The pause starts as soon as the finding fires, and the fired
+//! generation is saved after the tick, so a restart does not fire again.
+//! Findings replayed by the catch-up never fire, but a fresh-approval finding
+//! is live even during the catch-up.
 
 use super::Auditor;
 use crate::findings::MonitorFinding;
@@ -41,6 +42,7 @@ impl Auditor {
     }
 
     /// Fire on the first finding that autopauses, even during the catch-up.
+    /// The pause starts now, on a separate task.
     pub(super) fn fire_autopause(&mut self, findings: &[MonitorFinding]) {
         if !self.autopause_armed() {
             return;
@@ -50,17 +52,8 @@ impl Auditor {
         };
         tracing::error!(%finding, "autopause fired; pausing Hashi");
         self.autopause_fired_generation = self.autopause_generation();
-        self.autopause_due = true;
+        self.autopause_unsaved = true;
         self.export_autopause_armed();
-    }
-
-    /// Save the latch, then pause on a separate task.
-    pub(super) async fn run_due_autopause(&mut self) {
-        if !std::mem::take(&mut self.autopause_due) {
-            return;
-        }
-        // Pause even if the save fails: the violation is live.
-        self.save_snapshot().await;
         let cfg = self.cfg.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
@@ -76,6 +69,13 @@ impl Auditor {
             };
             metrics.record_autopause(result, now_timestamp_secs());
         });
+    }
+
+    /// Save the fired generation, if autopause fired since the last save.
+    pub(super) async fn save_autopause_latch(&mut self) {
+        if std::mem::take(&mut self.autopause_unsaved) {
+            self.save_snapshot().await;
+        }
     }
 }
 
@@ -118,23 +118,23 @@ mod tests {
         let (mut auditor, metrics) = autopause_auditor(Some(1));
         assert!(metrics.render().contains("hashi_monitor_autopause_armed 1"));
         auditor.report_findings("test", &[unbacked()]);
-        assert!(auditor.autopause_due);
+        assert!(auditor.autopause_unsaved);
         assert!(metrics.render().contains("hashi_monitor_autopause_armed 0"));
 
         // Neither a repeat nor a restart from the snapshot fires again.
-        auditor.autopause_due = false;
+        auditor.autopause_unsaved = false;
         auditor.report_findings("test", &[unbacked()]);
-        assert!(!auditor.autopause_due);
+        assert!(!auditor.autopause_unsaved);
         let (mut restarted, _) = autopause_auditor(Some(1));
         restarted.restore(auditor.state());
         restarted.report_findings("test", &[unbacked()]);
-        assert!(!restarted.autopause_due);
+        assert!(!restarted.autopause_unsaved);
 
         // A higher generation re-arms it.
         let (mut rearmed, _) = autopause_auditor(Some(2));
         rearmed.restore(auditor.state());
         rearmed.report_findings("test", &[unbacked()]);
-        assert!(rearmed.autopause_due);
+        assert!(rearmed.autopause_unsaved);
     }
 
     #[tokio::test]
@@ -142,16 +142,16 @@ mod tests {
         let (mut catching_up, _) = autopause_auditor(Some(1));
         catching_up.caught_up = false;
         catching_up.report_findings("test", &[unbacked()]);
-        assert!(!catching_up.autopause_due);
+        assert!(!catching_up.autopause_unsaved);
         catching_up.fire_autopause(&[unbacked()]);
-        assert!(catching_up.autopause_due);
+        assert!(catching_up.autopause_unsaved);
     }
 
     #[tokio::test]
     async fn no_fire_when_disabled() {
         let (mut disabled, metrics) = autopause_auditor(None);
         disabled.report_findings("test", &[unbacked()]);
-        assert!(!disabled.autopause_due);
+        assert!(!disabled.autopause_unsaved);
         assert!(!metrics.render().contains("hashi_monitor_autopause_armed"));
     }
 
@@ -159,7 +159,7 @@ mod tests {
     async fn a_failed_pause_keeps_the_saved_latch() {
         let (mut auditor, metrics) = autopause_auditor(Some(1));
         auditor.report_findings("test", &[unbacked()]);
-        auditor.run_due_autopause().await;
+        auditor.save_autopause_latch().await;
         while !metrics.render().contains(r#"result="failed""#) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
