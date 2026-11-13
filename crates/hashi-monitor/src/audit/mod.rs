@@ -235,6 +235,7 @@ impl Auditor {
         if let Some(state) = state {
             auditor.restore(state);
         }
+        auditor.export_autopause_armed();
         // A pruned start leaves the pool incomplete.
         auditor.rpc_pollers.ensure_sui_serves_start().await?;
         // A setup that cannot read the supply fails here, not silently later.

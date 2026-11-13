@@ -27,6 +27,9 @@ pub const SOURCE_SNAPSHOT: &str = "snapshot";
 const FLOW_WITHDRAWAL: &str = "withdrawal";
 const FLOW_DEPOSIT: &str = "deposit";
 
+pub const AUTOPAUSE_SUCCEEDED: &str = "succeeded";
+pub const AUTOPAUSE_FAILED: &str = "failed";
+
 pub struct MonitorMetrics {
     registry: Registry,
     pool_utxo_count: IntGauge,
@@ -48,6 +51,10 @@ pub struct MonitorMetrics {
     /// successful save.
     /// 0 until the auditor starts, so a monitor that never starts reads stale.
     checked_through_timestamp_seconds: IntGaugeVec,
+    /// 1 if autopause is armed, 0 if it fired. No series if it is disabled.
+    autopause_armed: IntGauge,
+    /// Unix time of the latest autopause of each result.
+    autopause_last_timestamp_seconds: IntGaugeVec,
 }
 
 impl Default for MonitorMetrics {
@@ -104,6 +111,19 @@ impl MonitorMetrics {
             "Total supply of hBTC on Sui, in satoshis",
         )
         .expect("valid metric");
+        let autopause_armed = IntGauge::new(
+            "hashi_monitor_autopause_armed",
+            "1 if autopause is armed, 0 if it fired; absent if autopause is disabled",
+        )
+        .expect("valid metric");
+        let autopause_last_timestamp_seconds = IntGaugeVec::new(
+            Opts::new(
+                "hashi_monitor_autopause_last_timestamp_seconds",
+                "Unix time of the latest autopause of each result: succeeded or failed",
+            ),
+            &["result"],
+        )
+        .expect("valid metric");
         registry
             .register(Box::new(pool_value_sats.clone()))
             .expect("register");
@@ -125,6 +145,9 @@ impl MonitorMetrics {
             .expect("register");
         registry
             .register(Box::new(open_flows.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(autopause_last_timestamp_seconds.clone()))
             .expect("register");
 
         for source in [
@@ -151,6 +174,8 @@ impl MonitorMetrics {
             open_flows,
             last_finding_timestamp_seconds,
             checked_through_timestamp_seconds,
+            autopause_armed,
+            autopause_last_timestamp_seconds,
         }
     }
 
@@ -192,6 +217,21 @@ impl MonitorMetrics {
                 .with_label_values(&[kind])
                 .set(i64::try_from(count).unwrap_or(i64::MAX));
         }
+    }
+
+    /// Export whether autopause is armed. Call only if it is enabled.
+    pub fn set_autopause_armed(&self, armed: bool) {
+        // Registered on first use, so a disabled autopause has no series.
+        let _ = self
+            .registry
+            .register(Box::new(self.autopause_armed.clone()));
+        self.autopause_armed.set(i64::from(armed));
+    }
+
+    pub fn record_autopause(&self, result: &str, now: UnixSeconds) {
+        self.autopause_last_timestamp_seconds
+            .with_label_values(&[result])
+            .set(gauge_value(now));
     }
 
     pub(crate) fn render(&self) -> String {

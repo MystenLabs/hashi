@@ -7,7 +7,10 @@
 
 use super::Auditor;
 use crate::findings::MonitorFinding;
+use crate::metrics::AUTOPAUSE_FAILED;
+use crate::metrics::AUTOPAUSE_SUCCEEDED;
 use crate::pause::initiate_pause;
+use hashi_types::guardian::time::now_timestamp_secs;
 
 impl Auditor {
     fn autopause_generation(&self) -> Option<u64> {
@@ -22,6 +25,13 @@ impl Auditor {
         })
     }
 
+    /// Export whether autopause is armed, if it is enabled.
+    pub(super) fn export_autopause_armed(&self) {
+        if self.autopause_generation().is_some() {
+            self.metrics.set_autopause_armed(self.autopause_armed());
+        }
+    }
+
     /// Fire on the first finding that autopauses.
     pub(super) fn note_autopause(&mut self, findings: &[MonitorFinding]) {
         if !self.caught_up || !self.autopause_armed() {
@@ -33,6 +43,7 @@ impl Auditor {
         tracing::error!(%finding, "autopause fired; pausing Hashi");
         self.autopause_fired_generation = self.autopause_generation();
         self.autopause_due = true;
+        self.export_autopause_armed();
     }
 
     /// Save the latch, then pause on a separate task.
@@ -43,11 +54,19 @@ impl Auditor {
         // Pause even if the save fails: the violation is live.
         self.save_snapshot().await;
         let cfg = self.cfg.clone();
+        let metrics = self.metrics.clone();
         tokio::spawn(async move {
-            match initiate_pause(&cfg).await {
-                Ok(()) => tracing::warn!("autopause paused Hashi"),
-                Err(error) => tracing::error!(?error, "autopause failed to pause Hashi"),
-            }
+            let result = match initiate_pause(&cfg).await {
+                Ok(()) => {
+                    tracing::warn!("autopause paused Hashi");
+                    AUTOPAUSE_SUCCEEDED
+                }
+                Err(error) => {
+                    tracing::error!(?error, "autopause failed to pause Hashi");
+                    AUTOPAUSE_FAILED
+                }
+            };
+            metrics.record_autopause(result, now_timestamp_secs());
         });
     }
 }
@@ -100,5 +119,28 @@ mod tests {
         assert!(rearmed.autopause_armed());
         rearmed.report_findings("test", std::slice::from_ref(&unbacked));
         assert!(rearmed.autopause_due);
+    }
+
+    #[tokio::test]
+    async fn firing_exports_the_disarm() {
+        let metrics = Arc::new(MonitorMetrics::new());
+        let mut auditor = auditor_with(&config_with_generation(1), metrics.clone());
+        auditor.export_autopause_armed();
+        assert!(metrics.render().contains("hashi_monitor_autopause_armed 1"));
+
+        let unbacked = MonitorFinding::DepositUnbacked {
+            sui: approval_of(&deposit_request(), 200),
+        };
+        auditor.report_findings("test", &[unbacked]);
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("hashi_monitor_autopause_armed 0"),
+            "{rendered}"
+        );
+
+        // A disabled autopause exports no armed series.
+        let disabled = Arc::new(MonitorMetrics::new());
+        auditor_with(&Config::for_tests(), disabled.clone()).export_autopause_armed();
+        assert!(!disabled.render().contains("hashi_monitor_autopause_armed"));
     }
 }
