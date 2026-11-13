@@ -81,66 +81,76 @@ mod tests {
     use crate::test_utils::approval_of;
     use crate::test_utils::deposit_request;
     use std::sync::Arc;
+    use std::time::Duration;
 
-    fn config_with_generation(generation: u64) -> Config {
+    /// An auditor whose autopause has `generation`, or is disabled, and its metrics.
+    fn autopause_auditor(generation: Option<u64>) -> (Auditor, Arc<MonitorMetrics>) {
         let mut cfg = Config::for_tests();
         cfg.pause = Some(PauseConfig {
-            transaction_rpc_url: String::new(),
+            // Nothing listens here, so a pause fails.
+            transaction_rpc_url: "http://127.0.0.1:1".to_owned(),
             object_id: None,
             operator_key_paths: Vec::new(),
-            autopause_generation: Some(generation),
+            autopause_generation: generation,
         });
-        cfg
+        let metrics = Arc::new(MonitorMetrics::new());
+        let auditor = auditor_with(&cfg, metrics.clone());
+        auditor.export_autopause_armed();
+        (auditor, metrics)
+    }
+
+    fn unbacked() -> MonitorFinding {
+        MonitorFinding::DepositUnbacked {
+            sui: approval_of(&deposit_request(), 200),
+        }
     }
 
     #[tokio::test]
     async fn autopause_fires_once_per_generation_across_restarts() {
-        let unbacked = MonitorFinding::DepositUnbacked {
-            sui: approval_of(&deposit_request(), 200),
-        };
-        let mut auditor = auditor_with(&config_with_generation(1), Arc::new(MonitorMetrics::new()));
-        auditor.report_findings("test", std::slice::from_ref(&unbacked));
+        let (mut auditor, metrics) = autopause_auditor(Some(1));
+        assert!(metrics.render().contains("hashi_monitor_autopause_armed 1"));
+        auditor.report_findings("test", &[unbacked()]);
         assert!(auditor.autopause_due);
-        assert!(!auditor.autopause_armed());
+        assert!(metrics.render().contains("hashi_monitor_autopause_armed 0"));
 
         // Neither a repeat nor a restart from the snapshot fires again.
         auditor.autopause_due = false;
-        auditor.report_findings("test", std::slice::from_ref(&unbacked));
+        auditor.report_findings("test", &[unbacked()]);
         assert!(!auditor.autopause_due);
-        let mut restarted =
-            auditor_with(&config_with_generation(1), Arc::new(MonitorMetrics::new()));
+        let (mut restarted, _) = autopause_auditor(Some(1));
         restarted.restore(auditor.state());
-        restarted.report_findings("test", std::slice::from_ref(&unbacked));
+        restarted.report_findings("test", &[unbacked()]);
         assert!(!restarted.autopause_due);
 
         // A higher generation re-arms it.
-        let mut rearmed = auditor_with(&config_with_generation(2), Arc::new(MonitorMetrics::new()));
+        let (mut rearmed, _) = autopause_auditor(Some(2));
         rearmed.restore(auditor.state());
-        assert!(rearmed.autopause_armed());
-        rearmed.report_findings("test", std::slice::from_ref(&unbacked));
+        rearmed.report_findings("test", &[unbacked()]);
         assert!(rearmed.autopause_due);
     }
 
     #[tokio::test]
-    async fn firing_exports_the_disarm() {
-        let metrics = Arc::new(MonitorMetrics::new());
-        let mut auditor = auditor_with(&config_with_generation(1), metrics.clone());
-        auditor.export_autopause_armed();
-        assert!(metrics.render().contains("hashi_monitor_autopause_armed 1"));
+    async fn no_fire_during_catch_up_or_when_disabled() {
+        let (mut catching_up, _) = autopause_auditor(Some(1));
+        catching_up.caught_up = false;
+        catching_up.report_findings("test", &[unbacked()]);
+        assert!(!catching_up.autopause_due);
 
-        let unbacked = MonitorFinding::DepositUnbacked {
-            sui: approval_of(&deposit_request(), 200),
-        };
-        auditor.report_findings("test", &[unbacked]);
-        let rendered = metrics.render();
-        assert!(
-            rendered.contains("hashi_monitor_autopause_armed 0"),
-            "{rendered}"
-        );
+        let (mut disabled, metrics) = autopause_auditor(None);
+        disabled.report_findings("test", &[unbacked()]);
+        assert!(!disabled.autopause_due);
+        assert!(!metrics.render().contains("hashi_monitor_autopause_armed"));
+    }
 
-        // A disabled autopause exports no armed series.
-        let disabled = Arc::new(MonitorMetrics::new());
-        auditor_with(&Config::for_tests(), disabled.clone()).export_autopause_armed();
-        assert!(!disabled.render().contains("hashi_monitor_autopause_armed"));
+    #[tokio::test]
+    async fn a_failed_pause_keeps_the_saved_latch() {
+        let (mut auditor, metrics) = autopause_auditor(Some(1));
+        auditor.report_findings("test", &[unbacked()]);
+        auditor.run_due_autopause().await;
+        while !metrics.render().contains(r#"result="failed""#) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let saved = auditor.store.load().await.unwrap().unwrap();
+        assert_eq!(saved.state.autopause_fired_generation, Some(1));
     }
 }
