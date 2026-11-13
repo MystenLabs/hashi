@@ -13879,22 +13879,19 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
 
     // The laggard (node 5) verifies each echo, then decodes its share.
     let mut decoder = setup.create_manager(5);
+    let receiver = decoder
+        .create_avid_nonce_receiver(fx.dealer_addr, batch_index)
+        .unwrap();
     let verified: Vec<_> = echoes
         .into_iter()
         .map(|(sender, echo)| {
-            decoder
-                .verify_avid_nonce_echo(
-                    fx.dealer_addr,
-                    batch_index,
-                    sender,
-                    echo,
-                    &verified_vote_cert,
-                )
+            MpcManager::verify_avid_nonce_echo(&receiver, sender, echo, &verified_vote_cert)
                 .unwrap()
         })
         .collect();
     let (outcome, _) = decoder
         .decode_avid_nonce_share(
+            &receiver,
             fx.dealer_addr,
             batch_index,
             fx.common.clone(),
@@ -17225,16 +17222,18 @@ fn test_decoded_shares_match_optimistic_shares() {
 
     let mut rng = rand::thread_rng();
     let mut decoder = setup.create_manager(5);
+    let receiver = decoder
+        .create_avid_nonce_receiver(fx.dealer_addr, batch_index)
+        .unwrap();
     let verified: Vec<_> = echoes
         .into_iter()
         .map(|(sender, echo)| {
-            decoder
-                .verify_avid_nonce_echo(fx.dealer_addr, batch_index, sender, echo, &vote_cert)
-                .unwrap()
+            MpcManager::verify_avid_nonce_echo(&receiver, sender, echo, &vote_cert).unwrap()
         })
         .collect();
     let (outcome, _) = decoder
         .decode_avid_nonce_share(
+            &receiver,
             fx.dealer_addr,
             batch_index,
             fx.common.clone(),
@@ -17597,6 +17596,9 @@ fn test_avid_voter_state_survives_restart() {
     );
 
     let mut laggard = setup.create_manager(5);
+    let receiver = laggard
+        .create_avid_nonce_receiver(dealer_addr, batch_index)
+        .unwrap();
     let mut verified = Vec::new();
     for (i, echo) in [(1usize, served_echo)]
         .into_iter()
@@ -17611,15 +17613,13 @@ fn test_avid_voter_state_survives_restart() {
         }))
     {
         verified.push(
-            laggard
-                .verify_avid_nonce_echo(
-                    dealer_addr,
-                    batch_index,
-                    setup.committee().index_of(&setup.address(i)).unwrap() as PartyId,
-                    echo,
-                    &vote_cert,
-                )
-                .unwrap(),
+            MpcManager::verify_avid_nonce_echo(
+                &receiver,
+                setup.committee().index_of(&setup.address(i)).unwrap() as PartyId,
+                echo,
+                &vote_cert,
+            )
+            .unwrap(),
         );
     }
     let common = restarted
@@ -17630,6 +17630,7 @@ fn test_avid_voter_state_survives_restart() {
         .clone();
     let (outcome, _) = laggard
         .decode_avid_nonce_share(
+            &receiver,
             dealer_addr,
             batch_index,
             common,
@@ -17785,16 +17786,18 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         .common
         .clone();
     let mut victim_mgr = setup.create_manager(5);
+    let receiver = victim_mgr
+        .create_avid_nonce_receiver(dealer_addr, batch_index)
+        .unwrap();
     let verified: Vec<_> = echoes_for_victim
         .into_iter()
         .map(|(sender, echo)| {
-            victim_mgr
-                .verify_avid_nonce_echo(dealer_addr, batch_index, sender, echo, &vote_cert)
-                .unwrap()
+            MpcManager::verify_avid_nonce_echo(&receiver, sender, echo, &vote_cert).unwrap()
         })
         .collect();
     let (outcome, _) = victim_mgr
         .decode_avid_nonce_share(
+            &receiver,
             dealer_addr,
             batch_index,
             common,
