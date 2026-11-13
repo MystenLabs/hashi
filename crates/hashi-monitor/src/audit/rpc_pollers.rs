@@ -218,6 +218,8 @@ impl Auditor {
         // Report now, so that a later error in this tick does not lose them.
         let fresh = self.check_fresh_approvals(tip_height, started_at)?;
         self.report_findings("btc", &fresh);
+        // A fresh approval's mint is still ahead, so it is never a replay.
+        self.fire_autopause(&fresh);
         // A "not confirmed yet" answer goes stale. A confirmed one is kept
         // until no flow names its txid.
         self.rpc_pollers.btc_client.forget_unconfirmed();

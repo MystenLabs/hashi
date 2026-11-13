@@ -3,7 +3,8 @@
 
 //! Pause Hashi on a live finding that autopauses, at most once per configured
 //! generation. The fired generation is saved before pausing, so a restart
-//! cannot fire again. Findings replayed by the catch-up never fire.
+//! cannot fire again. Findings replayed by the catch-up never fire, but a
+//! fresh-approval finding is live even during the catch-up.
 
 use super::Auditor;
 use crate::findings::MonitorFinding;
@@ -32,9 +33,16 @@ impl Auditor {
         }
     }
 
-    /// Fire on the first finding that autopauses.
+    /// Fire on the first finding that autopauses, once caught up.
     pub(super) fn note_autopause(&mut self, findings: &[MonitorFinding]) {
-        if !self.caught_up || !self.autopause_armed() {
+        if self.caught_up {
+            self.fire_autopause(findings);
+        }
+    }
+
+    /// Fire on the first finding that autopauses, even during the catch-up.
+    pub(super) fn fire_autopause(&mut self, findings: &[MonitorFinding]) {
+        if !self.autopause_armed() {
             return;
         }
         let Some(finding) = findings.iter().find(|finding| finding.autopauses()) else {
@@ -130,12 +138,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_fire_during_catch_up_or_when_disabled() {
+    async fn only_a_fresh_approval_fires_during_catch_up() {
         let (mut catching_up, _) = autopause_auditor(Some(1));
         catching_up.caught_up = false;
         catching_up.report_findings("test", &[unbacked()]);
         assert!(!catching_up.autopause_due);
+        catching_up.fire_autopause(&[unbacked()]);
+        assert!(catching_up.autopause_due);
+    }
 
+    #[tokio::test]
+    async fn no_fire_when_disabled() {
         let (mut disabled, metrics) = autopause_auditor(None);
         disabled.report_findings("test", &[unbacked()]);
         assert!(!disabled.autopause_due);

@@ -164,7 +164,8 @@ With autopause enabled, the monitor pauses the bridge on a security violation:
 `MonitorFinding::autopauses`.
 
 - Only findings after the initial catch-up autopause. A finding replayed at
-  startup does not.
+  startup does not, except a fresh-approval `DepositUnbacked`: its mint is
+  still ahead, so it is live.
 - Autopause fires once per generation. The fired generation is saved in the
   snapshot before the pause, so a restart does not fire again.
 - The pause is tried once. On failure, pause the bridge by hand.

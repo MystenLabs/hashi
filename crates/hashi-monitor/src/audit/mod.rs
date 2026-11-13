@@ -519,6 +519,8 @@ impl Auditor {
         // A first run can catch up for hours. That time is not a stale check.
         self.started_at = now_timestamp_secs();
         self.caught_up = true;
+        // A fresh-approval finding can fire autopause during the catch-up.
+        self.run_due_autopause().await;
         tracing::info!(
             sui_cursor = %utc_timestamp(self.rpc_pollers.sui_read_until()),
             guardian_cursor = %utc_timestamp(self.rpc_pollers.guardian_read_until()),
