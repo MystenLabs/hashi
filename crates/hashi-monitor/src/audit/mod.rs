@@ -82,13 +82,14 @@ mod pool_maintenance;
 mod rpc_pollers;
 
 /// How often Sui is polled. A deposit approval must reach the monitor
-/// early in Move's delay before the mint, ten minutes by default.
-const SUI_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// early in Move's delay before the mint, ten minutes by default, so
+/// autopause can land first.
+const SUI_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often Bitcoin is asked about the pending transactions. An approval
 /// is reported unbacked at the second empty lookup after it, so with
-/// `SUI_POLL_INTERVAL` the alert comes within five minutes of it.
-const BTC_POLL_INTERVAL: Duration = Duration::from_secs(2 * 60);
+/// `SUI_POLL_INTERVAL` the alert comes within about three minutes of it.
+const BTC_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often the guardian's log is polled. Each poll lists the current
 /// directory and reads only its new logs. The withdrawal bounds are hours.
