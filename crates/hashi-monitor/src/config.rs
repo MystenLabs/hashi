@@ -61,8 +61,8 @@ pub struct PauseConfig {
     /// Hashi shared object used for pause transactions.
     /// Omit to use the published mainnet Hashi object.
     pub object_id: Option<sui_sdk_types::Address>,
-    /// Funded operator key files for distinct seated validators, in the Hashi CLI's PEM format.
-    /// Keys are loaded only on explicit pause invocation.
+    /// Funded operator key files for distinct seated validators, in any format
+    /// the Hashi CLI loads. Keys are loaded only when pausing.
     pub operator_key_paths: Vec<PathBuf>,
     /// Autopause at most once per generation; bump it to re-arm. Omit to disable.
     pub autopause_generation: Option<u64>,

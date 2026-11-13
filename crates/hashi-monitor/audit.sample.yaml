@@ -66,3 +66,5 @@ btc:
 #   # Operator key files for signing pause transactions.
 #   operator_key_paths:
 #     - "/path/to/operator.key"
+#   # Set to enable autopause. Raise it to re-arm after an autopause.
+#   autopause_generation: 1

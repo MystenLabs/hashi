@@ -148,11 +148,31 @@ Configure `pause` to allow the monitor to pause the bridge.
 - `pause.object_id`: Hashi object used for pause transactions.
   Defaults to `HASHI_MAINNET_OBJECT_ID`; set it for other deployments.
 - `pause.operator_key_paths`: operator key files the monitor uses to sign
-  the governance transactions that pause the bridge.
+  the governance transactions that pause the bridge. Each operator is used
+  once; one that fails is skipped.
+- `pause.autopause_generation`: set to enable autopause. Omit to disable it.
 
 `hashi_monitor::pause::initiate_pause` proposes, approves, and executes a pause,
 then confirms the on-chain paused flag. An already-paused bridge is a no-op.
 Calling it without `pause` configured returns a configuration error.
+
+### Autopause
+
+With autopause enabled, the monitor pauses the bridge on a security violation:
+`DepositUnbacked`, `DepositMismatch` with `PaymentDiffers`,
+`WithdrawalUnapproved`, or `UtxoUnexpectedSpend`. See
+`MonitorFinding::autopauses`.
+
+- Only findings after the initial catch-up autopause. A finding replayed at
+  startup does not.
+- Autopause fires once per generation. The fired generation is saved in the
+  snapshot before the pause, so a restart does not fire again.
+- The pause is tried once. On failure, pause the bridge by hand.
+
+To re-arm after an autopause, unpause the bridge, then deploy the config with
+a higher `autopause_generation`. Re-arm only when no monitor finding alert is
+firing. Some findings repeat until their cause is fixed, and a repeat fires
+the re-armed autopause again.
 
 ## Alerting
 
@@ -164,6 +184,10 @@ The monitor decides what is wrong. An alerting system needs only these rules:
    essential findings set this metric.
 2. `up < 1`: the monitor cannot be scraped.
 3. `absent(up)`: no monitor runs.
+4. `time() - hashi_monitor_autopause_last_timestamp_seconds < 3600`: an
+   autopause succeeded or failed in the last hour. Each `result` fires on its
+   own.
+5. `hashi_monitor_autopause_armed == 0`: autopause fired and is not re-armed.
 
 A restart clears the finding metric. The restart reads the events after the
 last save again, so their findings come again.
@@ -188,6 +212,10 @@ last save again, so their findings come again.
 - `hashi_monitor_hbtc_supply_sats`: the hBTC supply.
 - `hashi_monitor_open_flows{kind}`: the open `withdrawal` and `deposit` flows,
   set at each maintenance tick and after the initial catch-up.
+- `hashi_monitor_autopause_armed`: 1 if autopause is armed, 0 if it fired.
+  Absent if autopause is disabled.
+- `hashi_monitor_autopause_last_timestamp_seconds{result}`: the time of the
+  last autopause that `succeeded` or `failed`.
 
 The hBTC supply less the pool value is zero or below in an honest bridge:
 
