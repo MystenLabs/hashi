@@ -10,10 +10,16 @@ use hashi::cli::config::CliConfig;
 use hashi::cli::upgrade::extract_proposal_id_from_response;
 use hashi::onchain::types::ProposalType;
 use hashi::sui_tx_executor::TxOutcome;
+use sui_sdk_types::Address;
 
 use crate::config::Config;
 
 /// Explicitly pause Hashi using the configured governance identities.
+///
+/// Each configured operator is used once, in order. The first that succeeds
+/// creates the proposal, which also votes for it, and the rest vote. An
+/// operator that fails is logged and skipped, so one bad key cannot block the
+/// pause. The chain checks the quorum on execution.
 ///
 /// Nothing calls this on monitor startup. Success means the on-chain paused flag
 /// was observed, not that nodes acknowledged it or Bitcoin broadcasts stopped.
@@ -35,76 +41,45 @@ pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
     if reader.onchain_state().state().hashi().config.paused() {
         return Ok(());
     }
-    // The first configured operator creates the proposal and automatically votes.
-    let (first_path, remaining_paths) = pause
-        .operator_key_paths
-        .split_first()
-        .context("at least one pause operator key must be configured")?;
-    let first_config = CliConfig {
-        keypair_path: Some(first_path.clone()),
-        ..read_config.clone()
-    };
-    let first = HashiClient::new(&first_config).await?;
+    ensure!(
+        !pause.operator_key_paths.is_empty(),
+        "at least one pause operator key must be configured"
+    );
 
-    let options = TxOptions {
-        gas_budget: None,
-        skip_confirm: true,
-        dry_run: false,
-        serialize_unsigned: false,
-        sender: None,
-        gas_object: None,
-        gas_price: None,
-    };
-    let create = first.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
-        pause: true,
-        metadata: vec![],
-    })?;
-    let TxOutcome::Executed(response) = first
-        .finalize_tx(create, &options)
-        .await
-        .context("creating pause proposal; submission may have landed")?
-    else {
-        anyhow::bail!("pause proposal was not executed");
-    };
-    let proposal_id = extract_proposal_id_from_response(&response)
-        .context("pause proposal creation succeeded but its ID could not be read")?;
+    // The proposal and the operator that created it, who executes it.
+    let mut proposal: Option<(Address, CliConfig)> = None;
+    for path in &pause.operator_key_paths {
+        let operator = CliConfig {
+            keypair_path: Some(path.clone()),
+            ..read_config.clone()
+        };
+        let step = match &proposal {
+            None => create_proposal(&operator)
+                .await
+                .map(|proposal_id| proposal = Some((proposal_id, operator))),
+            Some((proposal_id, _)) => vote(&operator, *proposal_id).await,
+        };
+        if let Err(error) = step {
+            tracing::warn!(key = %path.display(), "pause operator failed: {error:#}");
+        }
+    }
+    let (proposal_id, creator) =
+        proposal.context("no configured operator could create a pause proposal")?;
     let proposal_context = || {
         format!(
             "pause proposal {proposal_id} did not complete confirmation; submitted transactions may have landed"
         )
     };
 
-    // Collect approvals from the remaining configured operators.
-    for path in remaining_paths {
-        let voter = HashiClient::new(&CliConfig {
-            keypair_path: Some(path.clone()),
-            ..read_config.clone()
-        })
-        .await
-        .with_context(proposal_context)?;
-        let vote = voter
-            .build_vote_transaction(
-                proposal_id,
-                voter
-                    .proposal_type_arg(&ProposalType::EmergencyPause)
-                    .with_context(proposal_context)?,
-            )
-            .with_context(proposal_context)?;
-        voter
-            .finalize_tx(vote, &options)
-            .await
-            .with_context(proposal_context)?;
-    }
-
     // Execute the approved proposal using the proposer's credentials.
-    let executor = HashiClient::new(&first_config)
+    let executor = HashiClient::new(&creator)
         .await
         .with_context(proposal_context)?;
     let execute = executor
         .build_execute_proposal_transaction(proposal_id, &ProposalType::EmergencyPause)
         .with_context(proposal_context)?;
     executor
-        .finalize_tx(execute, &options)
+        .finalize_tx(execute, &TX_OPTIONS)
         .await
         .with_context(proposal_context)?;
 
@@ -116,6 +91,45 @@ pub async fn initiate_pause(config: &Config) -> anyhow::Result<()> {
         confirmed.onchain_state().state().hashi().config.paused(),
         "on-chain paused flag was not observed after executing pause proposal {proposal_id}"
     );
+    Ok(())
+}
+
+const TX_OPTIONS: TxOptions = TxOptions {
+    gas_budget: None,
+    skip_confirm: true,
+    dry_run: false,
+    serialize_unsigned: false,
+    sender: None,
+    gas_object: None,
+    gas_price: None,
+};
+
+/// Create a pause proposal, which also votes for it.
+async fn create_proposal(operator: &CliConfig) -> anyhow::Result<Address> {
+    let client = HashiClient::new(operator).await?;
+    let create =
+        client.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
+            pause: true,
+            metadata: vec![],
+        })?;
+    let TxOutcome::Executed(response) = client
+        .finalize_tx(create, &TX_OPTIONS)
+        .await
+        .context("creating pause proposal; submission may have landed")?
+    else {
+        anyhow::bail!("pause proposal was not executed");
+    };
+    extract_proposal_id_from_response(&response)
+        .context("pause proposal creation succeeded but its ID could not be read")
+}
+
+async fn vote(operator: &CliConfig, proposal_id: Address) -> anyhow::Result<()> {
+    let client = HashiClient::new(operator).await?;
+    let vote = client.build_vote_transaction(
+        proposal_id,
+        client.proposal_type_arg(&ProposalType::EmergencyPause)?,
+    )?;
+    client.finalize_tx(vote, &TX_OPTIONS).await?;
     Ok(())
 }
 
@@ -137,16 +151,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pause_with_three_operators() -> anyhow::Result<()> {
-        assert_pause_with_operators(3, 4000).await
+    async fn pause_with_one_operator() -> anyhow::Result<()> {
+        assert_pause(&[Some(0)], 2000, 1).await
     }
 
     #[tokio::test]
-    async fn pause_with_one_operator() -> anyhow::Result<()> {
-        assert_pause_with_operators(1, 2000).await
+    async fn pause_skips_failing_operators() -> anyhow::Result<()> {
+        assert_pause(&[None, Some(0), None, Some(1)], 4000, 2).await
     }
 
-    async fn assert_pause_with_operators(count: usize, threshold: u64) -> anyhow::Result<()> {
+    /// Each operator is a node's key, or `None` for an unreadable key file.
+    async fn assert_pause(
+        operators: &[Option<usize>],
+        threshold: u64,
+        expected_votes: usize,
+    ) -> anyhow::Result<()> {
         let networks = TestNetworksBuilder::new()
             .with_nodes(4)
             .with_onchain_config(
@@ -156,12 +175,17 @@ mod tests {
             .build()
             .await?;
         let ids = networks.hashi_network().ids();
+        let nodes = networks.hashi_network().nodes();
         let keys = tempfile::tempdir()?;
-        let paths: Vec<_> = (0..count)
-            .map(|index| keys.path().join(format!("operator-{index}.pem")))
-            .collect();
-        for (node, path) in networks.hashi_network().nodes().iter().zip(&paths) {
-            std::fs::write(path, node.config().operator_private_key.as_ref().unwrap())?;
+        let mut paths = Vec::new();
+        for (index, operator) in operators.iter().enumerate() {
+            let path = keys.path().join(format!("operator-{index}.pem"));
+            let key = match operator {
+                Some(node) => nodes[*node].config().operator_private_key.clone().unwrap(),
+                None => "not a key".to_owned(),
+            };
+            std::fs::write(&path, key)?;
+            paths.push(path);
         }
         let mut config = Config::for_tests();
         // Keep the default unreachable audit RPC to prove pause uses only the fullnode.
@@ -188,7 +212,7 @@ mod tests {
             .find(|proposal| proposal.proposal_type == ProposalType::EmergencyPause)
             .context("executed pause proposal not found")?;
         let details = paused.fetch_proposal_details(proposal.id).await?;
-        assert_eq!(details.votes.len(), count);
+        assert_eq!(details.votes.len(), expected_votes);
 
         // An already-paused bridge needs no signing credentials.
         keys.close()?;
