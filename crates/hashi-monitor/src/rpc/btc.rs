@@ -131,6 +131,8 @@ pub enum OutpointState {
     Unspent {
         /// The time of the block that holds the output.
         block_time: UnixSeconds,
+        /// The output, so a caller can check what it pays.
+        output: TxOut,
     },
 }
 
@@ -478,7 +480,11 @@ impl BtcRpcClient {
                 .with_context(|| format!("missing bitcoin lookup result for {}", outpoint.txid))?;
             match confirmation {
                 Some(confirmation) if (outpoint.vout as usize) < confirmation.outputs.len() => {
-                    existing.push((*outpoint, confirmation.block_time));
+                    existing.push((
+                        *outpoint,
+                        confirmation.block_time,
+                        confirmation.outputs[outpoint.vout as usize].clone(),
+                    ));
                 }
                 _ => {
                     states.insert(*outpoint, OutpointState::Missing);
@@ -488,14 +494,14 @@ impl BtcRpcClient {
 
         let existing_outpoints = existing
             .iter()
-            .map(|(outpoint, _)| *outpoint)
+            .map(|(outpoint, _, _)| *outpoint)
             .collect::<Vec<_>>();
         let unspent = self
             .transport
             .lookup_unspent(&existing_outpoints, include_mempool)?;
-        for (outpoint, block_time) in existing {
+        for (outpoint, block_time, output) in existing {
             let state = match unspent.get(&outpoint) {
-                Some(true) => OutpointState::Unspent { block_time },
+                Some(true) => OutpointState::Unspent { block_time, output },
                 Some(false) => OutpointState::Spent,
                 None => anyhow::bail!("missing bitcoin gettxout result for {outpoint}"),
             };
@@ -1171,7 +1177,8 @@ mod tests {
         assert_eq!(
             states[&outpoint],
             OutpointState::Unspent {
-                block_time: paid.block_time
+                block_time: paid.block_time,
+                output: paid.outputs[vout as usize].clone(),
             }
         );
         assert_eq!(states[&out_of_range], OutpointState::Missing);

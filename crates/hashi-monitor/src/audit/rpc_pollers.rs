@@ -259,7 +259,8 @@ impl Auditor {
     /// Complete flows' dependent machines must already be closed or ready to close when this tick finishes.
     pub fn tick_btc(&mut self) -> anyhow::Result<()> {
         let started_at = now_timestamp_secs();
-        let findings = self.fetch_btc_info(started_at)?;
+        let mut findings = self.fetch_btc_info(started_at)?;
+        self.confirm_not_found(&mut findings);
         // The machines Bitcoin answered stay until pool maintenance removes them.
         tracing::info!(
             withdrawals_waiting = self

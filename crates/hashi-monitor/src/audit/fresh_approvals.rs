@@ -124,7 +124,13 @@ impl Auditor {
                 Some(ReferenceOutput::Unspent { amount, script_pubkey })
                     if *amount == event.amount && *script_pubkey == event.script_pubkey
             );
-            if paid_on_reference || matches!(node, Some(OutpointState::Unspent { .. })) {
+            let paid_on_node = matches!(
+                node,
+                Some(OutpointState::Unspent { output, .. })
+                    if output.value.to_sat() == event.amount
+                        && output.script_pubkey == event.script_pubkey
+            );
+            if paid_on_reference || paid_on_node {
                 return false;
             }
             if finished >= event.timestamp_secs.saturating_add(FRESH_APPROVAL_DEADLINE) {
@@ -173,6 +179,44 @@ impl Auditor {
             None => HashMap::new(),
         };
         self.judge_fresh_approvals(&node, &reference, now_timestamp_secs())
+    }
+
+    /// Confirm each `NotFound` on the reference source, so a fake deposit the
+    /// monitor reads late, after its delay, still pauses. The reference
+    /// showing it paid as approved keeps `NotFound`: only the node misses it.
+    /// A spend is `Spent`. Anything else, a failed lookup too, is
+    /// `Unverified`. With no reference source, `NotFound` stays.
+    pub(super) fn confirm_not_found(&self, findings: &mut [MonitorFinding]) {
+        let Some(reference) = &self.rpc_pollers.reference_btc else {
+            return;
+        };
+        for finding in findings {
+            let MonitorFinding::DepositUnbacked {
+                sui,
+                reason: reason @ DepositUnbackedReason::NotFound,
+            } = finding
+            else {
+                continue;
+            };
+            let outpoint = OutPoint::from(sui.deposit_id);
+            let output = reference
+                .lookup_outputs(&[outpoint])
+                .map(|mut outputs| outputs.remove(&outpoint))
+                .unwrap_or_else(|error| {
+                    tracing::warn!(?error, %outpoint, "reference lookup of an unbacked deposit failed");
+                    None
+                });
+            *reason = match output {
+                Some(ReferenceOutput::Unspent {
+                    amount,
+                    script_pubkey,
+                }) if amount == sui.amount && script_pubkey == sui.script_pubkey => {
+                    DepositUnbackedReason::NotFound
+                }
+                Some(ReferenceOutput::Spent) => DepositUnbackedReason::Spent,
+                _ => DepositUnbackedReason::Unverified,
+            };
+        }
     }
 }
 
@@ -247,7 +291,14 @@ mod tests {
         let deadline = 1_000 + FRESH_APPROVAL_DEADLINE;
         // The approval stops being fresh here.
         let end = 1_000 + 600 - DELAY_END_MARGIN;
-        let unspent = Node::Unspent { block_time: 900 };
+        let node_paid = |amount, script_pubkey| Node::Unspent {
+            block_time: 900,
+            output: bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(amount),
+                script_pubkey,
+            },
+        };
+        let unspent = node_paid(fresh.amount, fresh.script_pubkey.clone());
         let cases = [
             (Some(Node::Spent), None, 1_000, Some(Spent)),
             (
@@ -285,6 +336,13 @@ mod tests {
                 deadline,
                 Some(Unverified),
             ),
+            // A real output that pays someone else is not the payment.
+            (
+                Some(node_paid(fresh.amount, bitcoin::ScriptBuf::new())),
+                None,
+                deadline,
+                Some(Unverified),
+            ),
             // A lookup that returns after the approval stopped being fresh.
             (Some(Node::Spent), None, end, None),
         ];
@@ -318,5 +376,69 @@ mod tests {
         // No lookup: the test client has no Bitcoin node to answer it.
         assert!(auditor.check_fresh_approvals(None, end).is_empty());
         assert!(auditor.fresh_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_not_found_deposit_pauses_unless_the_reference_shows_it_paid() {
+        use crate::rpc::esplora::EsploraClient;
+        use crate::test_utils::btc_rpc_answering;
+        let late = approval(1_000);
+        let not_found = || {
+            vec![MonitorFinding::DepositUnbacked {
+                sui: late.clone(),
+                reason: DepositUnbackedReason::NotFound,
+            }]
+        };
+        let paid = format!(
+            r#"{{"status":{{"confirmed":true,"block_height":95}},"vout":[{{"value":0,"scriptpubkey":"00"}},{{"value":{},"scriptpubkey":"{}"}}]}}"#,
+            late.amount,
+            late.script_pubkey.to_hex_string()
+        );
+        let unconfirmed = r#"{"status":{"confirmed":false},"vout":[]}"#.to_owned();
+        let cases = [
+            (
+                Some(vec![
+                    "100".to_owned(),
+                    paid,
+                    r#"{"spent":false}"#.to_owned(),
+                ]),
+                DepositUnbackedReason::NotFound,
+            ),
+            (
+                Some(vec!["100".to_owned(), unconfirmed]),
+                DepositUnbackedReason::Unverified,
+            ),
+            // Nothing listens: the lookup fails.
+            (None, DepositUnbackedReason::Unverified),
+        ];
+        for (answers, reason) in cases {
+            let mut auditor = auditor_with_pool().await;
+            let (url, server) = match answers {
+                Some(answers) => {
+                    let (url, server) = btc_rpc_answering(answers);
+                    (url, Some(server))
+                }
+                None => ("http://127.0.0.1:1".to_owned(), None),
+            };
+            auditor.rpc_pollers.reference_btc = Some(EsploraClient::new(&url, 1));
+            let mut findings = not_found();
+            auditor.confirm_not_found(&mut findings);
+            if let Some(server) = server {
+                server.join().unwrap();
+            }
+            assert_eq!(
+                findings,
+                vec![MonitorFinding::DepositUnbacked {
+                    sui: late.clone(),
+                    reason
+                }]
+            );
+        }
+
+        // With no reference source, the node's answer stands.
+        let auditor = auditor_with_pool().await;
+        let mut findings = not_found();
+        auditor.confirm_not_found(&mut findings);
+        assert_eq!(findings, not_found());
     }
 }

@@ -143,10 +143,14 @@ pub enum DepositUnbackedReason {
     /// The monitor's node or the reference source shows the output spent
     /// before the mint.
     Spent,
-    /// Neither source verified the payment by `FRESH_APPROVAL_DEADLINE`.
+    /// Neither source verified the payment in time. See `fresh_approvals`
+    /// and `Auditor::confirm_not_found`.
     Unverified,
-    /// The monitor's node alone does not find the payment. A node that peers
-    /// withhold blocks from gives this too, so it does not autopause.
+    /// The monitor's node does not find the payment, or a confirmed
+    /// transaction there pays another script, and the reference source shows
+    /// it paid, or no reference source is configured. A node that peers
+    /// withhold blocks from gives this, so it does not autopause. Each phase
+    /// that produces it calls `Auditor::confirm_not_found` before reporting.
     NotFound,
 }
 

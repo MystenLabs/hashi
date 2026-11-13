@@ -334,6 +334,7 @@ impl Auditor {
         for event in events {
             findings.extend(self.ingest(event));
         }
+        self.confirm_not_found(&mut findings);
         self.report_findings("ingest", &findings);
         findings
     }
